@@ -117,13 +117,19 @@ impl App {
     }
 
     fn on_worker_event(&self, wid: WorkerId, task: TaskId, event: AgentEvent) {
-        if let AgentEvent::Finished { ok, .. } = &event {
+        {
             let mut s = self.inner.lock().unwrap();
-            if let Some(t) = s.tasks.iter_mut().find(|t| t.task.id == task) {
-                t.status = if *ok { TaskStatus::Done } else { TaskStatus::Failed };
+            // Only the assigned worker may report on a running task.
+            let Some(t) = s.tasks.iter_mut().find(|t| t.task.id == task) else { return };
+            if t.worker != Some(wid) || t.status != TaskStatus::Running {
+                tracing::warn!(%wid, %task, "ignoring event for task not running on this worker");
+                return;
             }
-            if let Some(w) = s.workers.get_mut(&wid) {
-                w.busy = false;
+            if let AgentEvent::Finished { ok, .. } = &event {
+                t.status = if *ok { TaskStatus::Done } else { TaskStatus::Failed };
+                if let Some(w) = s.workers.get_mut(&wid) {
+                    w.busy = false;
+                }
             }
         }
         let _ = self.events.send(ServerMsg::Event { task, worker: wid, event });
@@ -133,15 +139,24 @@ impl App {
     fn remove_worker(&self, wid: WorkerId) {
         let mut s = self.inner.lock().unwrap();
         s.workers.remove(&wid);
-        // A task mid-flight on a vanished worker is lost; mark it failed.
-        for t in s.tasks.iter_mut() {
-            if t.worker == Some(wid) && t.status == TaskStatus::Running {
-                t.status = TaskStatus::Failed;
-            }
+        // A task mid-flight on a vanished worker is lost; fail it and tell followers.
+        let lost: Vec<TaskId> = s
+            .tasks
+            .iter_mut()
+            .filter(|t| t.worker == Some(wid) && t.status == TaskStatus::Running)
+            .map(|t| { t.status = TaskStatus::Failed; t.task.id })
+            .collect();
+        drop(s);
+        for task in lost {
+            let event = AgentEvent::Finished { ok: false, summary: Some("worker disconnected".into()) };
+            let _ = self.events.send(ServerMsg::Event { task, worker: wid, event });
         }
     }
 
     fn authorized(&self, headers: &HeaderMap) -> bool {
+        if headers.contains_key("origin") {
+            return false;
+        }
         match &self.token {
             None => true,
             Some(t) => headers
@@ -224,6 +239,20 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
     app.remove_worker(wid);
 }
 
+/// Next broadcast event; a lagged subscriber gets an Error instead of silently stalling.
+async fn next_event(sub: Option<&mut broadcast::Receiver<ServerMsg>>) -> ServerMsg {
+    let Some(r) = sub else { return std::future::pending().await };
+    loop {
+        match r.recv().await {
+            Ok(ev) => return ev,
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                return ServerMsg::Error { message: format!("dropped {n} events; re-run status") }
+            }
+            Err(broadcast::error::RecvError::Closed) => std::future::pending().await,
+        }
+    }
+}
+
 async fn client_conn(mut sock: WebSocket, app: App) {
     let mut sub: Option<broadcast::Receiver<ServerMsg>> = None;
     loop {
@@ -237,7 +266,7 @@ async fn client_conn(mut sock: WebSocket, app: App) {
                 Some(ClientMsg::Subscribe) => sub = Some(app.events.subscribe()),
                 None => break,
             },
-            Some(ev) = async { match sub.as_mut() { Some(r) => r.recv().await.ok(), None => std::future::pending().await } } => {
+            ev = next_event(sub.as_mut()) => {
                 if !send_json(&mut sock, &ev).await { break; }
             }
         }

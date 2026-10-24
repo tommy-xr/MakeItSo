@@ -18,10 +18,10 @@ pub trait Agent: Send + Sync {
 }
 
 /// Agents whose CLI is on PATH.
-pub fn available() -> Vec<Box<dyn Agent>> {
+pub fn available(skip_permissions: bool) -> Vec<Box<dyn Agent>> {
     let mut v: Vec<Box<dyn Agent>> = Vec::new();
     if which("claude") {
-        v.push(Box::new(claude::ClaudeAgent::default()));
+        v.push(Box::new(claude::ClaudeAgent { skip_permissions }));
     }
     v
 }

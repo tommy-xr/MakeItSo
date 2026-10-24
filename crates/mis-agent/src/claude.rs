@@ -64,16 +64,20 @@ impl Agent for ClaudeAgent {
     fn run<'a>(&'a self, prompt: &'a str, cwd: Option<&'a str>, tx: mpsc::Sender<AgentEvent>) -> BoxFut<'a> {
         Box::pin(async move {
             let mut cmd = Command::new("claude");
-            cmd.args(["-p", prompt, "--output-format", "stream-json", "--verbose"]);
+            cmd.args(["-p", "--output-format", "stream-json", "--verbose"]);
             if self.skip_permissions {
                 cmd.arg("--dangerously-skip-permissions");
             }
+            cmd.arg("--").arg(prompt); // prompt may start with '-'
             if let Some(d) = cwd {
                 cmd.current_dir(d);
             }
+            // stderr inherits so it can't fill a pipe and block; kill_on_drop so a
+            // dropped task can't leave claude running headless.
             cmd.stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
+                .stderr(std::process::Stdio::inherit())
+                .kill_on_drop(true);
             let mut child = cmd.spawn().context("spawning claude")?;
             let stdout = child.stdout.take().unwrap();
             let mut lines = BufReader::new(stdout).lines();
@@ -87,8 +91,12 @@ impl Agent for ClaudeAgent {
                     }
                 }
             }
-            let status = child.wait().await?;
-            if !finished {
+            let status = child.wait().await;
+            if finished {
+                return Ok(());
+            }
+            let status = status?;
+            {
                 let _ = tx
                     .send(AgentEvent::Finished { ok: status.success(), summary: Some(format!("claude exited: {status}")) })
                     .await;

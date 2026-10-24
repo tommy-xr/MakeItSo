@@ -30,11 +30,9 @@ async fn main() -> Result<()> {
     ).init();
     let args = Args::parse();
 
-    let mut agents = mis_agent::available();
-    for a in agents.iter_mut() {
-        if a.name() == "claude" {
-            *a = Box::new(mis_agent::claude::ClaudeAgent { skip_permissions: args.skip_permissions });
-        }
+    let agents = mis_agent::available(args.skip_permissions);
+    if agents.is_empty() {
+        anyhow::bail!("no agent harness found on PATH (need `claude`)");
     }
     let info = WorkerInfo {
         hostname: hostname(),
@@ -61,14 +59,15 @@ async fn main() -> Result<()> {
                 sink.send(text(&WorkerMsg::Event { task, event })).await?;
             }
             msg = stream.next() => match msg {
-                Some(Ok(Message::Text(t))) => match serde_json::from_str::<OrchMsg>(&t)? {
-                    OrchMsg::Welcome { id } => tracing::info!(%id, "registered"),
-                    OrchMsg::Assign { task } => {
+                Some(Ok(Message::Text(t))) => match serde_json::from_str::<OrchMsg>(&t) {
+                    Ok(OrchMsg::Welcome { id }) => tracing::info!(%id, "registered"),
+                    Ok(OrchMsg::Assign { task }) => {
                         tracing::info!(id = %task.id, harness = %task.harness, "assigned: {}", task.prompt);
                         let agents = agents.clone();
                         let tx = ev_tx.clone();
                         tokio::spawn(async move { run_task(&agents, task, tx).await });
                     }
+                    Err(e) => tracing::warn!("bad message from orchestrator: {e}"),
                 },
                 Some(Ok(_)) => {}
                 Some(Err(e)) => return Err(e.into()),

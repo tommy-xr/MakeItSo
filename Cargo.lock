@@ -525,7 +525,6 @@ dependencies = [
  "mis-types",
  "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -536,7 +535,6 @@ dependencies = [
  "clap",
  "futures-util",
  "mis-types",
- "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.26.2",

@@ -103,14 +103,27 @@ async fn main() -> Result<()> {
                 send(&mut ws, &ClientMsg::Subscribe).await?;
             }
             send(&mut ws, &ClientMsg::Submit { prompt: prompt.clone(), cwd: cwd.clone(), harness: harness.clone() }).await?;
-            let ServerMsg::Submitted { task } = recv(&mut ws).await? else { bail!("unexpected reply") };
+            // Other tasks' events may interleave once subscribed; skip them until Submitted.
+            let task = loop {
+                match recv(&mut ws).await? {
+                    ServerMsg::Submitted { task } => break task,
+                    ServerMsg::Event { .. } => continue,
+                    other => bail!("unexpected reply: {other:?}"),
+                }
+            };
             println!("submitted {task}");
             if *follow {
                 loop {
-                    if let ServerMsg::Event { task: t, event, .. } = recv(&mut ws).await? {
-                        if t != task { continue; }
-                        print_event(t, &event);
-                        if matches!(event, AgentEvent::Finished { .. }) { break; }
+                    match recv(&mut ws).await? {
+                        ServerMsg::Event { task: t, event, .. } if t == task => {
+                            print_event(t, &event);
+                            if let AgentEvent::Finished { ok, .. } = event {
+                                if !ok { std::process::exit(1); }
+                                break;
+                            }
+                        }
+                        ServerMsg::Error { message } => eprintln!("warning: {message}"),
+                        _ => {}
                     }
                 }
             }
@@ -118,8 +131,10 @@ async fn main() -> Result<()> {
         Cmd::Tail => {
             send(&mut ws, &ClientMsg::Subscribe).await?;
             loop {
-                if let ServerMsg::Event { task, event, .. } = recv(&mut ws).await? {
-                    print_event(task, &event);
+                match recv(&mut ws).await? {
+                    ServerMsg::Event { task, event, .. } => print_event(task, &event),
+                    ServerMsg::Error { message } => eprintln!("warning: {message}"),
+                    _ => {}
                 }
             }
         }
