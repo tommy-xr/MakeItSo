@@ -517,6 +517,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mis-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "mis-types",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "mis-cli"
 version = "0.1.0"
 dependencies = [
@@ -555,6 +567,23 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "mis-worker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures-util",
+ "mis-agent",
+ "mis-types",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
