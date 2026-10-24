@@ -7,6 +7,7 @@ use mis_types::AgentEvent;
 use tokio::sync::mpsc;
 
 pub mod claude;
+pub mod codex;
 
 pub type BoxFut<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 
@@ -22,6 +23,9 @@ pub fn available(skip_permissions: bool) -> Vec<Box<dyn Agent>> {
     let mut v: Vec<Box<dyn Agent>> = Vec::new();
     if which("claude") {
         v.push(Box::new(claude::ClaudeAgent { skip_permissions }));
+    }
+    if which("codex") {
+        v.push(Box::new(codex::CodexAgent { skip_permissions }));
     }
     v
 }

@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
 
     let agents = mis_agent::available(args.skip_permissions);
     if agents.is_empty() {
-        anyhow::bail!("no agent harness found on PATH (need `claude`)");
+        anyhow::bail!("no agent harness found on PATH (need `claude` or `codex`)");
     }
     let info = WorkerInfo {
         hostname: hostname(),
