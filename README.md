@@ -16,6 +16,26 @@ mis (cli)  --ws-->  mis-orchestrator  <--ws--  mis-worker  --spawns-->  claude -
 - `mis-worker` — runs assigned tasks via `mis-agent`
 - `mis-cli` — `mis status | task | tail`
 
+## Install
+
+macOS / Linux (installs `mis`, `mis-worker`, `mis-orchestrator` to `~/.local/bin`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/tommy-xr/MakeItSo/main/install.sh | sh
+```
+
+Windows (PowerShell; installs to `%LOCALAPPDATA%\mis\bin` and adds it to user PATH):
+
+```powershell
+irm https://raw.githubusercontent.com/tommy-xr/MakeItSo/main/install.ps1 | iex
+```
+
+Knobs: `MIS_VERSION=v0.1.0` pins a release (default latest); `MIS_INSTALL_DIR=...` changes the
+install dir.
+
+From source: `cargo install --git https://github.com/tommy-xr/MakeItSo mis-worker` (likewise
+`mis-cli`, `mis-orchestrator`).
+
 ## Try it
 
 ```sh
