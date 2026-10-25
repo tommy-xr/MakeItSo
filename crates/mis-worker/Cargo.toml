@@ -19,3 +19,4 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 toml = "1.1.8"
 rpassword = "7.5.4"
+sysinfo = { version = "0.39.6", default-features = false, features = ["system", "disk"] }
