@@ -36,6 +36,54 @@ enum Cmd {
     },
     /// Stream all task events.
     Tail,
+    /// Run an orchestrator and a worker on this machine for quick testing.
+    Dev {
+        /// Let agents run tools without permission prompts.
+        #[arg(long)]
+        skip_permissions: bool,
+    },
+}
+
+/// Spawns the sibling `mis-orchestrator` and `mis-worker` binaries, binding the
+/// orchestrator to the host in `url`. MIS_TOKEN is inherited by both. Both are
+/// killed when either exits or this process gets Ctrl-C / SIGTERM.
+async fn dev(url: &str, skip_permissions: bool) -> Result<()> {
+    let bin = |name: &str| -> Result<std::path::PathBuf> {
+        let exe = std::env::current_exe()?;
+        Ok(exe.with_file_name(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
+    };
+    let bind = url
+        .trim_start_matches("ws://")
+        .trim_end_matches('/')
+        .to_string();
+    let mut orch = tokio::process::Command::new(bin("mis-orchestrator")?)
+        .args(["--bind", &bind])
+        .kill_on_drop(true)
+        .spawn()
+        .context("starting mis-orchestrator")?;
+    let mut worker = tokio::process::Command::new(bin("mis-worker")?);
+    worker.args(["--url", url]).kill_on_drop(true);
+    if skip_permissions {
+        worker.arg("--skip-permissions");
+    }
+    let mut worker = worker.spawn().context("starting mis-worker")?;
+    tokio::select! {
+        s = orch.wait() => bail!("mis-orchestrator exited: {}", s?),
+        s = worker.wait() => bail!("mis-worker exited: {}", s?),
+        _ = tokio::signal::ctrl_c() => Ok(()),
+        _ = terminate() => Ok(()),
+    }
+}
+
+#[cfg(unix)]
+async fn terminate() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let _ = signal(SignalKind::terminate()).unwrap().recv().await;
+}
+
+#[cfg(not(unix))]
+async fn terminate() {
+    std::future::pending().await
 }
 
 type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -92,6 +140,9 @@ fn print_event(task: TaskId, event: &AgentEvent) {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if let Cmd::Dev { skip_permissions } = args.cmd {
+        return dev(&args.url, skip_permissions).await;
+    }
     let mut ws = connect(&args).await?;
     match &args.cmd {
         Cmd::Status => {
@@ -181,6 +232,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Cmd::Dev { .. } => unreachable!(),
     }
     Ok(())
 }
