@@ -199,6 +199,7 @@ async fn run_task(agents: &[Box<dyn Agent>], task: Task, tx: mpsc::Sender<(TaskI
     // A panic inside the agent must still produce a Finished, or the task stays
     // "running" in every future Hello.
     let run = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(agent.run(
+        id,
         &task.prompt,
         task.cwd.as_deref(),
         atx,

@@ -33,6 +33,9 @@ enum Cmd {
         /// Stream this task's events until it finishes.
         #[arg(long, short)]
         follow: bool,
+        /// Allow submitting from inside a running task (set by MIS_TASK).
+        #[arg(long)]
+        nested: bool,
     },
     /// Stream all task events.
     Tail,
@@ -120,6 +123,18 @@ async fn terminate() {
     std::future::pending().await
 }
 
+/// An agent submitting to the fleet that is running it deadlocks on a single
+/// worker, so refuse unless `--nested`. The message deliberately omits the flag:
+/// agents do what error messages say.
+fn check_nested(cmd: &Cmd, task_env: Option<&str>) -> Result<()> {
+    match (cmd, task_env) {
+        (Cmd::Task { nested: false, .. }, Some(parent)) if !parent.is_empty() => bail!(
+            "refusing to submit from inside task {parent}: with one worker it can never start while this task runs. Do the work here."
+        ),
+        _ => Ok(()),
+    }
+}
+
 type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn connect(args: &Args) -> Result<Ws> {
@@ -177,6 +192,7 @@ async fn main() -> Result<()> {
     if let Cmd::Dev { skip_permissions } = args.cmd {
         return dev(&args.url, args.token.as_deref(), skip_permissions).await;
     }
+    check_nested(&args.cmd, std::env::var(TASK_ENV).ok().as_deref())?;
     let mut ws = connect(&args).await?;
     match &args.cmd {
         Cmd::Status => {
@@ -216,6 +232,7 @@ async fn main() -> Result<()> {
             cwd,
             harness,
             follow,
+            nested: _,
         } => {
             if *follow {
                 send(&mut ws, &ClientMsg::Subscribe).await?;
@@ -269,4 +286,28 @@ async fn main() -> Result<()> {
         Cmd::Dev { .. } => unreachable!(),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(nested: bool) -> Cmd {
+        Cmd::Task {
+            prompt: "p".into(),
+            cwd: None,
+            harness: None,
+            follow: false,
+            nested,
+        }
+    }
+
+    #[test]
+    fn nested_submit_refused_unless_opted_in() {
+        assert!(check_nested(&task(false), Some("abc")).is_err());
+        assert!(check_nested(&task(true), Some("abc")).is_ok());
+        assert!(check_nested(&task(false), None).is_ok());
+        assert!(check_nested(&task(false), Some("")).is_ok());
+        assert!(check_nested(&Cmd::Status, Some("abc")).is_ok());
+    }
 }
