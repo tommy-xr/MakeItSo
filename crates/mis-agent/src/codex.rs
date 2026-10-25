@@ -17,17 +17,25 @@ pub struct CodexAgent {
 
 /// Map one `--json` line to zero or more events.
 pub fn parse_line(line: &str) -> Vec<AgentEvent> {
-    let Ok(v) = serde_json::from_str::<Value>(line) else { return vec![] };
+    let Ok(v) = serde_json::from_str::<Value>(line) else {
+        return vec![];
+    };
     let item = &v["item"];
     match (v["type"].as_str(), item["type"].as_str()) {
         (Some("thread.started"), _) => {
-            vec![AgentEvent::Started { session: v["thread_id"].as_str().map(String::from) }]
+            vec![AgentEvent::Started {
+                session: v["thread_id"].as_str().map(String::from),
+            }]
         }
         (Some("item.completed"), Some("agent_message")) => {
-            vec![AgentEvent::Text { text: item["text"].as_str().unwrap_or("").trim_end().to_string() }]
+            vec![AgentEvent::Text {
+                text: item["text"].as_str().unwrap_or("").trim_end().to_string(),
+            }]
         }
         (Some("item.completed"), Some("error")) => {
-            vec![AgentEvent::Text { text: format!("error: {}", item["message"].as_str().unwrap_or("")) }]
+            vec![AgentEvent::Text {
+                text: format!("error: {}", item["message"].as_str().unwrap_or("")),
+            }]
         }
         (Some("item.started"), Some("command_execution")) => vec![AgentEvent::ToolUse {
             name: "shell".into(),
@@ -36,7 +44,10 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
         (Some("item.completed"), Some("command_execution")) => vec![AgentEvent::ToolResult {
             content: item["aggregated_output"].as_str().unwrap_or("").to_string(),
         }],
-        (Some("turn.completed"), _) => vec![AgentEvent::Finished { ok: true, summary: None }],
+        (Some("turn.completed"), _) => vec![AgentEvent::Finished {
+            ok: true,
+            summary: None,
+        }],
         (Some("turn.failed"), _) => vec![AgentEvent::Finished {
             ok: false,
             summary: v["error"]["message"].as_str().map(String::from),
@@ -50,7 +61,12 @@ impl Agent for CodexAgent {
         "codex"
     }
 
-    fn run<'a>(&'a self, prompt: &'a str, cwd: Option<&'a str>, tx: mpsc::Sender<AgentEvent>) -> BoxFut<'a> {
+    fn run<'a>(
+        &'a self,
+        prompt: &'a str,
+        cwd: Option<&'a str>,
+        tx: mpsc::Sender<AgentEvent>,
+    ) -> BoxFut<'a> {
         Box::pin(async move {
             let mut cmd = Command::new("codex");
             cmd.args(["exec", "--json", "--skip-git-repo-check"]);
@@ -94,7 +110,10 @@ impl Agent for CodexAgent {
             }
             let status = status?;
             let _ = tx
-                .send(AgentEvent::Finished { ok: status.success(), summary: Some(format!("codex exited: {status}")) })
+                .send(AgentEvent::Finished {
+                    ok: status.success(),
+                    summary: Some(format!("codex exited: {status}")),
+                })
                 .await;
             Ok(())
         })
@@ -109,27 +128,48 @@ mod tests {
     fn parses_probe_output() {
         assert_eq!(
             parse_line(r#"{"type":"thread.started","thread_id":"t1"}"#),
-            vec![AgentEvent::Started { session: Some("t1".into()) }]
+            vec![AgentEvent::Started {
+                session: Some("t1".into())
+            }]
         );
         assert_eq!(
-            parse_line(r#"{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"I’ll run the command.\n"}}"#),
-            vec![AgentEvent::Text { text: "I’ll run the command.".into() }]
+            parse_line(
+                r#"{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"I’ll run the command.\n"}}"#
+            ),
+            vec![AgentEvent::Text {
+                text: "I’ll run the command.".into()
+            }]
         );
         assert_eq!(
-            parse_line(r#"{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"/bin/zsh -lc 'echo hi'","aggregated_output":"","exit_code":null,"status":"in_progress"}}"#),
-            vec![AgentEvent::ToolUse { name: "shell".into(), input: serde_json::json!({"command": "/bin/zsh -lc 'echo hi'"}) }]
+            parse_line(
+                r#"{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"/bin/zsh -lc 'echo hi'","aggregated_output":"","exit_code":null,"status":"in_progress"}}"#
+            ),
+            vec![AgentEvent::ToolUse {
+                name: "shell".into(),
+                input: serde_json::json!({"command": "/bin/zsh -lc 'echo hi'"})
+            }]
         );
         assert_eq!(
-            parse_line(r#"{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"x","aggregated_output":"hi\n","exit_code":0,"status":"completed"}}"#),
-            vec![AgentEvent::ToolResult { content: "hi\n".into() }]
+            parse_line(
+                r#"{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"x","aggregated_output":"hi\n","exit_code":0,"status":"completed"}}"#
+            ),
+            vec![AgentEvent::ToolResult {
+                content: "hi\n".into()
+            }]
         );
         assert_eq!(
             parse_line(r#"{"type":"turn.completed","usage":{"input_tokens":1}}"#),
-            vec![AgentEvent::Finished { ok: true, summary: None }]
+            vec![AgentEvent::Finished {
+                ok: true,
+                summary: None
+            }]
         );
         assert_eq!(
             parse_line(r#"{"type":"turn.failed","error":{"message":"boom"}}"#),
-            vec![AgentEvent::Finished { ok: false, summary: Some("boom".into()) }]
+            vec![AgentEvent::Finished {
+                ok: false,
+                summary: Some("boom".into())
+            }]
         );
         assert!(parse_line(r#"{"type":"turn.started"}"#).is_empty());
     }

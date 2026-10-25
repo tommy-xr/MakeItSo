@@ -15,7 +15,12 @@ pub trait Agent: Send + Sync {
     /// Harness name as advertised to the orchestrator, e.g. "claude".
     fn name(&self) -> &'static str;
     /// Run to completion. Must end with exactly one `AgentEvent::Finished`.
-    fn run<'a>(&'a self, prompt: &'a str, cwd: Option<&'a str>, tx: mpsc::Sender<AgentEvent>) -> BoxFut<'a>;
+    fn run<'a>(
+        &'a self,
+        prompt: &'a str,
+        cwd: Option<&'a str>,
+        tx: mpsc::Sender<AgentEvent>,
+    ) -> BoxFut<'a>;
 }
 
 /// Agents whose CLI is on PATH.

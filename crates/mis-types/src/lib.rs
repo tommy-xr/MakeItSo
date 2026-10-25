@@ -39,19 +39,40 @@ pub enum TaskStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
-    Started { session: Option<String> },
-    Text { text: String },
-    ToolUse { name: String, input: serde_json::Value },
-    ToolResult { content: String },
-    Finished { ok: bool, summary: Option<String> },
+    Started {
+        session: Option<String>,
+    },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        content: String,
+    },
+    Finished {
+        ok: bool,
+        summary: Option<String>,
+    },
 }
 
 /// Worker -> orchestrator.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkerMsg {
-    Hello { info: WorkerInfo },
-    Event { task: TaskId, event: AgentEvent },
+    /// `id` is stable across reconnects; `running` lists tasks still in flight
+    /// so the orchestrator can keep them instead of failing them.
+    Hello {
+        id: WorkerId,
+        info: WorkerInfo,
+        running: Vec<TaskId>,
+    },
+    Event {
+        task: TaskId,
+        event: AgentEvent,
+    },
 }
 
 /// Orchestrator -> worker.
@@ -67,7 +88,11 @@ pub enum OrchMsg {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMsg {
     Status,
-    Submit { prompt: String, cwd: Option<String>, harness: Option<String> },
+    Submit {
+        prompt: String,
+        cwd: Option<String>,
+        harness: Option<String>,
+    },
     /// Stream all task events from now on.
     Subscribe,
 }
@@ -77,6 +102,8 @@ pub struct WorkerSummary {
     pub id: WorkerId,
     pub info: WorkerInfo,
     pub busy: bool,
+    /// False while inside the reconnect grace period.
+    pub online: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -91,10 +118,21 @@ pub struct TaskSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMsg {
-    Status { workers: Vec<WorkerSummary>, tasks: Vec<TaskSummary> },
-    Submitted { task: TaskId },
-    Event { task: TaskId, worker: WorkerId, event: AgentEvent },
-    Error { message: String },
+    Status {
+        workers: Vec<WorkerSummary>,
+        tasks: Vec<TaskSummary>,
+    },
+    Submitted {
+        task: TaskId,
+    },
+    Event {
+        task: TaskId,
+        worker: WorkerId,
+        event: AgentEvent,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[cfg(test)]
@@ -105,6 +143,8 @@ mod tests {
     fn roundtrip_tagged_enums() {
         let msgs = vec![
             WorkerMsg::Hello {
+                id: Uuid::nil(),
+                running: vec![],
                 info: WorkerInfo {
                     hostname: "h".into(),
                     os: "macos".into(),
@@ -114,7 +154,10 @@ mod tests {
             },
             WorkerMsg::Event {
                 task: Uuid::nil(),
-                event: AgentEvent::ToolUse { name: "Bash".into(), input: serde_json::json!({"command": "ls"}) },
+                event: AgentEvent::ToolUse {
+                    name: "Bash".into(),
+                    input: serde_json::json!({"command": "ls"}),
+                },
             },
         ];
         for m in msgs {
