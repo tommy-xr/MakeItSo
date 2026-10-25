@@ -1,0 +1,282 @@
+//! `mis-worker setup`: ask for connection settings, test them, save worker.toml.
+
+use std::io::{BufRead, IsTerminal, Write};
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::{bail, Context, Result};
+use futures_util::{SinkExt, StreamExt};
+use mis_types::*;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::{self, http::Uri, Message};
+
+use crate::config::{self, Config};
+use crate::roots;
+
+/// Each flag answers (and skips) one question.
+#[derive(clap::Args)]
+pub struct SetupArgs {
+    /// Orchestrator URL, e.g. wss://mis.example.com.
+    #[arg(long)]
+    url: Option<String>,
+    /// Bearer token; empty for none.
+    #[arg(long)]
+    token: Option<String>,
+    /// Cloudflare Access service-token id; needs --cf-access-client-secret.
+    #[arg(long)]
+    cf_access_client_id: Option<String>,
+    #[arg(long)]
+    cf_access_client_secret: Option<String>,
+    /// Directory tasks may run in (repeatable). Default: the current directory.
+    #[arg(long = "root")]
+    roots: Vec<PathBuf>,
+}
+
+pub async fn run(a: SetupArgs) -> Result<()> {
+    let path = crate::state_dir()?.join("worker.toml");
+    let saved = config::load(&path)?;
+    let tty = std::io::stdin().is_terminal();
+    let cwd = std::env::current_dir()?;
+
+    let url = match a.url {
+        Some(u) => u,
+        None if tty => {
+            let default = match saved.url.or_else(|| std::env::var("MIS_URL").ok()) {
+                Some(u) => Some(u),
+                None => probe().await,
+            };
+            ask("Orchestrator URL", default.as_deref())?
+        }
+        None => bail!("--url is required when stdin is not a terminal"),
+    };
+    let mut token = match a.token {
+        Some(t) => Some(t).filter(|t| !t.is_empty()),
+        None if tty => ask_token()?,
+        None => None,
+    };
+    let (cf_id, cf_secret) =
+        if a.cf_access_client_id.is_some() || a.cf_access_client_secret.is_some() {
+            (a.cf_access_client_id, a.cf_access_client_secret)
+        } else if tty && may_need_access(&url) && confirm("Behind Cloudflare Access? [y/N]: ")? {
+            let id = ask("Access client id", None)?;
+            let secret = rpassword::prompt_password("Access client secret (hidden): ")?;
+            (Some(id), Some(secret))
+        } else {
+            (None, None)
+        };
+    access_headers(cf_id.as_deref(), cf_secret.as_deref()).map_err(anyhow::Error::msg)?;
+    let roots = if !a.roots.is_empty() {
+        a.roots
+    } else if tty {
+        parse_roots(&line(&format!("Roots [{}]: ", cwd.display()))?, &cwd)
+    } else {
+        vec![cwd.clone()]
+    };
+    let roots = roots::canonical_roots(&roots)?;
+
+    // Locking the id means setup refuses to run beside a live worker, whose
+    // ledger entry this test connection would otherwise replace.
+    let (id, _lock) = crate::worker_id()?;
+    let harnesses: Vec<String> = mis_agent::available(false)
+        .iter()
+        .map(|a| a.name().to_string())
+        .collect();
+    let info = WorkerInfo {
+        hostname: crate::hostname(),
+        os: std::env::consts::OS.into(),
+        arch: std::env::consts::ARCH.into(),
+        // Advertise no harnesses so the orchestrator assigns nothing to this probe.
+        harnesses: vec![],
+        roots: roots.iter().map(|r| r.display().to_string()).collect(),
+    };
+    let mut tries = 1;
+    let cfg = loop {
+        let cfg = Config {
+            url: Some(url.clone()),
+            token: token.clone(),
+            cf_access_client_id: cf_id.clone(),
+            cf_access_client_secret: cf_secret.clone(),
+            roots: roots.clone(),
+        };
+        let resolved = config::merge(cfg.clone(), Config::default(), cwd.clone());
+        match test_connect(&resolved, id, &info).await {
+            Ok(()) => break cfg,
+            Err(e) if tty && tries < 3 && denied(&e) => {
+                eprintln!("{e:#}; check the token");
+                token = ask_token()?;
+                tries += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    println!(
+        "connected to {url} as worker {id} ({}, {harnesses:?})",
+        info.hostname
+    );
+    if harnesses.is_empty() {
+        eprintln!("warning: no `claude` or `codex` on PATH; mis-worker needs one to run");
+    }
+    config::write(&path, &cfg)?;
+    println!("wrote {}", path.display());
+    Ok(())
+}
+
+/// Open the worker socket, say Hello, and wait for Welcome.
+async fn test_connect(cfg: &config::Resolved, id: WorkerId, info: &WorkerInfo) -> Result<()> {
+    let req = crate::worker_request(cfg, &crate::access_values(cfg)?)?;
+    let handshake = async {
+        let (mut ws, _) = connect_async(req)
+            .await
+            .with_context(|| format!("connecting to {}", cfg.url))?;
+        let hello = WorkerMsg::Hello {
+            id,
+            info: info.clone(),
+            running: vec![],
+        };
+        ws.send(crate::text(&hello)).await?;
+        while let Some(msg) = ws.next().await {
+            if let Message::Text(t) = msg? {
+                if let Ok(OrchMsg::Welcome { .. }) = serde_json::from_str(&t) {
+                    let _ = ws.close(None).await;
+                    return Ok(());
+                }
+            }
+        }
+        bail!("orchestrator closed the connection before Welcome")
+    };
+    tokio::time::timeout(Duration::from_secs(5), handshake)
+        .await
+        .with_context(|| format!("no Welcome from {} within 5s", cfg.url))?
+}
+
+/// True when the orchestrator refused our credentials (HTTP 401/403).
+fn denied(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<tungstenite::Error>(),
+        Some(tungstenite::Error::Http(r)) if matches!(r.status().as_u16(), 401 | 403)
+    )
+}
+
+/// A local orchestrator on the default address, if one answers quickly.
+async fn probe() -> Option<String> {
+    let url = config::DEFAULT_URL;
+    let attempt = connect_async(format!("{url}/ws/client"));
+    match tokio::time::timeout(Duration::from_millis(500), attempt).await {
+        // A 401 still means an orchestrator is listening.
+        Ok(Ok(_)) | Ok(Err(tungstenite::Error::Http(_))) => Some(url.into()),
+        _ => None,
+    }
+}
+
+/// Only a public `wss://` host can sit behind Cloudflare Access.
+fn may_need_access(url: &str) -> bool {
+    let Ok(uri) = url.parse::<Uri>() else {
+        return false;
+    };
+    let Some(host) = uri.host().filter(|_| uri.scheme_str() == Some("wss")) else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => !(ip.is_loopback() || ip.is_private() || ip.is_link_local()),
+        Ok(IpAddr::V6(ip)) => {
+            !(ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local())
+        }
+        Err(_) => !host.eq_ignore_ascii_case("localhost"),
+    }
+}
+
+/// "a, b" -> [a, b]; blank -> [cwd].
+fn parse_roots(answer: &str, cwd: &Path) -> Vec<PathBuf> {
+    let roots: Vec<PathBuf> = answer
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .collect();
+    if roots.is_empty() {
+        vec![cwd.to_path_buf()]
+    } else {
+        roots
+    }
+}
+
+/// Print `prompt` to stderr and read one trimmed line from stdin.
+fn line(prompt: &str) -> Result<String> {
+    eprint!("{prompt}");
+    std::io::stderr().flush()?;
+    let mut s = String::new();
+    if std::io::stdin().lock().read_line(&mut s)? == 0 {
+        bail!("stdin closed");
+    }
+    Ok(s.trim().to_string())
+}
+
+/// `label [default]:`; blank takes the default, or asks again if there is none.
+fn ask(label: &str, default: Option<&str>) -> Result<String> {
+    loop {
+        let answer = match default {
+            Some(d) => line(&format!("{label} [{d}]: "))?,
+            None => line(&format!("{label}: "))?,
+        };
+        match (answer.is_empty(), default) {
+            (false, _) => return Ok(answer),
+            (true, Some(d)) => return Ok(d.into()),
+            (true, None) => continue,
+        }
+    }
+}
+
+fn confirm(prompt: &str) -> Result<bool> {
+    Ok(matches!(line(prompt)?.to_lowercase().as_str(), "y" | "yes"))
+}
+
+fn ask_token() -> Result<Option<String>> {
+    let t = rpassword::prompt_password("Token (hidden, empty for none): ")?;
+    Ok(Some(t).filter(|t| !t.is_empty()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn access_question_only_for_public_wss() {
+        assert!(may_need_access("wss://mis.example.com"));
+        assert!(may_need_access("wss://8.8.8.8:443/"));
+        assert!(!may_need_access("ws://mis.example.com"));
+        assert!(!may_need_access("wss://localhost:7474"));
+        assert!(!may_need_access("wss://127.0.0.1"));
+        assert!(!may_need_access("wss://192.168.1.5:7474"));
+        assert!(!may_need_access("wss://10.0.0.2"));
+        assert!(!may_need_access("wss://[::1]:7474"));
+        assert!(!may_need_access("wss://[fd00::1]"));
+        assert!(!may_need_access("not a url"));
+    }
+
+    #[test]
+    fn roots_answer() {
+        let cwd = Path::new("/here");
+        assert_eq!(parse_roots("  ", cwd), vec![PathBuf::from("/here")]);
+        assert_eq!(
+            parse_roots("/a, /b ,", cwd),
+            vec![PathBuf::from("/a"), PathBuf::from("/b")]
+        );
+    }
+
+    #[test]
+    fn denied_matches_401_and_403_only() {
+        let http = |code: u16| {
+            let r = tungstenite::http::Response::builder()
+                .status(code)
+                .body(None)
+                .unwrap();
+            anyhow::Error::from(tungstenite::Error::Http(r)).context("connecting")
+        };
+        assert!(denied(&http(401)));
+        assert!(denied(&http(403)));
+        assert!(!denied(&http(500)));
+        assert!(!denied(&anyhow::anyhow!("timeout")));
+    }
+}

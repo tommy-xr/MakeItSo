@@ -61,6 +61,25 @@ pub fn load(path: &Path) -> anyhow::Result<Config> {
     }
 }
 
+/// Save `cfg`, readable only by this user on unix since it holds secrets.
+pub fn write(path: &Path, cfg: &Config) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    let mut f = opts
+        .open(path)
+        .with_context(|| format!("writing {}", path.display()))?;
+    // `mode` only applies on create; tighten a file that already existed.
+    #[cfg(unix)]
+    f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    std::io::Write::write_all(&mut f, toml::to_string(cfg)?.as_bytes())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +137,21 @@ mod tests {
         assert_eq!(r.url, DEFAULT_URL);
         assert_eq!(r.token, None);
         assert_eq!(r.roots, vec![PathBuf::from("/cwd")]);
+    }
+
+    #[test]
+    fn roundtrips_and_omits_unset() {
+        let cfg = Config {
+            url: Some("ws://x".into()),
+            ..Default::default()
+        };
+        let s = toml::to_string(&cfg).unwrap();
+        assert_eq!(s.trim(), r#"url = "ws://x""#);
+        assert_eq!(toml::from_str::<Config>(&s).unwrap(), cfg);
+        assert_eq!(
+            toml::from_str::<Config>(&toml::to_string(&file()).unwrap()).unwrap(),
+            file()
+        );
     }
 
     #[test]

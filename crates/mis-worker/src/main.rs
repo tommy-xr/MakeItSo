@@ -3,6 +3,7 @@
 
 mod config;
 mod roots;
+mod setup;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -10,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use mis_agent::Agent;
 use mis_types::*;
@@ -23,6 +24,7 @@ use tokio_tungstenite::tungstenite::Message;
 #[derive(Parser)]
 #[command(
     about = "Make It So worker",
+    args_conflicts_with_subcommands = true,
     after_help = "Unset flags fall back to $MIS_STATE_DIR/worker.toml (default ~/.config/mis)."
 )]
 struct Args {
@@ -43,6 +45,15 @@ struct Args {
     /// Let agents run tools without permission prompts (required for real work).
     #[arg(long)]
     skip_permissions: bool,
+    /// None runs the worker.
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Ask for connection settings, test them, and save worker.toml.
+    Setup(setup::SetupArgs),
 }
 
 #[tokio::main]
@@ -53,6 +64,9 @@ async fn main() -> Result<()> {
         )
         .init();
     let args = Args::parse();
+    if let Some(Cmd::Setup(a)) = args.cmd {
+        return setup::run(a).await;
+    }
     let path = state_dir()?.join("worker.toml");
     let cli = config::Config {
         url: args.url,
