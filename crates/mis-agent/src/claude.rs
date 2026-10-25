@@ -45,7 +45,7 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
             })
             .collect(),
         Some("result") => vec![AgentEvent::Finished {
-            ok: v["is_error"] != true && v["subtype"].as_str().map_or(true, |s| s == "success"),
+            ok: v["is_error"] != true && v["subtype"].as_str().is_none_or(|s| s == "success"),
             summary: v["result"].as_str().map(String::from),
         }],
         _ => vec![],
