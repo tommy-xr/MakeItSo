@@ -1,7 +1,11 @@
 //! Worker: connects to the orchestrator, advertises its harnesses, runs
 //! assigned tasks through `mis_agent` and streams events back.
 
+mod roots;
+
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -27,6 +31,10 @@ struct Args {
     cf_access_client_id: Option<String>,
     #[arg(long, env = "CF_ACCESS_CLIENT_SECRET", hide_env_values = true)]
     cf_access_client_secret: Option<String>,
+    /// Directory tasks may run in (repeatable; MIS_ROOTS is comma/`:`-separated).
+    /// Default: the current directory.
+    #[arg(long = "root", env = "MIS_ROOTS")]
+    roots: Vec<String>,
     /// Let agents run tools without permission prompts (required for real work).
     #[arg(long)]
     skip_permissions: bool,
@@ -50,6 +58,18 @@ async fn main() -> Result<()> {
     .map(|(k, v)| Ok((k, v.parse().with_context(|| format!("invalid {k}"))?)))
     .collect::<Result<Vec<(&str, HeaderValue)>>>()?;
 
+    let roots: Vec<PathBuf> = args
+        .roots
+        .iter()
+        .flat_map(|r| roots::split_roots(r))
+        .collect();
+    let roots = if roots.is_empty() {
+        vec![std::env::current_dir()?]
+    } else {
+        roots
+    };
+    let roots = roots::canonical_roots(&roots)?;
+
     let (id, _id_lock) = worker_id()?;
     let agents = mis_agent::available(args.skip_permissions);
     if agents.is_empty() {
@@ -60,9 +80,13 @@ async fn main() -> Result<()> {
         os: std::env::consts::OS.into(),
         arch: std::env::consts::ARCH.into(),
         harnesses: agents.iter().map(|a| a.name().to_string()).collect(),
+        roots: roots.iter().map(|r| r.display().to_string()).collect(),
     };
-    tracing::info!(?info.harnesses, "connecting to {}", args.url);
-    let agents = std::sync::Arc::new(agents);
+    tracing::info!(?info.harnesses, ?info.roots, "connecting to {}", args.url);
+    let ctx = Ctx {
+        agents: Arc::new(agents),
+        roots: Arc::new(roots),
+    };
     // Events from in-flight tasks queue here while disconnected. Delivery is best
     // effort: an event already written to a socket that then dies is not resent.
     let (ev_tx, ev_rx) = mpsc::channel::<(TaskId, AgentEvent)>(1024);
@@ -74,7 +98,7 @@ async fn main() -> Result<()> {
     };
 
     loop {
-        match session(&args, &access, id, &info, &agents, &ev_tx, &mut conn).await {
+        match session(&args, &access, id, &info, &ctx, &ev_tx, &mut conn).await {
             Ok(()) => tracing::info!("orchestrator closed connection"),
             Err(e) => tracing::warn!("connection lost: {e:#}"),
         }
@@ -82,6 +106,13 @@ async fn main() -> Result<()> {
         tokio::time::sleep(conn.backoff).await;
         conn.backoff = (conn.backoff * 2).min(Duration::from_secs(30));
     }
+}
+
+/// What a task needs from the worker: harnesses and allowed directories.
+#[derive(Clone)]
+struct Ctx {
+    agents: Arc<Vec<Box<dyn Agent>>>,
+    roots: Arc<Vec<PathBuf>>,
 }
 
 /// State that outlives a single connection.
@@ -101,7 +132,7 @@ async fn session(
     access: &[(&'static str, HeaderValue)],
     id: WorkerId,
     info: &WorkerInfo,
-    agents: &std::sync::Arc<Vec<Box<dyn Agent>>>,
+    ctx: &Ctx,
     ev_tx: &mpsc::Sender<(TaskId, AgentEvent)>,
     c: &mut Conn,
 ) -> Result<()> {
@@ -132,7 +163,7 @@ async fn session(
             None => tokio::select! {
                 ev = c.ev_rx.recv() => ev,
                 msg = stream.next() => {
-                    handle_incoming(msg, agents, ev_tx, &mut c.running, &mut c.backoff)?;
+                    handle_incoming(msg, ctx, ev_tx, &mut c.running, &mut c.backoff)?;
                     continue;
                 }
             },
@@ -162,7 +193,7 @@ type Incoming = Option<std::result::Result<Message, tokio_tungstenite::tungsteni
 /// Returns Ok on a message handled or ignored; Err when the socket is gone.
 fn handle_incoming(
     msg: Incoming,
-    agents: &std::sync::Arc<Vec<Box<dyn Agent>>>,
+    ctx: &Ctx,
     ev_tx: &mpsc::Sender<(TaskId, AgentEvent)>,
     running: &mut HashSet<TaskId>,
     backoff: &mut Duration,
@@ -179,9 +210,9 @@ fn handle_incoming(
                     return Ok(());
                 }
                 tracing::info!(id = %task.id, "assigned to {}: {}", task.harness, task.prompt);
-                let agents = agents.clone();
+                let ctx = ctx.clone();
                 let tx = ev_tx.clone();
-                tokio::spawn(async move { run_task(&agents, task, tx).await });
+                tokio::spawn(async move { run_task(&ctx, task, tx).await });
             }
             Err(e) => tracing::warn!("bad message from orchestrator: {e}"),
         },
@@ -192,7 +223,7 @@ fn handle_incoming(
     Ok(())
 }
 
-async fn run_task(agents: &[Box<dyn Agent>], task: Task, tx: mpsc::Sender<(TaskId, AgentEvent)>) {
+async fn run_task(ctx: &Ctx, task: Task, tx: mpsc::Sender<(TaskId, AgentEvent)>) {
     let id = task.id;
     let fail = |summary: String| {
         (
@@ -203,9 +234,17 @@ async fn run_task(agents: &[Box<dyn Agent>], task: Task, tx: mpsc::Sender<(TaskI
             },
         )
     };
-    let Some(agent) = agents.iter().find(|a| a.name() == task.harness) else {
+    let Some(agent) = ctx.agents.iter().find(|a| a.name() == task.harness) else {
         let _ = tx.send(fail(format!("no harness {}", task.harness))).await;
         return;
+    };
+    let cwd = match roots::resolve_cwd(&ctx.roots, task.cwd.as_deref()) {
+        Ok(c) => c.display().to_string(),
+        Err(why) => {
+            tracing::warn!(%id, "{why}");
+            let _ = tx.send(fail(why)).await;
+            return;
+        }
     };
     let (atx, mut arx) = mpsc::channel(64);
     let fwd = async {
@@ -220,7 +259,7 @@ async fn run_task(agents: &[Box<dyn Agent>], task: Task, tx: mpsc::Sender<(TaskI
     let run = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(agent.run(
         id,
         &task.prompt,
-        task.cwd.as_deref(),
+        Some(&cwd),
         atx,
     )));
     let (res, _) = tokio::join!(run, fwd);

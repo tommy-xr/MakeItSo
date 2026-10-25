@@ -216,11 +216,12 @@ async fn main() -> Result<()> {
             println!("workers ({}):", workers.len());
             for w in workers {
                 println!(
-                    "  {} {} {} {:?}{}",
+                    "  {} {} {} {:?} roots={}{}",
                     w.id,
                     w.info.hostname,
                     w.info.os,
                     w.info.harnesses,
+                    w.info.roots.join(","),
                     if !w.online {
                         " [offline]"
                     } else if w.busy {
