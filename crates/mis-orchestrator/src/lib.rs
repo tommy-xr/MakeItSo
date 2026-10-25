@@ -257,6 +257,17 @@ async fn client_conn(mut sock: WebSocket, app: App) {
                     send_json(&mut sock, &ServerMsg::Submitted { task }).await;
                 }
                 Some(ClientMsg::Subscribe) => sub = Some(app.events.subscribe()),
+                Some(ClientMsg::Show { task }) => {
+                    let reply = match app.ledger.lock().unwrap().show(task) {
+                        Some((task, events, truncated)) => ServerMsg::TaskDetail {
+                            task,
+                            events: events.to_vec(),
+                            truncated,
+                        },
+                        None => ServerMsg::Error { message: format!("unknown task {task}") },
+                    };
+                    send_json(&mut sock, &reply).await;
+                }
                 None => break,
             },
             ev = next_event(sub.as_mut()) => {

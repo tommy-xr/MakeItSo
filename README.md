@@ -14,7 +14,7 @@ mis (cli)  --ws-->  mis-orchestrator  <--ws--  mis-worker  --spawns-->  claude -
 - `mis-agent` — `Agent` trait + Claude Code and Codex CLI backends
 - `mis-orchestrator` — worker ledger, task queue, event fan-out
 - `mis-worker` — runs assigned tasks via `mis-agent`
-- `mis-cli` — `mis status | task | tail`
+- `mis-cli` — `mis status | task | show | tail`
 
 ## Try it
 
@@ -24,6 +24,7 @@ cargo build
 ./target/debug/mis task "list files in /tmp" --follow
 ./target/debug/mis task "say hi" --harness codex --follow
 ./target/debug/mis status
+./target/debug/mis show 1a2b3c4d                # one task's details + transcript (id prefix from status)
 ```
 
 Separate processes (what `mis dev` runs for you):

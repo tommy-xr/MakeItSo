@@ -472,3 +472,83 @@ async fn disconnect_then_reconnect_within_grace_keeps_task() {
     };
     assert_eq!(assigned.id, next);
 }
+
+#[tokio::test]
+async fn show_returns_transcript() {
+    let base = start().await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    send(&mut client, &ClientMsg::Subscribe).await;
+    let mut worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+    send(
+        &mut client,
+        &ClientMsg::Submit {
+            prompt: "hi".into(),
+            cwd: None,
+            harness: None,
+        },
+    )
+    .await;
+    let ServerMsg::Submitted { task } = recv(&mut client).await else {
+        panic!()
+    };
+    let OrchMsg::Assign { .. } = recv(&mut worker).await else {
+        panic!()
+    };
+
+    let events = vec![
+        AgentEvent::Started {
+            session: Some("sess".into()),
+        },
+        AgentEvent::Text { text: "hi".into() },
+        AgentEvent::ToolUse {
+            name: "Bash".into(),
+            input: serde_json::json!({"command": "ls"}),
+        },
+        AgentEvent::ToolResult {
+            content: "a.txt".into(),
+        },
+        AgentEvent::Finished {
+            ok: true,
+            summary: Some("listed".into()),
+        },
+    ];
+    for event in &events {
+        send(
+            &mut worker,
+            &WorkerMsg::Event {
+                task,
+                event: event.clone(),
+            },
+        )
+        .await;
+        let ServerMsg::Event { .. } = recv(&mut client).await else {
+            panic!()
+        };
+    }
+
+    send(&mut client, &ClientMsg::Show { task }).await;
+    let ServerMsg::TaskDetail {
+        task: info,
+        events: got,
+        truncated,
+    } = recv(&mut client).await
+    else {
+        panic!()
+    };
+    assert_eq!(got, events);
+    assert!(!truncated);
+    assert_eq!(info.status, TaskStatus::Done);
+    assert_eq!(info.session.as_deref(), Some("sess"));
+    assert_eq!(info.summary.as_deref(), Some("listed"));
+
+    send(
+        &mut client,
+        &ClientMsg::Show {
+            task: uuid::Uuid::nil(),
+        },
+    )
+    .await;
+    let ServerMsg::Error { .. } = recv(&mut client).await else {
+        panic!()
+    };
+}

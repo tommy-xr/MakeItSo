@@ -104,6 +104,10 @@ pub enum ClientMsg {
     },
     /// Stream all task events from now on.
     Subscribe,
+    /// One task's metadata and retained transcript.
+    Show {
+        task: TaskId,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -121,6 +125,11 @@ pub struct TaskSummary {
     pub prompt: String,
     pub status: TaskStatus,
     pub worker: Option<WorkerId>,
+    pub harness: String,
+    /// Agent session id, from the `Started` event.
+    pub session: Option<String>,
+    /// From the `Finished` event.
+    pub summary: Option<String>,
 }
 
 /// Orchestrator -> client.
@@ -133,6 +142,12 @@ pub enum ServerMsg {
     },
     Submitted {
         task: TaskId,
+    },
+    /// Reply to `Show`. `truncated`: oldest events were dropped to bound memory.
+    TaskDetail {
+        task: TaskSummary,
+        events: Vec<AgentEvent>,
+        truncated: bool,
     },
     Event {
         task: TaskId,
