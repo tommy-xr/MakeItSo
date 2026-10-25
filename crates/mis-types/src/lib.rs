@@ -4,6 +4,9 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+mod access;
+pub use access::access_headers;
+
 pub type WorkerId = Uuid;
 pub type TaskId = Uuid;
 
