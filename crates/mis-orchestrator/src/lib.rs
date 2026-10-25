@@ -139,7 +139,14 @@ impl App {
     /// Register (or re-register) a worker. Running tasks it no longer reports are lost.
     fn register(&self, wid: WorkerId, info: WorkerInfo, running: &[TaskId], tx: mpsc::UnboundedSender<OrchMsg>) {
         let mut s = self.inner.lock().unwrap();
-        let rejoined = s.workers.insert(wid, WorkerEntry { info, busy: !running.is_empty(), tx }).is_some();
+        // Tasks this orchestrator never saw (e.g. it restarted) can't be tracked; don't let
+        // them pin the worker busy.
+        let (known, unknown): (Vec<&TaskId>, Vec<&TaskId>) =
+            running.iter().partition(|id| s.tasks.iter().any(|t| t.task.id == **id));
+        if !unknown.is_empty() {
+            tracing::warn!(%wid, ?unknown, "worker reports tasks unknown to this orchestrator");
+        }
+        let rejoined = s.workers.insert(wid, WorkerEntry { info, busy: !known.is_empty(), tx }).is_some();
         tracing::info!(%wid, rejoined, ?running, "worker joined");
         let lost = fail_running(&mut s, wid, running, "worker restarted");
         drop(s);

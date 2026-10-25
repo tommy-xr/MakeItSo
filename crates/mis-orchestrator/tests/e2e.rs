@@ -173,3 +173,13 @@ async fn reconnect_keeps_reported_task_and_fails_unreported() {
     assert!(!workers[0].busy);
     assert_eq!(tasks[0].status, TaskStatus::Failed);
 }
+
+#[tokio::test]
+async fn unknown_running_task_does_not_pin_worker_busy() {
+    let base = start().await;
+    let _worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![uuid::Uuid::new_v4()]).await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { workers, .. } = recv(&mut client).await else { panic!() };
+    assert!(!workers[0].busy);
+}
