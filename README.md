@@ -89,6 +89,16 @@ export CF_ACCESS_CLIENT_ID=<id>.access
 export CF_ACCESS_CLIENT_SECRET=<secret>
 ```
 
-Requests with a browser `Origin` are rejected unless listed via `--allowed-origin https://mis.example.com`
-(repeatable, or comma-separated `MIS_ALLOWED_ORIGINS`). Browsers can't send the bearer token, so serve
-a browser page from a loopback, token-less orchestrator behind an authenticating proxy (e.g. Cloudflare Access).
+Requests with a browser `Origin` are rejected unless it is the orchestrator's own page (below) or listed
+via `--allowed-origin https://mis.example.com` (repeatable, or comma-separated `MIS_ALLOWED_ORIGINS`).
+Browsers send the token as WebSocket subprotocols `bearer, <token>`, so keep it to letters, digits
+and `-._` (e.g. `openssl rand -hex 24`).
+
+## From your phone
+
+The orchestrator serves a text-only page at `http://<host>:7474/`: task list, submit, transcripts.
+Open it and paste the token (set `MIS_TOKEN`; without one, only `localhost` pages may connect). To reach
+it from a phone:
+
+- `cloudflared tunnel --url http://localhost:7474`
+- `tailscale serve 7474`
