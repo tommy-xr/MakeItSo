@@ -43,6 +43,10 @@ pub struct App {
     planner: Option<Arc<dyn Agent>>,
     /// Bounds concurrent planner processes; tasks wait in Planning.
     planner_slots: Arc<tokio::sync::Semaphore>,
+    /// A worker silent (no Hello/Stats) this long is treated as disconnected.
+    stale_after: Duration,
+    /// How often to check for silent workers.
+    tick_every: Duration,
 }
 
 impl App {
@@ -58,11 +62,21 @@ impl App {
             grace: Duration::from_secs(60),
             planner: None,
             planner_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            // Two missed beats plus slack for network jitter.
+            stale_after: 2 * STATS_INTERVAL + Duration::from_secs(5),
+            tick_every: Duration::from_secs(5),
         }
     }
 
     pub fn with_grace(mut self, grace: Duration) -> Self {
         self.grace = grace;
+        self
+    }
+
+    /// Override heartbeat timing (tests use short values).
+    pub fn with_liveness(mut self, stale_after: Duration, tick_every: Duration) -> Self {
+        self.stale_after = stale_after;
+        self.tick_every = tick_every;
         self
     }
 
@@ -107,6 +121,10 @@ impl App {
                     let app = self.clone();
                     tokio::spawn(async move { app.run_planner(task, prompt).await });
                 }
+                // Dropping the sender ends that socket's `worker_conn` loop.
+                Effect::Close { conn } => {
+                    self.conns.lock().unwrap().remove(&conn);
+                }
             }
         }
     }
@@ -139,6 +157,18 @@ impl App {
             );
             self.apply(effects);
         }
+    }
+
+    /// Periodically disconnect workers that stopped sending heartbeats.
+    fn spawn_liveness(&self) {
+        let app = self.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(app.tick_every);
+            loop {
+                every.tick().await;
+                app.transition(|l| ((), l.tick(now(), app.stale_after)));
+            }
+        });
     }
 
     fn open_conn(&self, tx: mpsc::UnboundedSender<OrchMsg>) -> ConnId {
@@ -233,7 +263,15 @@ pub fn router(app: App) -> Router {
         .with_state(app)
 }
 
+/// Wall-clock time for the ledger, which never reads the clock itself.
+fn now() -> Duration {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+}
+
 pub async fn serve(listener: TcpListener, app: App) -> anyhow::Result<()> {
+    app.spawn_liveness();
     axum::serve(listener, router(app)).await?;
     Ok(())
 }
@@ -306,7 +344,7 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
     };
     let (tx, mut rx) = mpsc::unbounded_channel();
     let conn = app.open_conn(tx);
-    let unknown = app.transition(|l| l.connect(wid, info, &running, conn));
+    let unknown = app.transition(|l| l.connect(wid, info, &running, conn, now()));
     tracing::info!(%wid, conn, ?running, "worker joined");
     if !unknown.is_empty() {
         tracing::warn!(%wid, ?unknown, "worker reports tasks unknown to this orchestrator");
@@ -314,12 +352,16 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
     if send_json(&mut sock, &OrchMsg::Welcome { id: wid }).await {
         loop {
             tokio::select! {
-                Some(out) = rx.recv() => {
-                    if !send_json(&mut sock, &out).await { break; }
-                }
+                out = rx.recv() => match out {
+                    Some(out) => if !send_json(&mut sock, &out).await { break; },
+                    None => break, // closed by `Effect::Close`
+                },
                 incoming = recv_json::<WorkerMsg>(&mut sock) => match incoming {
                     Some(WorkerMsg::Event { task, event }) => {
                         app.transition(|l| ((), l.event(wid, conn, task, event)));
+                    }
+                    Some(WorkerMsg::Stats(stats)) => {
+                        app.ledger.lock().unwrap().worker_stats(wid, conn, stats, now());
                     }
                     Some(WorkerMsg::Hello { .. }) => {}
                     None => break,
