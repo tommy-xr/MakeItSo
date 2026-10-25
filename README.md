@@ -20,12 +20,18 @@ mis (cli)  --ws-->  mis-orchestrator  <--ws--  mis-worker  --spawns-->  claude -
 
 ```sh
 cargo build
-export MIS_TOKEN=secret                    # optional; omit on both sides to disable auth
-./target/debug/mis-orchestrator            # 127.0.0.1:7474
-./target/debug/mis-worker --skip-permissions
+./target/debug/mis dev --skip-permissions  # orchestrator + worker on 127.0.0.1:7474
 ./target/debug/mis task "list files in /tmp" --follow
 ./target/debug/mis task "say hi" --harness codex --follow
 ./target/debug/mis status
+```
+
+Separate processes (what `mis dev` runs for you):
+
+```sh
+export MIS_TOKEN=secret                    # optional; omit on both sides to disable auth
+./target/debug/mis-orchestrator            # 127.0.0.1:7474
+./target/debug/mis-worker --skip-permissions
 ```
 
 Remote machines: start the orchestrator with `--bind 0.0.0.0:7474` and a `MIS_TOKEN`. It prints a

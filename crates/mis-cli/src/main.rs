@@ -36,6 +36,88 @@ enum Cmd {
     },
     /// Stream all task events.
     Tail,
+    /// Run an orchestrator and a worker on this machine for quick testing.
+    Dev {
+        /// Let agents run tools without permission prompts.
+        #[arg(long)]
+        skip_permissions: bool,
+    },
+}
+
+/// Spawns the sibling `mis-orchestrator` and `mis-worker` binaries, binding the
+/// orchestrator to the host in `url` and passing `token` to both. Both are
+/// killed when either exits or this process gets Ctrl-C / SIGTERM.
+async fn dev(url: &str, token: Option<&str>, skip_permissions: bool) -> Result<()> {
+    // Register signal handlers before spawning so a signal during startup
+    // still drops (kills) the children.
+    let ctrl_c = tokio::signal::ctrl_c();
+    let term = terminate();
+    let exe = std::env::current_exe()?;
+    let bin = |name: &str| exe.with_file_name(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    let bind = bind_addr(url).await?;
+    // Children read MIS_TOKEN; override the inherited value with --token's.
+    let with_token = |mut c: tokio::process::Command| match token {
+        Some(t) => {
+            c.env("MIS_TOKEN", t);
+            c
+        }
+        None => {
+            c.env_remove("MIS_TOKEN");
+            c
+        }
+    };
+    let orch_bin = bin("mis-orchestrator");
+    let mut orch = with_token(tokio::process::Command::new(&orch_bin))
+        .args(["--bind", &bind])
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("starting {} (run `cargo build` first)", orch_bin.display()))?;
+    let worker_bin = bin("mis-worker");
+    let mut worker = with_token(tokio::process::Command::new(&worker_bin));
+    worker.args(["--url", url]).kill_on_drop(true);
+    if skip_permissions {
+        worker.arg("--skip-permissions");
+    }
+    let mut worker = worker
+        .spawn()
+        .with_context(|| format!("starting {}", worker_bin.display()))?;
+    tokio::select! {
+        s = orch.wait() => bail!("mis-orchestrator exited: {}", s?),
+        s = worker.wait() => bail!("mis-worker exited: {}", s?),
+        _ = ctrl_c => Ok(()),
+        _ = term => Ok(()),
+    }
+}
+
+/// `ws://localhost:7474` -> `127.0.0.1:7474`: the orchestrator's --bind needs a
+/// numeric socket address.
+async fn bind_addr(url: &str) -> Result<String> {
+    let host = url
+        .strip_prefix("ws://")
+        .with_context(|| format!("dev needs a ws:// url, got {url}"))?
+        .trim_end_matches('/');
+    let addrs: Vec<_> = tokio::net::lookup_host(host)
+        .await
+        .with_context(|| format!("resolving {host}"))?
+        .collect();
+    // Prefer IPv4 so `localhost` binds where clients using 127.0.0.1 expect it.
+    let addr = addrs
+        .iter()
+        .find(|a| a.is_ipv4())
+        .or(addrs.first())
+        .with_context(|| format!("no address for {host}"))?;
+    Ok(addr.to_string())
+}
+
+#[cfg(unix)]
+async fn terminate() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let _ = signal(SignalKind::terminate()).unwrap().recv().await;
+}
+
+#[cfg(not(unix))]
+async fn terminate() {
+    std::future::pending().await
 }
 
 type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -92,6 +174,9 @@ fn print_event(task: TaskId, event: &AgentEvent) {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if let Cmd::Dev { skip_permissions } = args.cmd {
+        return dev(&args.url, args.token.as_deref(), skip_permissions).await;
+    }
     let mut ws = connect(&args).await?;
     match &args.cmd {
         Cmd::Status => {
@@ -181,6 +266,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Cmd::Dev { .. } => unreachable!(),
     }
     Ok(())
 }
