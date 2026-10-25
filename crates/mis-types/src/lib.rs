@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 pub const TASK_ENV: &str = "MIS_TASK";
 use uuid::Uuid;
 
+mod access;
+pub use access::access_headers;
+
 pub type WorkerId = Uuid;
 pub type TaskId = Uuid;
 

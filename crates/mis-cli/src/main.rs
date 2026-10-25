@@ -15,6 +15,11 @@ struct Args {
     url: String,
     #[arg(long, env = "MIS_TOKEN")]
     token: Option<String>,
+    /// Cloudflare Access service-token id; needs --cf-access-client-secret.
+    #[arg(long, env = "CF_ACCESS_CLIENT_ID")]
+    cf_access_client_id: Option<String>,
+    #[arg(long, env = "CF_ACCESS_CLIENT_SECRET", hide_env_values = true)]
+    cf_access_client_secret: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -142,6 +147,14 @@ async fn connect(args: &Args) -> Result<Ws> {
     if let Some(t) = &args.token {
         req.headers_mut()
             .insert("authorization", format!("Bearer {t}").parse()?);
+    }
+    let access = access_headers(
+        args.cf_access_client_id.as_deref(),
+        args.cf_access_client_secret.as_deref(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    for (k, v) in access {
+        req.headers_mut().insert(k, v.parse()?);
     }
     let (ws, _) = connect_async(req)
         .await

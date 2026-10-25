@@ -12,6 +12,7 @@ use mis_types::*;
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Parser)]
@@ -21,6 +22,11 @@ struct Args {
     url: String,
     #[arg(long, env = "MIS_TOKEN")]
     token: Option<String>,
+    /// Cloudflare Access service-token id; needs --cf-access-client-secret.
+    #[arg(long, env = "CF_ACCESS_CLIENT_ID")]
+    cf_access_client_id: Option<String>,
+    #[arg(long, env = "CF_ACCESS_CLIENT_SECRET", hide_env_values = true)]
+    cf_access_client_secret: Option<String>,
     /// Let agents run tools without permission prompts (required for real work).
     #[arg(long)]
     skip_permissions: bool,
@@ -34,6 +40,15 @@ async fn main() -> Result<()> {
         )
         .init();
     let args = Args::parse();
+    // Validate before the reconnect loop so bad credentials fail fast.
+    let access = access_headers(
+        args.cf_access_client_id.as_deref(),
+        args.cf_access_client_secret.as_deref(),
+    )
+    .map_err(anyhow::Error::msg)?
+    .into_iter()
+    .map(|(k, v)| Ok((k, v.parse().with_context(|| format!("invalid {k}"))?)))
+    .collect::<Result<Vec<(&str, HeaderValue)>>>()?;
 
     let (id, _id_lock) = worker_id()?;
     let agents = mis_agent::available(args.skip_permissions);
@@ -59,7 +74,7 @@ async fn main() -> Result<()> {
     };
 
     loop {
-        match session(&args, id, &info, &agents, &ev_tx, &mut conn).await {
+        match session(&args, &access, id, &info, &agents, &ev_tx, &mut conn).await {
             Ok(()) => tracing::info!("orchestrator closed connection"),
             Err(e) => tracing::warn!("connection lost: {e:#}"),
         }
@@ -83,6 +98,7 @@ struct Conn {
 /// until the socket drops. Returns Ok on a clean close from the orchestrator.
 async fn session(
     args: &Args,
+    access: &[(&'static str, HeaderValue)],
     id: WorkerId,
     info: &WorkerInfo,
     agents: &std::sync::Arc<Vec<Box<dyn Agent>>>,
@@ -93,6 +109,9 @@ async fn session(
     if let Some(t) = &args.token {
         req.headers_mut()
             .insert("authorization", format!("Bearer {t}").parse()?);
+    }
+    for (k, v) in access {
+        req.headers_mut().insert(*k, v.clone());
     }
     let (ws, _) = connect_async(req)
         .await
