@@ -32,10 +32,12 @@ struct Worker {
     generation: u64,
 }
 
-/// Per-task transcript cap, in serialized JSON bytes; oldest events go first.
+/// Per-task transcript cap: sum of each event's serialized JSON size. Oldest
+/// events go first; the newest is always kept.
 pub const MAX_TRANSCRIPT_BYTES: usize = 256 * 1024;
 /// A single stored `ToolResult` keeps at most this many bytes of content.
 pub const MAX_TOOL_RESULT_BYTES: usize = 16 * 1024;
+const TRUNCATED: &str = "…[truncated]";
 
 struct TaskEntry {
     task: Task,
@@ -84,12 +86,12 @@ impl TaskEntry {
         }
         let event = match event {
             AgentEvent::ToolResult { content } if content.len() > MAX_TOOL_RESULT_BYTES => {
-                let mut end = MAX_TOOL_RESULT_BYTES;
+                let mut end = MAX_TOOL_RESULT_BYTES - TRUNCATED.len();
                 while !content.is_char_boundary(end) {
                     end -= 1;
                 }
                 AgentEvent::ToolResult {
-                    content: format!("{}…[truncated]", &content[..end]),
+                    content: format!("{}{TRUNCATED}", &content[..end]),
                 }
             }
             e => e.clone(),
@@ -97,7 +99,7 @@ impl TaskEntry {
         self.bytes += size(&event);
         self.events.push(event);
         let mut evict = 0;
-        while self.bytes > MAX_TRANSCRIPT_BYTES {
+        while self.bytes > MAX_TRANSCRIPT_BYTES && evict < self.events.len() - 1 {
             self.bytes -= size(&self.events[evict]);
             evict += 1;
         }
@@ -534,14 +536,16 @@ mod tests {
     #[test]
     fn huge_tool_result_is_truncated_on_store() {
         let (mut l, wid, task) = running_setup();
-        let content = "é".repeat(MAX_TOOL_RESULT_BYTES); // 2 bytes per char
+        // Odd prefix puts the cut mid-character.
+        let content = format!("a{}", "é".repeat(MAX_TOOL_RESULT_BYTES));
         l.event(wid, 1, task, AgentEvent::ToolResult { content });
         let (_, got, truncated) = l.show(task).unwrap();
         let AgentEvent::ToolResult { content } = &got[0] else {
             panic!()
         };
-        assert!(content.ends_with("…[truncated]"));
-        assert!(content.len() <= MAX_TOOL_RESULT_BYTES + "…[truncated]".len());
+        assert!(content.ends_with(TRUNCATED));
+        assert!(content.len() <= MAX_TOOL_RESULT_BYTES);
+        assert!(content.len() > MAX_TOOL_RESULT_BYTES - TRUNCATED.len() - 2);
         assert!(!truncated);
     }
 
@@ -552,5 +556,16 @@ mod tests {
         let (info, got, _) = l.show(task).unwrap();
         assert_eq!(info.summary.as_deref(), Some("worker restarted"));
         assert!(matches!(got, [AgentEvent::Finished { ok: false, .. }]));
+    }
+
+    #[test]
+    fn oversized_event_is_kept_alone() {
+        let (mut l, wid, task) = running_setup();
+        l.event(wid, 1, task, text("small"));
+        let huge = text(&"x".repeat(MAX_TRANSCRIPT_BYTES));
+        l.event(wid, 1, task, huge.clone());
+        let (_, got, truncated) = l.show(task).unwrap();
+        assert_eq!(got, std::slice::from_ref(&huge));
+        assert!(truncated);
     }
 }
