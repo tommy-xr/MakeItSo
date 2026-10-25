@@ -103,6 +103,8 @@ async fn main() -> anyhow::Result<()> {
                 "",
                 "--max-turns",
                 "1",
+                "--json-schema",
+                mis_orchestrator::plan::SCHEMA,
             ]
             .map(String::from)
             .to_vec(),

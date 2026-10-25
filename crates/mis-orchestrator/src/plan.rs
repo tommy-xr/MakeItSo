@@ -13,6 +13,10 @@ pub struct Plan {
     pub reason: String,
 }
 
+/// JSON Schema the planner's reply must satisfy (`claude --json-schema`). The
+/// harness is validated against the live fleet in `parse`, not here.
+pub const SCHEMA: &str = r#"{"type":"object","properties":{"harness":{"type":"string"},"prompt":{"type":"string"},"reason":{"type":"string"}},"required":["harness","reason"]}"#;
+
 /// Prompt asking the model to pick a harness and strip dispatch instructions.
 pub fn prompt(request: &str, harnesses: &[String]) -> String {
     let default = harnesses
@@ -28,7 +32,7 @@ pub fn prompt(request: &str, harnesses: &[String]) -> String {
          If the request contains dispatch instructions, set \"prompt\" to the request with \
          only those words removed, everything else verbatim; if nothing is left, ask the \
          agent to introduce itself. Otherwise omit \"prompt\" and the request is used as-is.\n\
-         Reply with only a JSON object: {{\"harness\": \"...\", \"prompt\": \"...\", \"reason\": \"one short sentence\"}}\n\n\
+         Set \"reason\" to one short sentence.\n\n\
          Request:\n{request}",
         harnesses.join(", ")
     )
