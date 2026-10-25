@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Make It So</title>
+<style>
+  :root { color-scheme: light dark; --fg: #111; --bg: #fff; --dim: #666; --line: #ddd; --bad: #b00; --ok: #070; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #eee; --bg: #111; --dim: #999; --line: #333; --bad: #f66; --ok: #6c6; }
+  }
+  body { margin: 0 auto; max-width: 720px; padding: 12px 16px 48px; font: 16px/1.4 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+  h1 { font-size: 20px; margin: 4px 0 8px; }
+  a { color: inherit; }
+  textarea, input, select, button { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; box-sizing: border-box; }
+  textarea, input[type=password] { width: 100%; padding: 10px; }
+  textarea { min-height: 96px; resize: vertical; }
+  select, button { min-height: 44px; padding: 0 14px; }
+  button { font-weight: 600; }
+  .row { display: flex; gap: 8px; margin: 8px 0 16px; }
+  .row button { flex: 1; }
+  .dim { color: var(--dim); font-size: 14px; }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size: 14px; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li a { display: block; padding: 12px 0; border-top: 1px solid var(--line); text-decoration: none; }
+  .failed { color: var(--bad); }
+  .done { color: var(--ok); }
+  .sum { color: var(--dim); }
+  pre { white-space: pre-wrap; word-break: break-word; margin: 0; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 8px 0 16px; }
+  dt { color: var(--dim); }
+  dd { margin: 0; word-break: break-word; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<h1>Make It So</h1>
+<div id="conn" class="dim">connecting…</div>
+
+<form id="auth" hidden>
+  <p>This orchestrator needs its token (MIS_TOKEN).</p>
+  <input id="token" type="password" autocomplete="current-password" placeholder="token">
+  <div class="row"><button>Connect</button></div>
+</form>
+
+<main id="list" hidden>
+  <form id="new">
+    <textarea id="prompt" placeholder="New task…" required></textarea>
+    <div class="row">
+      <select id="harness" aria-label="harness"><option value="">auto</option></select>
+      <button>Submit</button>
+    </div>
+  </form>
+  <div id="fleet" class="dim"></div>
+  <ul id="tasks"></ul>
+</main>
+
+<main id="detail" hidden>
+  <p><a href="#">← back</a></p>
+  <dl id="fields"></dl>
+  <pre id="log" class="mono"></pre>
+</main>
+
+<p class="dim"><a href="#" id="clear" hidden>disconnect / clear token</a></p>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const store = {
+  get() { try { return localStorage.getItem('mis-token') || ''; } catch { return ''; } },
+  set(v) { try { v ? localStorage.setItem('mis-token', v) : localStorage.removeItem('mis-token'); } catch {} },
+};
+let ws = null, authNeeded = false, tasks = [], detail = null, retries = 0, retryTimer = 0, statusTimer = 0;
+
+// Text-only DOM builder: every string becomes a text node, never parsed as HTML.
+function el(tag, props, ...kids) {
+  const n = Object.assign(document.createElement(tag), props || {});
+  for (const k of kids) n.append(k);
+  return n;
+}
+
+// First line of `s`, cut to `max` chars with a trailing ellipsis (as the CLI does).
+function firstLine(s, max) {
+  const line = [...(s.split(/\r?\n/)[0])];
+  return line.length <= max ? line.join('') : line.slice(0, max - 1).join('') + '…';
+}
+
+// One transcript line, matching `mis show` / `mis task --follow`.
+function eventLine(e) {
+  switch (e.type) {
+    case 'started': return 'started';
+    case 'text': return e.text;
+    case 'tool_use': return `> ${e.name} ${JSON.stringify(e.input)}`;
+    case 'tool_result': return `< ${(e.content || '').split(/\r?\n/)[0]}`;
+    case 'finished': return `${e.ok ? 'done' : 'FAILED'} ${e.summary || ''}`;
+    default: return `[${e.type}] ${JSON.stringify(e)}`;
+  }
+}
+
+function send(msg) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
+
+// Coalesce bursts of lifecycle events into one Status request.
+function refreshSoon() {
+  clearTimeout(statusTimer);
+  statusTimer = setTimeout(() => send({ type: 'status' }), 300);
+}
+
+function openTask() {
+  const m = location.hash.match(/^#task\/([0-9a-f-]{36})$/);
+  return m ? m[1] : null;
+}
+
+function render() {
+  const id = openTask();
+  const live = ws && ws.readyState === WebSocket.OPEN;
+  $('auth').hidden = live || !authNeeded || !!store.get();
+  $('list').hidden = !live || !!id;
+  $('detail').hidden = !live || !id;
+  $('clear').hidden = !store.get();
+  if (id) renderDetail(id); else renderList();
+}
+
+function renderList() {
+  $('tasks').replaceChildren(...[...tasks].reverse().map((t) => el('li', {},
+    el('a', { href: `#task/${t.id}` },
+      el('div', { className: 'mono' }, `${t.id.slice(0, 8)} `, el('span', { className: t.status }, t.status)),
+      el('div', {}, t.prompt),
+      t.summary ? el('div', { className: 'sum' }, `-> ${firstLine(t.summary, 80)}`) : ''))));
+  if (!tasks.length) $('tasks').append(el('li', { className: 'dim' }, 'no tasks yet'));
+}
+
+function renderDetail(id) {
+  if (!detail || detail.id !== id) {
+    detail = { id, task: null, lines: [], ready: false };
+    send({ type: 'show', task: id });
+  }
+  const t = tasks.find((x) => x.id === id) || detail.task;
+  const f = $('fields');
+  f.replaceChildren();
+  if (t) {
+    for (const [k, v] of [['id', t.id], ['status', t.status], ['harness', t.harness], ['worker', t.worker],
+      ['session', t.session], ['prompt', t.prompt], ['summary', t.summary]]) {
+      f.append(el('dt', {}, k), el('dd', { className: k === 'status' ? v : '' }, v || '-'));
+    }
+  }
+  $('log').textContent = detail.ready ? detail.lines.join('\n') : 'loading…';
+}
+
+function onMessage(msg) {
+  switch (msg.type) {
+    case 'status': {
+      tasks = msg.tasks;
+      const online = msg.workers.filter((w) => w.online);
+      $('fleet').textContent = `${online.length}/${msg.workers.length} workers online`;
+      const harnesses = [...new Set(msg.workers.flatMap((w) => w.info.harnesses))].sort();
+      const sel = $('harness'), keep = sel.value;
+      sel.replaceChildren(el('option', { value: '' }, 'auto'), ...harnesses.map((h) => el('option', { value: h }, h)));
+      sel.value = harnesses.includes(keep) ? keep : '';
+      break;
+    }
+    case 'submitted': $('prompt').value = ''; refreshSoon(); break;
+    case 'task_detail':
+      if (detail && detail.id === msg.task.id) {
+        detail.task = msg.task;
+        detail.lines = (msg.truncated ? ['(earlier events dropped)'] : []).concat(msg.events.map(eventLine));
+        detail.ready = true;
+      }
+      break;
+    case 'event':
+      if (detail && detail.ready && detail.id === msg.task) detail.lines.push(eventLine(msg.event));
+      if (['started', 'finished', 'planned'].includes(msg.event.type)) refreshSoon();
+      break;
+    case 'error': $('conn').textContent = `error: ${msg.message}`; refreshSoon(); break;
+  }
+  render();
+}
+
+function connect() {
+  clearTimeout(retryTimer);
+  const token = store.get();
+  if (authNeeded && !token) { $('conn').textContent = 'token required'; render(); return; }
+  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/client`;
+  let sock;
+  try {
+    // Browsers cannot set Authorization on a WebSocket; the token rides as a subprotocol.
+    sock = new WebSocket(url, token ? ['bearer', token] : []);
+  } catch (e) {
+    $('conn').textContent = `cannot connect: ${e.message} (token must be letters, digits, -._~ etc.)`;
+    return;
+  }
+  ws = sock;
+  sock.onopen = () => {
+    retries = 0;
+    $('conn').textContent = 'connected';
+    send({ type: 'subscribe' });
+    send({ type: 'status' });
+    detail = null; // re-fetch the open transcript after any reconnect
+    render();
+  };
+  sock.onmessage = (ev) => { try { onMessage(JSON.parse(ev.data)); } catch (e) { console.error(e); } };
+  sock.onclose = () => {
+    if (ws !== sock) return; // replaced by a deliberate reconnect / disconnect
+    ws = null;
+    const delay = Math.min(30, 2 ** retries++);
+    $('conn').textContent = `disconnected${authNeeded ? ' (wrong token?)' : ''}; reconnecting in ${delay}s…`;
+    retryTimer = setTimeout(connect, delay * 1000);
+    render();
+  };
+}
+
+function disconnect() {
+  const s = ws;
+  ws = null;
+  clearTimeout(retryTimer);
+  if (s) s.close();
+}
+
+$('auth').onsubmit = (e) => {
+  e.preventDefault();
+  store.set($('token').value.trim());
+  $('token').value = '';
+  connect();
+};
+$('new').onsubmit = (e) => {
+  e.preventDefault();
+  const prompt = $('prompt').value.trim();
+  if (prompt) send({ type: 'submit', prompt, cwd: null, harness: $('harness').value || null });
+};
+$('clear').onclick = (e) => {
+  e.preventDefault();
+  store.set('');
+  disconnect();
+  $('conn').textContent = authNeeded ? 'token required' : 'disconnected';
+  render();
+};
+window.onhashchange = render;
+
+fetch('/api/info').then((r) => r.json()).then((info) => { authNeeded = info.auth; connect(); })
+  .catch((e) => { $('conn').textContent = `cannot reach server: ${e.message}`; });
+</script>
+</body>
+</html>

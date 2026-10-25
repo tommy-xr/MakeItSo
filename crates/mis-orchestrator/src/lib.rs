@@ -9,9 +9,9 @@ use std::time::Duration;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::response::{Html, IntoResponse};
 use axum::routing::get;
-use axum::Router;
+use axum::{Json, Router};
 use futures_util::StreamExt;
 use mis_types::*;
 use tokio::net::TcpListener;
@@ -106,18 +106,55 @@ impl App {
             Some(Ok(o)) => Some(o),
             Some(Err(_)) => return false,
         };
-        if !origin_allowed(origin, &self.allowed_origins) {
+        let host = headers.get("host").and_then(|v| v.to_str().ok());
+        let own_page = match (origin, host) {
+            // Without a token, only loopback: a DNS-rebound name (evil.com -> 127.0.0.1)
+            // would otherwise pass as same-origin.
+            (Some(o), Some(h)) => same_origin(o, h) && (self.token.is_some() || loopback_host(h)),
+            _ => false,
+        };
+        if !own_page && !origin_allowed(origin, &self.allowed_origins) {
             return false;
         }
         match &self.token {
             None => true,
-            Some(t) => headers
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v == format!("Bearer {t}"))
-                .unwrap_or(false),
+            Some(t) => bearer_from(headers) == Some(t.as_str()),
         }
     }
+}
+
+/// Token from `Authorization: Bearer <t>`, or `Sec-WebSocket-Protocol: bearer, <t>`
+/// since browsers cannot set headers on a WebSocket.
+fn bearer_from(headers: &HeaderMap) -> Option<&str> {
+    let header = |name| headers.get(name).and_then(|v| v.to_str().ok());
+    if let Some(t) = header("authorization").and_then(|v| v.strip_prefix("Bearer ")) {
+        return Some(t);
+    }
+    let mut protos = header("sec-websocket-protocol")?.split(',').map(str::trim);
+    (protos.next()? == "bearer")
+        .then(|| protos.next())
+        .flatten()
+}
+
+/// `Origin` names the server itself, i.e. the request comes from the page at `/`:
+/// `https://x:443` matches `Host: x:443`.
+fn same_origin(origin: &str, host: &str) -> bool {
+    origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"))
+        .is_some_and(|authority| authority.eq_ignore_ascii_case(host))
+}
+
+/// `localhost:7474`, `127.0.0.1`, `[::1]:7474`.
+fn loopback_host(host: &str) -> bool {
+    let Ok(a) = host.parse::<axum::http::uri::Authority>() else {
+        return false;
+    };
+    let name = a.host().trim_start_matches('[').trim_end_matches(']');
+    name.eq_ignore_ascii_case("localhost")
+        || name
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Native clients send no `Origin`; a browser's must exactly match an allowlist entry.
@@ -137,6 +174,11 @@ pub fn normalize_origins(raw: impl IntoIterator<Item = String>) -> Vec<String> {
 
 pub fn router(app: App) -> Router {
     Router::new()
+        .route(
+            "/",
+            get(|| async { Html(include_str!("../static/index.html")) }),
+        )
+        .route("/api/info", get(info))
         .route("/ws/worker", get(ws_worker))
         .route("/ws/client", get(ws_client))
         .with_state(app)
@@ -147,6 +189,11 @@ pub async fn serve(listener: TcpListener, app: App) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Lets the page decide whether to ask for a token.
+async fn info(State(app): State<App>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "auth": app.token.is_some() }))
+}
+
 async fn ws_worker(
     ws: WebSocketUpgrade,
     State(app): State<App>,
@@ -155,7 +202,9 @@ async fn ws_worker(
     if !app.authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    ws.on_upgrade(move |sock| worker_conn(sock, app))
+    // Browsers abort unless the server echoes a protocol they offered.
+    ws.protocols(["bearer"])
+        .on_upgrade(move |sock| worker_conn(sock, app))
         .into_response()
 }
 
@@ -167,7 +216,8 @@ async fn ws_client(
     if !app.authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    ws.on_upgrade(move |sock| client_conn(sock, app))
+    ws.protocols(["bearer"])
+        .on_upgrade(move |sock| client_conn(sock, app))
         .into_response()
 }
 
@@ -309,6 +359,90 @@ mod tests {
             assert!(!origin_allowed(Some(o), &allowed), "{o}");
         }
         assert!(!origin_allowed(Some("https://x.com"), &[]));
+    }
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        pairs
+            .iter()
+            .map(|(k, v)| (axum::http::HeaderName::from_static(k), v.parse().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn bearer_from_either_header() {
+        let b = |pairs: &[(&'static str, &str)]| bearer_from(&headers(pairs)).map(str::to_owned);
+        assert_eq!(b(&[("authorization", "Bearer s")]).as_deref(), Some("s"));
+        assert_eq!(
+            b(&[("sec-websocket-protocol", "bearer, s")]).as_deref(),
+            Some("s")
+        );
+        assert_eq!(
+            b(&[("sec-websocket-protocol", "bearer,s")]).as_deref(),
+            Some("s")
+        );
+        assert_eq!(b(&[("authorization", "Basic s")]), None);
+        assert_eq!(b(&[("sec-websocket-protocol", "bearer")]), None);
+        assert_eq!(b(&[("sec-websocket-protocol", "chat, s")]), None);
+        assert_eq!(b(&[("sec-websocket-protocol", "s, bearer")]), None);
+        assert_eq!(b(&[]), None);
+    }
+
+    #[test]
+    fn same_origin_matches_host() {
+        assert!(same_origin("https://x:443", "x:443"));
+        assert!(same_origin("http://127.0.0.1:7474", "127.0.0.1:7474"));
+        assert!(same_origin("https://X.com", "x.com"));
+        assert!(!same_origin("https://x:443", "y:443"));
+        assert!(!same_origin("https://x:443", "x:444"));
+        assert!(!same_origin("https://x.evil", "x"));
+        assert!(!same_origin("null", "null"));
+        assert!(!same_origin("x:443", "x:443"));
+    }
+
+    #[test]
+    fn loopback_hosts() {
+        for h in [
+            "localhost:7474",
+            "127.0.0.1:7474",
+            "127.0.0.1",
+            "[::1]:7474",
+            "LOCALHOST",
+        ] {
+            assert!(loopback_host(h), "{h}");
+        }
+        for h in [
+            "evil.com:7474",
+            "192.168.1.2:7474",
+            "localhost.evil.com",
+            "",
+        ] {
+            assert!(!loopback_host(h), "{h}");
+        }
+    }
+
+    #[test]
+    fn authorized_combines_origin_and_token() {
+        let ok = |app: &App, pairs: &[(&'static str, &str)]| app.authorized(&headers(pairs));
+        let open = App::new(None);
+        // Same-origin page needs no allowlist entry.
+        let local = [
+            ("origin", "http://127.0.0.1:7474"),
+            ("host", "127.0.0.1:7474"),
+        ];
+        assert!(ok(&open, &local));
+        // No token: a rebound non-loopback name is not trusted as same-origin.
+        let rebound = [
+            ("origin", "http://evil.com:7474"),
+            ("host", "evil.com:7474"),
+        ];
+        assert!(!ok(&open, &rebound));
+        // Missing Host falls through to the (empty) allowlist.
+        assert!(!ok(&open, &local[..1]));
+        let t = App::new(Some("s".into()));
+        let (o, h) = (("origin", "https://m.example"), ("host", "m.example"));
+        assert!(ok(&t, &[o, h, ("sec-websocket-protocol", "bearer, s")]));
+        assert!(!ok(&t, &[o, h, ("sec-websocket-protocol", "bearer, x")]));
+        assert!(!ok(&t, &[o, h]));
     }
 
     #[test]

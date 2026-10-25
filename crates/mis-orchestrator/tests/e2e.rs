@@ -314,6 +314,55 @@ async fn allowed_origin_still_needs_token() {
     assert!(connect_async(req).await.is_err());
 }
 
+/// Browser-shaped upgrade: token as subprotocol, `Origin` naming this server.
+fn page_req(base: &str, token: &str) -> tokio_tungstenite::tungstenite::handshake::client::Request {
+    let origin = base.replacen("ws://", "http://", 1);
+    let mut req = client_req_with_origin(base, &origin);
+    let protos = format!("bearer, {token}").parse().unwrap();
+    req.headers_mut().insert("sec-websocket-protocol", protos);
+    req
+}
+
+#[tokio::test]
+async fn same_origin_page_connects_with_subprotocol_token() {
+    let base = start_app(App::new(Some("s".into()))).await;
+    let (mut client, resp) = connect_async(page_req(&base, "s")).await.unwrap();
+    assert_eq!(resp.headers()["sec-websocket-protocol"], "bearer");
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { .. } = recv(&mut client).await else {
+        panic!()
+    };
+
+    let err = connect_async(page_req(&base, "wrong")).await.unwrap_err();
+    let tokio_tungstenite::tungstenite::Error::Http(resp) = err else {
+        panic!("{err}")
+    };
+    assert_eq!(resp.status(), 401);
+}
+
+/// Minimal HTTP/1.1 GET; returns the raw response.
+async fn http_get(base: &str, path: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let addr = base.trim_start_matches("ws://");
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    out
+}
+
+#[tokio::test]
+async fn serves_page_and_info_without_token() {
+    let base = start_app(App::new(Some("s".into()))).await;
+    let page = http_get(&base, "/").await;
+    assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+    assert!(page.contains("text/html"));
+    assert!(page.contains("<title>Make It So</title>"));
+    let info = http_get(&base, "/api/info").await;
+    assert!(info.ends_with(r#"{"auth":true}"#), "{info}");
+}
+
 #[tokio::test]
 async fn reconnect_keeps_reported_task_and_fails_unreported() {
     let base = start().await;
