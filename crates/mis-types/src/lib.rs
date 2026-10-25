@@ -2,6 +2,9 @@
 //! Everything is JSON over WebSocket; `type` tags on the enums below.
 
 use serde::{Deserialize, Serialize};
+
+/// Env var set on agent processes: the id of the task they are running.
+pub const TASK_ENV: &str = "MIS_TASK";
 use uuid::Uuid;
 
 pub type WorkerId = Uuid;

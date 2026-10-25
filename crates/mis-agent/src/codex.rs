@@ -1,7 +1,7 @@
 //! Codex CLI backend: `codex exec --json <prompt>`.
 
 use anyhow::Context;
-use mis_types::{AgentEvent, TaskId};
+use mis_types::{AgentEvent, TaskId, TASK_ENV};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -78,7 +78,7 @@ impl Agent for CodexAgent {
             if let Some(d) = cwd {
                 cmd.current_dir(d);
             }
-            cmd.env("MIS_TASK", task.to_string());
+            cmd.env(TASK_ENV, task.to_string());
             cmd.stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::inherit())
