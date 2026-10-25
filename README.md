@@ -36,3 +36,11 @@ export MIS_TOKEN=secret                    # optional; omit on both sides to dis
 
 Remote machines: start the orchestrator with `--bind 0.0.0.0:7474` and a `MIS_TOKEN`. It prints a
 ready-to-paste `MIS_URL=... mis-worker` line for each LAN address (and for `--public-url` if set).
+
+Behind a Cloudflare Tunnel with an Access service-auth policy, give `mis` and `mis-worker` the
+service token too (or pass `--cf-access-client-id` / `--cf-access-client-secret`):
+
+```sh
+export CF_ACCESS_CLIENT_ID=<id>.access
+export CF_ACCESS_CLIENT_SECRET=<secret>
+```
