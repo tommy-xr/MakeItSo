@@ -136,19 +136,31 @@ impl App {
         self.schedule();
     }
 
-    fn remove_worker(&self, wid: WorkerId) {
+    /// Register (or re-register) a worker. Running tasks it no longer reports are lost.
+    fn register(&self, wid: WorkerId, info: WorkerInfo, running: &[TaskId], tx: mpsc::UnboundedSender<OrchMsg>) {
         let mut s = self.inner.lock().unwrap();
-        s.workers.remove(&wid);
-        // A task mid-flight on a vanished worker is lost; fail it and tell followers.
-        let lost: Vec<TaskId> = s
-            .tasks
-            .iter_mut()
-            .filter(|t| t.worker == Some(wid) && t.status == TaskStatus::Running)
-            .map(|t| { t.status = TaskStatus::Failed; t.task.id })
-            .collect();
+        let rejoined = s.workers.insert(wid, WorkerEntry { info, busy: !running.is_empty(), tx }).is_some();
+        tracing::info!(%wid, rejoined, ?running, "worker joined");
+        let lost = fail_running(&mut s, wid, running, "worker restarted");
         drop(s);
-        for task in lost {
-            let event = AgentEvent::Finished { ok: false, summary: Some("worker disconnected".into()) };
+        self.emit_lost(wid, lost);
+    }
+
+    /// Drop a worker, unless `tx` is stale (the worker already reconnected).
+    fn remove_worker(&self, wid: WorkerId, tx: &mpsc::UnboundedSender<OrchMsg>) {
+        let mut s = self.inner.lock().unwrap();
+        if !s.workers.get(&wid).is_some_and(|w| w.tx.same_channel(tx)) {
+            return;
+        }
+        s.workers.remove(&wid);
+        let lost = fail_running(&mut s, wid, &[], "worker disconnected");
+        drop(s);
+        self.emit_lost(wid, lost);
+    }
+
+    fn emit_lost(&self, wid: WorkerId, lost: Vec<(TaskId, &'static str)>) {
+        for (task, why) in lost {
+            let event = AgentEvent::Finished { ok: false, summary: Some(why.into()) };
             let _ = self.events.send(ServerMsg::Event { task, worker: wid, event });
         }
     }
@@ -166,6 +178,18 @@ impl App {
                 .unwrap_or(false),
         }
     }
+}
+
+/// Fail every Running task on `wid` not listed in `keep`; returns what was failed.
+fn fail_running(s: &mut Inner, wid: WorkerId, keep: &[TaskId], why: &'static str) -> Vec<(TaskId, &'static str)> {
+    s.tasks
+        .iter_mut()
+        .filter(|t| t.worker == Some(wid) && t.status == TaskStatus::Running && !keep.contains(&t.task.id))
+        .map(|t| {
+            t.status = TaskStatus::Failed;
+            (t.task.id, why)
+        })
+        .collect()
 }
 
 pub fn router(app: App) -> Router {
@@ -211,15 +235,13 @@ async fn send_json<T: serde::Serialize>(sock: &mut WebSocket, v: &T) -> bool {
 }
 
 async fn worker_conn(mut sock: WebSocket, app: App) {
-    let Some(WorkerMsg::Hello { info }) = recv_json::<WorkerMsg>(&mut sock).await else {
+    let Some(WorkerMsg::Hello { id: wid, info, running }) = recv_json::<WorkerMsg>(&mut sock).await else {
         return;
     };
-    let wid = Uuid::new_v4();
     let (tx, mut rx) = mpsc::unbounded_channel();
-    app.inner.lock().unwrap().workers.insert(wid, WorkerEntry { info: info.clone(), busy: false, tx });
-    tracing::info!(%wid, host = %info.hostname, ?info.harnesses, "worker joined");
+    app.register(wid, info, &running, tx.clone());
     if !send_json(&mut sock, &OrchMsg::Welcome { id: wid }).await {
-        app.remove_worker(wid);
+        app.remove_worker(wid, &tx);
         return;
     }
     app.schedule();
@@ -236,7 +258,7 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
         }
     }
     tracing::info!(%wid, "worker left");
-    app.remove_worker(wid);
+    app.remove_worker(wid, &tx);
 }
 
 /// Next broadcast event; a lagged subscriber gets an Error instead of silently stalling.

@@ -17,6 +17,19 @@ async fn recv<T: serde::de::DeserializeOwned>(ws: &mut Ws) -> T {
     serde_json::from_str(msg.to_text().unwrap()).unwrap()
 }
 
+fn info(harness: &str) -> WorkerInfo {
+    WorkerInfo { hostname: "w".into(), os: "o".into(), arch: "a".into(), harnesses: vec![harness.into()] }
+}
+
+/// Connect a worker and complete the handshake.
+async fn join(base: &str, id: WorkerId, harness: &str, running: Vec<TaskId>) -> Ws {
+    let (mut ws, _) = connect_async(format!("{base}/ws/worker")).await.unwrap();
+    send(&mut ws, &WorkerMsg::Hello { id, info: info(harness), running }).await;
+    let OrchMsg::Welcome { id: got } = recv(&mut ws).await else { panic!() };
+    assert_eq!(got, id);
+    ws
+}
+
 async fn start() -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -39,10 +52,8 @@ async fn submit_assign_finish() {
     assert_eq!(tasks[0].status, TaskStatus::Queued);
 
     // Worker joins and immediately receives the queued task.
-    let (mut worker, _) = connect_async(format!("{base}/ws/worker")).await.unwrap();
-    let info = WorkerInfo { hostname: "w".into(), os: "o".into(), arch: "a".into(), harnesses: vec!["claude".into()] };
-    send(&mut worker, &WorkerMsg::Hello { info }).await;
-    let OrchMsg::Welcome { id: wid } = recv(&mut worker).await else { panic!() };
+    let wid = uuid::Uuid::new_v4();
+    let mut worker = join(&base, wid, "claude", vec![]).await;
     let OrchMsg::Assign { task: assigned } = recv(&mut worker).await else { panic!() };
     assert_eq!(assigned.id, task);
     assert_eq!(assigned.harness, "claude");
@@ -64,10 +75,7 @@ async fn submit_assign_finish() {
 #[tokio::test]
 async fn harness_mismatch_stays_queued() {
     let base = start().await;
-    let (mut worker, _) = connect_async(format!("{base}/ws/worker")).await.unwrap();
-    let info = WorkerInfo { hostname: "w".into(), os: "o".into(), arch: "a".into(), harnesses: vec!["codex".into()] };
-    send(&mut worker, &WorkerMsg::Hello { info }).await;
-    let OrchMsg::Welcome { .. } = recv(&mut worker).await else { panic!() };
+    let _worker = join(&base, uuid::Uuid::new_v4(), "codex", vec![]).await;
 
     let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
     send(&mut client, &ClientMsg::Submit { prompt: "hi".into(), cwd: None, harness: Some("claude".into()) }).await;
@@ -82,10 +90,7 @@ async fn worker_disconnect_fails_task_and_notifies() {
     let base = start().await;
     let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
     send(&mut client, &ClientMsg::Subscribe).await;
-    let (mut worker, _) = connect_async(format!("{base}/ws/worker")).await.unwrap();
-    let info = WorkerInfo { hostname: "w".into(), os: "o".into(), arch: "a".into(), harnesses: vec!["claude".into()] };
-    send(&mut worker, &WorkerMsg::Hello { info }).await;
-    let OrchMsg::Welcome { .. } = recv(&mut worker).await else { panic!() };
+    let mut worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
 
     send(&mut client, &ClientMsg::Submit { prompt: "hi".into(), cwd: None, harness: None }).await;
     let ServerMsg::Submitted { task } = recv(&mut client).await else { panic!() };
@@ -103,13 +108,8 @@ async fn worker_disconnect_fails_task_and_notifies() {
 #[tokio::test]
 async fn events_from_wrong_worker_are_ignored() {
     let base = start().await;
-    let info = WorkerInfo { hostname: "w".into(), os: "o".into(), arch: "a".into(), harnesses: vec!["claude".into()] };
-    let (mut w1, _) = connect_async(format!("{base}/ws/worker")).await.unwrap();
-    send(&mut w1, &WorkerMsg::Hello { info: info.clone() }).await;
-    let OrchMsg::Welcome { .. } = recv(&mut w1).await else { panic!() };
-    let (mut w2, _) = connect_async(format!("{base}/ws/worker")).await.unwrap();
-    send(&mut w2, &WorkerMsg::Hello { info }).await;
-    let OrchMsg::Welcome { .. } = recv(&mut w2).await else { panic!() };
+    let w1 = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+    let w2 = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
 
     let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
     send(&mut client, &ClientMsg::Submit { prompt: "hi".into(), cwd: None, harness: None }).await;
@@ -135,4 +135,41 @@ async fn browser_origin_rejected() {
     let mut req = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(format!("{base}/ws/client")).unwrap();
     req.headers_mut().insert("origin", "http://evil.example".parse().unwrap());
     assert!(connect_async(req).await.is_err());
+}
+
+#[tokio::test]
+async fn reconnect_keeps_reported_task_and_fails_unreported() {
+    let base = start().await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    send(&mut client, &ClientMsg::Subscribe).await;
+    let wid = uuid::Uuid::new_v4();
+    let mut worker = join(&base, wid, "claude", vec![]).await;
+    send(&mut client, &ClientMsg::Submit { prompt: "a".into(), cwd: None, harness: None }).await;
+    let ServerMsg::Submitted { task } = recv(&mut client).await else { panic!() };
+    let OrchMsg::Assign { .. } = recv(&mut worker).await else { panic!() };
+
+    // Reconnect, still running the task: ledger keeps one busy entry, task stays Running.
+    let mut worker2 = join(&base, wid, "claude", vec![task]).await;
+    drop(worker); // stale socket closing must not remove the new registration
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { tasks, workers } = recv(&mut client).await else { panic!() };
+    assert_eq!(workers.len(), 1);
+    assert!(workers[0].busy);
+    assert_eq!(tasks[0].status, TaskStatus::Running);
+
+    // Events over the new connection still count.
+    send(&mut worker2, &WorkerMsg::Event { task, event: AgentEvent::Text { text: "still here".into() } }).await;
+    let ServerMsg::Event { event: AgentEvent::Text { text }, .. } = recv(&mut client).await else { panic!() };
+    assert_eq!(text, "still here");
+
+    // Reconnect after a restart (nothing running): task is failed and followers told.
+    let _worker3 = join(&base, wid, "claude", vec![]).await;
+    let ServerMsg::Event { task: t, event: AgentEvent::Finished { ok: false, summary }, .. } = recv(&mut client).await else { panic!() };
+    assert_eq!(t, task);
+    assert_eq!(summary.as_deref(), Some("worker restarted"));
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { tasks, workers } = recv(&mut client).await else { panic!() };
+    assert_eq!(workers.len(), 1);
+    assert!(!workers[0].busy);
+    assert_eq!(tasks[0].status, TaskStatus::Failed);
 }

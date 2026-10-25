@@ -50,7 +50,9 @@ pub enum AgentEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkerMsg {
-    Hello { info: WorkerInfo },
+    /// `id` is stable across reconnects; `running` lists tasks still in flight
+    /// so the orchestrator can keep them instead of failing them.
+    Hello { id: WorkerId, info: WorkerInfo, running: Vec<TaskId> },
     Event { task: TaskId, event: AgentEvent },
 }
 
@@ -105,6 +107,8 @@ mod tests {
     fn roundtrip_tagged_enums() {
         let msgs = vec![
             WorkerMsg::Hello {
+                id: Uuid::nil(),
+                running: vec![],
                 info: WorkerInfo {
                     hostname: "h".into(),
                     os: "macos".into(),

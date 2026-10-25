@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
     }
     let (ws, _) = connect_async(req).await.with_context(|| format!("connecting to {}", args.url))?;
     let (mut sink, mut stream) = ws.split();
-    sink.send(text(&WorkerMsg::Hello { info })).await?;
+    sink.send(text(&WorkerMsg::Hello { id: worker_id()?, info, running: vec![] })).await?;
 
     // Agent events from the running task are forwarded on this channel.
     let (ev_tx, mut ev_rx) = mpsc::channel::<(TaskId, AgentEvent)>(64);
@@ -98,6 +98,24 @@ async fn run_task(agents: &[Box<dyn Agent>], task: Task, tx: mpsc::Sender<(TaskI
 
 fn text<T: serde::Serialize>(v: &T) -> Message {
     Message::Text(serde_json::to_string(v).unwrap().into())
+}
+
+/// Stable identity across restarts, persisted in `$MIS_STATE_DIR/worker-id`
+/// (default `~/.config/mis`).
+fn worker_id() -> Result<WorkerId> {
+    let dir = std::env::var_os("MIS_STATE_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config/mis")))
+        .context("neither MIS_STATE_DIR nor HOME is set")?;
+    let path = dir.join("worker-id");
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        return s.trim().parse().with_context(|| format!("bad worker id in {}", path.display()));
+    }
+    let id = WorkerId::new_v4();
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(&path, id.to_string())?;
+    tracing::info!(%id, "created worker id at {}", path.display());
+    Ok(id)
 }
 
 fn hostname() -> String {
