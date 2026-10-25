@@ -257,6 +257,7 @@ mod tests {
             os: "o".into(),
             arch: "a".into(),
             harnesses: vec!["claude".into()],
+            roots: vec![],
         }
     }
 

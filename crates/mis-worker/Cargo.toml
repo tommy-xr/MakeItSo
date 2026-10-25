@@ -17,3 +17,5 @@ tokio-tungstenite.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+toml = "1.1.8"
+rpassword = "7.5.4"

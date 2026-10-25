@@ -1,11 +1,17 @@
 //! Worker: connects to the orchestrator, advertises its harnesses, runs
 //! assigned tasks through `mis_agent` and streams events back.
 
+mod config;
+mod roots;
+mod setup;
+
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use mis_agent::Agent;
 use mis_types::*;
@@ -16,10 +22,15 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Parser)]
-#[command(about = "Make It So worker")]
+#[command(
+    about = "Make It So worker",
+    args_conflicts_with_subcommands = true,
+    after_help = "Unset flags fall back to $MIS_STATE_DIR/worker.toml (default ~/.config/mis)."
+)]
 struct Args {
-    #[arg(long, env = "MIS_URL", default_value = "ws://127.0.0.1:7474")]
-    url: String,
+    /// Default: ws://127.0.0.1:7474.
+    #[arg(long, env = "MIS_URL")]
+    url: Option<String>,
     #[arg(long, env = "MIS_TOKEN")]
     token: Option<String>,
     /// Cloudflare Access service-token id; needs --cf-access-client-secret.
@@ -27,9 +38,22 @@ struct Args {
     cf_access_client_id: Option<String>,
     #[arg(long, env = "CF_ACCESS_CLIENT_SECRET", hide_env_values = true)]
     cf_access_client_secret: Option<String>,
+    /// Directory tasks may run in (repeatable; MIS_ROOTS is comma/`:`-separated).
+    /// Default: the current directory.
+    #[arg(long = "root", env = "MIS_ROOTS")]
+    roots: Vec<String>,
     /// Let agents run tools without permission prompts (required for real work).
     #[arg(long)]
     skip_permissions: bool,
+    /// None runs the worker.
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Ask for connection settings, test them, and save worker.toml.
+    Setup(setup::SetupArgs),
 }
 
 #[tokio::main]
@@ -40,15 +64,25 @@ async fn main() -> Result<()> {
         )
         .init();
     let args = Args::parse();
+    if let Some(Cmd::Setup(a)) = args.cmd {
+        return setup::run(a).await;
+    }
+    let path = state_dir()?.join("worker.toml");
+    let cli = config::Config {
+        url: args.url,
+        token: args.token,
+        cf_access_client_id: args.cf_access_client_id,
+        cf_access_client_secret: args.cf_access_client_secret,
+        roots: args
+            .roots
+            .iter()
+            .flat_map(|r| roots::split_roots(r))
+            .collect(),
+    };
+    let cfg = config::merge(cli, config::load(&path)?, std::env::current_dir()?);
     // Validate before the reconnect loop so bad credentials fail fast.
-    let access = access_headers(
-        args.cf_access_client_id.as_deref(),
-        args.cf_access_client_secret.as_deref(),
-    )
-    .map_err(anyhow::Error::msg)?
-    .into_iter()
-    .map(|(k, v)| Ok((k, v.parse().with_context(|| format!("invalid {k}"))?)))
-    .collect::<Result<Vec<(&str, HeaderValue)>>>()?;
+    let access = access_values(&cfg)?;
+    let roots = roots::canonical_roots(&cfg.roots)?;
 
     let (id, _id_lock) = worker_id()?;
     let agents = mis_agent::available(args.skip_permissions);
@@ -60,9 +94,13 @@ async fn main() -> Result<()> {
         os: std::env::consts::OS.into(),
         arch: std::env::consts::ARCH.into(),
         harnesses: agents.iter().map(|a| a.name().to_string()).collect(),
+        roots: roots.iter().map(|r| r.display().to_string()).collect(),
     };
-    tracing::info!(?info.harnesses, "connecting to {}", args.url);
-    let agents = std::sync::Arc::new(agents);
+    tracing::info!(?info.harnesses, ?info.roots, "connecting to {}", cfg.url);
+    let ctx = Ctx {
+        agents: Arc::new(agents),
+        roots: Arc::new(roots),
+    };
     // Events from in-flight tasks queue here while disconnected. Delivery is best
     // effort: an event already written to a socket that then dies is not resent.
     let (ev_tx, ev_rx) = mpsc::channel::<(TaskId, AgentEvent)>(1024);
@@ -74,7 +112,7 @@ async fn main() -> Result<()> {
     };
 
     loop {
-        match session(&args, &access, id, &info, &agents, &ev_tx, &mut conn).await {
+        match session(&cfg, &access, id, &info, &ctx, &ev_tx, &mut conn).await {
             Ok(()) => tracing::info!("orchestrator closed connection"),
             Err(e) => tracing::warn!("connection lost: {e:#}"),
         }
@@ -82,6 +120,13 @@ async fn main() -> Result<()> {
         tokio::time::sleep(conn.backoff).await;
         conn.backoff = (conn.backoff * 2).min(Duration::from_secs(30));
     }
+}
+
+/// What a task needs from the worker: harnesses and allowed directories.
+#[derive(Clone)]
+struct Ctx {
+    agents: Arc<Vec<Box<dyn Agent>>>,
+    roots: Arc<Vec<PathBuf>>,
 }
 
 /// State that outlives a single connection.
@@ -97,25 +142,17 @@ struct Conn {
 /// One connection's lifetime: handshake, then forward events and run assignments
 /// until the socket drops. Returns Ok on a clean close from the orchestrator.
 async fn session(
-    args: &Args,
+    cfg: &config::Resolved,
     access: &[(&'static str, HeaderValue)],
     id: WorkerId,
     info: &WorkerInfo,
-    agents: &std::sync::Arc<Vec<Box<dyn Agent>>>,
+    ctx: &Ctx,
     ev_tx: &mpsc::Sender<(TaskId, AgentEvent)>,
     c: &mut Conn,
 ) -> Result<()> {
-    let mut req = format!("{}/ws/worker", args.url).into_client_request()?;
-    if let Some(t) = &args.token {
-        req.headers_mut()
-            .insert("authorization", format!("Bearer {t}").parse()?);
-    }
-    for (k, v) in access {
-        req.headers_mut().insert(*k, v.clone());
-    }
-    let (ws, _) = connect_async(req)
+    let (ws, _) = connect_async(worker_request(cfg, access)?)
         .await
-        .with_context(|| format!("connecting to {}", args.url))?;
+        .with_context(|| format!("connecting to {}", cfg.url))?;
     let (mut sink, mut stream) = ws.split();
     let running: Vec<TaskId> = c.running.iter().copied().collect();
     sink.send(text(&WorkerMsg::Hello {
@@ -132,7 +169,7 @@ async fn session(
             None => tokio::select! {
                 ev = c.ev_rx.recv() => ev,
                 msg = stream.next() => {
-                    handle_incoming(msg, agents, ev_tx, &mut c.running, &mut c.backoff)?;
+                    handle_incoming(msg, ctx, ev_tx, &mut c.running, &mut c.backoff)?;
                     continue;
                 }
             },
@@ -162,7 +199,7 @@ type Incoming = Option<std::result::Result<Message, tokio_tungstenite::tungsteni
 /// Returns Ok on a message handled or ignored; Err when the socket is gone.
 fn handle_incoming(
     msg: Incoming,
-    agents: &std::sync::Arc<Vec<Box<dyn Agent>>>,
+    ctx: &Ctx,
     ev_tx: &mpsc::Sender<(TaskId, AgentEvent)>,
     running: &mut HashSet<TaskId>,
     backoff: &mut Duration,
@@ -179,9 +216,9 @@ fn handle_incoming(
                     return Ok(());
                 }
                 tracing::info!(id = %task.id, "assigned to {}: {}", task.harness, task.prompt);
-                let agents = agents.clone();
+                let ctx = ctx.clone();
                 let tx = ev_tx.clone();
-                tokio::spawn(async move { run_task(&agents, task, tx).await });
+                tokio::spawn(async move { run_task(&ctx, task, tx).await });
             }
             Err(e) => tracing::warn!("bad message from orchestrator: {e}"),
         },
@@ -192,7 +229,7 @@ fn handle_incoming(
     Ok(())
 }
 
-async fn run_task(agents: &[Box<dyn Agent>], task: Task, tx: mpsc::Sender<(TaskId, AgentEvent)>) {
+async fn run_task(ctx: &Ctx, task: Task, tx: mpsc::Sender<(TaskId, AgentEvent)>) {
     let id = task.id;
     let fail = |summary: String| {
         (
@@ -203,9 +240,17 @@ async fn run_task(agents: &[Box<dyn Agent>], task: Task, tx: mpsc::Sender<(TaskI
             },
         )
     };
-    let Some(agent) = agents.iter().find(|a| a.name() == task.harness) else {
+    let Some(agent) = ctx.agents.iter().find(|a| a.name() == task.harness) else {
         let _ = tx.send(fail(format!("no harness {}", task.harness))).await;
         return;
+    };
+    let cwd = match roots::resolve_cwd(&ctx.roots, task.cwd.as_deref()) {
+        Ok(c) => c.display().to_string(),
+        Err(why) => {
+            tracing::warn!(%id, "{why}");
+            let _ = tx.send(fail(why)).await;
+            return;
+        }
     };
     let (atx, mut arx) = mpsc::channel(64);
     let fwd = async {
@@ -220,7 +265,7 @@ async fn run_task(agents: &[Box<dyn Agent>], task: Task, tx: mpsc::Sender<(TaskI
     let run = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(agent.run(
         id,
         &task.prompt,
-        task.cwd.as_deref(),
+        Some(&cwd),
         atx,
     )));
     let (res, _) = tokio::join!(run, fwd);
@@ -237,19 +282,52 @@ async fn run_task(agents: &[Box<dyn Agent>], task: Task, tx: mpsc::Sender<(TaskI
     }
 }
 
+/// Cloudflare Access headers from `cfg`, checked so bad values fail early.
+fn access_values(cfg: &config::Resolved) -> Result<Vec<(&'static str, HeaderValue)>> {
+    access_headers(
+        cfg.cf_access_client_id.as_deref(),
+        cfg.cf_access_client_secret.as_deref(),
+    )
+    .map_err(anyhow::Error::msg)?
+    .into_iter()
+    .map(|(k, v)| Ok((k, v.parse().with_context(|| format!("invalid {k}"))?)))
+    .collect()
+}
+
+/// `/ws/worker` upgrade request carrying the token and Access headers.
+fn worker_request(
+    cfg: &config::Resolved,
+    access: &[(&'static str, HeaderValue)],
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request> {
+    let mut req = format!("{}/ws/worker", cfg.url).into_client_request()?;
+    if let Some(t) = &cfg.token {
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {t}").parse()?);
+    }
+    for (k, v) in access {
+        req.headers_mut().insert(*k, v.clone());
+    }
+    Ok(req)
+}
+
 fn text<T: serde::Serialize>(v: &T) -> Message {
     Message::Text(serde_json::to_string(v).unwrap().into())
 }
 
-/// Stable identity across restarts, persisted in `$MIS_STATE_DIR/worker-id`
-/// (default `~/.config/mis`). Holds an exclusive lock on the file for the life of
-/// the process so two workers can't share one id.
-fn worker_id() -> Result<(WorkerId, std::fs::File)> {
+/// `$MIS_STATE_DIR`, default `~/.config/mis`: holds `worker-id` and `worker.toml`.
+fn state_dir() -> Result<PathBuf> {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    let dir = std::env::var_os("MIS_STATE_DIR")
-        .map(std::path::PathBuf::from)
-        .or_else(|| home.map(|h| std::path::PathBuf::from(h).join(".config/mis")))
-        .context("neither MIS_STATE_DIR nor HOME is set")?;
+    std::env::var_os("MIS_STATE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| home.map(|h| PathBuf::from(h).join(".config/mis")))
+        .context("neither MIS_STATE_DIR nor HOME is set")
+}
+
+/// Stable identity across restarts, persisted in `<state_dir>/worker-id`.
+/// Holds an exclusive lock on the file for the life of the process so two
+/// workers can't share one id.
+fn worker_id() -> Result<(WorkerId, std::fs::File)> {
+    let dir = state_dir()?;
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("worker-id");
     let mut file = std::fs::OpenOptions::new()

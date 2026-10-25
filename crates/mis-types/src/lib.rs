@@ -21,6 +21,9 @@ pub struct WorkerInfo {
     pub arch: String,
     /// Agent harnesses this worker can run, e.g. "claude", "codex".
     pub harnesses: Vec<String>,
+    /// Directories tasks may run in; a task's cwd must resolve under one.
+    #[serde(default)]
+    pub roots: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -156,6 +159,7 @@ mod tests {
                     os: "macos".into(),
                     arch: "aarch64".into(),
                     harnesses: vec!["claude".into()],
+                    roots: vec!["/code".into()],
                 },
             },
             WorkerMsg::Event {
@@ -170,6 +174,10 @@ mod tests {
             let s = serde_json::to_string(&m).unwrap();
             assert_eq!(serde_json::from_str::<WorkerMsg>(&s).unwrap(), m);
         }
+        // Workers predating `roots` still parse.
+        let old: WorkerInfo =
+            serde_json::from_str(r#"{"hostname":"h","os":"o","arch":"a","harnesses":[]}"#).unwrap();
+        assert!(old.roots.is_empty());
         let s = serde_json::to_string(&ClientMsg::Status).unwrap();
         assert_eq!(s, r#"{"type":"status"}"#);
     }

@@ -28,6 +28,7 @@ fn info(harness: &str) -> WorkerInfo {
         os: "o".into(),
         arch: "a".into(),
         harnesses: vec![harness.into()],
+        roots: vec![],
     }
 }
 
