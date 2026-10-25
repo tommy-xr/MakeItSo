@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -174,10 +174,7 @@ pub fn normalize_origins(raw: impl IntoIterator<Item = String>) -> Vec<String> {
 
 pub fn router(app: App) -> Router {
     Router::new()
-        .route(
-            "/",
-            get(|| async { Html(include_str!("../static/index.html")) }),
-        )
+        .route("/", get(page))
         .route("/api/info", get(info))
         .route("/ws/worker", get(ws_worker))
         .route("/ws/client", get(ws_client))
@@ -187,6 +184,14 @@ pub fn router(app: App) -> Router {
 pub async fn serve(listener: TcpListener, app: App) -> anyhow::Result<()> {
     axum::serve(listener, router(app)).await?;
     Ok(())
+}
+
+/// The phone page. Not framable: it acts with the token stored for this origin.
+async fn page() -> impl IntoResponse {
+    (
+        [(header::CONTENT_SECURITY_POLICY, "frame-ancestors 'none'")],
+        Html(include_str!("../static/index.html")),
+    )
 }
 
 /// Lets the page decide whether to ask for a token.
@@ -202,9 +207,7 @@ async fn ws_worker(
     if !app.authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    // Browsers abort unless the server echoes a protocol they offered.
-    ws.protocols(["bearer"])
-        .on_upgrade(move |sock| worker_conn(sock, app))
+    ws.on_upgrade(move |sock| worker_conn(sock, app))
         .into_response()
 }
 
@@ -216,6 +219,7 @@ async fn ws_client(
     if !app.authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    // Browsers abort unless the server echoes a protocol they offered.
     ws.protocols(["bearer"])
         .on_upgrade(move |sock| client_conn(sock, app))
         .into_response()
@@ -296,7 +300,13 @@ async fn next_event(sub: Option<&mut broadcast::Receiver<ServerMsg>>) -> ServerM
 async fn client_conn(mut sock: WebSocket, app: App) {
     let mut sub: Option<broadcast::Receiver<ServerMsg>> = None;
     loop {
+        // Drain queued events before handling a request, so a `Show` snapshot is not
+        // followed by stale copies of events it already contains.
         tokio::select! {
+            biased;
+            ev = next_event(sub.as_mut()) => {
+                if !send_json(&mut sock, &ev).await { break; }
+            }
             incoming = recv_json::<ClientMsg>(&mut sock) => match incoming {
                 Some(ClientMsg::Status) => {
                     let status = app.ledger.lock().unwrap().status();
@@ -320,9 +330,6 @@ async fn client_conn(mut sock: WebSocket, app: App) {
                 }
                 None => break,
             },
-            ev = next_event(sub.as_mut()) => {
-                if !send_json(&mut sock, &ev).await { break; }
-            }
         }
     }
 }
@@ -443,6 +450,12 @@ mod tests {
         assert!(ok(&t, &[o, h, ("sec-websocket-protocol", "bearer, s")]));
         assert!(!ok(&t, &[o, h, ("sec-websocket-protocol", "bearer, x")]));
         assert!(!ok(&t, &[o, h]));
+        // Right token from a foreign page is still rejected.
+        let foreign = ("origin", "https://evil.example");
+        assert!(!ok(
+            &t,
+            &[foreign, h, ("sec-websocket-protocol", "bearer, s")]
+        ));
     }
 
     #[test]

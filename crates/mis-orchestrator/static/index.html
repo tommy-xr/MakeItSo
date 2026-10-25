@@ -88,6 +88,7 @@ function firstLine(s, max) {
 // One transcript line, matching `mis show` / `mis task --follow`.
 function eventLine(e) {
   switch (e.type) {
+    case 'planned': return `plan: ${e.harness}: ${e.prompt}`;
     case 'started': return 'started';
     case 'text': return e.text;
     case 'tool_use': return `> ${e.name} ${JSON.stringify(e.input)}`;
@@ -170,7 +171,13 @@ function onMessage(msg) {
       if (detail && detail.ready && detail.id === msg.task) detail.lines.push(eventLine(msg.event));
       if (['started', 'finished', 'planned'].includes(msg.event.type)) refreshSoon();
       break;
-    case 'error': $('conn').textContent = `error: ${msg.message}`; refreshSoon(); break;
+    case 'error':
+      $('conn').textContent = `error: ${msg.message}`;
+      // A pending Show failed (unknown task): say so. Otherwise events were dropped: re-fetch.
+      if (detail && !detail.ready) Object.assign(detail, { ready: true, lines: [msg.message] });
+      else detail = null;
+      refreshSoon();
+      break;
   }
   render();
 }
@@ -185,7 +192,10 @@ function connect() {
     // Browsers cannot set Authorization on a WebSocket; the token rides as a subprotocol.
     sock = new WebSocket(url, token ? ['bearer', token] : []);
   } catch (e) {
-    $('conn').textContent = `cannot connect: ${e.message} (token must be letters, digits, -._~ etc.)`;
+    // Browsers reject tokens that are not valid subprotocol names; let the user enter another.
+    store.set('');
+    $('conn').textContent = `cannot connect: ${e.message} (token must be letters, digits, -._)`;
+    render();
     return;
   }
   ws = sock;
