@@ -13,6 +13,8 @@ use crate::{Agent, BoxFut};
 pub struct ClaudeAgent {
     /// Pass `--dangerously-skip-permissions` so tool calls don't block headless.
     pub skip_permissions: bool,
+    /// Extra CLI flags, e.g. `--tools ""` for a tool-less planner call.
+    pub extra_args: Vec<String>,
 }
 
 /// Map one stream-json line to zero or more events.
@@ -86,6 +88,7 @@ impl Agent for ClaudeAgent {
             if self.skip_permissions {
                 cmd.arg("--dangerously-skip-permissions");
             }
+            cmd.args(&self.extra_args);
             cmd.arg("--").arg(prompt); // prompt may start with '-'
             if let Some(d) = cwd {
                 cmd.current_dir(d);

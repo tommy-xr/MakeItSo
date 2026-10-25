@@ -169,6 +169,7 @@ async fn recv(ws: &mut Ws) -> Result<ServerMsg> {
 fn print_event(task: TaskId, event: &AgentEvent) {
     let short = &task.to_string()[..8];
     match event {
+        AgentEvent::Planned { harness, prompt } => println!("[{short}] plan: {harness}: {prompt}"),
         AgentEvent::Started { .. } => println!("[{short}] started"),
         AgentEvent::Text { text } => println!("[{short}] {text}"),
         AgentEvent::ToolUse { name, input } => println!("[{short}] > {name} {input}"),

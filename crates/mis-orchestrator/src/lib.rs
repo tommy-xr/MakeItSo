@@ -18,8 +18,10 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 
 pub mod ledger;
+pub mod plan;
 
 use ledger::{ConnId, Effect, Ledger};
+use mis_agent::Agent;
 
 #[derive(Clone)]
 pub struct App {
@@ -30,6 +32,9 @@ pub struct App {
     token: Option<String>,
     /// How long a disconnected worker may be gone before its tasks are failed.
     grace: Duration,
+    /// Chooses a harness and rewrites the prompt for tasks submitted without one.
+    /// None: such tasks default to "claude" unplanned.
+    planner: Option<Arc<dyn Agent>>,
 }
 
 impl App {
@@ -42,11 +47,17 @@ impl App {
             events: broadcast::channel(256).0,
             token,
             grace: Duration::from_secs(60),
+            planner: None,
         }
     }
 
     pub fn with_grace(mut self, grace: Duration) -> Self {
         self.grace = grace;
+        self
+    }
+
+    pub fn with_planner(mut self, planner: Arc<dyn Agent>) -> Self {
+        self.planner = Some(planner);
         self
     }
 
@@ -76,7 +87,37 @@ impl App {
                         app.apply(effects);
                     });
                 }
+                Effect::Plan { task, prompt } => {
+                    let app = self.clone();
+                    tokio::spawn(async move { app.run_planner(task, prompt).await });
+                }
             }
+        }
+    }
+
+    /// Stream the planner's events into the ledger. Only reached when a planner
+    /// is set, since `client_conn` fills in the default harness otherwise.
+    async fn run_planner(&self, task: TaskId, prompt: String) {
+        let planner = self.planner.clone().expect("planner");
+        let (tx, mut rx) = mpsc::channel(64);
+        let run = planner.run(task, &prompt, None, tx);
+        let feed = async {
+            while let Some(ev) = rx.recv().await {
+                let effects = self.ledger.lock().unwrap().planning_event(task, ev);
+                self.apply(effects);
+            }
+        };
+        let (res, _) = tokio::join!(run, feed);
+        if let Err(e) = res {
+            tracing::error!(%task, "planner failed: {e:#}");
+            let effects = self.ledger.lock().unwrap().planning_event(
+                task,
+                AgentEvent::Finished {
+                    ok: false,
+                    summary: Some(format!("planner failed: {e}")),
+                },
+            );
+            self.apply(effects);
         }
     }
 
@@ -224,6 +265,7 @@ async fn client_conn(mut sock: WebSocket, app: App) {
                     send_json(&mut sock, &status).await;
                 }
                 Some(ClientMsg::Submit { prompt, cwd, harness }) => {
+                    let harness = harness.or_else(|| app.planner.is_none().then(|| "claude".into()));
                     let task = app.transition(|l| l.submit(prompt, cwd, harness));
                     send_json(&mut sock, &ServerMsg::Submitted { task }).await;
                 }

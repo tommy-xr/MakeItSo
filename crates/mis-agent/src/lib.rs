@@ -29,7 +29,10 @@ pub trait Agent: Send + Sync {
 pub fn available(skip_permissions: bool) -> Vec<Box<dyn Agent>> {
     let mut v: Vec<Box<dyn Agent>> = Vec::new();
     if which("claude") {
-        v.push(Box::new(claude::ClaudeAgent { skip_permissions }));
+        v.push(Box::new(claude::ClaudeAgent {
+            skip_permissions,
+            extra_args: vec![],
+        }));
     }
     if which("codex") {
         v.push(Box::new(codex::CodexAgent { skip_permissions }));
@@ -37,7 +40,7 @@ pub fn available(skip_permissions: bool) -> Vec<Box<dyn Agent>> {
     v
 }
 
-fn which(bin: &str) -> bool {
+pub fn which(bin: &str) -> bool {
     std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
         .unwrap_or(false)
