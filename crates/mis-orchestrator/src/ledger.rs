@@ -231,23 +231,27 @@ impl Ledger {
                         t.task.prompt = p.prompt.clone();
                         t.status = TaskStatus::Queued;
                         self.queue.push_back(task);
-                        let mut effects = vec![];
+                        let mut events = vec![];
                         if !p.reason.is_empty() {
-                            effects.push(broadcast(AgentEvent::Text { text: p.reason }));
+                            events.push(AgentEvent::Text { text: p.reason });
                         }
-                        effects.push(broadcast(AgentEvent::Planned {
+                        events.push(AgentEvent::Planned {
                             harness: p.harness,
                             prompt: p.prompt,
-                        }));
+                        });
+                        events.iter().for_each(|e| t.record(e));
+                        let mut effects: Vec<_> = events.into_iter().map(broadcast).collect();
                         effects.extend(self.schedule());
                         effects
                     }
                     Err(why) => {
                         t.status = TaskStatus::Failed;
-                        vec![broadcast(AgentEvent::Finished {
+                        let event = AgentEvent::Finished {
                             ok: false,
                             summary: Some(why),
-                        })]
+                        };
+                        t.record(&event);
+                        vec![broadcast(event)]
                     }
                 }
             }
@@ -708,6 +712,12 @@ mod tests {
             (sent.harness.as_str(), sent.prompt.as_str()),
             ("codex", "say hi")
         );
+        // Planner reason and decision are part of the transcript.
+        let (_, transcript, _) = l.show(task).unwrap();
+        assert!(matches!(
+            transcript,
+            [AgentEvent::Text { .. }, AgentEvent::Planned { .. }]
+        ));
         // Late planner output is ignored once queued.
         assert!(l
             .planning_event(task, AgentEvent::Text { text: "x".into() })
