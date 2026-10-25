@@ -25,11 +25,14 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter(
-        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-    ).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
     let args = Args::parse();
 
+    let (id, _id_lock) = worker_id()?;
     let agents = mis_agent::available(args.skip_permissions);
     if agents.is_empty() {
         anyhow::bail!("no agent harness found on PATH (need `claude` or `codex`)");
@@ -44,11 +47,19 @@ async fn main() -> Result<()> {
 
     let mut req = format!("{}/ws/worker", args.url).into_client_request()?;
     if let Some(t) = &args.token {
-        req.headers_mut().insert("authorization", format!("Bearer {t}").parse()?);
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {t}").parse()?);
     }
-    let (ws, _) = connect_async(req).await.with_context(|| format!("connecting to {}", args.url))?;
+    let (ws, _) = connect_async(req)
+        .await
+        .with_context(|| format!("connecting to {}", args.url))?;
     let (mut sink, mut stream) = ws.split();
-    sink.send(text(&WorkerMsg::Hello { id: worker_id()?, info, running: vec![] })).await?;
+    sink.send(text(&WorkerMsg::Hello {
+        id,
+        info,
+        running: vec![],
+    }))
+    .await?;
 
     // Agent events from the running task are forwarded on this channel.
     let (ev_tx, mut ev_rx) = mpsc::channel::<(TaskId, AgentEvent)>(64);
@@ -80,19 +91,37 @@ async fn main() -> Result<()> {
 async fn run_task(agents: &[Box<dyn Agent>], task: Task, tx: mpsc::Sender<(TaskId, AgentEvent)>) {
     let id = task.id;
     let Some(agent) = agents.iter().find(|a| a.name() == task.harness) else {
-        let _ = tx.send((id, AgentEvent::Finished { ok: false, summary: Some(format!("no harness {}", task.harness)) })).await;
+        let _ = tx
+            .send((
+                id,
+                AgentEvent::Finished {
+                    ok: false,
+                    summary: Some(format!("no harness {}", task.harness)),
+                },
+            ))
+            .await;
         return;
     };
     let (atx, mut arx) = mpsc::channel(64);
     let fwd = async {
         while let Some(ev) = arx.recv().await {
-            if tx.send((id, ev)).await.is_err() { break; }
+            if tx.send((id, ev)).await.is_err() {
+                break;
+            }
         }
     };
     let (res, _) = tokio::join!(agent.run(&task.prompt, task.cwd.as_deref(), atx), fwd);
     if let Err(e) = res {
         tracing::error!(%id, "agent failed: {e:#}");
-        let _ = tx.send((id, AgentEvent::Finished { ok: false, summary: Some(e.to_string()) })).await;
+        let _ = tx
+            .send((
+                id,
+                AgentEvent::Finished {
+                    ok: false,
+                    summary: Some(e.to_string()),
+                },
+            ))
+            .await;
     }
 }
 
@@ -101,21 +130,45 @@ fn text<T: serde::Serialize>(v: &T) -> Message {
 }
 
 /// Stable identity across restarts, persisted in `$MIS_STATE_DIR/worker-id`
-/// (default `~/.config/mis`).
-fn worker_id() -> Result<WorkerId> {
+/// (default `~/.config/mis`). Holds an exclusive lock on the file for the life of
+/// the process so two workers can't share one id.
+fn worker_id() -> Result<(WorkerId, std::fs::File)> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
     let dir = std::env::var_os("MIS_STATE_DIR")
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config/mis")))
+        .or_else(|| home.map(|h| std::path::PathBuf::from(h).join(".config/mis")))
         .context("neither MIS_STATE_DIR nor HOME is set")?;
-    let path = dir.join("worker-id");
-    if let Ok(s) = std::fs::read_to_string(&path) {
-        return s.trim().parse().with_context(|| format!("bad worker id in {}", path.display()));
-    }
-    let id = WorkerId::new_v4();
     std::fs::create_dir_all(&dir)?;
-    std::fs::write(&path, id.to_string())?;
-    tracing::info!(%id, "created worker id at {}", path.display());
-    Ok(id)
+    let path = dir.join("worker-id");
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
+            "another worker is using {}; set MIS_STATE_DIR to run a second one",
+            path.display()
+        ),
+        Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+    }
+    let mut s = String::new();
+    std::io::Read::read_to_string(&mut file, &mut s)?;
+    let id = if s.trim().is_empty() {
+        let id = WorkerId::new_v4();
+        std::io::Write::write_all(&mut file, id.to_string().as_bytes())?;
+        file.sync_all()?;
+        tracing::info!(%id, "created worker id at {}", path.display());
+        id
+    } else {
+        s.trim()
+            .parse()
+            .with_context(|| format!("bad worker id in {}", path.display()))?
+    };
+    Ok((id, file))
 }
 
 fn hostname() -> String {

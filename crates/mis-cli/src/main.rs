@@ -43,14 +43,18 @@ type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 async fn connect(args: &Args) -> Result<Ws> {
     let mut req = format!("{}/ws/client", args.url).into_client_request()?;
     if let Some(t) = &args.token {
-        req.headers_mut().insert("authorization", format!("Bearer {t}").parse()?);
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {t}").parse()?);
     }
-    let (ws, _) = connect_async(req).await.with_context(|| format!("connecting to {}", args.url))?;
+    let (ws, _) = connect_async(req)
+        .await
+        .with_context(|| format!("connecting to {}", args.url))?;
     Ok(ws)
 }
 
 async fn send(ws: &mut Ws, m: &ClientMsg) -> Result<()> {
-    ws.send(Message::Text(serde_json::to_string(m)?.into())).await?;
+    ws.send(Message::Text(serde_json::to_string(m)?.into()))
+        .await?;
     Ok(())
 }
 
@@ -76,7 +80,11 @@ fn print_event(task: TaskId, event: &AgentEvent) {
             println!("[{short}] < {first}");
         }
         AgentEvent::Finished { ok, summary } => {
-            println!("[{short}] {} {}", if *ok { "done" } else { "FAILED" }, summary.as_deref().unwrap_or(""))
+            println!(
+                "[{short}] {} {}",
+                if *ok { "done" } else { "FAILED" },
+                summary.as_deref().unwrap_or("")
+            )
         }
     }
 }
@@ -88,21 +96,54 @@ async fn main() -> Result<()> {
     match &args.cmd {
         Cmd::Status => {
             send(&mut ws, &ClientMsg::Status).await?;
-            let ServerMsg::Status { workers, tasks } = recv(&mut ws).await? else { bail!("unexpected reply") };
+            let ServerMsg::Status { workers, tasks } = recv(&mut ws).await? else {
+                bail!("unexpected reply")
+            };
             println!("workers ({}):", workers.len());
             for w in workers {
-                println!("  {} {} {} {:?}{}", w.id, w.info.hostname, w.info.os, w.info.harnesses, if w.busy { " [busy]" } else { "" });
+                println!(
+                    "  {} {} {} {:?}{}",
+                    w.id,
+                    w.info.hostname,
+                    w.info.os,
+                    w.info.harnesses,
+                    if !w.online {
+                        " [offline]"
+                    } else if w.busy {
+                        " [busy]"
+                    } else {
+                        ""
+                    }
+                );
             }
             println!("tasks ({}):", tasks.len());
             for t in tasks {
-                println!("  {} {:<8} {}", &t.id.to_string()[..8], format!("{:?}", t.status).to_lowercase(), t.prompt);
+                println!(
+                    "  {} {:<8} {}",
+                    &t.id.to_string()[..8],
+                    format!("{:?}", t.status).to_lowercase(),
+                    t.prompt
+                );
             }
         }
-        Cmd::Task { prompt, cwd, harness, follow } => {
+        Cmd::Task {
+            prompt,
+            cwd,
+            harness,
+            follow,
+        } => {
             if *follow {
                 send(&mut ws, &ClientMsg::Subscribe).await?;
             }
-            send(&mut ws, &ClientMsg::Submit { prompt: prompt.clone(), cwd: cwd.clone(), harness: harness.clone() }).await?;
+            send(
+                &mut ws,
+                &ClientMsg::Submit {
+                    prompt: prompt.clone(),
+                    cwd: cwd.clone(),
+                    harness: harness.clone(),
+                },
+            )
+            .await?;
             // Other tasks' events may interleave once subscribed; skip them until Submitted.
             let task = loop {
                 match recv(&mut ws).await? {
@@ -118,7 +159,9 @@ async fn main() -> Result<()> {
                         ServerMsg::Event { task: t, event, .. } if t == task => {
                             print_event(t, &event);
                             if let AgentEvent::Finished { ok, .. } = event {
-                                if !ok { std::process::exit(1); }
+                                if !ok {
+                                    std::process::exit(1);
+                                }
                                 break;
                             }
                         }
