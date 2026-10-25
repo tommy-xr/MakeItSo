@@ -2,11 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-/// `MIS_ROOTS` / `--root` value -> paths. Splits on `,` and the platform path
-/// separator (`:` on unix), e.g. "/a,/b:/c" -> [/a, /b, /c].
+/// `MIS_ROOTS` / `--root` / prompt value -> paths. Splits on `,` and the
+/// platform path separator (`:` on unix), e.g. "/a, /b:/c" -> [/a, /b, /c].
 pub fn split_roots(s: &str) -> Vec<PathBuf> {
     s.split(',')
         .flat_map(std::env::split_paths)
+        .map(|p| PathBuf::from(p.to_string_lossy().trim()))
         .filter(|p| !p.as_os_str().is_empty())
         .collect()
 }
@@ -15,23 +16,24 @@ pub fn split_roots(s: &str) -> Vec<PathBuf> {
 pub fn canonical_roots(roots: &[PathBuf]) -> anyhow::Result<Vec<PathBuf>> {
     roots
         .iter()
-        .map(|r| {
-            r.canonicalize()
-                .map_err(|e| anyhow::anyhow!("root {}: {e}", r.display()))
+        .map(|r| match r.canonicalize() {
+            Ok(c) if c.is_dir() => Ok(c),
+            Ok(_) => anyhow::bail!("root {} is not a directory", r.display()),
+            Err(e) => anyhow::bail!("root {}: {e}", r.display()),
         })
         .collect()
 }
 
 /// Task cwd -> directory to run in. `roots` must be canonical and non-empty.
 /// None -> first root; relative -> joined to the first root; either way the
-/// canonical result must sit under some root (so `../..` escapes are refused).
+/// canonical result must sit under some root (so `../..` escapes, or a root
+/// swapped for a symlink, are refused).
 pub fn resolve_cwd(roots: &[PathBuf], requested: Option<&str>) -> Result<PathBuf, String> {
     let Some(first) = roots.first() else {
         return Err("worker has no roots".into());
     };
-    let Some(req) = requested else {
-        return Ok(first.clone());
-    };
+    let first_str = first.to_string_lossy();
+    let req = requested.unwrap_or(&first_str);
     let path = Path::new(req);
     let joined = if path.is_absolute() {
         path.to_path_buf()
@@ -75,7 +77,7 @@ mod tests {
     fn splits_on_comma_and_path_separator() {
         let sep = if cfg!(windows) { ";" } else { ":" };
         assert_eq!(
-            split_roots(&format!("a,b{sep}c,,")),
+            split_roots(&format!(" a, b{sep}c,,")),
             vec![PathBuf::from("a"), PathBuf::from("b"), PathBuf::from("c")]
         );
     }
@@ -120,6 +122,18 @@ mod tests {
         let t = Tmp::new();
         let e = resolve_cwd(std::slice::from_ref(&t.0), Some("nope")).unwrap_err();
         assert!(e.contains("not usable"), "{e}");
+    }
+
+    #[test]
+    fn root_must_be_dir() {
+        let t = Tmp::new();
+        std::fs::write(t.0.join("f"), "").unwrap();
+        assert!(canonical_roots(&[t.0.join("f")]).is_err());
+        assert!(canonical_roots(&[t.0.join("missing")]).is_err());
+        assert_eq!(
+            canonical_roots(std::slice::from_ref(&t.0)).unwrap(),
+            std::slice::from_ref(&t.0)
+        );
     }
 
     #[test]

@@ -66,6 +66,7 @@ pub fn write(path: &Path, cfg: &Config) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
+    let body = toml::to_string(cfg)?; // before truncating, so a failure keeps the old file
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -76,7 +77,7 @@ pub fn write(path: &Path, cfg: &Config) -> anyhow::Result<()> {
     // `mode` only applies on create; tighten a file that already existed.
     #[cfg(unix)]
     f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
-    std::io::Write::write_all(&mut f, toml::to_string(cfg)?.as_bytes())?;
+    std::io::Write::write_all(&mut f, body.as_bytes())?;
     Ok(())
 }
 

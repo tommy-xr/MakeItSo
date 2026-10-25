@@ -2,7 +2,6 @@
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -28,9 +27,13 @@ pub struct SetupArgs {
     cf_access_client_id: Option<String>,
     #[arg(long)]
     cf_access_client_secret: Option<String>,
-    /// Directory tasks may run in (repeatable). Default: the current directory.
+    /// Not behind Cloudflare Access; skips that question.
+    #[arg(long, conflicts_with_all = ["cf_access_client_id", "cf_access_client_secret"])]
+    no_cf_access: bool,
+    /// Directory tasks may run in (repeatable, comma-separated ok). Default: the
+    /// current directory.
     #[arg(long = "root")]
-    roots: Vec<PathBuf>,
+    roots: Vec<String>,
 }
 
 pub async fn run(a: SetupArgs) -> Result<()> {
@@ -58,7 +61,11 @@ pub async fn run(a: SetupArgs) -> Result<()> {
     let (cf_id, cf_secret) =
         if a.cf_access_client_id.is_some() || a.cf_access_client_secret.is_some() {
             (a.cf_access_client_id, a.cf_access_client_secret)
-        } else if tty && may_need_access(&url) && confirm("Behind Cloudflare Access? [y/N]: ")? {
+        } else if tty
+            && !a.no_cf_access
+            && may_need_access(&url)
+            && confirm("Behind Cloudflare Access? [y/N]: ")?
+        {
             let id = ask("Access client id", None)?;
             let secret = rpassword::prompt_password("Access client secret (hidden): ")?;
             (Some(id), Some(secret))
@@ -66,13 +73,15 @@ pub async fn run(a: SetupArgs) -> Result<()> {
             (None, None)
         };
     access_headers(cf_id.as_deref(), cf_secret.as_deref()).map_err(anyhow::Error::msg)?;
-    let roots = if !a.roots.is_empty() {
-        a.roots
-    } else if tty {
-        parse_roots(&line(&format!("Roots [{}]: ", cwd.display()))?, &cwd)
-    } else {
-        vec![cwd.clone()]
+    let answer = match a.roots.is_empty() {
+        false => a.roots.join(","),
+        true if tty => line(&format!("Roots [{}]: ", cwd.display()))?,
+        true => String::new(),
     };
+    let mut roots = roots::split_roots(&answer);
+    if roots.is_empty() {
+        roots.push(cwd.clone());
+    }
     let roots = roots::canonical_roots(&roots)?;
 
     // Locking the id means setup refuses to run beside a live worker, whose
@@ -102,10 +111,14 @@ pub async fn run(a: SetupArgs) -> Result<()> {
         let resolved = config::merge(cfg.clone(), Config::default(), cwd.clone());
         match test_connect(&resolved, id, &info).await {
             Ok(()) => break cfg,
-            Err(e) if tty && tries < 3 && denied(&e) => {
+            Err(e) if tty && tries < 3 && denied(&e) == Some(401) => {
                 eprintln!("{e:#}; check the token");
                 token = ask_token()?;
                 tries += 1;
+            }
+            // Cloudflare Access answers 403 for a bad service token.
+            Err(e) if denied(&e) == Some(403) => {
+                return Err(e.context("check the Cloudflare Access credentials"))
             }
             Err(e) => return Err(e),
         }
@@ -150,12 +163,14 @@ async fn test_connect(cfg: &config::Resolved, id: WorkerId, info: &WorkerInfo) -
         .with_context(|| format!("no Welcome from {} within 5s", cfg.url))?
 }
 
-/// True when the orchestrator refused our credentials (HTTP 401/403).
-fn denied(e: &anyhow::Error) -> bool {
-    matches!(
-        e.downcast_ref::<tungstenite::Error>(),
-        Some(tungstenite::Error::Http(r)) if matches!(r.status().as_u16(), 401 | 403)
-    )
+/// 401 (bad token) or 403 (refused by Cloudflare Access) from the handshake.
+fn denied(e: &anyhow::Error) -> Option<u16> {
+    match e.downcast_ref::<tungstenite::Error>() {
+        Some(tungstenite::Error::Http(r)) => {
+            Some(r.status().as_u16()).filter(|s| matches!(s, 401 | 403))
+        }
+        _ => None,
+    }
 }
 
 /// A local orchestrator on the default address, if one answers quickly.
@@ -184,21 +199,6 @@ fn may_need_access(url: &str) -> bool {
             !(ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local())
         }
         Err(_) => !host.eq_ignore_ascii_case("localhost"),
-    }
-}
-
-/// "a, b" -> [a, b]; blank -> [cwd].
-fn parse_roots(answer: &str, cwd: &Path) -> Vec<PathBuf> {
-    let roots: Vec<PathBuf> = answer
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .collect();
-    if roots.is_empty() {
-        vec![cwd.to_path_buf()]
-    } else {
-        roots
     }
 }
 
@@ -256,17 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn roots_answer() {
-        let cwd = Path::new("/here");
-        assert_eq!(parse_roots("  ", cwd), vec![PathBuf::from("/here")]);
-        assert_eq!(
-            parse_roots("/a, /b ,", cwd),
-            vec![PathBuf::from("/a"), PathBuf::from("/b")]
-        );
-    }
-
-    #[test]
-    fn denied_matches_401_and_403_only() {
+    fn denied_reports_401_and_403_only() {
         let http = |code: u16| {
             let r = tungstenite::http::Response::builder()
                 .status(code)
@@ -274,9 +264,9 @@ mod tests {
                 .unwrap();
             anyhow::Error::from(tungstenite::Error::Http(r)).context("connecting")
         };
-        assert!(denied(&http(401)));
-        assert!(denied(&http(403)));
-        assert!(!denied(&http(500)));
-        assert!(!denied(&anyhow::anyhow!("timeout")));
+        assert_eq!(denied(&http(401)), Some(401));
+        assert_eq!(denied(&http(403)), Some(403));
+        assert_eq!(denied(&http(500)), None);
+        assert_eq!(denied(&anyhow::anyhow!("timeout")), None);
     }
 }

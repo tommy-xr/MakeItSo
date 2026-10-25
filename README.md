@@ -52,7 +52,7 @@ url = "wss://mis.example.com"
 token = "..."
 cf_access_client_id = "..."      # optional, with the secret
 cf_access_client_secret = "..."
-roots = ["/Users/me/code"]       # task --cwd must resolve under one; default: cwd
+roots = ["/Users/me/code"]       # task --cwd must start under one (not a sandbox); default: cwd
 ```
 
 ## Remote machines

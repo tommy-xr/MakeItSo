@@ -82,7 +82,11 @@ async fn dev(url: &str, token: Option<&str>, skip_permissions: bool) -> Result<(
         .with_context(|| format!("starting {} (run `cargo build` first)", orch_bin.display()))?;
     let worker_bin = bin("mis-worker");
     let mut worker = with_token(tokio::process::Command::new(&worker_bin));
-    worker.args(["--url", url]).kill_on_drop(true);
+    // --root keeps tasks here rather than in a saved worker.toml's roots.
+    worker
+        .args(["--url", url, "--root"])
+        .arg(std::env::current_dir()?)
+        .kill_on_drop(true);
     if skip_permissions {
         worker.arg("--skip-permissions");
     }
