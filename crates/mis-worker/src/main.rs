@@ -1,6 +1,7 @@
 //! Worker: connects to the orchestrator, advertises its harnesses, runs
 //! assigned tasks through `mis_agent` and streams events back.
 
+mod config;
 mod roots;
 
 use std::collections::HashSet;
@@ -20,10 +21,14 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Parser)]
-#[command(about = "Make It So worker")]
+#[command(
+    about = "Make It So worker",
+    after_help = "Unset flags fall back to $MIS_STATE_DIR/worker.toml (default ~/.config/mis)."
+)]
 struct Args {
-    #[arg(long, env = "MIS_URL", default_value = "ws://127.0.0.1:7474")]
-    url: String,
+    /// Default: ws://127.0.0.1:7474.
+    #[arg(long, env = "MIS_URL")]
+    url: Option<String>,
     #[arg(long, env = "MIS_TOKEN")]
     token: Option<String>,
     /// Cloudflare Access service-token id; needs --cf-access-client-secret.
@@ -48,27 +53,22 @@ async fn main() -> Result<()> {
         )
         .init();
     let args = Args::parse();
-    // Validate before the reconnect loop so bad credentials fail fast.
-    let access = access_headers(
-        args.cf_access_client_id.as_deref(),
-        args.cf_access_client_secret.as_deref(),
-    )
-    .map_err(anyhow::Error::msg)?
-    .into_iter()
-    .map(|(k, v)| Ok((k, v.parse().with_context(|| format!("invalid {k}"))?)))
-    .collect::<Result<Vec<(&str, HeaderValue)>>>()?;
-
-    let roots: Vec<PathBuf> = args
-        .roots
-        .iter()
-        .flat_map(|r| roots::split_roots(r))
-        .collect();
-    let roots = if roots.is_empty() {
-        vec![std::env::current_dir()?]
-    } else {
-        roots
+    let path = state_dir()?.join("worker.toml");
+    let cli = config::Config {
+        url: args.url,
+        token: args.token,
+        cf_access_client_id: args.cf_access_client_id,
+        cf_access_client_secret: args.cf_access_client_secret,
+        roots: args
+            .roots
+            .iter()
+            .flat_map(|r| roots::split_roots(r))
+            .collect(),
     };
-    let roots = roots::canonical_roots(&roots)?;
+    let cfg = config::merge(cli, config::load(&path)?, std::env::current_dir()?);
+    // Validate before the reconnect loop so bad credentials fail fast.
+    let access = access_values(&cfg)?;
+    let roots = roots::canonical_roots(&cfg.roots)?;
 
     let (id, _id_lock) = worker_id()?;
     let agents = mis_agent::available(args.skip_permissions);
@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
         harnesses: agents.iter().map(|a| a.name().to_string()).collect(),
         roots: roots.iter().map(|r| r.display().to_string()).collect(),
     };
-    tracing::info!(?info.harnesses, ?info.roots, "connecting to {}", args.url);
+    tracing::info!(?info.harnesses, ?info.roots, "connecting to {}", cfg.url);
     let ctx = Ctx {
         agents: Arc::new(agents),
         roots: Arc::new(roots),
@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
     };
 
     loop {
-        match session(&args, &access, id, &info, &ctx, &ev_tx, &mut conn).await {
+        match session(&cfg, &access, id, &info, &ctx, &ev_tx, &mut conn).await {
             Ok(()) => tracing::info!("orchestrator closed connection"),
             Err(e) => tracing::warn!("connection lost: {e:#}"),
         }
@@ -128,7 +128,7 @@ struct Conn {
 /// One connection's lifetime: handshake, then forward events and run assignments
 /// until the socket drops. Returns Ok on a clean close from the orchestrator.
 async fn session(
-    args: &Args,
+    cfg: &config::Resolved,
     access: &[(&'static str, HeaderValue)],
     id: WorkerId,
     info: &WorkerInfo,
@@ -136,17 +136,9 @@ async fn session(
     ev_tx: &mpsc::Sender<(TaskId, AgentEvent)>,
     c: &mut Conn,
 ) -> Result<()> {
-    let mut req = format!("{}/ws/worker", args.url).into_client_request()?;
-    if let Some(t) = &args.token {
-        req.headers_mut()
-            .insert("authorization", format!("Bearer {t}").parse()?);
-    }
-    for (k, v) in access {
-        req.headers_mut().insert(*k, v.clone());
-    }
-    let (ws, _) = connect_async(req)
+    let (ws, _) = connect_async(worker_request(cfg, access)?)
         .await
-        .with_context(|| format!("connecting to {}", args.url))?;
+        .with_context(|| format!("connecting to {}", cfg.url))?;
     let (mut sink, mut stream) = ws.split();
     let running: Vec<TaskId> = c.running.iter().copied().collect();
     sink.send(text(&WorkerMsg::Hello {
@@ -276,19 +268,52 @@ async fn run_task(ctx: &Ctx, task: Task, tx: mpsc::Sender<(TaskId, AgentEvent)>)
     }
 }
 
+/// Cloudflare Access headers from `cfg`, checked so bad values fail early.
+fn access_values(cfg: &config::Resolved) -> Result<Vec<(&'static str, HeaderValue)>> {
+    access_headers(
+        cfg.cf_access_client_id.as_deref(),
+        cfg.cf_access_client_secret.as_deref(),
+    )
+    .map_err(anyhow::Error::msg)?
+    .into_iter()
+    .map(|(k, v)| Ok((k, v.parse().with_context(|| format!("invalid {k}"))?)))
+    .collect()
+}
+
+/// `/ws/worker` upgrade request carrying the token and Access headers.
+fn worker_request(
+    cfg: &config::Resolved,
+    access: &[(&'static str, HeaderValue)],
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request> {
+    let mut req = format!("{}/ws/worker", cfg.url).into_client_request()?;
+    if let Some(t) = &cfg.token {
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {t}").parse()?);
+    }
+    for (k, v) in access {
+        req.headers_mut().insert(*k, v.clone());
+    }
+    Ok(req)
+}
+
 fn text<T: serde::Serialize>(v: &T) -> Message {
     Message::Text(serde_json::to_string(v).unwrap().into())
 }
 
-/// Stable identity across restarts, persisted in `$MIS_STATE_DIR/worker-id`
-/// (default `~/.config/mis`). Holds an exclusive lock on the file for the life of
-/// the process so two workers can't share one id.
-fn worker_id() -> Result<(WorkerId, std::fs::File)> {
+/// `$MIS_STATE_DIR`, default `~/.config/mis`: holds `worker-id` and `worker.toml`.
+fn state_dir() -> Result<PathBuf> {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    let dir = std::env::var_os("MIS_STATE_DIR")
-        .map(std::path::PathBuf::from)
-        .or_else(|| home.map(|h| std::path::PathBuf::from(h).join(".config/mis")))
-        .context("neither MIS_STATE_DIR nor HOME is set")?;
+    std::env::var_os("MIS_STATE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| home.map(|h| PathBuf::from(h).join(".config/mis")))
+        .context("neither MIS_STATE_DIR nor HOME is set")
+}
+
+/// Stable identity across restarts, persisted in `<state_dir>/worker-id`.
+/// Holds an exclusive lock on the file for the life of the process so two
+/// workers can't share one id.
+fn worker_id() -> Result<(WorkerId, std::fs::File)> {
+    let dir = state_dir()?;
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("worker-id");
     let mut file = std::fs::OpenOptions::new()
