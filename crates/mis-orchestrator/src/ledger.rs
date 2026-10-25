@@ -32,10 +32,84 @@ struct Worker {
     generation: u64,
 }
 
+/// Per-task transcript cap, in serialized JSON bytes; oldest events go first.
+pub const MAX_TRANSCRIPT_BYTES: usize = 256 * 1024;
+/// A single stored `ToolResult` keeps at most this many bytes of content.
+pub const MAX_TOOL_RESULT_BYTES: usize = 16 * 1024;
+
 struct TaskEntry {
     task: Task,
     status: TaskStatus,
     worker: Option<WorkerId>,
+    session: Option<String>,
+    summary: Option<String>,
+    events: Vec<AgentEvent>,
+    /// Serialized size of `events`.
+    bytes: usize,
+    truncated: bool,
+}
+
+impl TaskEntry {
+    fn new(task: Task) -> Self {
+        Self {
+            task,
+            status: TaskStatus::Queued,
+            worker: None,
+            session: None,
+            summary: None,
+            events: vec![],
+            bytes: 0,
+            truncated: false,
+        }
+    }
+
+    fn summary(&self) -> TaskSummary {
+        TaskSummary {
+            id: self.task.id,
+            prompt: self.task.prompt.clone(),
+            status: self.status,
+            worker: self.worker,
+            harness: self.task.harness.clone(),
+            session: self.session.clone(),
+            summary: self.summary.clone(),
+        }
+    }
+
+    /// Append to the transcript, evicting oldest events past `MAX_TRANSCRIPT_BYTES`.
+    fn record(&mut self, event: &AgentEvent) {
+        match event {
+            AgentEvent::Started { session: Some(s) } => self.session = Some(s.clone()),
+            AgentEvent::Finished { summary, .. } => self.summary = summary.clone(),
+            _ => {}
+        }
+        let event = match event {
+            AgentEvent::ToolResult { content } if content.len() > MAX_TOOL_RESULT_BYTES => {
+                let mut end = MAX_TOOL_RESULT_BYTES;
+                while !content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                AgentEvent::ToolResult {
+                    content: format!("{}…[truncated]", &content[..end]),
+                }
+            }
+            e => e.clone(),
+        };
+        self.bytes += size(&event);
+        self.events.push(event);
+        let mut evict = 0;
+        while self.bytes > MAX_TRANSCRIPT_BYTES {
+            self.bytes -= size(&self.events[evict]);
+            evict += 1;
+        }
+        if evict > 0 {
+            self.events.drain(..evict);
+            self.truncated = true;
+        }
+    }
+}
+
+fn size(e: &AgentEvent) -> usize {
+    serde_json::to_vec(e).map_or(0, |v| v.len())
 }
 
 #[derive(Default)]
@@ -58,17 +132,14 @@ impl Ledger {
                     online: w.conn.is_some(),
                 })
                 .collect(),
-            tasks: self
-                .tasks
-                .iter()
-                .map(|t| TaskSummary {
-                    id: t.task.id,
-                    prompt: t.task.prompt.clone(),
-                    status: t.status,
-                    worker: t.worker,
-                })
-                .collect(),
+            tasks: self.tasks.iter().map(TaskEntry::summary).collect(),
         }
+    }
+
+    /// Task metadata, retained transcript (oldest first), and whether any was evicted.
+    pub fn show(&self, task: TaskId) -> Option<(TaskSummary, &[AgentEvent], bool)> {
+        let t = self.tasks.iter().find(|t| t.task.id == task)?;
+        Some((t.summary(), &t.events, t.truncated))
     }
 
     fn is_busy(&self, wid: WorkerId) -> bool {
@@ -90,11 +161,7 @@ impl Ledger {
             harness: harness.unwrap_or_else(|| "claude".into()),
         };
         let id = task.id;
-        self.tasks.push(TaskEntry {
-            task,
-            status: TaskStatus::Queued,
-            worker: None,
-        });
+        self.tasks.push(TaskEntry::new(task));
         self.queue.push_back(id);
         (id, self.schedule())
     }
@@ -173,6 +240,7 @@ impl Ledger {
         if t.worker != Some(wid) || t.status != TaskStatus::Running {
             return vec![];
         }
+        t.record(&event);
         if let AgentEvent::Finished { ok, .. } = &event {
             t.status = if *ok {
                 TaskStatus::Done
@@ -234,13 +302,15 @@ impl Ledger {
             })
             .map(|t| {
                 t.status = TaskStatus::Failed;
+                let event = AgentEvent::Finished {
+                    ok: false,
+                    summary: Some(why.into()),
+                };
+                t.record(&event);
                 Effect::Broadcast(ServerMsg::Event {
                     task: t.task.id,
                     worker: wid,
-                    event: AgentEvent::Finished {
-                        ok: false,
-                        summary: Some(why.into()),
-                    },
+                    event,
                 })
             })
             .collect()
@@ -404,5 +474,83 @@ mod tests {
         assert_eq!(task_status(&l, task), TaskStatus::Queued);
         let (_, eff) = l.connect(wid, info(), &[], 2);
         assert_eq!(assigned(&eff), vec![(2, task)]);
+    }
+
+    fn text(t: &str) -> AgentEvent {
+        AgentEvent::Text { text: t.into() }
+    }
+
+    #[test]
+    fn transcript_accumulates_in_order_with_session_and_summary() {
+        let (mut l, wid, task) = running_setup();
+        let events = vec![
+            AgentEvent::Started {
+                session: Some("s1".into()),
+            },
+            text("hi"),
+            AgentEvent::ToolResult {
+                content: "out".into(),
+            },
+            AgentEvent::Finished {
+                ok: true,
+                summary: Some("all good".into()),
+            },
+        ];
+        for e in &events {
+            l.event(wid, 1, task, e.clone());
+        }
+        // Dropped: task is no longer running.
+        l.event(wid, 1, task, text("late"));
+        let (info, got, truncated) = l.show(task).unwrap();
+        assert_eq!(got, events.as_slice());
+        assert!(!truncated);
+        assert_eq!(info.session.as_deref(), Some("s1"));
+        assert_eq!(info.summary.as_deref(), Some("all good"));
+        assert_eq!(info.harness, "claude");
+        assert_eq!(info.worker, Some(wid));
+        assert!(l.show(Uuid::nil()).is_none());
+    }
+
+    #[test]
+    fn transcript_cap_evicts_oldest_and_flags_truncated() {
+        let (mut l, wid, task) = running_setup();
+        let chunk = "x".repeat(10 * 1024);
+        for i in 0..40 {
+            l.event(wid, 1, task, text(&format!("{i} {chunk}")));
+        }
+        let (_, got, truncated) = l.show(task).unwrap();
+        assert!(truncated);
+        let bytes: usize = got.iter().map(size).sum();
+        assert!(bytes <= MAX_TRANSCRIPT_BYTES);
+        assert!(got.len() < 40);
+        // Newest kept, oldest gone, order preserved.
+        assert_eq!(got.last(), Some(&text(&format!("39 {chunk}"))));
+        let AgentEvent::Text { text: first } = &got[0] else {
+            panic!()
+        };
+        assert!(first.starts_with(&format!("{} ", 40 - got.len())));
+    }
+
+    #[test]
+    fn huge_tool_result_is_truncated_on_store() {
+        let (mut l, wid, task) = running_setup();
+        let content = "é".repeat(MAX_TOOL_RESULT_BYTES); // 2 bytes per char
+        l.event(wid, 1, task, AgentEvent::ToolResult { content });
+        let (_, got, truncated) = l.show(task).unwrap();
+        let AgentEvent::ToolResult { content } = &got[0] else {
+            panic!()
+        };
+        assert!(content.ends_with("…[truncated]"));
+        assert!(content.len() <= MAX_TOOL_RESULT_BYTES + "…[truncated]".len());
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn worker_loss_is_recorded_in_transcript() {
+        let (mut l, wid, task) = running_setup();
+        l.connect(wid, info(), &[], 2);
+        let (info, got, _) = l.show(task).unwrap();
+        assert_eq!(info.summary.as_deref(), Some("worker restarted"));
+        assert!(matches!(got, [AgentEvent::Finished { ok: false, .. }]));
     }
 }
