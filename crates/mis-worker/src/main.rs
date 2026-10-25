@@ -1,6 +1,9 @@
 //! Worker: connects to the orchestrator, advertises its harnesses, runs
 //! assigned tasks through `mis_agent` and streams events back.
 
+use std::collections::HashSet;
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
@@ -44,7 +47,48 @@ async fn main() -> Result<()> {
         harnesses: agents.iter().map(|a| a.name().to_string()).collect(),
     };
     tracing::info!(?info.harnesses, "connecting to {}", args.url);
+    let agents = std::sync::Arc::new(agents);
+    // Events from in-flight tasks queue here while disconnected. Delivery is best
+    // effort: an event already written to a socket that then dies is not resent.
+    let (ev_tx, ev_rx) = mpsc::channel::<(TaskId, AgentEvent)>(1024);
+    let mut conn = Conn {
+        ev_rx,
+        pending: None,
+        running: HashSet::new(),
+        backoff: Duration::from_secs(1),
+    };
 
+    loop {
+        match session(&args, id, &info, &agents, &ev_tx, &mut conn).await {
+            Ok(()) => tracing::info!("orchestrator closed connection"),
+            Err(e) => tracing::warn!("connection lost: {e:#}"),
+        }
+        tracing::info!("reconnecting in {:?}", conn.backoff);
+        tokio::time::sleep(conn.backoff).await;
+        conn.backoff = (conn.backoff * 2).min(Duration::from_secs(30));
+    }
+}
+
+/// State that outlives a single connection.
+struct Conn {
+    ev_rx: mpsc::Receiver<(TaskId, AgentEvent)>,
+    /// Event taken from `ev_rx` whose send failed; goes first on the next session.
+    pending: Option<(TaskId, AgentEvent)>,
+    /// Tasks assigned and not yet reported Finished; sent in Hello on reconnect.
+    running: HashSet<TaskId>,
+    backoff: Duration,
+}
+
+/// One connection's lifetime: handshake, then forward events and run assignments
+/// until the socket drops. Returns Ok on a clean close from the orchestrator.
+async fn session(
+    args: &Args,
+    id: WorkerId,
+    info: &WorkerInfo,
+    agents: &std::sync::Arc<Vec<Box<dyn Agent>>>,
+    ev_tx: &mpsc::Sender<(TaskId, AgentEvent)>,
+    c: &mut Conn,
+) -> Result<()> {
     let mut req = format!("{}/ws/worker", args.url).into_client_request()?;
     if let Some(t) = &args.token {
         req.headers_mut()
@@ -54,52 +98,94 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("connecting to {}", args.url))?;
     let (mut sink, mut stream) = ws.split();
+    let running: Vec<TaskId> = c.running.iter().copied().collect();
     sink.send(text(&WorkerMsg::Hello {
         id,
-        info,
-        running: vec![],
+        info: info.clone(),
+        running,
     }))
     .await?;
 
-    // Agent events from the running task are forwarded on this channel.
-    let (ev_tx, mut ev_rx) = mpsc::channel::<(TaskId, AgentEvent)>(64);
-    let agents = std::sync::Arc::new(agents);
     loop {
-        tokio::select! {
-            Some((task, event)) = ev_rx.recv() => {
-                sink.send(text(&WorkerMsg::Event { task, event })).await?;
-            }
-            msg = stream.next() => match msg {
-                Some(Ok(Message::Text(t))) => match serde_json::from_str::<OrchMsg>(&t) {
-                    Ok(OrchMsg::Welcome { id }) => tracing::info!(%id, "registered"),
-                    Ok(OrchMsg::Assign { task }) => {
-                        tracing::info!(id = %task.id, harness = %task.harness, "assigned: {}", task.prompt);
-                        let agents = agents.clone();
-                        let tx = ev_tx.clone();
-                        tokio::spawn(async move { run_task(&agents, task, tx).await });
-                    }
-                    Err(e) => tracing::warn!("bad message from orchestrator: {e}"),
-                },
-                Some(Ok(_)) => {}
-                Some(Err(e)) => return Err(e.into()),
-                None => { tracing::info!("orchestrator closed connection"); return Ok(()); }
-            }
+        // Resend a stranded event before pulling a new one.
+        let next = match c.pending.take() {
+            Some(ev) => Some(ev),
+            None => tokio::select! {
+                ev = c.ev_rx.recv() => ev,
+                msg = stream.next() => {
+                    handle_incoming(msg, agents, ev_tx, &mut c.running, &mut c.backoff)?;
+                    continue;
+                }
+            },
+        };
+        let Some((task, event)) = next else {
+            return Ok(());
+        };
+        let finished = matches!(event, AgentEvent::Finished { .. });
+        if let Err(e) = sink
+            .send(text(&WorkerMsg::Event {
+                task,
+                event: event.clone(),
+            }))
+            .await
+        {
+            c.pending = Some((task, event));
+            return Err(e.into());
+        }
+        if finished {
+            c.running.remove(&task);
         }
     }
 }
 
+type Incoming = Option<std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>;
+
+/// Returns Ok on a message handled or ignored; Err when the socket is gone.
+fn handle_incoming(
+    msg: Incoming,
+    agents: &std::sync::Arc<Vec<Box<dyn Agent>>>,
+    ev_tx: &mpsc::Sender<(TaskId, AgentEvent)>,
+    running: &mut HashSet<TaskId>,
+    backoff: &mut Duration,
+) -> Result<()> {
+    match msg {
+        Some(Ok(Message::Text(t))) => match serde_json::from_str::<OrchMsg>(&t) {
+            Ok(OrchMsg::Welcome { id }) => {
+                tracing::info!(%id, "registered");
+                *backoff = Duration::from_secs(1);
+            }
+            Ok(OrchMsg::Assign { task }) => {
+                if !running.insert(task.id) {
+                    tracing::warn!(id = %task.id, "already running; ignoring duplicate assign");
+                    return Ok(());
+                }
+                tracing::info!(id = %task.id, harness = %task.harness, "assigned: {}", task.prompt);
+                let agents = agents.clone();
+                let tx = ev_tx.clone();
+                tokio::spawn(async move { run_task(&agents, task, tx).await });
+            }
+            Err(e) => tracing::warn!("bad message from orchestrator: {e}"),
+        },
+        Some(Ok(_)) => {}
+        Some(Err(e)) => return Err(e.into()),
+        None => anyhow::bail!("orchestrator closed connection"),
+    }
+    Ok(())
+}
+
 async fn run_task(agents: &[Box<dyn Agent>], task: Task, tx: mpsc::Sender<(TaskId, AgentEvent)>) {
     let id = task.id;
+    let fail = |summary: String| {
+        (
+            id,
+            AgentEvent::Finished {
+                ok: false,
+                summary: Some(summary),
+            },
+        )
+    };
     let Some(agent) = agents.iter().find(|a| a.name() == task.harness) else {
-        let _ = tx
-            .send((
-                id,
-                AgentEvent::Finished {
-                    ok: false,
-                    summary: Some(format!("no harness {}", task.harness)),
-                },
-            ))
-            .await;
+        let _ = tx.send(fail(format!("no harness {}", task.harness))).await;
         return;
     };
     let (atx, mut arx) = mpsc::channel(64);
@@ -110,18 +196,24 @@ async fn run_task(agents: &[Box<dyn Agent>], task: Task, tx: mpsc::Sender<(TaskI
             }
         }
     };
-    let (res, _) = tokio::join!(agent.run(&task.prompt, task.cwd.as_deref(), atx), fwd);
-    if let Err(e) = res {
-        tracing::error!(%id, "agent failed: {e:#}");
-        let _ = tx
-            .send((
-                id,
-                AgentEvent::Finished {
-                    ok: false,
-                    summary: Some(e.to_string()),
-                },
-            ))
-            .await;
+    // A panic inside the agent must still produce a Finished, or the task stays
+    // "running" in every future Hello.
+    let run = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(agent.run(
+        &task.prompt,
+        task.cwd.as_deref(),
+        atx,
+    )));
+    let (res, _) = tokio::join!(run, fwd);
+    match res {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::error!(%id, "agent failed: {e:#}");
+            let _ = tx.send(fail(e.to_string())).await;
+        }
+        Err(_) => {
+            tracing::error!(%id, "agent panicked");
+            let _ = tx.send(fail("worker panicked".into())).await;
+        }
     }
 }
 
