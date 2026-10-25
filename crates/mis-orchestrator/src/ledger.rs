@@ -94,11 +94,13 @@ impl Ledger {
     ) -> (TaskId, Vec<Effect>) {
         let id = Uuid::new_v4();
         let planning = harness.is_none();
+        let plan_prompt = planning.then(|| plan::prompt(&prompt, &self.harnesses()));
         self.tasks.push(TaskEntry {
             task: Task {
                 id,
-                prompt: prompt.clone(),
+                prompt,
                 cwd,
+                // Empty until planned; Planning tasks are never queued or assigned.
                 harness: harness.unwrap_or_default(),
             },
             status: if planning {
@@ -108,33 +110,31 @@ impl Ledger {
             },
             worker: None,
         });
-        if planning {
-            return (
-                id,
-                vec![Effect::Plan {
-                    task: id,
-                    prompt: plan::prompt(&prompt, &self.harnesses()),
-                }],
-            );
+        if let Some(prompt) = plan_prompt {
+            return (id, vec![Effect::Plan { task: id, prompt }]);
         }
         self.queue.push_back(id);
         (id, self.schedule())
     }
 
-    /// Every harness any known worker offers.
+    /// Every harness a known worker offers; with no workers, every harness that
+    /// exists, so a plan made before the fleet connects still queues.
     pub fn harnesses(&self) -> Vec<String> {
         let mut v: Vec<String> = self
             .workers
             .values()
             .flat_map(|w| w.info.harnesses.iter().cloned())
             .collect();
+        if v.is_empty() {
+            v = mis_agent::HARNESSES.map(String::from).to_vec();
+        }
         v.sort();
         v.dedup();
         v
     }
 
-    /// Planner output for a Planning task. Text streams to followers; Finished
-    /// carries the plan, which queues the task or fails it.
+    /// Planner output for a Planning task. Only Finished matters: it carries the
+    /// plan (the reply's JSON), which queues the task or fails it.
     pub fn planning_event(&mut self, task: TaskId, event: AgentEvent) -> Vec<Effect> {
         let harnesses = self.harnesses();
         let Some(t) = self.tasks.iter_mut().find(|t| t.task.id == task) else {
@@ -151,12 +151,9 @@ impl Ledger {
             })
         };
         match event {
-            // The JSON answer itself is not relayed; its `reason` is, after parsing.
-            AgentEvent::Text { ref text } if text.trim_start().starts_with('{') => vec![],
-            AgentEvent::Text { .. } => vec![broadcast(event)],
             AgentEvent::Finished { ok, summary } => {
                 let plan = match (ok, summary) {
-                    (true, Some(reply)) => plan::parse(&reply, &harnesses),
+                    (true, Some(reply)) => plan::parse(&reply, &t.task.prompt, &harnesses),
                     (_, summary) => Err(summary.unwrap_or_else(|| "planner failed".into())),
                 };
                 match plan {
@@ -513,6 +510,9 @@ mod tests {
         assert!(l
             .planning_event(task, AgentEvent::Started { session: None })
             .is_empty());
+        assert!(l
+            .planning_event(task, AgentEvent::Text { text: "{}".into() })
+            .is_empty());
 
         let eff = l.planning_event(
             task,
@@ -564,5 +564,28 @@ mod tests {
         );
         assert_eq!(finished(&eff, task), Some(false));
         assert_eq!(task_status(&l, task), TaskStatus::Failed);
+    }
+
+    #[test]
+    fn plan_without_workers_queues_until_one_joins() {
+        let mut l = Ledger::default();
+        let (task, eff) = l.submit("use codex".into(), None, None);
+        let [Effect::Plan { prompt, .. }] = &eff[..] else {
+            panic!("{eff:?}")
+        };
+        assert!(prompt.contains("claude, codex"));
+        let eff = l.planning_event(
+            task,
+            AgentEvent::Finished {
+                ok: true,
+                summary: Some(r#"{"harness":"codex","prompt":"x"}"#.into()),
+            },
+        );
+        assert!(assigned(&eff).is_empty());
+        assert_eq!(task_status(&l, task), TaskStatus::Queued);
+        let mut codex = info();
+        codex.harnesses = vec!["codex".into()];
+        let (_, eff) = l.connect(Uuid::new_v4(), codex, &[], 3);
+        assert_eq!(assigned(&eff), vec![(3, task)]);
     }
 }

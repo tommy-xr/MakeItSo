@@ -20,6 +20,10 @@ use tokio::sync::{broadcast, mpsc};
 pub mod ledger;
 pub mod plan;
 
+/// A stuck planner (auth prompt, network stall) fails the task instead of
+/// leaving it in Planning forever.
+const PLANNER_TIMEOUT: Duration = Duration::from_secs(90);
+
 use ledger::{ConnId, Effect, Ledger};
 use mis_agent::Agent;
 
@@ -35,6 +39,8 @@ pub struct App {
     /// Chooses a harness and rewrites the prompt for tasks submitted without one.
     /// None: such tasks default to "claude" unplanned.
     planner: Option<Arc<dyn Agent>>,
+    /// Bounds concurrent planner processes; tasks wait in Planning.
+    planner_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl App {
@@ -48,6 +54,7 @@ impl App {
             token,
             grace: Duration::from_secs(60),
             planner: None,
+            planner_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         }
     }
 
@@ -99,22 +106,26 @@ impl App {
     /// is set, since `client_conn` fills in the default harness otherwise.
     async fn run_planner(&self, task: TaskId, prompt: String) {
         let planner = self.planner.clone().expect("planner");
+        let _slot = self.planner_slots.acquire().await.expect("semaphore open");
         let (tx, mut rx) = mpsc::channel(64);
-        let run = planner.run(task, &prompt, None, tx);
+        let run = tokio::time::timeout(
+            PLANNER_TIMEOUT,
+            mis_agent::run_guarded(planner.as_ref(), task, &prompt, None, tx),
+        );
         let feed = async {
             while let Some(ev) = rx.recv().await {
                 let effects = self.ledger.lock().unwrap().planning_event(task, ev);
                 self.apply(effects);
             }
         };
-        let (res, _) = tokio::join!(run, feed);
-        if let Err(e) = res {
-            tracing::error!(%task, "planner failed: {e:#}");
+        let (timed_out, _) = tokio::join!(run, feed);
+        if timed_out.is_err() {
+            // Dropping `run` killed the process (kill_on_drop) without a Finished.
             let effects = self.ledger.lock().unwrap().planning_event(
                 task,
                 AgentEvent::Finished {
                     ok: false,
-                    summary: Some(format!("planner failed: {e}")),
+                    summary: Some(format!("planner timed out after {PLANNER_TIMEOUT:?}")),
                 },
             );
             self.apply(effects);

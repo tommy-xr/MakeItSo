@@ -535,6 +535,7 @@ dependencies = [
  "mis-types",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

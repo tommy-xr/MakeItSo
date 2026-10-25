@@ -72,9 +72,19 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("planner: local claude (tool-less)");
         app = app.with_planner(std::sync::Arc::new(mis_agent::claude::ClaudeAgent {
             skip_permissions: false,
-            extra_args: ["--tools", "", "--max-turns", "1"]
-                .map(String::from)
-                .to_vec(),
+            // No user/project settings (hooks, CLAUDE.md), MCP servers, or tools; one
+            // turn. (`--bare` would also drop the login.)
+            extra_args: [
+                "--setting-sources",
+                "",
+                "--strict-mcp-config",
+                "--tools",
+                "",
+                "--max-turns",
+                "1",
+            ]
+            .map(String::from)
+            .to_vec(),
         }));
     } else {
         tracing::warn!("no `claude` on PATH: planner off; tasks without --harness run on claude");

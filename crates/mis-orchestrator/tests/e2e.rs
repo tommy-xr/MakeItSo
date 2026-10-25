@@ -55,12 +55,13 @@ async fn start() -> String {
 }
 
 async fn start_with_grace(grace: std::time::Duration) -> String {
+    start_app(App::new(None).with_grace(grace)).await
+}
+
+async fn start_app(app: App) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(mis_orchestrator::serve(
-        listener,
-        App::new(None).with_grace(grace),
-    ));
+    tokio::spawn(mis_orchestrator::serve(listener, app));
     format!("ws://{addr}")
 }
 
@@ -432,7 +433,7 @@ async fn disconnect_then_reconnect_within_grace_keeps_task() {
     assert_eq!(assigned.id, next);
 }
 
-/// Planner stub: streams one line of "thinking", then picks codex and rewrites.
+/// Planner stub: picks codex and rewrites the prompt.
 struct FakePlanner;
 impl mis_agent::Agent for FakePlanner {
     fn name(&self) -> &'static str {
@@ -450,10 +451,6 @@ impl mis_agent::Agent for FakePlanner {
                 prompt.contains("claude, codex"),
                 "fleet harnesses in prompt"
             );
-            tx.send(AgentEvent::Text {
-                text: "thinking".into(),
-            })
-            .await?;
             tx.send(AgentEvent::Finished {
                 ok: true,
                 summary: Some(
@@ -469,12 +466,7 @@ impl mis_agent::Agent for FakePlanner {
 
 #[tokio::test]
 async fn planner_routes_to_codex_and_streams_its_output() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("ws://{}", listener.local_addr().unwrap());
-    tokio::spawn(mis_orchestrator::serve(
-        listener,
-        App::new(None).with_planner(std::sync::Arc::new(FakePlanner)),
-    ));
+    let base = start_app(App::new(None).with_planner(std::sync::Arc::new(FakePlanner))).await;
     let mut claude = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
     let codex_id = uuid::Uuid::new_v4();
     let mut codex = join(&base, codex_id, "codex", vec![]).await;
@@ -493,7 +485,7 @@ async fn planner_routes_to_codex_and_streams_its_output() {
     let ServerMsg::Submitted { task } = recv(&mut client).await else {
         panic!()
     };
-    // Planner output streams to followers with no worker, then the decision.
+    // The planner's reason and decision reach followers as events with no worker.
     let mut texts = vec![];
     loop {
         match recv::<ServerMsg>(&mut client).await {
@@ -516,7 +508,7 @@ async fn planner_routes_to_codex_and_streams_its_output() {
             other => panic!("{other:?}"),
         }
     }
-    assert_eq!(texts, ["thinking", "user asked for codex"]);
+    assert_eq!(texts, ["user asked for codex"]);
     // Only the codex worker gets it, with the rewritten prompt.
     let OrchMsg::Assign { task: assigned } = recv(&mut codex).await else {
         panic!()
