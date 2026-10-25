@@ -143,10 +143,8 @@ pub struct WorkerSummary {
     /// False while inside the reconnect grace period.
     pub online: bool,
     /// Latest `WorkerMsg::Stats`; None until the first arrives.
-    #[serde(default)]
     pub stats: Option<WorkerStats>,
     /// Unix seconds when `stats` arrived, so clients can judge staleness.
-    #[serde(default)]
     pub stats_at: Option<u64>,
 }
 

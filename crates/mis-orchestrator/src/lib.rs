@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -47,6 +47,8 @@ pub struct App {
     stale_after: Duration,
     /// How often to check for silent workers.
     tick_every: Duration,
+    /// Origin of the ledger's monotonic `now`.
+    started: Instant,
 }
 
 impl App {
@@ -65,7 +67,13 @@ impl App {
             // Two missed beats plus slack for network jitter.
             stale_after: 2 * STATS_INTERVAL + Duration::from_secs(5),
             tick_every: Duration::from_secs(5),
+            started: Instant::now(),
         }
+    }
+
+    /// Monotonic time for the ledger, which never reads the clock itself.
+    fn now(&self) -> Duration {
+        self.started.elapsed()
     }
 
     pub fn with_grace(mut self, grace: Duration) -> Self {
@@ -166,7 +174,7 @@ impl App {
             let mut every = tokio::time::interval(app.tick_every);
             loop {
                 every.tick().await;
-                app.transition(|l| ((), l.tick(now(), app.stale_after)));
+                app.transition(|l| ((), l.tick(app.now(), app.stale_after)));
             }
         });
     }
@@ -263,11 +271,11 @@ pub fn router(app: App) -> Router {
         .with_state(app)
 }
 
-/// Wall-clock time for the ledger, which never reads the clock itself.
-fn now() -> Duration {
+/// Wall-clock seconds, only for display (`stats_at`).
+fn unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
+        .map_or(0, |d| d.as_secs())
 }
 
 pub async fn serve(listener: TcpListener, app: App) -> anyhow::Result<()> {
@@ -344,7 +352,7 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
     };
     let (tx, mut rx) = mpsc::unbounded_channel();
     let conn = app.open_conn(tx);
-    let unknown = app.transition(|l| l.connect(wid, info, &running, conn, now()));
+    let unknown = app.transition(|l| l.connect(wid, info, &running, conn, app.now()));
     tracing::info!(%wid, conn, ?running, "worker joined");
     if !unknown.is_empty() {
         tracing::warn!(%wid, ?unknown, "worker reports tasks unknown to this orchestrator");
@@ -361,7 +369,8 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
                         app.transition(|l| ((), l.event(wid, conn, task, event)));
                     }
                     Some(WorkerMsg::Stats(stats)) => {
-                        app.ledger.lock().unwrap().worker_stats(wid, conn, stats, now());
+                        let now = app.now();
+                        app.ledger.lock().unwrap().worker_stats(wid, conn, stats, now, unix_secs());
                     }
                     Some(WorkerMsg::Hello { .. }) => {}
                     None => break,

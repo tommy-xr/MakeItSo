@@ -1,6 +1,6 @@
 //! Pure fleet state: workers, tasks, queue. Every transition returns the
-//! effects the shell must perform. No I/O, no clocks, no locks here; times
-//! (`now`) are passed in by the shell as durations since the Unix epoch.
+//! effects the shell must perform. No I/O, no clocks, no locks here; `now` is
+//! monotonic time from the shell, so wall-clock jumps can't fake silence.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
@@ -43,8 +43,8 @@ struct Worker {
     conn: Option<ConnId>,
     /// Bumped on every (re)connect so a stale grace timer can't expire a live worker.
     generation: u64,
-    /// Cleared on (re)connect, so when set it arrived at `last_seen`.
-    stats: Option<WorkerStats>,
+    /// Latest stats and the Unix second they arrived; cleared on (re)connect.
+    stats: Option<(WorkerStats, u64)>,
     /// Last Hello or Stats; `tick` drops the worker when this gets too old.
     last_seen: Duration,
 }
@@ -149,8 +149,8 @@ impl Ledger {
                     info: w.info.clone(),
                     busy: self.is_busy(*id),
                     online: w.conn.is_some(),
-                    stats: w.stats.clone(),
-                    stats_at: w.stats.as_ref().map(|_| w.last_seen.as_secs()),
+                    stats: w.stats.as_ref().map(|(s, _)| s.clone()),
+                    stats_at: w.stats.as_ref().map(|(_, at)| *at),
                 })
                 .collect(),
             tasks: self.tasks.iter().map(TaskEntry::summary).collect(),
@@ -317,10 +317,18 @@ impl Ledger {
         }]
     }
 
-    /// Heartbeat from `conn`: store the stats. Ignored unless `conn` is live.
-    pub fn worker_stats(&mut self, wid: WorkerId, conn: ConnId, stats: WorkerStats, now: Duration) {
+    /// Heartbeat from `conn`: store the stats, stamped `unix_secs` for clients.
+    /// Ignored unless `conn` is live.
+    pub fn worker_stats(
+        &mut self,
+        wid: WorkerId,
+        conn: ConnId,
+        stats: WorkerStats,
+        now: Duration,
+        unix_secs: u64,
+    ) {
         if let Some(w) = self.workers.get_mut(&wid).filter(|w| w.conn == Some(conn)) {
-            w.stats = Some(stats);
+            w.stats = Some((stats, unix_secs));
             w.last_seen = now;
         }
     }
@@ -484,19 +492,19 @@ mod tests {
         l.connect(wid, info(), &[], 1, T0);
         assert_eq!(summary(&l, wid).stats, None);
         assert_eq!(summary(&l, wid).stats_at, None);
-        l.worker_stats(wid, 1, stats(64), secs(10));
+        l.worker_stats(wid, 1, stats(64), secs(10), 1_700_000_000);
         let s = summary(&l, wid);
         assert_eq!(s.stats, Some(stats(64)));
-        assert_eq!(s.stats_at, Some(10));
+        assert_eq!(s.stats_at, Some(1_700_000_000));
         // A stale connection's stats are ignored.
-        l.worker_stats(wid, 9, stats(1), secs(11));
+        l.worker_stats(wid, 9, stats(1), secs(11), 0);
         assert_eq!(summary(&l, wid).stats, Some(stats(64)));
     }
 
     #[test]
     fn tick_drops_silent_worker_through_disconnect_path() {
         let (mut l, wid, task) = running_setup();
-        l.worker_stats(wid, 1, stats(5), secs(10));
+        l.worker_stats(wid, 1, stats(5), secs(10), 0);
         assert!(l.tick(secs(45), STALE).is_empty()); // exactly at the limit: kept
         assert_eq!(
             l.tick(secs(46), STALE),
@@ -519,7 +527,7 @@ mod tests {
         let wid = Uuid::new_v4();
         l.connect(wid, info(), &[], 1, T0);
         for t in (15..200).step_by(15) {
-            l.worker_stats(wid, 1, stats(1), secs(t));
+            l.worker_stats(wid, 1, stats(1), secs(t), 0);
             assert!(l.tick(secs(t + 5), STALE).is_empty());
         }
         assert!(summary(&l, wid).online);
@@ -530,7 +538,7 @@ mod tests {
         let mut l = Ledger::default();
         let wid = Uuid::new_v4();
         l.connect(wid, info(), &[], 1, T0);
-        l.worker_stats(wid, 1, stats(9), secs(1));
+        l.worker_stats(wid, 1, stats(9), secs(1), 0);
         assert_eq!(l.tick(secs(40), STALE).len(), 2);
         l.connect(wid, info(), &[], 2, secs(50));
         let s = summary(&l, wid);

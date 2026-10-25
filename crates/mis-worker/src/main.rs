@@ -164,14 +164,10 @@ async fn session(
         running,
     }))
     .await?;
-    // Stats right away so the orchestrator has numbers, then every interval as
-    // the heartbeat. Sampling takes ~1ms, so it runs inline in the loop.
-    let t = std::time::Instant::now();
-    let s = c.sampler.sample();
-    tracing::info!(?s, took = ?t.elapsed(), "sending stats");
-    sink.send(text(&WorkerMsg::Stats(s))).await?;
-    let mut beat =
-        tokio::time::interval_at(tokio::time::Instant::now() + STATS_INTERVAL, STATS_INTERVAL);
+    // Heartbeat with stats. The first tick fires at once, so the orchestrator
+    // has numbers right after Hello. Sampling (~20ms) runs inline; at one per
+    // 15s that stall is negligible.
+    let mut beat = tokio::time::interval(STATS_INTERVAL);
     // After a stall (e.g. laptop sleep), send one beat, not a burst.
     beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -186,7 +182,10 @@ async fn session(
                     continue;
                 }
                 _ = beat.tick() => {
-                    sink.send(text(&WorkerMsg::Stats(c.sampler.sample()))).await?;
+                    let t = std::time::Instant::now();
+                    let s = c.sampler.sample();
+                    tracing::debug!(?s, took = ?t.elapsed(), "sending stats");
+                    sink.send(text(&WorkerMsg::Stats(s))).await?;
                     continue;
                 }
             },

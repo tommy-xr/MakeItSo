@@ -219,7 +219,6 @@ fn first_line(s: &str, max: usize) -> String {
     format!("{cut}…")
 }
 
-/// The one task whose id starts with `prefix`.
 /// `disk 38% cpu 64% mem 82%`, or `stats: -` before the first report.
 fn stats_text(s: Option<&WorkerStats>) -> String {
     s.map_or("stats: -".into(), |s| {
@@ -230,6 +229,7 @@ fn stats_text(s: Option<&WorkerStats>) -> String {
     })
 }
 
+/// The one task whose id starts with `prefix`.
 fn resolve(tasks: &[TaskSummary], prefix: &str) -> Result<TaskId> {
     let hits: Vec<_> = tasks
         .iter()
