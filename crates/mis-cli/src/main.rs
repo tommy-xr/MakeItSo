@@ -42,6 +42,11 @@ enum Cmd {
         #[arg(long)]
         nested: bool,
     },
+    /// Show one task's details and transcript.
+    Show {
+        /// Task id or unambiguous prefix (as `mis status` prints).
+        id: String,
+    },
     /// Stream all task events.
     Tail,
     /// Run an orchestrator and a worker on this machine for quick testing.
@@ -199,6 +204,29 @@ fn print_event(task: TaskId, event: &AgentEvent) {
     }
 }
 
+/// First line of `s`, cut to `max` chars with a trailing ellipsis.
+fn first_line(s: &str, max: usize) -> String {
+    let line = s.lines().next().unwrap_or("");
+    if line.chars().count() <= max {
+        return line.to_string();
+    }
+    let cut: String = line.chars().take(max - 1).collect();
+    format!("{cut}…")
+}
+
+/// The one task whose id starts with `prefix`.
+fn resolve(tasks: &[TaskSummary], prefix: &str) -> Result<TaskId> {
+    let hits: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.id.to_string().starts_with(prefix))
+        .collect();
+    match hits.as_slice() {
+        [t] => Ok(t.id),
+        [] => bail!("no task matches {prefix}"),
+        _ => bail!("{prefix} matches {} tasks", hits.len()),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -233,11 +261,46 @@ async fn main() -> Result<()> {
             println!("tasks ({}):", tasks.len());
             for t in tasks {
                 println!(
-                    "  {} {:<8} {}",
+                    "  {} {:<8} {}{}",
                     &t.id.to_string()[..8],
                     format!("{:?}", t.status).to_lowercase(),
-                    t.prompt
+                    t.prompt,
+                    t.summary
+                        .map(|s| format!(" -> {}", first_line(&s, 80)))
+                        .unwrap_or_default()
                 );
+            }
+        }
+        Cmd::Show { id } => {
+            send(&mut ws, &ClientMsg::Status).await?;
+            let ServerMsg::Status { tasks, .. } = recv(&mut ws).await? else {
+                bail!("unexpected reply")
+            };
+            let task = resolve(&tasks, id)?;
+            send(&mut ws, &ClientMsg::Show { task }).await?;
+            let (t, events, truncated) = match recv(&mut ws).await? {
+                ServerMsg::TaskDetail {
+                    task,
+                    events,
+                    truncated,
+                } => (task, events, truncated),
+                ServerMsg::Error { message } => bail!(message),
+                other => bail!("unexpected reply: {other:?}"),
+            };
+            let opt = |v: Option<String>| v.unwrap_or_else(|| "-".into());
+            println!("id:      {}", t.id);
+            println!("status:  {}", format!("{:?}", t.status).to_lowercase());
+            println!("harness: {}", t.harness);
+            println!("worker:  {}", opt(t.worker.map(|w| w.to_string())));
+            println!("session: {}", opt(t.session));
+            println!("prompt:  {}", t.prompt);
+            println!("summary: {}", opt(t.summary));
+            println!();
+            if truncated {
+                println!("(earlier events dropped)");
+            }
+            for e in &events {
+                print_event(t.id, e);
             }
         }
         Cmd::Task {
@@ -315,6 +378,18 @@ mod tests {
         }
     }
 
+    fn summary(id: &str) -> TaskSummary {
+        TaskSummary {
+            id: id.parse().unwrap(),
+            prompt: String::new(),
+            status: TaskStatus::Done,
+            worker: None,
+            harness: "claude".into(),
+            session: None,
+            summary: None,
+        }
+    }
+
     #[test]
     fn nested_submit_refused_unless_opted_in() {
         assert!(check_nested(&task(false), Some("abc")).is_err());
@@ -322,5 +397,22 @@ mod tests {
         assert!(check_nested(&task(false), None).is_ok());
         assert!(check_nested(&task(false), Some("")).is_ok());
         assert!(check_nested(&Cmd::Status, Some("abc")).is_ok());
+    }
+
+    #[test]
+    fn resolve_needs_one_match() {
+        let tasks = [
+            summary("aaaa0000-0000-0000-0000-000000000000"),
+            summary("aaab0000-0000-0000-0000-000000000000"),
+        ];
+        assert_eq!(resolve(&tasks, "aaab").unwrap(), tasks[1].id);
+        assert!(resolve(&tasks, "aaa").is_err());
+        assert!(resolve(&tasks, "b").is_err());
+    }
+
+    #[test]
+    fn first_line_truncates() {
+        assert_eq!(first_line("ab\ncd", 80), "ab");
+        assert_eq!(first_line("abcdef", 4), "abc…");
     }
 }
