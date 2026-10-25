@@ -159,7 +159,7 @@ fn handle_incoming(
                     tracing::warn!(id = %task.id, "already running; ignoring duplicate assign");
                     return Ok(());
                 }
-                tracing::info!(id = %task.id, harness = %task.harness, "assigned: {}", task.prompt);
+                tracing::info!(id = %task.id, "assigned to {}: {}", task.harness, task.prompt);
                 let agents = agents.clone();
                 let tx = ev_tx.clone();
                 tokio::spawn(async move { run_task(&agents, task, tx).await });
