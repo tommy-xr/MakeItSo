@@ -55,13 +55,31 @@ async fn start() -> String {
 }
 
 async fn start_with_grace(grace: std::time::Duration) -> String {
+    start_app(App::new(None).with_grace(grace)).await
+}
+
+async fn start_app(app: App) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(mis_orchestrator::serve(
-        listener,
-        App::new(None).with_grace(grace),
-    ));
+    tokio::spawn(mis_orchestrator::serve(listener, app));
     format!("ws://{addr}")
+}
+
+/// `/ws/client` upgrade request carrying a browser `Origin` header.
+fn client_req_with_origin(
+    base: &str,
+    origin: &str,
+) -> tokio_tungstenite::tungstenite::handshake::client::Request {
+    let mut req = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
+        format!("{base}/ws/client"),
+    )
+    .unwrap();
+    req.headers_mut().insert("origin", origin.parse().unwrap());
+    req
+}
+
+fn allow_mis_example(app: App) -> App {
+    app.with_allowed_origins(vec!["https://mis.example.com".into()])
 }
 
 #[tokio::test]
@@ -264,12 +282,34 @@ async fn events_from_wrong_worker_are_ignored() {
 #[tokio::test]
 async fn browser_origin_rejected() {
     let base = start().await;
-    let mut req = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
-        format!("{base}/ws/client"),
-    )
-    .unwrap();
-    req.headers_mut()
-        .insert("origin", "http://evil.example".parse().unwrap());
+    let req = client_req_with_origin(&base, "http://evil.example");
+    assert!(connect_async(req).await.is_err());
+}
+
+#[tokio::test]
+async fn allowed_origin_connects() {
+    let base = start_app(allow_mis_example(App::new(None))).await;
+    let mut client = connect_async(client_req_with_origin(&base, "https://mis.example.com"))
+        .await
+        .unwrap()
+        .0;
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { .. } = recv(&mut client).await else {
+        panic!()
+    };
+}
+
+#[tokio::test]
+async fn unlisted_origin_rejected_with_allowlist() {
+    let base = start_app(allow_mis_example(App::new(None))).await;
+    let req = client_req_with_origin(&base, "https://evil.example");
+    assert!(connect_async(req).await.is_err());
+}
+
+#[tokio::test]
+async fn allowed_origin_still_needs_token() {
+    let base = start_app(allow_mis_example(App::new(Some("s".into())))).await;
+    let req = client_req_with_origin(&base, "https://mis.example.com");
     assert!(connect_async(req).await.is_err());
 }
 

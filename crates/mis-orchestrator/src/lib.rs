@@ -28,6 +28,8 @@ pub struct App {
     next_conn: Arc<AtomicU64>,
     events: broadcast::Sender<ServerMsg>,
     token: Option<String>,
+    /// Browser `Origin`s permitted to connect; requests without `Origin` are always let through.
+    allowed_origins: Vec<String>,
     /// How long a disconnected worker may be gone before its tasks are failed.
     grace: Duration,
 }
@@ -41,12 +43,19 @@ impl App {
             next_conn: Default::default(),
             events: broadcast::channel(256).0,
             token,
+            allowed_origins: Vec::new(),
             grace: Duration::from_secs(60),
         }
     }
 
     pub fn with_grace(mut self, grace: Duration) -> Self {
         self.grace = grace;
+        self
+    }
+
+    /// Allow browser pages from these origins (already normalised, see [`normalize_origins`]).
+    pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
+        self.allowed_origins = origins;
         self
     }
 
@@ -92,7 +101,12 @@ impl App {
     }
 
     fn authorized(&self, headers: &HeaderMap) -> bool {
-        if headers.contains_key("origin") {
+        let origin = match headers.get("origin").map(|v| v.to_str()) {
+            None => None,
+            Some(Ok(o)) => Some(o),
+            Some(Err(_)) => return false,
+        };
+        if !origin_allowed(origin, &self.allowed_origins) {
             return false;
         }
         match &self.token {
@@ -104,6 +118,24 @@ impl App {
                 .unwrap_or(false),
         }
     }
+}
+
+/// Native clients send no `Origin`; a browser's must exactly match an allowlist entry.
+/// Rejecting other origins stops arbitrary web pages from driving a local orchestrator.
+pub fn origin_allowed(origin: Option<&str>, allowed: &[String]) -> bool {
+    match origin {
+        None => true,
+        Some(o) => allowed.iter().any(|a| a == o),
+    }
+}
+
+/// Trim entries, drop a trailing `/`, skip blanks: ` https://x.com/ ` -> `https://x.com`,
+/// which is the form browsers send in `Origin`.
+pub fn normalize_origins(raw: impl IntoIterator<Item = String>) -> Vec<String> {
+    raw.into_iter()
+        .map(|o| o.trim().trim_end_matches('/').to_string())
+        .filter(|o| !o.is_empty())
+        .collect()
 }
 
 pub fn router(app: App) -> Router {
@@ -234,5 +266,48 @@ async fn client_conn(mut sock: WebSocket, app: App) {
                 if !send_json(&mut sock, &ev).await { break; }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn list(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn no_origin_is_allowed() {
+        assert!(origin_allowed(None, &[]));
+        assert!(origin_allowed(None, &list(&["https://x.com"])));
+    }
+
+    #[test]
+    fn origin_must_match_exactly() {
+        let allowed = list(&["https://x.com", "http://localhost:3000"]);
+        assert!(origin_allowed(Some("https://x.com"), &allowed));
+        assert!(origin_allowed(Some("http://localhost:3000"), &allowed));
+        for o in [
+            "https://evil.example",
+            "http://x.com",
+            "https://X.com",
+            "https://x.com/",
+            "https://x.com:8443",
+            "https://x.com.evil.example",
+            "http://localhost:3001",
+            "null",
+        ] {
+            assert!(!origin_allowed(Some(o), &allowed), "{o}");
+        }
+        assert!(!origin_allowed(Some("https://x.com"), &[]));
+    }
+
+    #[test]
+    fn normalizes_entries() {
+        assert_eq!(
+            normalize_origins(list(&[" https://x.com/ ", "", "  ", "http://a:1"])),
+            list(&["https://x.com", "http://a:1"])
+        );
     }
 }

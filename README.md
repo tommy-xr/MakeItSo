@@ -44,3 +44,6 @@ service token too (or pass `--cf-access-client-id` / `--cf-access-client-secret`
 export CF_ACCESS_CLIENT_ID=<id>.access
 export CF_ACCESS_CLIENT_SECRET=<secret>
 ```
+
+Requests with a browser `Origin` are rejected unless listed via `--allowed-origin https://mis.example.com`
+(repeatable, or comma-separated `MIS_ALLOWED_ORIGINS`).
