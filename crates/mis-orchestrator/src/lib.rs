@@ -18,8 +18,14 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 
 pub mod ledger;
+pub mod plan;
+
+/// A stuck planner (auth prompt, network stall) fails the task instead of
+/// leaving it in Planning forever.
+const PLANNER_TIMEOUT: Duration = Duration::from_secs(90);
 
 use ledger::{ConnId, Effect, Ledger};
+use mis_agent::Agent;
 
 #[derive(Clone)]
 pub struct App {
@@ -32,6 +38,11 @@ pub struct App {
     allowed_origins: Vec<String>,
     /// How long a disconnected worker may be gone before its tasks are failed.
     grace: Duration,
+    /// Chooses a harness and rewrites the prompt for tasks submitted without one.
+    /// None: such tasks default to "claude" unplanned.
+    planner: Option<Arc<dyn Agent>>,
+    /// Bounds concurrent planner processes; tasks wait in Planning.
+    planner_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl App {
@@ -45,6 +56,8 @@ impl App {
             token,
             allowed_origins: Vec::new(),
             grace: Duration::from_secs(60),
+            planner: None,
+            planner_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         }
     }
 
@@ -56,6 +69,11 @@ impl App {
     /// Allow browser pages from these origins (already normalised, see [`normalize_origins`]).
     pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
         self.allowed_origins = origins;
+        self
+    }
+
+    pub fn with_planner(mut self, planner: Arc<dyn Agent>) -> Self {
+        self.planner = Some(planner);
         self
     }
 
@@ -85,7 +103,41 @@ impl App {
                         app.apply(effects);
                     });
                 }
+                Effect::Plan { task, prompt } => {
+                    let app = self.clone();
+                    tokio::spawn(async move { app.run_planner(task, prompt).await });
+                }
             }
+        }
+    }
+
+    /// Stream the planner's events into the ledger. Only reached when a planner
+    /// is set, since `client_conn` fills in the default harness otherwise.
+    async fn run_planner(&self, task: TaskId, prompt: String) {
+        let planner = self.planner.clone().expect("planner");
+        let _slot = self.planner_slots.acquire().await.expect("semaphore open");
+        let (tx, mut rx) = mpsc::channel(64);
+        let run = tokio::time::timeout(
+            PLANNER_TIMEOUT,
+            mis_agent::run_guarded(planner.as_ref(), task, &prompt, None, tx),
+        );
+        let feed = async {
+            while let Some(ev) = rx.recv().await {
+                let effects = self.ledger.lock().unwrap().planning_event(task, ev);
+                self.apply(effects);
+            }
+        };
+        let (timed_out, _) = tokio::join!(run, feed);
+        if timed_out.is_err() {
+            // Dropping `run` killed the process (kill_on_drop) without a Finished.
+            let effects = self.ledger.lock().unwrap().planning_event(
+                task,
+                AgentEvent::Finished {
+                    ok: false,
+                    summary: Some(format!("planner timed out after {PLANNER_TIMEOUT:?}")),
+                },
+            );
+            self.apply(effects);
         }
     }
 
@@ -253,6 +305,7 @@ async fn client_conn(mut sock: WebSocket, app: App) {
                     send_json(&mut sock, &status).await;
                 }
                 Some(ClientMsg::Submit { prompt, cwd, harness }) => {
+                    let harness = harness.or_else(|| app.planner.is_none().then(|| "claude".into()));
                     let task = app.transition(|l| l.submit(prompt, cwd, harness));
                     send_json(&mut sock, &ServerMsg::Submitted { task }).await;
                 }

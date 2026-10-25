@@ -260,26 +260,8 @@ async fn run_task(ctx: &Ctx, task: Task, tx: mpsc::Sender<(TaskId, AgentEvent)>)
             }
         }
     };
-    // A panic inside the agent must still produce a Finished, or the task stays
-    // "running" in every future Hello.
-    let run = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(agent.run(
-        id,
-        &task.prompt,
-        Some(&cwd),
-        atx,
-    )));
-    let (res, _) = tokio::join!(run, fwd);
-    match res {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            tracing::error!(%id, "agent failed: {e:#}");
-            let _ = tx.send(fail(e.to_string())).await;
-        }
-        Err(_) => {
-            tracing::error!(%id, "agent panicked");
-            let _ = tx.send(fail("worker panicked".into())).await;
-        }
-    }
+    let run = mis_agent::run_guarded(agent.as_ref(), id, &task.prompt, Some(&cwd), atx);
+    tokio::join!(run, fwd);
 }
 
 /// Cloudflare Access headers from `cfg`, checked so bad values fail early.

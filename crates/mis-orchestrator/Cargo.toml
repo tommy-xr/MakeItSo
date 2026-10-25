@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 mis-types.workspace = true
+mis-agent.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
