@@ -96,7 +96,7 @@ and `-._` (e.g. `openssl rand -hex 24`).
 
 ## From your phone
 
-The orchestrator serves a text-only page at `http://<host>:7474/`: task list, submit, transcripts.
+The orchestrator serves a text-only page at `http://<host>:7474/`: tasks (list, submit, transcripts) and workers.
 Open it and paste the token (set `MIS_TOKEN`; without one, only `localhost` pages may connect). To reach
 it from a phone:
 
