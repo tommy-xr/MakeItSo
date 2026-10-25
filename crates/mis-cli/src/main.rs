@@ -18,7 +18,7 @@ struct Args {
     /// Cloudflare Access service-token id; needs --cf-access-client-secret.
     #[arg(long, env = "CF_ACCESS_CLIENT_ID")]
     cf_access_client_id: Option<String>,
-    #[arg(long, env = "CF_ACCESS_CLIENT_SECRET")]
+    #[arg(long, env = "CF_ACCESS_CLIENT_SECRET", hide_env_values = true)]
     cf_access_client_secret: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
