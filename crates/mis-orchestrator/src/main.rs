@@ -12,6 +12,9 @@ struct Args {
     /// Externally reachable URL (e.g. a tunnel hostname), shown in connection hints.
     #[arg(long, env = "MIS_PUBLIC_URL")]
     public_url: Option<String>,
+    /// Don't plan with the local `claude` CLI; tasks without --harness run on claude as-is.
+    #[arg(long)]
+    no_planner: bool,
 }
 
 /// Print ready-to-paste worker/CLI commands for every way to reach this orchestrator.
@@ -62,7 +65,31 @@ async fn main() -> anyhow::Result<()> {
     let local = listener.local_addr()?;
     tracing::info!("listening on {local}");
     print_connect_hints(local, args.token.as_deref(), args.public_url.as_deref());
-    mis_orchestrator::serve(listener, App::new(args.token)).await
+    let mut app = App::new(args.token);
+    if args.no_planner {
+        tracing::info!("planner off; tasks without --harness run on claude");
+    } else if mis_agent::which("claude") {
+        tracing::info!("planner: local claude (tool-less)");
+        app = app.with_planner(std::sync::Arc::new(mis_agent::claude::ClaudeAgent {
+            skip_permissions: false,
+            // No user/project settings (hooks, CLAUDE.md), MCP servers, or tools; one
+            // turn. (`--bare` would also drop the login.)
+            extra_args: [
+                "--setting-sources",
+                "",
+                "--strict-mcp-config",
+                "--tools",
+                "",
+                "--max-turns",
+                "1",
+            ]
+            .map(String::from)
+            .to_vec(),
+        }));
+    } else {
+        tracing::warn!("no `claude` on PATH: planner off; tasks without --harness run on claude");
+    }
+    mis_orchestrator::serve(listener, app).await
 }
 
 #[cfg(test)]

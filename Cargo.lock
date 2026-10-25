@@ -535,6 +535,7 @@ dependencies = [
  "mis-types",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -559,6 +560,7 @@ dependencies = [
  "clap",
  "futures-util",
  "if-addrs",
+ "mis-agent",
  "mis-types",
  "serde",
  "serde_json",

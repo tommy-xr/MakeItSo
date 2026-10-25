@@ -32,6 +32,8 @@ pub struct Task {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
+    /// The orchestrator's planner is choosing a harness and rewriting the prompt.
+    Planning,
     Queued,
     Running,
     Done,
@@ -42,6 +44,11 @@ pub enum TaskStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    /// Planner decided; the task is now queued with this harness and prompt.
+    Planned {
+        harness: String,
+        prompt: String,
+    },
     Started {
         session: Option<String>,
     },
@@ -91,6 +98,7 @@ pub enum OrchMsg {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMsg {
     Status,
+    /// `harness` None lets the orchestrator's planner choose and rewrite the prompt.
     Submit {
         prompt: String,
         cwd: Option<String>,
@@ -130,7 +138,8 @@ pub enum ServerMsg {
     },
     Event {
         task: TaskId,
-        worker: WorkerId,
+        /// None for events from the orchestrator's planner.
+        worker: Option<WorkerId>,
         event: AgentEvent,
     },
     Error {
