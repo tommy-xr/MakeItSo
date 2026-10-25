@@ -122,18 +122,15 @@ impl App {
 
 /// Native clients send no `Origin`; a browser's must exactly match an allowlist entry.
 /// Rejecting other origins stops arbitrary web pages from driving a local orchestrator.
-pub fn origin_allowed(origin: Option<&str>, allowed: &[String]) -> bool {
-    match origin {
-        None => true,
-        Some(o) => allowed.iter().any(|a| a == o),
-    }
+fn origin_allowed(origin: Option<&str>, allowed: &[String]) -> bool {
+    origin.is_none_or(|o| allowed.iter().any(|a| a == o))
 }
 
-/// Trim entries, drop a trailing `/`, skip blanks: ` https://x.com/ ` -> `https://x.com`,
+/// Trim, lowercase, drop a trailing `/`, skip blanks: ` HTTPS://X.com/ ` -> `https://x.com`,
 /// which is the form browsers send in `Origin`.
 pub fn normalize_origins(raw: impl IntoIterator<Item = String>) -> Vec<String> {
     raw.into_iter()
-        .map(|o| o.trim().trim_end_matches('/').to_string())
+        .map(|o| o.trim().trim_end_matches('/').to_ascii_lowercase())
         .filter(|o| !o.is_empty())
         .collect()
 }
@@ -306,7 +303,7 @@ mod tests {
     #[test]
     fn normalizes_entries() {
         assert_eq!(
-            normalize_origins(list(&[" https://x.com/ ", "", "  ", "http://a:1"])),
+            normalize_origins(list(&[" HTTPS://X.com/ ", "", "  ", "http://a:1"])),
             list(&["https://x.com", "http://a:1"])
         );
     }

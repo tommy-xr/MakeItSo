@@ -46,4 +46,5 @@ export CF_ACCESS_CLIENT_SECRET=<secret>
 ```
 
 Requests with a browser `Origin` are rejected unless listed via `--allowed-origin https://mis.example.com`
-(repeatable, or comma-separated `MIS_ALLOWED_ORIGINS`).
+(repeatable, or comma-separated `MIS_ALLOWED_ORIGINS`). Browsers can't send the bearer token, so serve
+a browser page from a loopback, token-less orchestrator behind an authenticating proxy (e.g. Cloudflare Access).
