@@ -28,4 +28,5 @@ export MIS_TOKEN=secret                    # optional; omit on both sides to dis
 ./target/debug/mis status
 ```
 
-Remote machines: `--bind 0.0.0.0:7474` on the orchestrator, `MIS_URL=ws://host:7474` on workers/CLI.
+Remote machines: start the orchestrator with `--bind 0.0.0.0:7474` and a `MIS_TOKEN`. It prints a
+ready-to-paste `MIS_URL=... mis-worker` line for each LAN address (and for `--public-url` if set).
