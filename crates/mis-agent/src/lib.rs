@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use mis_types::AgentEvent;
+use mis_types::{AgentEvent, TaskId};
 use tokio::sync::mpsc;
 
 pub mod claude;
@@ -15,8 +15,10 @@ pub trait Agent: Send + Sync {
     /// Harness name as advertised to the orchestrator, e.g. "claude".
     fn name(&self) -> &'static str;
     /// Run to completion. Must end with exactly one `AgentEvent::Finished`.
+    /// The agent process sees `MIS_TASK=<task>` so nested `mis task` calls can be refused.
     fn run<'a>(
         &'a self,
+        task: TaskId,
         prompt: &'a str,
         cwd: Option<&'a str>,
         tx: mpsc::Sender<AgentEvent>,

@@ -33,6 +33,9 @@ enum Cmd {
         /// Stream this task's events until it finishes.
         #[arg(long, short)]
         follow: bool,
+        /// Allow submitting from inside a running task (set by MIS_TASK).
+        #[arg(long)]
+        nested: bool,
     },
     /// Stream all task events.
     Tail,
@@ -177,6 +180,15 @@ async fn main() -> Result<()> {
     if let Cmd::Dev { skip_permissions } = args.cmd {
         return dev(&args.url, args.token.as_deref(), skip_permissions).await;
     }
+    // An agent submitting a task to the fleet that is running it can deadlock on
+    // a single worker; make that opt-in.
+    if let Cmd::Task { nested: false, .. } = args.cmd {
+        if let Ok(parent) = std::env::var("MIS_TASK") {
+            bail!(
+                "refusing to submit from inside task {parent}; do the work here, or pass --nested"
+            );
+        }
+    }
     let mut ws = connect(&args).await?;
     match &args.cmd {
         Cmd::Status => {
@@ -216,6 +228,7 @@ async fn main() -> Result<()> {
             cwd,
             harness,
             follow,
+            nested: _,
         } => {
             if *follow {
                 send(&mut ws, &ClientMsg::Subscribe).await?;
