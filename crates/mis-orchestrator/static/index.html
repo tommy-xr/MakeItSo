@@ -25,7 +25,11 @@
   li a { display: block; padding: 12px 0; border-top: 1px solid var(--line); text-decoration: none; }
   .failed { color: var(--bad); }
   .done { color: var(--ok); }
-  .sum { color: var(--dim); }
+  /* Answers: full text, list view clamped to a few lines (tap for the rest). */
+  .answer { white-space: pre-wrap; word-break: break-word; margin: 6px 0 0; }
+  li .answer { display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
+  details { margin-top: 16px; }
+  summary { color: var(--dim); cursor: pointer; padding: 8px 0; }
   pre { white-space: pre-wrap; word-break: break-word; margin: 0; }
   dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 8px 0 16px; }
   dt { color: var(--dim); }
@@ -58,7 +62,8 @@
 <main id="detail" hidden>
   <p><a href="#">← back</a></p>
   <dl id="fields"></dl>
-  <pre id="log" class="mono"></pre>
+  <pre id="answer" class="answer"></pre>
+  <details><summary>transcript</summary><pre id="log" class="mono"></pre></details>
 </main>
 
 <p class="dim"><a href="#" id="clear" hidden>disconnect / clear token</a></p>
@@ -77,12 +82,6 @@ function el(tag, props, ...kids) {
   const n = Object.assign(document.createElement(tag), props || {});
   for (const k of kids) n.append(k);
   return n;
-}
-
-// First line of `s`, cut to `max` chars with a trailing ellipsis (as the CLI does).
-function firstLine(s, max) {
-  const line = [...(s.split(/\r?\n/)[0])];
-  return line.length <= max ? line.join('') : line.slice(0, max - 1).join('') + '…';
 }
 
 // One transcript line, matching `mis show` / `mis task --follow`.
@@ -126,7 +125,7 @@ function renderList() {
     el('a', { href: `#task/${t.id}` },
       el('div', { className: 'mono' }, `${t.id.slice(0, 8)} `, el('span', { className: t.status }, t.status)),
       el('div', {}, t.prompt),
-      t.summary ? el('div', { className: 'sum' }, `-> ${firstLine(t.summary, 80)}`) : ''))));
+      t.summary ? el('pre', { className: 'answer' }, t.summary) : ''))));
   if (!tasks.length) $('tasks').append(el('li', { className: 'dim' }, 'no tasks yet'));
 }
 
@@ -139,11 +138,13 @@ function renderDetail(id) {
   const f = $('fields');
   f.replaceChildren();
   if (t) {
-    for (const [k, v] of [['id', t.id], ['status', t.status], ['harness', t.harness], ['worker', t.worker],
-      ['session', t.session], ['prompt', t.prompt], ['summary', t.summary]]) {
+    for (const [k, v] of [['prompt', t.prompt], ['status', t.status], ['harness', t.harness],
+      ['id', t.id], ['worker', t.worker], ['session', t.session]]) {
       f.append(el('dt', {}, k), el('dd', { className: k === 'status' ? v : '' }, v || '-'));
     }
   }
+  // The answer is what a question-style task is for; transcript is secondary.
+  $('answer').textContent = t && t.summary ? t.summary : (t && t.status === 'running' ? 'working…' : '');
   $('log').textContent = detail.ready ? detail.lines.join('\n') : 'loading…';
 }
 
