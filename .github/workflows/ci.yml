@@ -32,8 +32,13 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
+          # Apple's toolchain cross-compiles to Intel from the arm64 runner.
+          - os: macos-latest
+            target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             ext: .exe
