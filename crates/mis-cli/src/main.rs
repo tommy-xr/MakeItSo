@@ -209,6 +209,8 @@ fn print_event(task: TaskId, event: &AgentEvent) {
             let first = content.lines().next().unwrap_or("");
             println!("[{short}] < {first}");
         }
+        // Running totals; `mis status` shows the latest.
+        AgentEvent::Usage { .. } => {}
         AgentEvent::Finished { ok, summary } => {
             println!(
                 "[{short}] {} {}",
@@ -217,16 +219,6 @@ fn print_event(task: TaskId, event: &AgentEvent) {
             )
         }
     }
-}
-
-/// First line of `s`, cut to `max` chars with a trailing ellipsis.
-fn first_line(s: &str, max: usize) -> String {
-    let line = s.lines().next().unwrap_or("");
-    if line.chars().count() <= max {
-        return line.to_string();
-    }
-    let cut: String = line.chars().take(max - 1).collect();
-    format!("{cut}…")
 }
 
 /// `disk 38% cpu 64% mem 82%`, or `stats: -` before the first report.
@@ -259,6 +251,47 @@ fn placement(t: &TaskSummary, workers: &[WorkerSummary]) -> String {
     s
 }
 
+/// `42s`, `3m04s`, `2h05m`.
+fn elapsed(ms: u64) -> String {
+    let s = ms / 1000;
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m{:02}s", s / 60, s % 60),
+        _ => format!("{}h{:02}m", s / 3600, s / 60 % 60),
+    }
+}
+
+/// `850`, `12.3k`, `1.2M`.
+fn tokens(n: u64) -> String {
+    match n {
+        0..1000 => n.to_string(),
+        1000..1_000_000 => format!("{:.1}k", n as f64 / 1e3),
+        _ => format!("{:.1}M", n as f64 / 1e6),
+    }
+}
+
+/// `claude/sonnet @ host · 1m04s · 12.3k/1.1k · > Bash ls`; tokens only once
+/// reported. A running task's time runs to `now_ms`.
+fn task_line(t: &TaskSummary, workers: &[WorkerSummary], now_ms: u64) -> String {
+    let mut parts = vec![placement(t, workers)];
+    if let Some(start) = t.started_at {
+        parts.push(elapsed(
+            t.finished_at.unwrap_or(now_ms).saturating_sub(start),
+        ));
+    }
+    if let (Some(i), Some(o)) = (t.tokens_in, t.tokens_out) {
+        parts.push(format!("{}/{}", tokens(i), tokens(o)));
+    }
+    parts.push(t.activity.clone());
+    parts.join(" · ")
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
 /// The one task whose id starts with `prefix`.
 fn resolve(tasks: &[TaskSummary], prefix: &str) -> Result<TaskId> {
     let hits: Vec<_> = tasks
@@ -286,10 +319,16 @@ async fn main() -> Result<()> {
             let ServerMsg::Status { workers, tasks } = recv(&mut ws).await? else {
                 bail!("unexpected reply")
             };
+            let now = unix_ms();
             println!("workers ({}):", workers.len());
             for w in &workers {
+                let current = tasks
+                    .iter()
+                    .find(|t| t.worker == Some(w.id) && t.status == TaskStatus::Running)
+                    .map(|t| format!(" · {} {}", &t.id.to_string()[..8], t.activity))
+                    .unwrap_or_default();
                 println!(
-                    "  {} {} {} {:?} roots={} {}{}",
+                    "  {} {} {} {:?} roots={} {}{}{current}",
                     w.id,
                     w.info.hostname,
                     w.info.os,
@@ -308,10 +347,10 @@ async fn main() -> Result<()> {
             println!("tasks ({}):", tasks.len());
             for t in tasks {
                 println!(
-                    "  {} {:<8} {} {}{}",
+                    "  {} {:<8} {}\n      {}{}",
                     &t.id.to_string()[..8],
                     format!("{:?}", t.status).to_lowercase(),
-                    placement(&t, &workers),
+                    task_line(&t, &workers, now),
                     t.prompt,
                     t.summary
                         .map(|s| format!(" -> {}", first_line(&s, 80)))
@@ -439,6 +478,11 @@ mod tests {
             model: None,
             session: None,
             summary: None,
+            started_at: None,
+            finished_at: None,
+            tokens_in: None,
+            tokens_out: None,
+            activity: String::new(),
         }
     }
 
@@ -475,6 +519,31 @@ mod tests {
     }
 
     #[test]
+    fn task_line_shows_time_tokens_activity() {
+        let mut t = summary("aaaa0000-0000-0000-0000-000000000000");
+        t.activity = "> Bash ls".into();
+        assert_eq!(task_line(&t, &[], 0), "claude · > Bash ls");
+        t.started_at = Some(1_000);
+        t.tokens_in = Some(12_345);
+        t.tokens_out = Some(1_100);
+        // Running: up to now. Finished: up to finished_at.
+        assert_eq!(
+            task_line(&t, &[], 65_000),
+            "claude · 1m04s · 12.3k/1.1k · > Bash ls"
+        );
+        t.finished_at = Some(43_000);
+        assert_eq!(
+            task_line(&t, &[], 9_999_999),
+            "claude · 42s · 12.3k/1.1k · > Bash ls"
+        );
+        assert_eq!(elapsed(7_530_000), "2h05m");
+        assert_eq!(
+            (tokens(850), tokens(1_234_567)),
+            ("850".into(), "1.2M".into())
+        );
+    }
+
+    #[test]
     fn placement_shows_known_parts() {
         let mut t = summary("aaaa0000-0000-0000-0000-000000000000");
         assert_eq!(placement(&t, &[]), "claude");
@@ -502,11 +571,5 @@ mod tests {
         t.model = None;
         t.worker = None;
         assert_eq!(placement(&t, &[]), "-");
-    }
-
-    #[test]
-    fn first_line_truncates() {
-        assert_eq!(first_line("ab\ncd", 80), "ab");
-        assert_eq!(first_line("abcdef", 4), "abc…");
     }
 }
