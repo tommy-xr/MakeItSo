@@ -44,10 +44,10 @@ pub fn prompt(request: &str, fleet: &Fleet) -> String {
     } else {
         format!(
             "Models per harness:\n{models}\
-             Set \"model\" to one listed for the chosen harness: honor an explicit choice in \
-             the request, otherwise the cheapest one adequate for it (e.g. haiku for trivial \
-             lookups or summaries, sonnet by default, opus for hard multi-file engineering). \
-             Omit \"model\" for a harness with none listed.\n"
+             If the chosen harness lists models, always set \"model\" to one of them: the one \
+             the request names, otherwise the cheapest adequate for it (e.g. haiku for trivial \
+             lookups or summaries, sonnet for ordinary coding, opus for hard multi-file \
+             engineering). Otherwise omit \"model\".\n"
         )
     };
     format!(
