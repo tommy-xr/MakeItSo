@@ -682,6 +682,55 @@ async fn show_returns_transcript() {
     };
 }
 
+#[tokio::test]
+async fn status_shows_activity_tokens_and_timing() {
+    let base = start().await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    send(&mut client, &ClientMsg::Subscribe).await;
+    let mut worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+    send(
+        &mut client,
+        &ClientMsg::Submit {
+            prompt: "hi".into(),
+            cwd: None,
+            harness: Some("claude".into()),
+            model: None,
+        },
+    )
+    .await;
+    let ServerMsg::Submitted { task } = recv(&mut client).await else {
+        panic!()
+    };
+    let OrchMsg::Assign { .. } = recv(&mut worker).await else {
+        panic!()
+    };
+    for event in [
+        AgentEvent::ToolUse {
+            name: "Bash".into(),
+            input: serde_json::json!({"command": "ls"}),
+        },
+        AgentEvent::Usage {
+            input: 12_300,
+            output: 1_100,
+        },
+    ] {
+        send(&mut worker, &WorkerMsg::Event { task, event }).await;
+        // Usage is broadcast too, so followers can update live.
+        let ServerMsg::Event { .. } = recv(&mut client).await else {
+            panic!()
+        };
+    }
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { tasks, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    let t = &tasks[0];
+    assert_eq!(t.activity, "> Bash ls");
+    assert_eq!((t.tokens_in, t.tokens_out), (Some(12_300), Some(1_100)));
+    assert!(t.started_at.unwrap() > 1_700_000_000_000);
+    assert_eq!(t.finished_at, None);
+}
+
 /// Picks codex and its advertised model, and rewrites the prompt.
 const ROUTE_CODEX: &str =
     r#"{"harness":"codex","model":"codex-mini","prompt":"say hi","reason":"user asked for codex"}"#;

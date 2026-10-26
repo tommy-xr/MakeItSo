@@ -63,6 +63,7 @@
   .clamp2, .clamp3 { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
   .clamp2 { -webkit-line-clamp: 2; } .clamp3 { -webkit-line-clamp: 3; }
   .sub { margin-top: .125rem; }
+  .activity { margin-top: .125rem; color: var(--run); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .back { display: inline-flex; align-items: center; min-height: 2.75rem; padding: 0 1rem; border: 1px solid var(--line); text-decoration: none; }
   #answer { margin: 1.5rem 0 1rem; }
   .meta { margin: .25rem 0; }
@@ -158,9 +159,10 @@ function el(tag, props, ...kids) {
   return n;
 }
 
-// One transcript line, matching `mis show` / `mis task --follow`.
+// One transcript line, matching `mis show` / `mis task --follow`; null for none.
 function eventLine(e) {
   switch (e.type) {
+    case 'usage': return null; // running totals, shown on the task row
     case 'planned': return `plan: ${e.harness}${e.model ? `/${e.model}` : ''}: ${e.prompt}`;
     case 'started': return 'started';
     case 'text': return e.text;
@@ -188,11 +190,36 @@ function hostOf(wid) {
 
 function send(msg) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
 
-// Coalesce bursts of lifecycle events into one Status request.
+// At most one Status request per 300ms while events stream in.
 function refreshSoon() {
-  clearTimeout(statusTimer);
-  statusTimer = setTimeout(() => send({ type: 'status' }), 300);
+  if (statusTimer) return;
+  statusTimer = setTimeout(() => { statusTimer = 0; send({ type: 'status' }); }, 300);
 }
+
+// `42s`, `3m04s`, `2h05m`, as `mis status` prints them.
+function fmtElapsed(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000)), pad = (n) => String(n).padStart(2, '0');
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m${pad(s % 60)}s`;
+  return `${Math.floor(s / 3600)}h${pad(Math.floor(s / 60) % 60)}m`;
+}
+const fmtTokens = (n) => (n < 1e3 ? `${n}` : n < 1e6 ? `${(n / 1e3).toFixed(1)}k` : `${(n / 1e6).toFixed(1)}M`);
+// `12.3k/1.1k` once the agent reports usage.
+const tokensOf = (t) => (num(t.tokens_in) === null || num(t.tokens_out) === null ? '' : `${fmtTokens(t.tokens_in)}/${fmtTokens(t.tokens_out)}`);
+const finished = (t) => t.status === 'done' || t.status === 'failed';
+// Time since submit; `tick` advances it every second until the task finishes.
+function clock(t) {
+  if (num(t.started_at) === null) return '';
+  if (num(t.finished_at) !== null) return fmtElapsed(t.finished_at - t.started_at);
+  const s = el('span', {}, fmtElapsed(Date.now() - t.started_at));
+  s.dataset.start = t.started_at;
+  return s;
+}
+function tick() {
+  for (const s of document.querySelectorAll('[data-start]')) s.textContent = fmtElapsed(Date.now() - Number(s.dataset.start));
+}
+// Known parts joined with ` · `.
+const dots = (parts) => parts.filter(Boolean).flatMap((p, i) => (i ? [' · ', p] : [p]));
 
 // `#` tasks, `#task/<id>`, `#workers`, `#worker/<id>`.
 function route() {
@@ -220,12 +247,13 @@ function render() {
 // `claude · sonnet · host`, leaving out what isn't known yet.
 const placement = (t) => [t.harness, t.model, t.worker && hostOf(t.worker)].filter(Boolean);
 
-// Status + prompt, then placement, then the answer preview. Newest first.
+// Status + prompt, then placement/time/tokens, then what it's doing or the answer preview. Newest first.
 function taskRows(ul, list) {
   ul.replaceChildren(...[...list].reverse().map((t) => el('li', {},
     el('a', { href: `#task/${t.id}` },
       el('div', { className: 'head clamp2' }, chip(t.status), t.prompt),
-      el('div', { className: 'sub dim' }, placement(t).join(' · ')),
+      el('div', { className: 'sub dim' }, ...dots([...placement(t), clock(t), tokensOf(t)])),
+      !finished(t) && t.activity ? el('div', { className: 'activity' }, t.activity) : '',
       t.summary ? el('pre', { className: 'answer clamp3' }, t.summary) : ''))));
   if (!list.length) ul.append(el('li', { className: 'dim' }, 'no tasks yet'));
 }
@@ -264,6 +292,7 @@ function renderWorkers() {
     return el('li', { className: `worker${st === 'offline' ? ' off' : ''}` },
       el('div', { className: 'head' }, el('a', { href: `#worker/${w.id}`, className: 'open' }, w.info.hostname), ' ', chip(st),
         run ? el('a', { href: `#task/${run.id}`, className: 'task' }, short(run.id)) : ''),
+      run ? el('div', { className: 'activity' }, ...dots([run.activity, clock(run), tokensOf(run)])) : '',
       meterLine(w));
   }));
   if (!workers.length) $('machines').append(el('li', { className: 'dim' }, 'no workers connected'));
@@ -318,12 +347,15 @@ function onMessage(msg) {
         detail.ready = true;
       }
       break;
-    case 'event':
-      if (['started', 'finished', 'planned'].includes(msg.event.type)) refreshSoon();
+    case 'event': {
+      // Rows show each task's latest activity and tokens.
+      refreshSoon();
       // Only an open transcript shows events; re-rendering other views would drop focus.
-      if (!detail || !detail.ready || detail.id !== msg.task) return;
-      detail.lines.push(eventLine(msg.event));
+      const line = eventLine(msg.event);
+      if (!detail || !detail.ready || detail.id !== msg.task || line === null) return;
+      detail.lines.push(line);
       break;
+    }
     case 'error':
       $('conn').textContent = `error: ${msg.message}`;
       // A pending Show failed (unknown task): say so. Otherwise events were dropped: re-fetch.
@@ -397,6 +429,7 @@ $('clear').onclick = (e) => {
   render();
 };
 window.onhashchange = render;
+setInterval(tick, 1000);
 
 fetch('/api/info').then((r) => r.json()).then((info) => { authNeeded = info.auth; connect(); })
   .catch((e) => { $('conn').textContent = `cannot reach server: ${e.message}`; });

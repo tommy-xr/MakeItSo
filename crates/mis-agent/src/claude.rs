@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(p.line(&asst("m1", 4)), [usage(110, 4), text.clone()]);
         // Same message again (next content block): replaced, not added; unchanged is not resent.
         assert_eq!(p.line(&asst("m1", 9)), [usage(110, 9), text.clone()]);
-        assert_eq!(p.line(&asst("m1", 9)), [text.clone()]);
+        assert_eq!(p.line(&asst("m1", 9)), std::slice::from_ref(&text));
         assert_eq!(p.line(&asst("m2", 1)), [usage(220, 10), text]);
         let res = r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","usage":{"input_tokens":4,"cache_creation_input_tokens":200,"cache_read_input_tokens":16,"output_tokens":83}}"#;
         assert_eq!(
