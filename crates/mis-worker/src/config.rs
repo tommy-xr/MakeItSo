@@ -1,5 +1,6 @@
 //! `worker.toml`: saved connection settings. Flags / env override the file.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -17,6 +18,9 @@ pub struct Config {
     pub cf_access_client_secret: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roots: Vec<PathBuf>,
+    /// `[models] claude = [...]`: replaces that harness's discovered models.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, Vec<String>>,
 }
 
 /// Settings the worker runs with.
@@ -28,6 +32,7 @@ pub struct Resolved {
     pub cf_access_client_secret: Option<String>,
     /// Never empty.
     pub roots: Vec<PathBuf>,
+    pub models: BTreeMap<String, Vec<String>>,
 }
 
 /// `cli` beats `file` beats defaults (`DEFAULT_URL`, roots = `[cwd]`). The
@@ -39,6 +44,8 @@ pub fn merge(cli: Config, file: Config, cwd: PathBuf) -> Resolved {
     } else {
         (file.cf_access_client_id, file.cf_access_client_secret)
     };
+    let mut models = file.models;
+    models.extend(cli.models);
     let roots = [cli.roots, file.roots, vec![cwd]]
         .into_iter()
         .find(|r| !r.is_empty())
@@ -49,6 +56,7 @@ pub fn merge(cli: Config, file: Config, cwd: PathBuf) -> Resolved {
         cf_access_client_id,
         cf_access_client_secret,
         roots,
+        models,
     }
 }
 
@@ -93,6 +101,9 @@ mod tests {
             cf_access_client_id = "file.access"
             cf_access_client_secret = "file-secret"
             roots = ["/code"]
+
+            [models]
+            codex = ["gpt-a"]
             "#,
         )
         .unwrap()
@@ -105,6 +116,7 @@ mod tests {
         assert_eq!(r.token.as_deref(), Some("file-token"));
         assert_eq!(r.cf_access_client_id.as_deref(), Some("file.access"));
         assert_eq!(r.roots, vec![PathBuf::from("/code")]);
+        assert_eq!(r.models["codex"], ["gpt-a"]);
     }
 
     #[test]

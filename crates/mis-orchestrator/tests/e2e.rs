@@ -687,6 +687,9 @@ impl mis_agent::Agent for FakePlanner {
     fn name(&self) -> &'static str {
         "fake"
     }
+    fn models(&self) -> Vec<String> {
+        vec![]
+    }
     fn run<'a>(
         &'a self,
         _task: TaskId,

@@ -211,8 +211,8 @@ impl Ledger {
 
     /// Every harness a known worker offers, with the models every such worker
     /// advertises (scheduling ignores the model, so any of them may get the task);
-    /// with no workers, every harness that exists and its built-in models, so a
-    /// plan made before the fleet connects still queues.
+    /// with no workers, every harness that exists and no models, so a plan made
+    /// before the fleet connects still queues (on the harness default).
     pub fn fleet(&self) -> plan::Fleet {
         let mut fleet = plan::Fleet::new();
         for w in self.workers.values() {
@@ -227,10 +227,7 @@ impl Ledger {
         if fleet.is_empty() {
             fleet = mis_agent::HARNESSES
                 .iter()
-                .map(|h| {
-                    let models = mis_agent::models(h).iter().map(|m| m.to_string());
-                    (h.to_string(), models.collect())
-                })
+                .map(|h| (h.to_string(), vec![]))
                 .collect();
         }
         fleet
@@ -933,8 +930,8 @@ mod tests {
     #[test]
     fn planned_model_is_sent_and_fleet_intersects_models() {
         let mut l = Ledger::default();
-        // Default table when no worker is known.
-        assert_eq!(l.fleet()["claude"], ["haiku", "sonnet", "opus"]);
+        // No worker known: harnesses, no models.
+        assert!(l.fleet()["claude"].is_empty());
         // Only models every claude worker offers.
         let mut big = info();
         big.models

@@ -1,6 +1,7 @@
 //! Harness abstraction: run a prompt, stream normalized `AgentEvent`s back.
 
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use mis_types::{AgentEvent, TaskId};
@@ -14,6 +15,9 @@ pub type BoxFut<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '
 pub trait Agent: Send + Sync {
     /// Harness name as advertised to the orchestrator, e.g. "claude".
     fn name(&self) -> &'static str;
+    /// Models the planner may pick for this harness, read from the harness's own
+    /// files. Never fails: falls back (with a warning) when they can't be read.
+    fn models(&self) -> Vec<String>;
     /// Run to completion. Must end with exactly one `AgentEvent::Finished`.
     /// The agent process sees `MIS_TASK=<task>` so nested `mis task` calls can be refused.
     /// `model` None leaves the harness's default.
@@ -29,15 +33,6 @@ pub trait Agent: Send + Sync {
 
 /// Every harness this crate can run.
 pub const HARNESSES: [&str; 2] = ["claude", "codex"];
-
-/// Models the planner may pick for `harness`, cheapest first. Codex model ids
-/// change too often to pin here, so codex always runs its configured default.
-pub fn models(harness: &str) -> &'static [&'static str] {
-    match harness {
-        "claude" => &["haiku", "sonnet", "opus"],
-        _ => &[],
-    }
-}
 
 /// `Agent::run` that always ends with a Finished: an Err or a panic inside the
 /// agent becomes `Finished { ok: false }` instead of a task stuck running.
@@ -83,6 +78,17 @@ pub fn available(skip_permissions: bool) -> Vec<Box<dyn Agent>> {
         v.push(Box::new(codex::CodexAgent { skip_permissions }));
     }
     v
+}
+
+fn home() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+}
+
+/// `path`'s contents; the error names the file.
+fn read(path: &Path) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 pub fn which(bin: &str) -> bool {

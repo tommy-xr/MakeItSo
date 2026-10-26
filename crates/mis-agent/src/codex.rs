@@ -15,6 +15,35 @@ pub struct CodexAgent {
     pub skip_permissions: bool,
 }
 
+/// Slugs from codex's `models_cache.json` with visibility "list", by priority,
+/// after the default `model` set at the top level of `config.toml` (if any).
+pub fn codex_models(cache_json: &str, config_toml: &str) -> Result<Vec<String>, String> {
+    let v: Value = serde_json::from_str(cache_json).map_err(|e| e.to_string())?;
+    let mut listed: Vec<(i64, &str)> = v["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["visibility"] == "list")
+        .filter_map(|m| {
+            Some((
+                m["priority"].as_i64().unwrap_or(i64::MAX),
+                m["slug"].as_str()?,
+            ))
+        })
+        .collect();
+    listed.sort_by_key(|(p, _)| *p);
+    let default = toml::from_str::<toml::Table>(config_toml)
+        .ok()
+        .and_then(|t| Some(t.get("model")?.as_str()?.to_string()));
+    let mut out: Vec<String> = default.into_iter().collect();
+    for (_, slug) in listed {
+        if !out.iter().any(|o| o == slug) {
+            out.push(slug.to_string());
+        }
+    }
+    Ok(out)
+}
+
 /// Map one `--json` line to zero or more events.
 pub fn parse_line(line: &str) -> Vec<AgentEvent> {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -61,6 +90,22 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
 impl Agent for CodexAgent {
     fn name(&self) -> &'static str {
         "codex"
+    }
+
+    fn models(&self) -> Vec<String> {
+        let dir = std::env::var_os("CODEX_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| crate::home().join(".codex"));
+        // No config just means no default to put first.
+        let config = std::fs::read_to_string(dir.join("config.toml")).unwrap_or_default();
+        let cache = dir.join("models_cache.json");
+        let models = crate::read(&cache).and_then(|c| {
+            codex_models(&c, &config).map_err(|e| format!("{}: {e}", cache.display()))
+        });
+        models.unwrap_or_else(|e| {
+            tracing::warn!("{e}; codex will run its default model");
+            vec![]
+        })
     }
 
     fn run<'a>(
@@ -182,5 +227,27 @@ mod tests {
             }]
         );
         assert!(parse_line(r#"{"type":"turn.started"}"#).is_empty());
+    }
+
+    #[test]
+    fn models_listed_by_priority_after_configured_default() {
+        let cache = r#"{"fetched_at":"x","models":[
+            {"slug":"gpt-b","visibility":"list","priority":4},
+            {"slug":"gpt-hidden","visibility":"hide","priority":0},
+            {"slug":"gpt-a","visibility":"list","priority":1},
+            {"slug":"gpt-c","visibility":"list","priority":2}]}"#;
+        let config = "model = \"gpt-c\"\nmodel_reasoning_effort = \"high\"\n\
+                      [projects.\"/x\"]\nmodel = \"gpt-b\"\n";
+        assert_eq!(
+            codex_models(cache, config).unwrap(),
+            ["gpt-c", "gpt-a", "gpt-b"]
+        );
+        assert_eq!(
+            codex_models(cache, "").unwrap(),
+            ["gpt-a", "gpt-c", "gpt-b"]
+        );
+        // A broken config only loses the default.
+        assert_eq!(codex_models(cache, "model = ").unwrap()[0], "gpt-a");
+        assert!(codex_models("{", "").is_err());
     }
 }

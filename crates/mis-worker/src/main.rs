@@ -6,7 +6,7 @@ mod roots;
 mod setup;
 mod stats;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -79,6 +79,7 @@ async fn main() -> Result<()> {
             .iter()
             .flat_map(|r| roots::split_roots(r))
             .collect(),
+        models: Default::default(),
     };
     let cfg = config::merge(cli, config::load(&path)?, std::env::current_dir()?);
     // Validate before the reconnect loop so bad credentials fail fast.
@@ -96,14 +97,9 @@ async fn main() -> Result<()> {
         arch: std::env::consts::ARCH.into(),
         harnesses: agents.iter().map(|a| a.name().to_string()).collect(),
         roots: roots.iter().map(|r| r.display().to_string()).collect(),
-        models: agents
-            .iter()
-            .map(|a| (a.name(), mis_agent::models(a.name())))
-            .filter(|(_, m)| !m.is_empty())
-            .map(|(h, m)| (h.to_string(), m.iter().map(|s| s.to_string()).collect()))
-            .collect(),
+        models: advertised(&agents, &cfg.models),
     };
-    tracing::info!(?info.harnesses, ?info.roots, "connecting to {}", cfg.url);
+    tracing::info!(?info.harnesses, ?info.models, ?info.roots, "connecting to {}", cfg.url);
     let ctx = Ctx {
         agents: Arc::new(agents),
         roots: Arc::new(roots),
@@ -128,6 +124,22 @@ async fn main() -> Result<()> {
         tokio::time::sleep(conn.backoff).await;
         conn.backoff = (conn.backoff * 2).min(Duration::from_secs(30));
     }
+}
+
+/// Each agent's models, from discovery unless worker.toml's `[models]` sets
+/// them; harnesses with none are left out (they run their default).
+fn advertised(
+    agents: &[Box<dyn Agent>],
+    overrides: &BTreeMap<String, Vec<String>>,
+) -> BTreeMap<String, Vec<String>> {
+    agents
+        .iter()
+        .map(|a| {
+            let models = overrides.get(a.name()).cloned();
+            (a.name().to_string(), models.unwrap_or_else(|| a.models()))
+        })
+        .filter(|(_, m)| !m.is_empty())
+        .collect()
 }
 
 /// What a task needs from the worker: harnesses and allowed directories.
