@@ -23,7 +23,7 @@ struct Args {
     #[arg(long)]
     no_planner: bool,
     /// Model the planner itself runs on.
-    #[arg(long, default_value = "sonnet")]
+    #[arg(long, default_value = "sonnet", value_parser = clap::builder::NonEmptyStringValueParser::new())]
     planner_model: String,
 }
 

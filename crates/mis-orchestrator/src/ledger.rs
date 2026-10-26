@@ -209,19 +209,19 @@ impl Ledger {
         (id, self.schedule())
     }
 
-    /// Every harness a known worker offers, with the models workers advertise for
-    /// it; with no workers, every harness that exists and its built-in models, so
-    /// a plan made before the fleet connects still queues.
+    /// Every harness a known worker offers, with the models every such worker
+    /// advertises (scheduling ignores the model, so any of them may get the task);
+    /// with no workers, every harness that exists and its built-in models, so a
+    /// plan made before the fleet connects still queues.
     pub fn fleet(&self) -> plan::Fleet {
         let mut fleet = plan::Fleet::new();
         for w in self.workers.values() {
             for h in &w.info.harnesses {
-                let models = fleet.entry(h.clone()).or_default();
-                for m in w.info.models.get(h).into_iter().flatten() {
-                    if !models.contains(m) {
-                        models.push(m.clone());
-                    }
-                }
+                let mine = w.info.models.get(h).cloned().unwrap_or_default();
+                fleet
+                    .entry(h.clone())
+                    .and_modify(|m| m.retain(|x| mine.contains(x)))
+                    .or_insert(mine);
             }
         }
         if fleet.is_empty() {
@@ -931,19 +931,19 @@ mod tests {
     }
 
     #[test]
-    fn planned_model_is_sent_and_fleet_merges_models() {
+    fn planned_model_is_sent_and_fleet_intersects_models() {
         let mut l = Ledger::default();
         // Default table when no worker is known.
         assert_eq!(l.fleet()["claude"], ["haiku", "sonnet", "opus"]);
+        // Only models every claude worker offers.
         let mut big = info();
-        big.models.insert("claude".into(), vec!["opus".into()]);
+        big.models
+            .insert("claude".into(), vec!["sonnet".into(), "opus".into()]);
         big.harnesses.push("codex".into());
         l.connect(Uuid::new_v4(), info(), &[], 1, T0);
         l.connect(Uuid::new_v4(), big, &[], 2, T0);
         let fleet = l.fleet();
-        let mut claude = fleet["claude"].clone();
-        claude.sort();
-        assert_eq!(claude, ["haiku", "opus", "sonnet"]);
+        assert_eq!(fleet["claude"], ["sonnet"]);
         assert!(fleet["codex"].is_empty());
 
         let (task, _) = l.submit("summarize the README".into(), None, None, None);
@@ -951,7 +951,7 @@ mod tests {
             task,
             AgentEvent::Finished {
                 ok: true,
-                summary: Some(r#"{"harness":"claude","model":"haiku","reason":"trivial"}"#.into()),
+                summary: Some(r#"{"harness":"claude","model":"sonnet","reason":"default"}"#.into()),
             },
         );
         let sent: Vec<_> = eff
@@ -968,8 +968,8 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(sent, [Some("haiku"), Some("haiku")]);
-        assert_eq!(l.show(task).unwrap().0.model.as_deref(), Some("haiku"));
+        assert_eq!(sent, [Some("sonnet"), Some("sonnet")]);
+        assert_eq!(l.show(task).unwrap().0.model.as_deref(), Some("sonnet"));
     }
 
     #[test]

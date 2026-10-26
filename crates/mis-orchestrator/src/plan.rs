@@ -65,8 +65,9 @@ pub fn prompt(request: &str, fleet: &Fleet) -> String {
 }
 
 /// Extract the plan from the model's reply (which may wrap the JSON in prose or
-/// a code fence), check the harness and model exist, and fill an omitted prompt
-/// with `request`.
+/// a code fence), check the harness exists, and fill an omitted prompt with
+/// `request`. A model not listed for the harness (blank, invented, or gone since
+/// the prompt was built) falls back to the harness default.
 pub fn parse(reply: &str, request: &str, fleet: &Fleet) -> Result<Plan, String> {
     let start = reply.find('{').ok_or("planner reply has no JSON")?;
     let end = reply
@@ -82,14 +83,7 @@ pub fn parse(reply: &str, request: &str, fleet: &Fleet) -> Result<Plan, String> 
             fleet.keys().cloned().collect::<Vec<_>>().join(", ")
         ));
     };
-    plan.model = plan.model.filter(|m| !m.trim().is_empty());
-    if let Some(m) = plan.model.as_ref().filter(|m| !models.contains(m)) {
-        return Err(format!(
-            "planner picked unknown model {m:?} for {} (have {})",
-            plan.harness,
-            models.join(", ")
-        ));
-    }
+    plan.model = plan.model.filter(|m| models.contains(m));
     if plan.prompt.trim().is_empty() {
         plan.prompt = request.to_string();
     }
@@ -127,20 +121,18 @@ mod tests {
     }
 
     #[test]
-    fn validates_model_against_harness() {
+    fn unlisted_model_falls_back_to_default() {
         let p = |reply| parse(reply, "req", &both());
         let ok = p(r#"{"harness":"claude","model":"haiku"}"#).unwrap();
         assert_eq!(ok.model.as_deref(), Some("haiku"));
-        // Blank means default.
-        assert_eq!(
-            p(r#"{"harness":"claude","model":" "}"#).unwrap().model,
-            None
-        );
-        // Listed for another harness, or not at all.
-        assert!(p(r#"{"harness":"codex","model":"haiku"}"#)
-            .unwrap_err()
-            .contains("unknown model"));
-        assert!(p(r#"{"harness":"claude","model":"opus"}"#).is_err());
+        // Blank, listed for another harness, or not at all: harness default.
+        for reply in [
+            r#"{"harness":"claude","model":" "}"#,
+            r#"{"harness":"codex","model":"haiku"}"#,
+            r#"{"harness":"claude","model":"opus"}"#,
+        ] {
+            assert_eq!(p(reply).unwrap().model, None, "{reply}");
+        }
     }
 
     #[test]
