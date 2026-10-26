@@ -105,7 +105,7 @@ async fn submit_assign_finish() {
         panic!()
     };
     send(&mut client, &ClientMsg::Status).await;
-    let ServerMsg::Status { tasks, workers } = recv(&mut client).await else {
+    let ServerMsg::Status { tasks, workers, .. } = recv(&mut client).await else {
         panic!()
     };
     assert!(workers.is_empty());
@@ -160,7 +160,7 @@ async fn submit_assign_finish() {
     };
 
     send(&mut client, &ClientMsg::Status).await;
-    let ServerMsg::Status { tasks, workers } = recv(&mut client).await else {
+    let ServerMsg::Status { tasks, workers, .. } = recv(&mut client).await else {
         panic!()
     };
     assert_eq!(tasks[0].status, TaskStatus::Done);
@@ -298,7 +298,7 @@ async fn worker_disconnect_fails_task_and_notifies() {
     };
     assert_eq!(t, task);
     send(&mut client, &ClientMsg::Status).await;
-    let ServerMsg::Status { tasks, workers } = recv(&mut client).await else {
+    let ServerMsg::Status { tasks, workers, .. } = recv(&mut client).await else {
         panic!()
     };
     assert_eq!(tasks[0].status, TaskStatus::Failed);
@@ -466,7 +466,7 @@ async fn reconnect_keeps_reported_task_and_fails_unreported() {
     let mut worker2 = join(&base, wid, "claude", vec![task]).await;
     drop(worker); // stale socket closing must not remove the new registration
     send(&mut client, &ClientMsg::Status).await;
-    let ServerMsg::Status { tasks, workers } = recv(&mut client).await else {
+    let ServerMsg::Status { tasks, workers, .. } = recv(&mut client).await else {
         panic!()
     };
     assert_eq!(workers.len(), 1);
@@ -506,7 +506,7 @@ async fn reconnect_keeps_reported_task_and_fails_unreported() {
     assert_eq!(t, task);
     assert_eq!(summary.as_deref(), Some("worker restarted"));
     send(&mut client, &ClientMsg::Status).await;
-    let ServerMsg::Status { tasks, workers } = recv(&mut client).await else {
+    let ServerMsg::Status { tasks, workers, .. } = recv(&mut client).await else {
         panic!()
     };
     assert_eq!(workers.len(), 1);
@@ -721,11 +721,12 @@ async fn status_shows_activity_tokens_and_timing() {
         };
     }
     send(&mut client, &ClientMsg::Status).await;
-    let ServerMsg::Status { tasks, .. } = recv(&mut client).await else {
+    let ServerMsg::Status { tasks, now_ms, .. } = recv(&mut client).await else {
         panic!()
     };
     let t = &tasks[0];
     assert_eq!(t.activity, "> Bash ls");
+    assert!(now_ms.unwrap() >= t.started_at.unwrap());
     assert_eq!((t.tokens_in, t.tokens_out), (Some(12_300), Some(1_100)));
     assert!(t.started_at.unwrap() > 1_700_000_000_000);
     assert_eq!(t.finished_at, None);
@@ -890,7 +891,7 @@ async fn planner_answers_trivial_question_without_a_worker() {
     assert_eq!(summary.as_deref(), Some("4"));
 
     send(&mut client, &ClientMsg::Status).await;
-    let ServerMsg::Status { tasks, workers } = recv(&mut client).await else {
+    let ServerMsg::Status { tasks, workers, .. } = recv(&mut client).await else {
         panic!()
     };
     let t = tasks.iter().find(|t| t.id == task).unwrap();

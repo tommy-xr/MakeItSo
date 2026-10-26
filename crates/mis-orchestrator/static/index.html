@@ -150,6 +150,7 @@ const store = {
   set(v) { try { v ? localStorage.setItem('mis-token', v) : localStorage.removeItem('mis-token'); } catch {} },
 };
 let ws = null, authNeeded = false, tasks = [], workers = [], detail = null, retries = 0, retryTimer = 0, statusTimer = 0;
+let skew = 0; // orchestrator clock minus ours, from the last Status; task times are on its clock
 let from = '#'; // last list view, so a task's back link returns to Workers when opened from there
 
 // Text-only DOM builder: every string becomes a text node, never parsed as HTML.
@@ -206,17 +207,16 @@ function fmtElapsed(ms) {
 const fmtTokens = (n) => (n < 1e3 ? `${n}` : n < 1e6 ? `${(n / 1e3).toFixed(1)}k` : `${(n / 1e6).toFixed(1)}M`);
 // `12.3k/1.1k` once the agent reports usage.
 const tokensOf = (t) => (num(t.tokens_in) === null || num(t.tokens_out) === null ? '' : `${fmtTokens(t.tokens_in)}/${fmtTokens(t.tokens_out)}`);
-const finished = (t) => t.status === 'done' || t.status === 'failed';
 // Time since submit; `tick` advances it every second until the task finishes.
 function clock(t) {
   if (num(t.started_at) === null) return '';
   if (num(t.finished_at) !== null) return fmtElapsed(t.finished_at - t.started_at);
-  const s = el('span', {}, fmtElapsed(Date.now() - t.started_at));
+  const s = el('span', {}, fmtElapsed(Date.now() + skew - t.started_at));
   s.dataset.start = t.started_at;
   return s;
 }
 function tick() {
-  for (const s of document.querySelectorAll('[data-start]')) s.textContent = fmtElapsed(Date.now() - Number(s.dataset.start));
+  for (const s of document.querySelectorAll('[data-start]')) s.textContent = fmtElapsed(Date.now() + skew - Number(s.dataset.start));
 }
 // Known parts joined with ` · `.
 const dots = (parts) => parts.filter(Boolean).flatMap((p, i) => (i ? [' · ', p] : [p]));
@@ -247,13 +247,13 @@ function render() {
 // `claude · sonnet · host`, leaving out what isn't known yet.
 const placement = (t) => [t.harness, t.model, t.worker && hostOf(t.worker)].filter(Boolean);
 
-// Status + prompt, then placement/time/tokens, then what it's doing or the answer preview. Newest first.
+// Status + prompt, then placement/time/tokens, then what a running task is doing, then the answer preview. Newest first.
 function taskRows(ul, list) {
   ul.replaceChildren(...[...list].reverse().map((t) => el('li', {},
     el('a', { href: `#task/${t.id}` },
       el('div', { className: 'head clamp2' }, chip(t.status), t.prompt),
       el('div', { className: 'sub dim' }, ...dots([...placement(t), clock(t), tokensOf(t)])),
-      !finished(t) && t.activity ? el('div', { className: 'activity' }, t.activity) : '',
+      t.status === 'running' && t.activity ? el('div', { className: 'activity' }, t.activity) : '',
       t.summary ? el('pre', { className: 'answer clamp3' }, t.summary) : ''))));
   if (!list.length) ul.append(el('li', { className: 'dim' }, 'no tasks yet'));
 }
@@ -292,7 +292,8 @@ function renderWorkers() {
     return el('li', { className: `worker${st === 'offline' ? ' off' : ''}` },
       el('div', { className: 'head' }, el('a', { href: `#worker/${w.id}`, className: 'open' }, w.info.hostname), ' ', chip(st),
         run ? el('a', { href: `#task/${run.id}`, className: 'task' }, short(run.id)) : ''),
-      run ? el('div', { className: 'activity' }, ...dots([run.activity, clock(run), tokensOf(run)])) : '',
+      // Activity last: it's the part the ellipsis may cut.
+      run ? el('div', { className: 'activity' }, ...dots([clock(run), tokensOf(run), run.activity])) : '',
       meterLine(w));
   }));
   if (!workers.length) $('machines').append(el('li', { className: 'dim' }, 'no workers connected'));
@@ -331,6 +332,7 @@ function onMessage(msg) {
   switch (msg.type) {
     case 'status': {
       tasks = msg.tasks;
+      if (num(msg.now_ms) !== null) skew = msg.now_ms - Date.now();
       // The server's order is unstable; sort so rows don't jump on refresh.
       workers = [...msg.workers].sort((a, b) => a.info.hostname.localeCompare(b.info.hostname) || a.id.localeCompare(b.id));
       const harnesses = [...new Set(msg.workers.flatMap((w) => w.info.harnesses))].sort();

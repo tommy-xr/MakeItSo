@@ -217,6 +217,10 @@ pub enum ServerMsg {
     Status {
         workers: Vec<WorkerSummary>,
         tasks: Vec<TaskSummary>,
+        /// Orchestrator's Unix millis, so clients time running tasks on its
+        /// clock rather than their own.
+        #[serde(default)]
+        now_ms: Option<u64>,
     },
     Submitted {
         task: TaskId,

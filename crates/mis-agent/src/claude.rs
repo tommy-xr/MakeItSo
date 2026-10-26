@@ -49,11 +49,8 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
 /// line wins); the `result` line's session totals replace the tally.
 #[derive(Default)]
 pub struct Parser {
-    msg: Option<String>,
-    /// Totals of the messages before `msg`.
-    closed: (u64, u64),
-    /// `msg`'s latest usage.
-    current: (u64, u64),
+    /// Latest usage per message id; lines of different messages may interleave.
+    messages: std::collections::HashMap<String, (u64, u64)>,
     sent: Option<(u64, u64)>,
 }
 
@@ -65,16 +62,11 @@ impl Parser {
         let mut out = events(&v);
         let total = match v["type"].as_str() {
             Some("assistant") => usage(&v["message"]["usage"]).map(|u| {
-                let id = v["message"]["id"].as_str().map(String::from);
-                if id != self.msg {
-                    self.closed = (
-                        self.closed.0 + self.current.0,
-                        self.closed.1 + self.current.1,
-                    );
-                    self.msg = id;
-                }
-                self.current = u;
-                (self.closed.0 + u.0, self.closed.1 + u.1)
+                let id = v["message"]["id"].as_str().unwrap_or_default();
+                self.messages.insert(id.to_string(), u);
+                self.messages
+                    .values()
+                    .fold((0, 0), |a, m| (a.0 + m.0, a.1 + m.1))
             }),
             Some("result") => usage(&v["usage"]),
             _ => None,
@@ -299,7 +291,9 @@ mod tests {
         // Same message again (next content block): replaced, not added; unchanged is not resent.
         assert_eq!(p.line(&asst("m1", 9)), [usage(110, 9), text.clone()]);
         assert_eq!(p.line(&asst("m1", 9)), std::slice::from_ref(&text));
-        assert_eq!(p.line(&asst("m2", 1)), [usage(220, 10), text]);
+        assert_eq!(p.line(&asst("m2", 1)), [usage(220, 10), text.clone()]);
+        // Interleaved (e.g. a subagent's messages): m1 still counted once.
+        assert_eq!(p.line(&asst("m1", 12)), [usage(220, 13), text]);
         let res = r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","usage":{"input_tokens":4,"cache_creation_input_tokens":200,"cache_read_input_tokens":16,"output_tokens":83}}"#;
         assert_eq!(
             p.line(res),

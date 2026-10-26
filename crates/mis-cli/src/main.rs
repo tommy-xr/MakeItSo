@@ -316,10 +316,16 @@ async fn main() -> Result<()> {
     match &args.cmd {
         Cmd::Status => {
             send(&mut ws, &ClientMsg::Status).await?;
-            let ServerMsg::Status { workers, tasks } = recv(&mut ws).await? else {
+            let ServerMsg::Status {
+                workers,
+                tasks,
+                now_ms,
+            } = recv(&mut ws).await?
+            else {
                 bail!("unexpected reply")
             };
-            let now = unix_ms();
+            // Orchestrator's clock, like the task timestamps; older ones don't send it.
+            let now = now_ms.unwrap_or_else(unix_ms);
             println!("workers ({}):", workers.len());
             for w in &workers {
                 let current = tasks
@@ -360,7 +366,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Show { id } => {
             send(&mut ws, &ClientMsg::Status).await?;
-            let ServerMsg::Status { tasks, workers } = recv(&mut ws).await? else {
+            let ServerMsg::Status { tasks, workers, .. } = recv(&mut ws).await? else {
                 bail!("unexpected reply")
             };
             let task = resolve(&tasks, id)?;

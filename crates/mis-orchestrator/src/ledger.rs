@@ -225,6 +225,7 @@ impl Ledger {
                 })
                 .collect(),
             tasks: self.tasks.iter().map(TaskEntry::summary).collect(),
+            now_ms: Some(self.now_ms),
         }
     }
 
@@ -365,6 +366,7 @@ impl Ledger {
                             model: p.model,
                         });
                         events.iter().for_each(|e| t.record(e, now));
+                        // Not the planner's reason: the worker hasn't started yet.
                         t.step = None;
                         let mut effects: Vec<_> = events.into_iter().map(broadcast).collect();
                         effects.extend(self.schedule());
@@ -387,7 +389,7 @@ impl Ledger {
             }
             AgentEvent::Usage { input, output } => {
                 t.tokens = Some((input, output));
-                vec![]
+                vec![broadcast(AgentEvent::Usage { input, output })]
             }
             _ => vec![],
         }
@@ -1240,7 +1242,8 @@ mod tests {
             input: 4_000,
             output: 20,
         };
-        l.planning_event(planned, usage.clone());
+        // Broadcast so followers refresh.
+        assert_eq!(l.planning_event(planned, usage.clone()).len(), 1);
         l.planning_event(
             planned,
             AgentEvent::Finished {
