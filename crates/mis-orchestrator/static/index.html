@@ -4,42 +4,102 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Make It So</title>
+<!-- Quest browser: VR panels are read at arm's length, so `html.vr` enlarges type. In head to avoid a 16px first paint. -->
+<script>if (/OculusBrowser|Quest/.test(navigator.userAgent)) document.documentElement.classList.add('vr');</script>
 <style>
-  :root { color-scheme: light dark; --fg: #111; --bg: #fff; --dim: #666; --line: #ddd; --bad: #b00; --ok: #070; }
-  @media (prefers-color-scheme: dark) {
-    :root { --fg: #eee; --bg: #111; --dim: #999; --line: #333; --bad: #f66; --ok: #6c6; }
+  :root { color-scheme: dark; --page: #141320; --frame: #4F4D66; --screen: #232236; --field: #1C1B2C; --fg: #ECEAF5; --dim: #A9A6C6; --line: #7B7898; --rule: #38364E; --answer: #9DE6F2; --ok: #86E3B4; --bad: #FF9CC2; --run: #EED384; --focus: #5FDDF2; --hot: #FF3D9A; --crit: #FF6B6B;
+    --synth: #FF3D9A 0 20%, #D244CC 0 40%, #B04DFF 0 60%, #5F9BFF 0 80%, #2FD8F2 0;
+    --arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M0 0h10L5 6z' fill='%23ECEAF5'/%3E%3C/svg%3E");
+    --mono: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace; }
+  @media (prefers-color-scheme: light) {
+    :root { color-scheme: light; --page: #D3D2DC; --frame: #A3A1B5; --screen: #E8E7EF; --field: #F6F5FA; --fg: #29273D; --dim: #56536E; --line: #7E7B94; --rule: #CFCDDB; --answer: #005F70; --ok: #1F6B45; --bad: #A5285E; --run: #735400; --focus: #8A2BD0; --crit: #B3261E;
+      --arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M0 0h10L5 6z' fill='%2329273D'/%3E%3C/svg%3E"); }
   }
-  body { margin: 0 auto; max-width: 720px; padding: 12px 16px 48px; font: 16px/1.4 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
-  h1 { font-size: 20px; margin: 4px 0 8px; }
+  /* Slate screen in a thin grey bezel; on a phone the bezel fills the edge. */
+  html { background: var(--page); padding: .375rem; min-height: 100%; box-sizing: border-box; }
+  body { --pad: 1.25rem; box-sizing: border-box; margin: 0 auto; max-width: 46rem; min-height: calc(100vh - .75rem); padding: 1.5rem var(--pad) 3rem; background: var(--screen); box-shadow: 0 0 0 .375rem var(--frame); color: var(--fg); font: 1rem/1.55 var(--mono); }
+  @media (min-width: 64rem) { html { padding: 3rem; } body { --pad: 2.5rem; min-height: calc(100vh - 6rem); padding-top: 2.25rem; } }
+  /* Boot banner, then the synthwave stripe (five stacked lines) across the screen. */
+  h1 { margin: 0 calc(-1 * var(--pad)); padding: 0 var(--pad) 1.5rem; font-size: 1rem; font-weight: 500; text-align: center; text-transform: uppercase; letter-spacing: .08em; color: var(--dim);
+    background: linear-gradient(var(--synth)) bottom / 100% .625rem no-repeat; }
+  h1::before { content: "**** "; }
+  h1::after { content: " ****"; }
+  #conn { margin: 1.25rem 0 .5rem; text-transform: uppercase; overflow-wrap: anywhere; }
+  #conn::after { content: ""; display: inline-block; width: .6em; height: 1.1em; margin-left: .2em; vertical-align: -.2em; background: var(--fg); animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { #conn::after { animation: none; } }
+  #tabs { display: flex; gap: 1.5rem; margin: 0 0 1.25rem; border-bottom: 1px solid var(--rule); }
+  [role=tab] { display: inline-flex; align-items: center; justify-content: center; min-height: 2.75rem; min-width: 2.75rem; color: var(--dim); text-decoration: none; }
+  [role=tab][aria-selected=true] { color: var(--fg); box-shadow: inset 0 -2px var(--answer); }
+  p { margin: 0 0 .75rem; }
   a { color: inherit; }
-  textarea, input, select, button { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; box-sizing: border-box; }
-  textarea, input[type=password] { width: 100%; padding: 10px; }
-  textarea { min-height: 96px; resize: vertical; }
-  select, button { min-height: 44px; padding: 0 14px; }
-  button { font-weight: 600; }
-  .row { display: flex; gap: 8px; margin: 8px 0 16px; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  textarea, input, select, button { font: inherit; color: var(--fg); background: var(--field); border: 1px solid var(--line); border-radius: 0; box-sizing: border-box; }
+  textarea, input[type=password] { display: block; width: 100%; padding: .625rem .75rem; }
+  textarea { min-height: 6.5rem; resize: vertical; }
+  ::placeholder { color: var(--dim); opacity: 1; }
+  select, button { min-height: 2.75rem; padding: 0 1rem; }
+  select { appearance: none; padding-right: 2.5rem; background: var(--field) var(--arrow) right .875rem center / .625rem .375rem no-repeat; }
+  button { background: var(--fg); color: var(--screen); border-color: var(--fg); font-weight: 600; cursor: pointer; }
+  button:active { background: var(--hot); border-color: var(--hot); color: #1B0F24; }
+  .row { display: flex; gap: .5rem; margin: .5rem 0 1.5rem; }
   .row button { flex: 1; }
-  .dim { color: var(--dim); font-size: 14px; }
-  .mono { font-family: ui-monospace, Menlo, monospace; font-size: 14px; }
+  .dim { color: var(--dim); }
+  #fleet { padding-bottom: .75rem; }
   ul { list-style: none; margin: 0; padding: 0; }
-  li a { display: block; padding: 12px 0; border-top: 1px solid var(--line); text-decoration: none; }
-  .failed { color: var(--bad); }
-  .done { color: var(--ok); }
-  /* Answers: full text, list view clamped to a few lines (tap for the rest). */
-  .answer { white-space: pre-wrap; word-break: break-word; margin: 6px 0 0; }
-  li .answer { display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
-  details { margin-top: 16px; }
-  summary { color: var(--dim); cursor: pointer; padding: 8px 0; }
-  pre { white-space: pre-wrap; word-break: break-word; margin: 0; }
-  dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 8px 0 16px; }
+  li { border-top: 1px solid var(--rule); }
+  li.dim { padding: 1rem 0; }
+  li > a { display: block; padding: 1rem 0; text-decoration: none; }
+  .queued { --s: var(--dim); } .running { --s: var(--run); } .done { --s: var(--ok); } .failed { --s: var(--bad); }
+  .busy { --s: var(--run); } .idle { --s: var(--ok); } .offline { --s: var(--dim); }
+  /* Status in reverse video, like C64 inverse characters. */
+  /* Inline, not inline-block: WebKit adds a stray ellipsis to line-clamped text holding an inline-block. */
+  .chip { margin-right: .5em; padding: .125em .375em; background: var(--s); color: var(--screen); }
+  pre { margin: 0; font: inherit; white-space: pre-wrap; word-break: break-word; }
+  .head, .meta, dd { overflow-wrap: anywhere; }
+  .answer { margin: .5rem 0 0; padding-left: .875rem; border-left: 2px solid var(--answer); color: var(--answer); }
+  /* List rows: prompt to 2 lines, answer preview to 3; tap for the rest. */
+  .clamp2, .clamp3 { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+  .clamp2 { -webkit-line-clamp: 2; } .clamp3 { -webkit-line-clamp: 3; }
+  .sub { margin-top: .125rem; }
+  .back { display: inline-flex; align-items: center; min-height: 2.75rem; padding: 0 1rem; border: 1px solid var(--line); text-decoration: none; }
+  #answer { margin: 1.5rem 0 1rem; }
+  .meta { margin: .25rem 0; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: .25rem 1rem; margin: 1rem 0; }
   dt { color: var(--dim); }
-  dd { margin: 0; word-break: break-word; }
+  dd { margin: 0; white-space: pre-line; }
+  details { margin-top: 1.5rem; border-top: 1px solid var(--rule); }
+  details + details { margin-top: 0; }
+  summary { padding: .625rem 0; color: var(--dim); cursor: pointer; }
+  #log { color: var(--dim); }
+  /* Workers: the whole row opens the worker; the busy task's id is its own link on top. */
+  li.worker { position: relative; padding: 1rem 0; }
+  .worker .open { text-decoration: none; }
+  .worker .open::after { content: ""; position: absolute; inset: 0; }
+  .worker .task { position: relative; display: inline-block; padding: .625rem .25rem; margin: -.625rem 0; }
+  #machine h2 { margin: 1.5rem 0 0; font-size: 1rem; }
+  h3 { margin: 2rem 0 .5rem; font-size: 1rem; font-weight: 400; color: var(--dim); }
+  /* Meters: grey when fine or unknown, yellow from 75%, red from 90%. */
+  .warn { color: var(--run); } .crit { color: var(--crit); }
+  .meter { margin-top: .375rem; --b: var(--line); }
+  .meter.warn { --b: var(--run); } .meter.crit { --b: var(--crit); }
+  .bar { display: block; height: .1875rem; margin-top: .25rem; background: linear-gradient(var(--b), var(--b)) 0 0 / var(--v, 0%) 100% no-repeat, var(--rule); }
+  .off .meter, .off .meters span { color: var(--dim); --b: var(--dim); }
+  body > p.dim { margin-top: 1.5rem; }
+  #clear { display: inline-block; padding: .625rem 0; }
   [hidden] { display: none !important; }
+  /* VR panels: bigger type, secondary text pulled toward the foreground. */
+  html.vr { font-size: 22px; --dim: color-mix(in srgb, var(--fg) 85%, var(--screen)); }
 </style>
 </head>
 <body>
 <h1>Make It So</h1>
 <div id="conn" class="dim">connecting…</div>
+
+<nav id="tabs" role="tablist" aria-label="View" hidden>
+  <a href="#" id="tab-tasks" role="tab" aria-selected="true">Tasks</a>
+  <a href="#workers" id="tab-workers" role="tab" aria-selected="false">Workers</a>
+</nav>
 
 <form id="auth" hidden>
   <p>This orchestrator needs its token (MIS_TOKEN).</p>
@@ -55,15 +115,26 @@
       <button>Submit</button>
     </div>
   </form>
-  <div id="fleet" class="dim"></div>
   <ul id="tasks"></ul>
 </main>
 
 <main id="detail" hidden>
-  <p><a href="#">← back</a></p>
-  <dl id="fields"></dl>
+  <p><a href="#" class="back">← back</a></p>
   <pre id="answer" class="answer"></pre>
-  <details><summary>transcript</summary><pre id="log" class="mono"></pre></details>
+  <div id="meta" class="meta"></div>
+  <div id="ask" class="meta dim"></div>
+  <details><summary>transcript</summary><pre id="log"></pre></details>
+  <details><summary>ids</summary><dl id="ids"></dl></details>
+</main>
+
+<main id="workers" hidden>
+  <div id="fleet" class="dim"></div>
+  <ul id="machines"></ul>
+</main>
+
+<main id="machine" hidden>
+  <p><a href="#workers" class="back">← back</a></p>
+  <div id="wbody"></div>
 </main>
 
 <p class="dim"><a href="#" id="clear" hidden>disconnect / clear token</a></p>
@@ -75,7 +146,8 @@ const store = {
   get() { try { return localStorage.getItem('mis-token') || ''; } catch { return ''; } },
   set(v) { try { v ? localStorage.setItem('mis-token', v) : localStorage.removeItem('mis-token'); } catch {} },
 };
-let ws = null, authNeeded = false, tasks = [], detail = null, retries = 0, retryTimer = 0, statusTimer = 0;
+let ws = null, authNeeded = false, tasks = [], workers = [], detail = null, retries = 0, retryTimer = 0, statusTimer = 0;
+let from = '#'; // last list view, so a task's back link returns to Workers when opened from there
 
 // Text-only DOM builder: every string becomes a text node, never parsed as HTML.
 function el(tag, props, ...kids) {
@@ -97,6 +169,21 @@ function eventLine(e) {
   }
 }
 
+const short = (id) => id.slice(0, 8);
+const chip = (s) => el('span', { className: `chip ${s}` }, s);
+// Worker stats are optional; anything that isn't a number is unknown (null).
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const pct = (v) => (v === null ? '—' : `${Math.round(v)}%`);
+// Grey when fine or unknown, yellow from 75%, red from 90%.
+const level = (v) => (v === null ? '' : v >= 90 ? 'crit' : v >= 75 ? 'warn' : '');
+const workerState = (w) => (!w.online ? 'offline' : w.busy ? 'busy' : 'idle');
+const runningOn = (wid) => tasks.find((t) => t.worker === wid && t.status === 'running');
+// Hostname from the last Status; short id if the worker is gone.
+function hostOf(wid) {
+  const w = workers.find((x) => x.id === wid);
+  return w ? w.info.hostname : short(wid);
+}
+
 function send(msg) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
 
 // Coalesce bursts of lifecycle events into one Status request.
@@ -105,29 +192,40 @@ function refreshSoon() {
   statusTimer = setTimeout(() => send({ type: 'status' }), 300);
 }
 
-function openTask() {
-  const m = location.hash.match(/^#task\/([0-9a-f-]{36})$/);
-  return m ? m[1] : null;
+// `#` tasks, `#task/<id>`, `#workers`, `#worker/<id>`.
+function route() {
+  const m = location.hash.match(/^#(task|worker)\/([0-9a-f-]{36})$/);
+  if (m) return { view: m[1] === 'task' ? 'detail' : 'machine', id: m[2] };
+  return { view: location.hash === '#workers' ? 'workers' : 'list' };
 }
 
 function render() {
-  const id = openTask();
+  const r = route();
   const live = ws && ws.readyState === WebSocket.OPEN;
+  const views = { list: renderList, detail: renderDetail, workers: renderWorkers, machine: renderMachine };
   $('auth').hidden = live || !authNeeded || !!store.get();
-  $('list').hidden = !live || !!id;
-  $('detail').hidden = !live || !id;
+  $('tabs').hidden = !live;
+  for (const v in views) $(v).hidden = !live || v !== r.view;
+  if (r.view === 'detail') $('detail').querySelector('.back').href = from;
+  else from = location.hash || '#';
+  const onWorkers = r.view === 'workers' || r.view === 'machine';
+  $('tab-tasks').setAttribute('aria-selected', String(!onWorkers));
+  $('tab-workers').setAttribute('aria-selected', String(onWorkers));
   $('clear').hidden = !store.get();
-  if (id) renderDetail(id); else renderList();
+  views[r.view](r.id);
 }
 
-function renderList() {
-  $('tasks').replaceChildren(...[...tasks].reverse().map((t) => el('li', {},
+// Status + prompt, then `harness · host`, then the answer preview. Newest first.
+function taskRows(ul, list) {
+  ul.replaceChildren(...[...list].reverse().map((t) => el('li', {},
     el('a', { href: `#task/${t.id}` },
-      el('div', { className: 'mono' }, `${t.id.slice(0, 8)} `, el('span', { className: t.status }, t.status)),
-      el('div', {}, t.prompt),
-      t.summary ? el('pre', { className: 'answer' }, t.summary) : ''))));
-  if (!tasks.length) $('tasks').append(el('li', { className: 'dim' }, 'no tasks yet'));
+      el('div', { className: 'head clamp2' }, chip(t.status), t.prompt),
+      el('div', { className: 'sub dim' }, [t.harness, t.worker && hostOf(t.worker)].filter(Boolean).join(' · ')),
+      t.summary ? el('pre', { className: 'answer clamp3' }, t.summary) : ''))));
+  if (!list.length) ul.append(el('li', { className: 'dim' }, 'no tasks yet'));
 }
+
+function renderList() { taskRows($('tasks'), tasks); }
 
 function renderDetail(id) {
   if (!detail || detail.id !== id) {
@@ -135,25 +233,72 @@ function renderDetail(id) {
     send({ type: 'show', task: id });
   }
   const t = tasks.find((x) => x.id === id) || detail.task;
-  const f = $('fields');
-  f.replaceChildren();
-  if (t) {
-    for (const [k, v] of [['prompt', t.prompt], ['status', t.status], ['harness', t.harness],
-      ['id', t.id], ['worker', t.worker], ['session', t.session]]) {
-      f.append(el('dt', {}, k), el('dd', { className: k === 'status' ? v : '' }, v || '-'));
-    }
-  }
-  // The answer is what a question-style task is for; transcript is secondary.
-  $('answer').textContent = t && t.summary ? t.summary : (t && t.status === 'running' ? 'working…' : '');
+  // The answer is what a question-style task is for; everything else is secondary.
+  const answer = t && t.summary ? t.summary : (t && t.status === 'running' ? 'working…' : '');
+  $('answer').textContent = answer;
+  $('answer').hidden = !answer;
+  $('meta').replaceChildren(...(t ? [chip(t.status),
+    [t.harness, t.worker && hostOf(t.worker), t.session && `session ${short(t.session)}`].filter(Boolean).join(' · ')] : []));
+  $('ask').textContent = t ? t.prompt : '';
+  $('ids').replaceChildren(...(t ? [['task', t.id], ['session', t.session]] : [])
+    .filter(([, v]) => v).flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]));
   $('log').textContent = detail.ready ? detail.lines.join('\n') : 'loading…';
+}
+
+// `disk 38% · cpu 64% · mem 82%`, each value coloured by level.
+function meterLine(w) {
+  const s = w.stats || {};
+  return el('div', { className: 'meters dim' }, ...[['disk', s.disk_used_pct], ['cpu', s.cpu_pct], ['mem', s.mem_pct]]
+    .flatMap(([k, v], i) => [i ? ' · ' : '', `${k} `, el('span', { className: level(num(v)) }, pct(num(v)))]));
+}
+
+function renderWorkers() {
+  $('fleet').textContent = `${workers.filter((w) => w.online).length}/${workers.length} online`;
+  $('machines').replaceChildren(...workers.map((w) => {
+    const st = workerState(w), run = runningOn(w.id);
+    return el('li', { className: `worker${st === 'offline' ? ' off' : ''}` },
+      el('div', { className: 'head' }, el('a', { href: `#worker/${w.id}`, className: 'open' }, w.info.hostname), ' ', chip(st),
+        run ? el('a', { href: `#task/${run.id}`, className: 'task' }, short(run.id)) : ''),
+      meterLine(w));
+  }));
+  if (!workers.length) $('machines').append(el('li', { className: 'dim' }, 'no workers connected'));
+}
+
+// Text over a thin bar.
+function meter(label, v) {
+  const bar = el('span', { className: 'bar' });
+  bar.setAttribute('aria-hidden', 'true');
+  if (v !== null) bar.style.setProperty('--v', `${Math.min(100, Math.max(0, v))}%`);
+  return el('div', { className: `meter ${level(v)}` }, label, bar);
+}
+
+function renderMachine(id) {
+  const w = workers.find((x) => x.id === id);
+  if (!w) { $('wbody').replaceChildren(el('p', { className: 'dim' }, `unknown worker ${id}`)); return; }
+  const st = workerState(w), s = w.stats || {};
+  const [disk, free, cpu, mem] = [s.disk_used_pct, s.disk_free_gb, s.cpu_pct, s.mem_pct].map(num);
+  const mine = el('ul');
+  taskRows(mine, tasks.filter((t) => t.worker === id));
+  $('wbody').className = st === 'offline' ? 'off' : '';
+  $('wbody').replaceChildren(
+    el('h2', {}, `${w.info.hostname} `, chip(st)),
+    el('dl', {},
+      el('dt', {}, 'os'), el('dd', {}, `${w.info.os} ${w.info.arch}`),
+      el('dt', {}, 'harnesses'), el('dd', {}, w.info.harnesses.join(', ') || '-'),
+      el('dt', {}, 'roots'), el('dd', {}, (w.info.roots || []).join('\n') || '-')),
+    meter(disk === null ? 'disk —' : `disk ${free === null ? '' : `${Math.round(free)} GB free, `}${pct(disk)} used`, disk),
+    meter(`cpu ${pct(cpu)}`, cpu),
+    meter(`memory ${pct(mem)}`, mem),
+    el('h3', {}, 'tasks on this worker'),
+    mine);
 }
 
 function onMessage(msg) {
   switch (msg.type) {
     case 'status': {
       tasks = msg.tasks;
-      const online = msg.workers.filter((w) => w.online);
-      $('fleet').textContent = `${online.length}/${msg.workers.length} workers online`;
+      // The server's order is unstable; sort so rows don't jump on refresh.
+      workers = [...msg.workers].sort((a, b) => a.info.hostname.localeCompare(b.info.hostname) || a.id.localeCompare(b.id));
       const harnesses = [...new Set(msg.workers.flatMap((w) => w.info.harnesses))].sort();
       const sel = $('harness'), keep = sel.value;
       sel.replaceChildren(el('option', { value: '' }, 'auto'), ...harnesses.map((h) => el('option', { value: h }, h)));
@@ -169,8 +314,10 @@ function onMessage(msg) {
       }
       break;
     case 'event':
-      if (detail && detail.ready && detail.id === msg.task) detail.lines.push(eventLine(msg.event));
       if (['started', 'finished', 'planned'].includes(msg.event.type)) refreshSoon();
+      // Only an open transcript shows events; re-rendering other views would drop focus.
+      if (!detail || !detail.ready || detail.id !== msg.task) return;
+      detail.lines.push(eventLine(msg.event));
       break;
     case 'error':
       $('conn').textContent = `error: ${msg.message}`;
@@ -202,7 +349,7 @@ function connect() {
   ws = sock;
   sock.onopen = () => {
     retries = 0;
-    $('conn').textContent = 'connected';
+    $('conn').textContent = 'ready.';
     send({ type: 'subscribe' });
     send({ type: 'status' });
     detail = null; // re-fetch the open transcript after any reconnect
