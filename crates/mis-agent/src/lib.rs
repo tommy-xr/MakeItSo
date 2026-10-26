@@ -30,6 +30,15 @@ pub trait Agent: Send + Sync {
 /// Every harness this crate can run.
 pub const HARNESSES: [&str; 2] = ["claude", "codex"];
 
+/// Models the planner may pick for `harness`, cheapest first. Codex model ids
+/// change too often to pin here, so codex always runs its configured default.
+pub fn models(harness: &str) -> &'static [&'static str] {
+    match harness {
+        "claude" => &["haiku", "sonnet", "opus"],
+        _ => &[],
+    }
+}
+
 /// `Agent::run` that always ends with a Finished: an Err or a panic inside the
 /// agent becomes `Finished { ok: false }` instead of a task stuck running.
 pub async fn run_guarded(

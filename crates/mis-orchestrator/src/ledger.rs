@@ -189,7 +189,7 @@ impl Ledger {
     ) -> (TaskId, Vec<Effect>) {
         let id = Uuid::new_v4();
         let planning = harness.is_none();
-        let plan_prompt = planning.then(|| plan::prompt(&prompt, &self.harnesses()));
+        let plan_prompt = planning.then(|| plan::prompt(&prompt, &self.fleet()));
         let mut entry = TaskEntry::new(Task {
             id,
             prompt,
@@ -209,26 +209,37 @@ impl Ledger {
         (id, self.schedule())
     }
 
-    /// Every harness a known worker offers; with no workers, every harness that
-    /// exists, so a plan made before the fleet connects still queues.
-    pub fn harnesses(&self) -> Vec<String> {
-        let mut v: Vec<String> = self
-            .workers
-            .values()
-            .flat_map(|w| w.info.harnesses.iter().cloned())
-            .collect();
-        if v.is_empty() {
-            v = mis_agent::HARNESSES.map(String::from).to_vec();
+    /// Every harness a known worker offers, with the models every such worker
+    /// advertises (scheduling ignores the model, so any of them may get the task);
+    /// with no workers, every harness that exists and its built-in models, so a
+    /// plan made before the fleet connects still queues.
+    pub fn fleet(&self) -> plan::Fleet {
+        let mut fleet = plan::Fleet::new();
+        for w in self.workers.values() {
+            for h in &w.info.harnesses {
+                let mine = w.info.models.get(h).cloned().unwrap_or_default();
+                fleet
+                    .entry(h.clone())
+                    .and_modify(|m| m.retain(|x| mine.contains(x)))
+                    .or_insert(mine);
+            }
         }
-        v.sort();
-        v.dedup();
-        v
+        if fleet.is_empty() {
+            fleet = mis_agent::HARNESSES
+                .iter()
+                .map(|h| {
+                    let models = mis_agent::models(h).iter().map(|m| m.to_string());
+                    (h.to_string(), models.collect())
+                })
+                .collect();
+        }
+        fleet
     }
 
     /// Planner output for a Planning task. Only Finished matters: it carries the
     /// plan (the reply's JSON), which queues the task or fails it.
     pub fn planning_event(&mut self, task: TaskId, event: AgentEvent) -> Vec<Effect> {
-        let harnesses = self.harnesses();
+        let fleet = self.fleet();
         let Some(t) = self.tasks.iter_mut().find(|t| t.task.id == task) else {
             return vec![];
         };
@@ -245,13 +256,14 @@ impl Ledger {
         match event {
             AgentEvent::Finished { ok, summary } => {
                 let plan = match (ok, summary) {
-                    (true, Some(reply)) => plan::parse(&reply, &t.task.prompt, &harnesses),
+                    (true, Some(reply)) => plan::parse(&reply, &t.task.prompt, &fleet),
                     (_, summary) => Err(summary.unwrap_or_else(|| "planner failed".into())),
                 };
                 match plan {
                     Ok(p) => {
                         t.task.harness = p.harness.clone();
                         t.task.prompt = p.prompt.clone();
+                        t.task.model = p.model.clone();
                         t.status = TaskStatus::Queued;
                         self.queue.push_back(task);
                         let mut events = vec![];
@@ -261,6 +273,7 @@ impl Ledger {
                         events.push(AgentEvent::Planned {
                             harness: p.harness,
                             prompt: p.prompt,
+                            model: p.model,
                         });
                         events.iter().for_each(|e| t.record(e));
                         let mut effects: Vec<_> = events.into_iter().map(broadcast).collect();
@@ -566,6 +579,7 @@ mod tests {
             arch: "a".into(),
             harnesses: vec!["claude".into()],
             roots: vec![],
+            models: [("claude".into(), vec!["haiku".into(), "sonnet".into()])].into(),
         }
     }
 
@@ -882,7 +896,12 @@ mod tests {
             event: AgentEvent::Text { text },
             ..
         }), Effect::Broadcast(ServerMsg::Event {
-            event: AgentEvent::Planned { harness, prompt },
+            event:
+                AgentEvent::Planned {
+                    harness,
+                    prompt,
+                    model: None,
+                },
             ..
         }), Effect::Send {
             conn: 1,
@@ -909,6 +928,48 @@ mod tests {
         assert!(l
             .planning_event(task, AgentEvent::Text { text: "x".into() })
             .is_empty());
+    }
+
+    #[test]
+    fn planned_model_is_sent_and_fleet_intersects_models() {
+        let mut l = Ledger::default();
+        // Default table when no worker is known.
+        assert_eq!(l.fleet()["claude"], ["haiku", "sonnet", "opus"]);
+        // Only models every claude worker offers.
+        let mut big = info();
+        big.models
+            .insert("claude".into(), vec!["sonnet".into(), "opus".into()]);
+        big.harnesses.push("codex".into());
+        l.connect(Uuid::new_v4(), info(), &[], 1, T0);
+        l.connect(Uuid::new_v4(), big, &[], 2, T0);
+        let fleet = l.fleet();
+        assert_eq!(fleet["claude"], ["sonnet"]);
+        assert!(fleet["codex"].is_empty());
+
+        let (task, _) = l.submit("summarize the README".into(), None, None, None);
+        let eff = l.planning_event(
+            task,
+            AgentEvent::Finished {
+                ok: true,
+                summary: Some(r#"{"harness":"claude","model":"sonnet","reason":"default"}"#.into()),
+            },
+        );
+        let sent: Vec<_> = eff
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Send {
+                    msg: OrchMsg::Assign { task },
+                    ..
+                } => Some(task.model.as_deref()),
+                Effect::Broadcast(ServerMsg::Event {
+                    event: AgentEvent::Planned { model, .. },
+                    ..
+                }) => Some(model.as_deref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, [Some("sonnet"), Some("sonnet")]);
+        assert_eq!(l.show(task).unwrap().0.model.as_deref(), Some("sonnet"));
     }
 
     #[test]

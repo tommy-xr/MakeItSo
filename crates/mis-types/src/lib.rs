@@ -1,6 +1,8 @@
 //! Wire types shared by orchestrator, workers, and clients.
 //! Everything is JSON over WebSocket; `type` tags on the enums below.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Env var set on agent processes: the id of the task they are running.
@@ -39,6 +41,10 @@ pub struct WorkerInfo {
     /// Directories tasks may run in; a task's cwd must resolve under one.
     #[serde(default)]
     pub roots: Vec<String>,
+    /// Models the planner may pick, per harness; a harness without an entry
+    /// runs its own default.
+    #[serde(default)]
+    pub models: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -72,6 +78,8 @@ pub enum AgentEvent {
     Planned {
         harness: String,
         prompt: String,
+        #[serde(default)]
+        model: Option<String>,
     },
     Started {
         session: Option<String>,
@@ -217,6 +225,7 @@ mod tests {
                     arch: "aarch64".into(),
                     harnesses: vec!["claude".into()],
                     roots: vec!["/code".into()],
+                    models: [("claude".into(), vec!["sonnet".into()])].into(),
                 },
             },
             WorkerMsg::Event {
@@ -240,7 +249,7 @@ mod tests {
         // Workers predating `roots` still parse.
         let old: WorkerInfo =
             serde_json::from_str(r#"{"hostname":"h","os":"o","arch":"a","harnesses":[]}"#).unwrap();
-        assert!(old.roots.is_empty());
+        assert!(old.roots.is_empty() && old.models.is_empty());
         // Tag sits beside the stats fields; missing fields default.
         let s: WorkerMsg = serde_json::from_str(r#"{"type":"stats","cpu_pct":7}"#).unwrap();
         assert_eq!(

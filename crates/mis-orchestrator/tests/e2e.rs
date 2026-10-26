@@ -29,6 +29,7 @@ fn info(harness: &str) -> WorkerInfo {
         arch: "a".into(),
         harnesses: vec![harness.into()],
         roots: vec![],
+        models: [(harness.into(), vec![format!("{harness}-mini")])].into(),
     }
 }
 
@@ -680,7 +681,7 @@ async fn show_returns_transcript() {
     };
 }
 
-/// Planner stub: picks codex and rewrites the prompt.
+/// Planner stub: picks codex and its advertised model, and rewrites the prompt.
 struct FakePlanner;
 impl mis_agent::Agent for FakePlanner {
     fn name(&self) -> &'static str {
@@ -699,10 +700,14 @@ impl mis_agent::Agent for FakePlanner {
                 prompt.contains("claude, codex"),
                 "fleet harnesses in prompt"
             );
+            assert!(
+                prompt.contains("- codex: codex-mini"),
+                "fleet models in prompt"
+            );
             tx.send(AgentEvent::Finished {
                 ok: true,
                 summary: Some(
-                    r#"{"harness":"codex","prompt":"say hi","reason":"user asked for codex"}"#
+                    r#"{"harness":"codex","model":"codex-mini","prompt":"say hi","reason":"user asked for codex"}"#
                         .into(),
                 ),
             })
@@ -745,12 +750,17 @@ async fn planner_routes_to_codex_and_streams_its_output() {
             } => texts.push(text),
             ServerMsg::Event {
                 worker: None,
-                event: AgentEvent::Planned { harness, prompt },
+                event:
+                    AgentEvent::Planned {
+                        harness,
+                        prompt,
+                        model,
+                    },
                 task: t,
             } => {
                 assert_eq!(
-                    (t, harness.as_str(), prompt.as_str()),
-                    (task, "codex", "say hi")
+                    (t, harness.as_str(), prompt.as_str(), model.as_deref()),
+                    (task, "codex", "say hi", Some("codex-mini"))
                 );
                 break;
             }
@@ -758,7 +768,7 @@ async fn planner_routes_to_codex_and_streams_its_output() {
         }
     }
     assert_eq!(texts, ["user asked for codex"]);
-    // Only the codex worker gets it, with the rewritten prompt.
+    // Only the codex worker gets it, with the rewritten prompt and chosen model.
     let OrchMsg::Assign { task: assigned } = recv(&mut codex).await else {
         panic!()
     };
@@ -766,9 +776,10 @@ async fn planner_routes_to_codex_and_streams_its_output() {
         (
             assigned.id,
             assigned.harness.as_str(),
-            assigned.prompt.as_str()
+            assigned.prompt.as_str(),
+            assigned.model.as_deref()
         ),
-        (task, "codex", "say hi")
+        (task, "codex", "say hi", Some("codex-mini"))
     );
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(100), claude.next())
