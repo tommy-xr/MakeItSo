@@ -44,6 +44,7 @@
   button:active { background: var(--hot); border-color: var(--hot); color: #1B0F24; }
   .row { display: flex; gap: .5rem; margin: .5rem 0 1.5rem; }
   .row button { flex: 1; }
+  .row input { flex: 1; min-width: 0; min-height: 2.75rem; padding: 0 .75rem; }
   .dim { color: var(--dim); }
   #fleet { padding-bottom: .75rem; }
   ul { list-style: none; margin: 0; padding: 0; }
@@ -112,6 +113,7 @@
     <textarea id="prompt" placeholder="New task…" required></textarea>
     <div class="row">
       <select id="harness" aria-label="harness"><option value="">auto</option></select>
+      <input id="model" aria-label="model" placeholder="model (optional)" autocapitalize="off" autocorrect="off" spellcheck="false">
       <button>Submit</button>
     </div>
   </form>
@@ -215,12 +217,15 @@ function render() {
   views[r.view](r.id);
 }
 
-// Status + prompt, then `harness · host`, then the answer preview. Newest first.
+// `claude · sonnet · host`, leaving out what isn't known yet.
+const placement = (t) => [t.harness, t.model, t.worker && hostOf(t.worker)].filter(Boolean);
+
+// Status + prompt, then placement, then the answer preview. Newest first.
 function taskRows(ul, list) {
   ul.replaceChildren(...[...list].reverse().map((t) => el('li', {},
     el('a', { href: `#task/${t.id}` },
       el('div', { className: 'head clamp2' }, chip(t.status), t.prompt),
-      el('div', { className: 'sub dim' }, [t.harness, t.worker && hostOf(t.worker)].filter(Boolean).join(' · ')),
+      el('div', { className: 'sub dim' }, placement(t).join(' · ')),
       t.summary ? el('pre', { className: 'answer clamp3' }, t.summary) : ''))));
   if (!list.length) ul.append(el('li', { className: 'dim' }, 'no tasks yet'));
 }
@@ -238,7 +243,7 @@ function renderDetail(id) {
   $('answer').textContent = answer;
   $('answer').hidden = !answer;
   $('meta').replaceChildren(...(t ? [chip(t.status),
-    [t.harness, t.worker && hostOf(t.worker), t.session && `session ${short(t.session)}`].filter(Boolean).join(' · ')] : []));
+    [...placement(t), t.session && `session ${short(t.session)}`].filter(Boolean).join(' · ')] : []));
   $('ask').textContent = t ? t.prompt : '';
   $('ids').replaceChildren(...(t ? [['task', t.id], ['session', t.session]] : [])
     .filter(([, v]) => v).flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]));
@@ -382,7 +387,7 @@ $('auth').onsubmit = (e) => {
 $('new').onsubmit = (e) => {
   e.preventDefault();
   const prompt = $('prompt').value.trim();
-  if (prompt) send({ type: 'submit', prompt, cwd: null, harness: $('harness').value || null });
+  if (prompt) send({ type: 'submit', prompt, cwd: null, harness: $('harness').value || null, model: $('model').value.trim() || null });
 };
 $('clear').onclick = (e) => {
   e.preventDefault();
