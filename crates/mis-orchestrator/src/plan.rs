@@ -48,8 +48,8 @@ pub fn prompt(request: &str, fleet: &Fleet) -> String {
              the request names, otherwise the cheapest adequate for it. For claude: haiku for \
              trivial lookups or summaries, sonnet for ordinary coding, opus for hard multi-file \
              engineering, fable only when the request clearly demands the most capable model. \
-             For other harnesses the first listed is the configured default; use it unless the \
-             request calls for another. Otherwise omit \"model\".\n"
+             Other harnesses list models in preference order; use the first unless the request \
+             calls for another. Otherwise omit \"model\".\n"
         )
     };
     format!(

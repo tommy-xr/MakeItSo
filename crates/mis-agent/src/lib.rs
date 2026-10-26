@@ -80,15 +80,16 @@ pub fn available(skip_permissions: bool) -> Vec<Box<dyn Agent>> {
     v
 }
 
-fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default()
+fn home() -> Result<PathBuf, String> {
+    std::env::home_dir().ok_or_else(|| "no home directory".into())
 }
 
-/// `path`'s contents; the error names the file.
-fn read(path: &Path) -> Result<String, String> {
-    std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
+/// Read `path` and `parse` it; either error names the file.
+fn parse_file<T>(path: &Path, parse: impl FnOnce(&str) -> Result<T, String>) -> Result<T, String> {
+    std::fs::read_to_string(path)
+        .map_err(|e| e.to_string())
+        .and_then(|s| parse(&s))
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 pub fn which(bin: &str) -> bool {

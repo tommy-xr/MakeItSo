@@ -17,6 +17,7 @@ pub struct CodexAgent {
 
 /// Slugs from codex's `models_cache.json` with visibility "list", by priority,
 /// after the default `model` set at the top level of `config.toml` (if any).
+/// Either file failing to parse is an error.
 pub fn codex_models(cache_json: &str, config_toml: &str) -> Result<Vec<String>, String> {
     let v: Value = serde_json::from_str(cache_json).map_err(|e| e.to_string())?;
     let mut listed: Vec<(i64, &str)> = v["models"]
@@ -32,9 +33,12 @@ pub fn codex_models(cache_json: &str, config_toml: &str) -> Result<Vec<String>, 
         })
         .collect();
     listed.sort_by_key(|(p, _)| *p);
-    let default = toml::from_str::<toml::Table>(config_toml)
-        .ok()
-        .and_then(|t| Some(t.get("model")?.as_str()?.to_string()));
+    let config: toml::Table =
+        toml::from_str(config_toml).map_err(|e| format!("config.toml: {e}"))?;
+    let default = config
+        .get("model")
+        .and_then(|m| m.as_str())
+        .map(String::from);
     let mut out: Vec<String> = default.into_iter().collect();
     for (_, slug) in listed {
         if !out.iter().any(|o| o == slug) {
@@ -94,13 +98,15 @@ impl Agent for CodexAgent {
 
     fn models(&self) -> Vec<String> {
         let dir = std::env::var_os("CODEX_HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| crate::home().join(".codex"));
-        // No config just means no default to put first.
-        let config = std::fs::read_to_string(dir.join("config.toml")).unwrap_or_default();
-        let cache = dir.join("models_cache.json");
-        let models = crate::read(&cache).and_then(|c| {
-            codex_models(&c, &config).map_err(|e| format!("{}: {e}", cache.display()))
+            .map_or_else(|| crate::home().map(|h| h.join(".codex")), |d| Ok(d.into()));
+        let models = dir.and_then(|dir| {
+            // No config just means no default to put first.
+            let config = dir.join("config.toml");
+            let config = match std::fs::read_to_string(&config) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                r => r.map_err(|e| format!("{}: {e}", config.display()))?,
+            };
+            crate::parse_file(&dir.join("models_cache.json"), |c| codex_models(c, &config))
         });
         models.unwrap_or_else(|e| {
             tracing::warn!("{e}; codex will run its default model");
@@ -246,8 +252,9 @@ mod tests {
             codex_models(cache, "").unwrap(),
             ["gpt-a", "gpt-c", "gpt-b"]
         );
-        // A broken config only loses the default.
-        assert_eq!(codex_models(cache, "model = ").unwrap()[0], "gpt-a");
+        assert!(codex_models(cache, "model = ")
+            .unwrap_err()
+            .contains("config.toml"));
         assert!(codex_models("{", "").is_err());
     }
 }

@@ -215,7 +215,10 @@ impl Ledger {
     /// before the fleet connects still queues (on the harness default).
     pub fn fleet(&self) -> plan::Fleet {
         let mut fleet = plan::Fleet::new();
-        for w in self.workers.values() {
+        // By id, so the surviving order (first = preferred) doesn't follow hash order.
+        let mut workers: Vec<_> = self.workers.iter().collect();
+        workers.sort_by_key(|(id, _)| **id);
+        for (_, w) in workers {
             for h in &w.info.harnesses {
                 let mine = w.info.models.get(h).cloned().unwrap_or_default();
                 fleet

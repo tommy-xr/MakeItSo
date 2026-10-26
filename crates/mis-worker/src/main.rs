@@ -392,3 +392,45 @@ fn hostname() -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Stub(&'static str);
+    impl Agent for Stub {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn models(&self) -> Vec<String> {
+            vec![format!("{}-found", self.0)]
+        }
+        fn run<'a>(
+            &'a self,
+            _: TaskId,
+            _: &'a str,
+            _: Option<&'a str>,
+            _: Option<&'a str>,
+            _: mpsc::Sender<AgentEvent>,
+        ) -> mis_agent::BoxFut<'a> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn override_replaces_discovery_and_empty_hides() {
+        let agents: Vec<Box<dyn Agent>> = vec![Box::new(Stub("claude")), Box::new(Stub("codex"))];
+        let none = BTreeMap::new();
+        assert_eq!(advertised(&agents, &none)["codex"], ["codex-found"]);
+        let overrides = BTreeMap::from([
+            ("claude".to_string(), vec!["opus".to_string()]),
+            ("codex".to_string(), vec![]),
+            ("other".to_string(), vec!["x".to_string()]),
+        ]);
+        let got = advertised(&agents, &overrides);
+        assert_eq!(
+            got,
+            BTreeMap::from([("claude".into(), vec!["opus".into()])])
+        );
+    }
+}

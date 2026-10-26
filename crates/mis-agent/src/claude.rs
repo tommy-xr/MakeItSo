@@ -98,9 +98,9 @@ impl Agent for ClaudeAgent {
     }
 
     fn models(&self) -> Vec<String> {
-        let path = crate::home().join(".claude.json");
-        let models = crate::read(&path)
-            .and_then(|s| claude_models(&s).map_err(|e| format!("{}: {e}", path.display())));
+        // claude keeps `.claude.json` in CLAUDE_CONFIG_DIR when set, else in home.
+        let dir = std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(crate::home, |d| Ok(d.into()));
+        let models = dir.and_then(|d| crate::parse_file(&d.join(".claude.json"), claude_models));
         models.unwrap_or_else(|e| {
             tracing::warn!("{e}; offering only the claude model aliases");
             ALIASES.map(String::from).to_vec()

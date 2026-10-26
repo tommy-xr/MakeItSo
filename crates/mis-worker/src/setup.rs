@@ -130,13 +130,17 @@ pub async fn run(a: SetupArgs) -> Result<()> {
     if harnesses.is_empty() {
         eprintln!("warning: no `claude` or `codex` on PATH; mis-worker needs one to run");
     }
-    for (h, models) in crate::advertised(&agents, &saved.models) {
-        let from = if saved.models.contains_key(&h) {
+    let models = crate::advertised(&agents, &saved.models);
+    for h in &harnesses {
+        let from = if saved.models.contains_key(h) {
             "worker.toml"
         } else {
             "discovered"
         };
-        println!("{h} models ({from}): {}", models.join(", "));
+        let list = models
+            .get(h)
+            .map_or("none (runs its default)".into(), |m| m.join(", "));
+        println!("{h} models ({from}): {list}");
     }
     config::write(&path, &cfg)?;
     println!("wrote {}", path.display());

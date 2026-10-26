@@ -22,3 +22,4 @@ clap = { version = "4", features = ["derive", "env"] }
 if-addrs = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+toml = "1.1.8"

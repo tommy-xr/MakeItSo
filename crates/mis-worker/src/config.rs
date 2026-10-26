@@ -44,8 +44,6 @@ pub fn merge(cli: Config, file: Config, cwd: PathBuf) -> Resolved {
     } else {
         (file.cf_access_client_id, file.cf_access_client_secret)
     };
-    let mut models = file.models;
-    models.extend(cli.models);
     let roots = [cli.roots, file.roots, vec![cwd]]
         .into_iter()
         .find(|r| !r.is_empty())
@@ -56,7 +54,7 @@ pub fn merge(cli: Config, file: Config, cwd: PathBuf) -> Resolved {
         cf_access_client_id,
         cf_access_client_secret,
         roots,
-        models,
+        models: file.models,
     }
 }
 

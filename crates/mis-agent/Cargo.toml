@@ -11,4 +11,4 @@ tracing.workspace = true
 futures-util.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-toml = "1.1.8"
+toml.workspace = true
