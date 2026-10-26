@@ -48,6 +48,9 @@ pub struct Task {
     /// Working directory on the worker machine; None = worker default.
     pub cwd: Option<String>,
     pub harness: String,
+    /// Model passed to the harness (`--model`); None = harness default.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -72,6 +75,9 @@ pub enum AgentEvent {
     },
     Started {
         session: Option<String>,
+        /// Model the agent reports running, if it says.
+        #[serde(default)]
+        model: Option<String>,
     },
     Text {
         text: String,
@@ -126,6 +132,9 @@ pub enum ClientMsg {
         prompt: String,
         cwd: Option<String>,
         harness: Option<String>,
+        /// None = harness default.
+        #[serde(default)]
+        model: Option<String>,
     },
     /// Stream all task events from now on.
     Subscribe,
@@ -155,6 +164,9 @@ pub struct TaskSummary {
     pub status: TaskStatus,
     pub worker: Option<WorkerId>,
     pub harness: String,
+    /// Requested model, else the one the `Started` event reported.
+    #[serde(default)]
+    pub model: Option<String>,
     /// Agent session id, from the `Started` event.
     pub session: Option<String>,
     /// From the `Finished` event.

@@ -276,7 +276,14 @@ async fn run_task(ctx: &Ctx, task: Task, tx: mpsc::Sender<(TaskId, AgentEvent)>)
             }
         }
     };
-    let run = mis_agent::run_guarded(agent.as_ref(), id, &task.prompt, Some(&cwd), atx);
+    let run = mis_agent::run_guarded(
+        agent.as_ref(),
+        id,
+        &task.prompt,
+        Some(&cwd),
+        task.model.as_deref(),
+        atx,
+    );
     tokio::join!(run, fwd);
 }
 
