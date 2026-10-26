@@ -96,6 +96,12 @@ async fn main() -> Result<()> {
         arch: std::env::consts::ARCH.into(),
         harnesses: agents.iter().map(|a| a.name().to_string()).collect(),
         roots: roots.iter().map(|r| r.display().to_string()).collect(),
+        models: agents
+            .iter()
+            .map(|a| (a.name(), mis_agent::models(a.name())))
+            .filter(|(_, m)| !m.is_empty())
+            .map(|(h, m)| (h.to_string(), m.iter().map(|s| s.to_string()).collect()))
+            .collect(),
     };
     tracing::info!(?info.harnesses, ?info.roots, "connecting to {}", cfg.url);
     let ctx = Ctx {

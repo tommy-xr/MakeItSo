@@ -161,7 +161,7 @@ function el(tag, props, ...kids) {
 // One transcript line, matching `mis show` / `mis task --follow`.
 function eventLine(e) {
   switch (e.type) {
-    case 'planned': return `plan: ${e.harness}: ${e.prompt}`;
+    case 'planned': return `plan: ${e.harness}${e.model ? `/${e.model}` : ''}: ${e.prompt}`;
     case 'started': return 'started';
     case 'text': return e.text;
     case 'tool_use': return `> ${e.name} ${JSON.stringify(e.input)}`;

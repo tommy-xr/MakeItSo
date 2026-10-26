@@ -194,7 +194,14 @@ async fn recv(ws: &mut Ws) -> Result<ServerMsg> {
 fn print_event(task: TaskId, event: &AgentEvent) {
     let short = &task.to_string()[..8];
     match event {
-        AgentEvent::Planned { harness, prompt } => println!("[{short}] plan: {harness}: {prompt}"),
+        AgentEvent::Planned {
+            harness,
+            prompt,
+            model,
+        } => {
+            let model = model.as_ref().map(|m| format!("/{m}")).unwrap_or_default();
+            println!("[{short}] plan: {harness}{model}: {prompt}")
+        }
         AgentEvent::Started { .. } => println!("[{short}] started"),
         AgentEvent::Text { text } => println!("[{short}] {text}"),
         AgentEvent::ToolUse { name, input } => println!("[{short}] > {name} {input}"),
@@ -483,6 +490,7 @@ mod tests {
                 arch: "aarch64".into(),
                 harnesses: vec![],
                 roots: vec![],
+                models: Default::default(),
             },
             busy: false,
             online: true,

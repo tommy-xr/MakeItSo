@@ -22,6 +22,9 @@ struct Args {
     /// Don't plan with the local `claude` CLI; tasks without --harness run on claude as-is.
     #[arg(long)]
     no_planner: bool,
+    /// Model the planner itself runs on.
+    #[arg(long, default_value = "sonnet")]
+    planner_model: String,
 }
 
 /// Print ready-to-paste worker/CLI commands for every way to reach this orchestrator.
@@ -101,12 +104,13 @@ async fn main() -> anyhow::Result<()> {
     if args.no_planner {
         tracing::info!("planner off; tasks without --harness run on claude");
     } else if mis_agent::which("claude") {
-        tracing::info!("planner: local claude (tool-less)");
+        tracing::info!(model = %args.planner_model, "planner: local claude (tool-less)");
         app = app.with_planner(std::sync::Arc::new(mis_agent::claude::ClaudeAgent {
             skip_permissions: false,
             // No user/project settings (hooks, CLAUDE.md), MCP servers, or tools; one
             // turn. (`--bare` would also drop the login.)
             extra_args: [
+                &format!("--model={}", args.planner_model),
                 "--setting-sources",
                 "",
                 "--strict-mcp-config",

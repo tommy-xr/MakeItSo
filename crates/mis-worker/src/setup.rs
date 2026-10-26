@@ -98,6 +98,7 @@ pub async fn run(a: SetupArgs) -> Result<()> {
         // Advertise no harnesses so the orchestrator assigns nothing to this probe.
         harnesses: vec![],
         roots: roots.iter().map(|r| r.display().to_string()).collect(),
+        models: Default::default(),
     };
     let mut tries = 1;
     let cfg = loop {
