@@ -145,7 +145,7 @@ impl App {
         let (tx, mut rx) = mpsc::channel(64);
         let run = tokio::time::timeout(
             PLANNER_TIMEOUT,
-            mis_agent::run_guarded(planner.as_ref(), task, &prompt, None, tx),
+            mis_agent::run_guarded(planner.as_ref(), task, &prompt, None, None, tx),
         );
         let feed = async {
             while let Some(ev) = rx.recv().await {
@@ -415,9 +415,12 @@ async fn client_conn(mut sock: WebSocket, app: App) {
                     let status = app.ledger.lock().unwrap().status();
                     send_json(&mut sock, &status).await;
                 }
-                Some(ClientMsg::Submit { prompt, cwd, harness }) => {
-                    let harness = harness.or_else(|| app.planner.is_none().then(|| "claude".into()));
-                    let task = app.transition(|l| l.submit(prompt, cwd, harness));
+                Some(ClientMsg::Submit { prompt, cwd, harness, model }) => {
+                    // A chosen model pins the default harness: the planner could pick
+                    // one that doesn't know that model.
+                    let unplanned = app.planner.is_none() || model.is_some();
+                    let harness = harness.or_else(|| unplanned.then(|| "claude".into()));
+                    let task = app.transition(|l| l.submit(prompt, cwd, harness, model));
                     send_json(&mut sock, &ServerMsg::Submitted { task }).await;
                 }
                 Some(ClientMsg::Subscribe) => sub = Some(app.events.subscribe()),

@@ -35,6 +35,9 @@ enum Cmd {
         cwd: Option<String>,
         #[arg(long)]
         harness: Option<String>,
+        /// Model for the harness, e.g. `sonnet`; implies the default harness if none given.
+        #[arg(long)]
+        model: Option<String>,
         /// Stream this task's events until it finishes.
         #[arg(long, short)]
         follow: bool,
@@ -229,6 +232,26 @@ fn stats_text(s: Option<&WorkerStats>) -> String {
     })
 }
 
+/// `claude/sonnet @ host`: model and host only when known; `-` before a harness is picked.
+fn placement(t: &TaskSummary, workers: &[WorkerSummary]) -> String {
+    let mut s = if t.harness.is_empty() {
+        "-".to_string()
+    } else {
+        t.harness.clone()
+    };
+    if let Some(m) = &t.model {
+        s += &format!("/{m}");
+    }
+    if let Some(wid) = t.worker {
+        let host = workers.iter().find(|w| w.id == wid).map_or_else(
+            || wid.to_string()[..8].to_string(),
+            |w| w.info.hostname.clone(),
+        );
+        s += &format!(" @ {host}");
+    }
+    s
+}
+
 /// The one task whose id starts with `prefix`.
 fn resolve(tasks: &[TaskSummary], prefix: &str) -> Result<TaskId> {
     let hits: Vec<_> = tasks
@@ -257,7 +280,7 @@ async fn main() -> Result<()> {
                 bail!("unexpected reply")
             };
             println!("workers ({}):", workers.len());
-            for w in workers {
+            for w in &workers {
                 println!(
                     "  {} {} {} {:?} roots={} {}{}",
                     w.id,
@@ -278,9 +301,10 @@ async fn main() -> Result<()> {
             println!("tasks ({}):", tasks.len());
             for t in tasks {
                 println!(
-                    "  {} {:<8} {}{}",
+                    "  {} {:<8} {} {}{}",
                     &t.id.to_string()[..8],
                     format!("{:?}", t.status).to_lowercase(),
+                    placement(&t, &workers),
                     t.prompt,
                     t.summary
                         .map(|s| format!(" -> {}", first_line(&s, 80)))
@@ -290,7 +314,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Show { id } => {
             send(&mut ws, &ClientMsg::Status).await?;
-            let ServerMsg::Status { tasks, .. } = recv(&mut ws).await? else {
+            let ServerMsg::Status { tasks, workers } = recv(&mut ws).await? else {
                 bail!("unexpected reply")
             };
             let task = resolve(&tasks, id)?;
@@ -307,7 +331,7 @@ async fn main() -> Result<()> {
             let opt = |v: Option<String>| v.unwrap_or_else(|| "-".into());
             println!("id:      {}", t.id);
             println!("status:  {}", format!("{:?}", t.status).to_lowercase());
-            println!("harness: {}", t.harness);
+            println!("harness: {}", placement(&t, &workers));
             println!("worker:  {}", opt(t.worker.map(|w| w.to_string())));
             println!("session: {}", opt(t.session));
             println!("prompt:  {}", t.prompt);
@@ -324,6 +348,7 @@ async fn main() -> Result<()> {
             prompt,
             cwd,
             harness,
+            model,
             follow,
             nested: _,
         } => {
@@ -336,6 +361,7 @@ async fn main() -> Result<()> {
                     prompt: prompt.clone(),
                     cwd: cwd.clone(),
                     harness: harness.clone(),
+                    model: model.clone(),
                 },
             )
             .await?;
@@ -390,6 +416,7 @@ mod tests {
             prompt: "p".into(),
             cwd: None,
             harness: None,
+            model: None,
             follow: false,
             nested,
         }
@@ -402,6 +429,7 @@ mod tests {
             status: TaskStatus::Done,
             worker: None,
             harness: "claude".into(),
+            model: None,
             session: None,
             summary: None,
         }
@@ -437,6 +465,35 @@ mod tests {
             mem_pct: 82,
         };
         assert_eq!(stats_text(Some(&s)), "disk 38% cpu 64% mem 82%");
+    }
+
+    #[test]
+    fn placement_shows_known_parts() {
+        let mut t = summary("aaaa0000-0000-0000-0000-000000000000");
+        assert_eq!(placement(&t, &[]), "claude");
+        t.model = Some("sonnet".into());
+        let wid: WorkerId = "bbbbbbbb-0000-0000-0000-000000000000".parse().unwrap();
+        t.worker = Some(wid);
+        assert_eq!(placement(&t, &[]), "claude/sonnet @ bbbbbbbb");
+        let w = WorkerSummary {
+            id: wid,
+            info: WorkerInfo {
+                hostname: "mini".into(),
+                os: "macos".into(),
+                arch: "aarch64".into(),
+                harnesses: vec![],
+                roots: vec![],
+            },
+            busy: false,
+            online: true,
+            stats: None,
+            stats_at: None,
+        };
+        assert_eq!(placement(&t, &[w]), "claude/sonnet @ mini");
+        t.harness.clear();
+        t.model = None;
+        t.worker = None;
+        assert_eq!(placement(&t, &[]), "-");
     }
 
     #[test]

@@ -96,6 +96,7 @@ async fn submit_assign_finish() {
             prompt: "hi".into(),
             cwd: None,
             harness: None,
+            model: None,
         },
     )
     .await;
@@ -167,6 +168,74 @@ async fn submit_assign_finish() {
 }
 
 #[tokio::test]
+async fn model_reaches_worker_and_status() {
+    // FakePlanner would route to codex: an explicit model must skip it.
+    let base = start_app(App::new(None).with_planner(std::sync::Arc::new(FakePlanner))).await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    send(&mut client, &ClientMsg::Subscribe).await;
+    let mut worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+
+    // Requested model: default harness, sent to the worker, kept over the reported one.
+    // Then a task with none: the reported model fills in.
+    let mut ids = vec![];
+    for (harness, model, reported) in [
+        (None, Some("opus"), "claude-opus-4-1"),
+        (Some("claude"), None, "claude-sonnet-4-5"),
+    ] {
+        send(
+            &mut client,
+            &ClientMsg::Submit {
+                prompt: "hi".into(),
+                cwd: None,
+                harness: harness.map(String::from),
+                model: model.map(String::from),
+            },
+        )
+        .await;
+        let ServerMsg::Submitted { task } = recv(&mut client).await else {
+            panic!()
+        };
+        let OrchMsg::Assign { task: assigned } = recv(&mut worker).await else {
+            panic!()
+        };
+        assert_eq!(
+            (
+                assigned.id,
+                assigned.harness.as_str(),
+                assigned.model.as_deref()
+            ),
+            (task, "claude", model)
+        );
+        for event in [
+            AgentEvent::Started {
+                session: None,
+                model: Some(reported.into()),
+            },
+            AgentEvent::Finished {
+                ok: true,
+                summary: None,
+            },
+        ] {
+            send(&mut worker, &WorkerMsg::Event { task, event }).await;
+            let ServerMsg::Event { .. } = recv(&mut client).await else {
+                panic!()
+            };
+        }
+        ids.push(task);
+    }
+
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { tasks, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    let models: Vec<_> = ids
+        .iter()
+        .map(|id| tasks.iter().find(|t| t.id == *id).unwrap().model.as_deref())
+        .collect();
+    assert_eq!(models, [Some("opus"), Some("claude-sonnet-4-5")]);
+}
+
+#[tokio::test]
 async fn harness_mismatch_stays_queued() {
     let base = start().await;
     let _worker = join(&base, uuid::Uuid::new_v4(), "codex", vec![]).await;
@@ -178,6 +247,7 @@ async fn harness_mismatch_stays_queued() {
             prompt: "hi".into(),
             cwd: None,
             harness: Some("claude".into()),
+            model: None,
         },
     )
     .await;
@@ -204,6 +274,7 @@ async fn worker_disconnect_fails_task_and_notifies() {
             prompt: "hi".into(),
             cwd: None,
             harness: None,
+            model: None,
         },
     )
     .await;
@@ -245,6 +316,7 @@ async fn events_from_wrong_worker_are_ignored() {
             prompt: "hi".into(),
             cwd: None,
             harness: None,
+            model: None,
         },
     )
     .await;
@@ -377,6 +449,7 @@ async fn reconnect_keeps_reported_task_and_fails_unreported() {
             prompt: "a".into(),
             cwd: None,
             harness: None,
+            model: None,
         },
     )
     .await;
@@ -470,6 +543,7 @@ async fn disconnect_then_reconnect_within_grace_keeps_task() {
             prompt: "a".into(),
             cwd: None,
             harness: None,
+            model: None,
         },
     )
     .await;
@@ -511,6 +585,7 @@ async fn disconnect_then_reconnect_within_grace_keeps_task() {
             prompt: "b".into(),
             cwd: None,
             harness: None,
+            model: None,
         },
     )
     .await;
@@ -535,6 +610,7 @@ async fn show_returns_transcript() {
             prompt: "hi".into(),
             cwd: None,
             harness: None,
+            model: None,
         },
     )
     .await;
@@ -548,6 +624,7 @@ async fn show_returns_transcript() {
     let events = vec![
         AgentEvent::Started {
             session: Some("sess".into()),
+            model: None,
         },
         AgentEvent::Text { text: "hi".into() },
         AgentEvent::ToolUse {
@@ -614,6 +691,7 @@ impl mis_agent::Agent for FakePlanner {
         _task: TaskId,
         prompt: &'a str,
         _cwd: Option<&'a str>,
+        _model: Option<&'a str>,
         tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> mis_agent::BoxFut<'a> {
         Box::pin(async move {
@@ -649,6 +727,7 @@ async fn planner_routes_to_codex_and_streams_its_output() {
             prompt: "hey run as codex and say hi".into(),
             cwd: None,
             harness: None,
+            model: None,
         },
     )
     .await;

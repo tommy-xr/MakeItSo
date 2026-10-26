@@ -25,6 +25,8 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
         (Some("thread.started"), _) => {
             vec![AgentEvent::Started {
                 session: v["thread_id"].as_str().map(String::from),
+                // `thread.started` carries no model.
+                model: None,
             }]
         }
         (Some("item.completed"), Some("agent_message")) => {
@@ -66,6 +68,7 @@ impl Agent for CodexAgent {
         task: TaskId,
         prompt: &'a str,
         cwd: Option<&'a str>,
+        model: Option<&'a str>,
         tx: mpsc::Sender<AgentEvent>,
     ) -> BoxFut<'a> {
         Box::pin(async move {
@@ -73,6 +76,10 @@ impl Agent for CodexAgent {
             cmd.args(["exec", "--json", "--skip-git-repo-check"]);
             if self.skip_permissions {
                 cmd.arg("--dangerously-bypass-approvals-and-sandbox");
+            }
+            // One `=` token, so a model starting with '-' can't be read as a flag.
+            if let Some(m) = model {
+                cmd.arg(format!("--model={m}"));
             }
             cmd.arg("--").arg(prompt);
             if let Some(d) = cwd {
@@ -131,7 +138,8 @@ mod tests {
         assert_eq!(
             parse_line(r#"{"type":"thread.started","thread_id":"t1"}"#),
             vec![AgentEvent::Started {
-                session: Some("t1".into())
+                session: Some("t1".into()),
+                model: None,
             }]
         );
         assert_eq!(

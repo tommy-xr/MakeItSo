@@ -16,11 +16,13 @@ pub trait Agent: Send + Sync {
     fn name(&self) -> &'static str;
     /// Run to completion. Must end with exactly one `AgentEvent::Finished`.
     /// The agent process sees `MIS_TASK=<task>` so nested `mis task` calls can be refused.
+    /// `model` None leaves the harness's default.
     fn run<'a>(
         &'a self,
         task: TaskId,
         prompt: &'a str,
         cwd: Option<&'a str>,
+        model: Option<&'a str>,
         tx: mpsc::Sender<AgentEvent>,
     ) -> BoxFut<'a>;
 }
@@ -35,9 +37,10 @@ pub async fn run_guarded(
     task: TaskId,
     prompt: &str,
     cwd: Option<&str>,
+    model: Option<&str>,
     tx: mpsc::Sender<AgentEvent>,
 ) {
-    let run = agent.run(task, prompt, cwd, tx.clone());
+    let run = agent.run(task, prompt, cwd, model, tx.clone());
     let res = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(run)).await;
     let why = match res {
         Ok(Ok(())) => return,

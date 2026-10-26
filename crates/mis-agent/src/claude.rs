@@ -26,6 +26,7 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
         Some("system") if v["subtype"] == "init" => {
             vec![AgentEvent::Started {
                 session: v["session_id"].as_str().map(String::from),
+                model: v["model"].as_str().map(String::from),
             }]
         }
         Some("assistant") => blocks(&v)
@@ -80,6 +81,7 @@ impl Agent for ClaudeAgent {
         task: TaskId,
         prompt: &'a str,
         cwd: Option<&'a str>,
+        model: Option<&'a str>,
         tx: mpsc::Sender<AgentEvent>,
     ) -> BoxFut<'a> {
         Box::pin(async move {
@@ -89,6 +91,10 @@ impl Agent for ClaudeAgent {
                 cmd.arg("--dangerously-skip-permissions");
             }
             cmd.args(&self.extra_args);
+            // One `=` token, so a model starting with '-' can't be read as a flag.
+            if let Some(m) = model {
+                cmd.arg(format!("--model={m}"));
+            }
             cmd.arg("--").arg(prompt); // prompt may start with '-'
             if let Some(d) = cwd {
                 cmd.current_dir(d);
@@ -137,11 +143,12 @@ mod tests {
 
     #[test]
     fn parses_probe_output() {
-        let init = r#"{"type":"system","subtype":"init","session_id":"abc","tools":[]}"#;
+        let init = r#"{"type":"system","subtype":"init","session_id":"abc","tools":[],"model":"claude-sonnet-4-5"}"#;
         assert_eq!(
             parse_line(init),
             vec![AgentEvent::Started {
-                session: Some("abc".into())
+                session: Some("abc".into()),
+                model: Some("claude-sonnet-4-5".into()),
             }]
         );
 

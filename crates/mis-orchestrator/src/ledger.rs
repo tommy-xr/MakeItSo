@@ -89,6 +89,7 @@ impl TaskEntry {
             status: self.status,
             worker: self.worker,
             harness: self.task.harness.clone(),
+            model: self.task.model.clone(),
             session: self.session.clone(),
             summary: self.summary.clone(),
         }
@@ -97,7 +98,15 @@ impl TaskEntry {
     /// Append to the transcript, evicting oldest events past `MAX_TRANSCRIPT_BYTES`.
     fn record(&mut self, event: &AgentEvent) {
         match event {
-            AgentEvent::Started { session: Some(s) } => self.session = Some(s.clone()),
+            AgentEvent::Started { session, model } => {
+                if session.is_some() {
+                    self.session = session.clone();
+                }
+                // A requested model wins over the one the agent reports.
+                if self.task.model.is_none() {
+                    self.task.model = model.clone();
+                }
+            }
             AgentEvent::Finished { summary, .. } => self.summary = summary.clone(),
             _ => {}
         }
@@ -176,6 +185,7 @@ impl Ledger {
         prompt: String,
         cwd: Option<String>,
         harness: Option<String>,
+        model: Option<String>,
     ) -> (TaskId, Vec<Effect>) {
         let id = Uuid::new_v4();
         let planning = harness.is_none();
@@ -186,6 +196,7 @@ impl Ledger {
             cwd,
             // Empty until planned; Planning tasks are never queued or assigned.
             harness: harness.unwrap_or_default(),
+            model,
         });
         if planning {
             entry.status = TaskStatus::Planning;
@@ -591,7 +602,7 @@ mod tests {
         let mut l = Ledger::default();
         let wid = Uuid::new_v4();
         l.connect(wid, info(), &[], 1, T0);
-        let (task, eff) = l.submit("p".into(), None, Some("claude".into()));
+        let (task, eff) = l.submit("p".into(), None, Some("claude".into()), None);
         assert_eq!(assigned(&eff), vec![(1, task)]);
         (l, wid, task)
     }
@@ -625,7 +636,7 @@ mod tests {
         );
         assert_eq!(finished(&eff, task), Some(true));
         assert!(!l.is_busy(wid));
-        let (next, eff) = l.submit("q".into(), None, Some("claude".into()));
+        let (next, eff) = l.submit("q".into(), None, Some("claude".into()), None);
         assert_eq!(assigned(&eff), vec![(2, next)]);
     }
 
@@ -662,7 +673,7 @@ mod tests {
         l.disconnect(wid, 1); // offline, so the next task must land on `other`
         let other = Uuid::new_v4();
         l.connect(other, info(), &[], 5, T0);
-        let (foreign, eff) = l.submit("f".into(), None, Some("claude".into()));
+        let (foreign, eff) = l.submit("f".into(), None, Some("claude".into()), None);
         assert_eq!(assigned(&eff), vec![(5, foreign)]);
 
         let (unknown, _) = l.connect(wid, info(), &[task, foreign, Uuid::nil()], 2, T0);
@@ -697,7 +708,7 @@ mod tests {
         let wid = Uuid::new_v4();
         l.connect(wid, info(), &[], 1, T0);
         l.disconnect(wid, 1);
-        let (task, eff) = l.submit("p".into(), None, Some("claude".into()));
+        let (task, eff) = l.submit("p".into(), None, Some("claude".into()), None);
         assert!(assigned(&eff).is_empty());
         assert_eq!(task_status(&l, task), TaskStatus::Queued);
         let (_, eff) = l.connect(wid, info(), &[], 2, T0);
@@ -714,6 +725,7 @@ mod tests {
         let events = vec![
             AgentEvent::Started {
                 session: Some("s1".into()),
+                model: None,
             },
             text("hi"),
             AgentEvent::ToolResult {
@@ -737,6 +749,41 @@ mod tests {
         assert_eq!(info.harness, "claude");
         assert_eq!(info.worker, Some(wid));
         assert!(l.show(Uuid::nil()).is_none());
+    }
+
+    #[test]
+    fn model_from_submit_else_from_started() {
+        let started = |m: &str| AgentEvent::Started {
+            session: None,
+            model: Some(m.into()),
+        };
+        let model = |l: &Ledger, t| l.show(t).unwrap().0.model;
+        // Not requested: the reported model fills in.
+        let (mut l, wid, task) = running_setup();
+        assert_eq!(model(&l, task), None);
+        l.event(wid, 1, task, started("claude-sonnet-4-5"));
+        assert_eq!(model(&l, task).as_deref(), Some("claude-sonnet-4-5"));
+        l.event(
+            wid,
+            1,
+            task,
+            AgentEvent::Finished {
+                ok: true,
+                summary: None,
+            },
+        );
+        // Requested: sent to the worker and kept over the reported one.
+        let (next, eff) = l.submit("q".into(), None, Some("claude".into()), Some("opus".into()));
+        let [Effect::Send {
+            msg: OrchMsg::Assign { task: sent },
+            ..
+        }] = &eff[..]
+        else {
+            panic!("{eff:?}")
+        };
+        assert_eq!(sent.model.as_deref(), Some("opus"));
+        l.event(wid, 1, next, started("claude-opus-4-1"));
+        assert_eq!(model(&l, next).as_deref(), Some("opus"));
     }
 
     #[test]
@@ -802,7 +849,7 @@ mod tests {
         let mut both = info();
         both.harnesses.push("codex".into());
         l.connect(wid, both, &[], 1, T0);
-        let (task, eff) = l.submit("hey run as codex and say hi".into(), None, None);
+        let (task, eff) = l.submit("hey run as codex and say hi".into(), None, None, None);
         assert_eq!(task_status(&l, task), TaskStatus::Planning);
         let [Effect::Plan { task: t, prompt }] = &eff[..] else {
             panic!("{eff:?}")
@@ -810,7 +857,13 @@ mod tests {
         assert_eq!(*t, task);
         assert!(prompt.contains("claude, codex"));
         assert!(l
-            .planning_event(task, AgentEvent::Started { session: None })
+            .planning_event(
+                task,
+                AgentEvent::Started {
+                    session: None,
+                    model: None
+                }
+            )
             .is_empty());
         assert!(l
             .planning_event(task, AgentEvent::Text { text: "{}".into() })
@@ -862,7 +915,7 @@ mod tests {
     fn bad_plan_fails_task() {
         let mut l = Ledger::default();
         l.connect(Uuid::new_v4(), info(), &[], 1, T0);
-        let (task, _) = l.submit("p".into(), None, None);
+        let (task, _) = l.submit("p".into(), None, None, None);
         let eff = l.planning_event(
             task,
             AgentEvent::Finished {
@@ -877,7 +930,7 @@ mod tests {
     #[test]
     fn plan_without_workers_queues_until_one_joins() {
         let mut l = Ledger::default();
-        let (task, eff) = l.submit("use codex".into(), None, None);
+        let (task, eff) = l.submit("use codex".into(), None, None, None);
         let [Effect::Plan { prompt, .. }] = &eff[..] else {
             panic!("{eff:?}")
         };
