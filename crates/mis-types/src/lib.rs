@@ -13,6 +13,21 @@ pub use access::access_headers;
 pub type WorkerId = Uuid;
 pub type TaskId = Uuid;
 
+/// How often a worker sends `WorkerMsg::Stats`; the orchestrator treats these
+/// as heartbeats and drops a worker silent for `2 * STATS_INTERVAL + 5s`.
+pub const STATS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Machine load sampled by a worker. Percentages are 0-100.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct WorkerStats {
+    /// Free space on the filesystem holding the worker's first root.
+    pub disk_free_gb: f32,
+    pub disk_used_pct: u8,
+    pub cpu_pct: u8,
+    pub mem_pct: u8,
+}
+
 /// Reported by a worker on connect; the orchestrator keeps these as its ledger.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkerInfo {
@@ -89,6 +104,8 @@ pub enum WorkerMsg {
         task: TaskId,
         event: AgentEvent,
     },
+    /// Sent after Hello and every `STATS_INTERVAL`; doubles as the heartbeat.
+    Stats(WorkerStats),
 }
 
 /// Orchestrator -> worker.
@@ -125,6 +142,10 @@ pub struct WorkerSummary {
     pub busy: bool,
     /// False while inside the reconnect grace period.
     pub online: bool,
+    /// Latest `WorkerMsg::Stats`; None until the first arrives.
+    pub stats: Option<WorkerStats>,
+    /// Unix seconds when `stats` arrived, so clients can judge staleness.
+    pub stats_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -193,6 +214,12 @@ mod tests {
                     input: serde_json::json!({"command": "ls"}),
                 },
             },
+            WorkerMsg::Stats(WorkerStats {
+                disk_free_gb: 12.5,
+                disk_used_pct: 38,
+                cpu_pct: 64,
+                mem_pct: 82,
+            }),
         ];
         for m in msgs {
             let s = serde_json::to_string(&m).unwrap();
@@ -202,6 +229,15 @@ mod tests {
         let old: WorkerInfo =
             serde_json::from_str(r#"{"hostname":"h","os":"o","arch":"a","harnesses":[]}"#).unwrap();
         assert!(old.roots.is_empty());
+        // Tag sits beside the stats fields; missing fields default.
+        let s: WorkerMsg = serde_json::from_str(r#"{"type":"stats","cpu_pct":7}"#).unwrap();
+        assert_eq!(
+            s,
+            WorkerMsg::Stats(WorkerStats {
+                cpu_pct: 7,
+                ..Default::default()
+            })
+        );
         let s = serde_json::to_string(&ClientMsg::Status).unwrap();
         assert_eq!(s, r#"{"type":"status"}"#);
     }

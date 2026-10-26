@@ -1,7 +1,9 @@
 //! Pure fleet state: workers, tasks, queue. Every transition returns the
-//! effects the shell must perform. No I/O, no clocks, no locks here.
+//! effects the shell must perform. No I/O, no clocks, no locks here; `now` is
+//! monotonic time from the shell, so wall-clock jumps can't fake silence.
 
 use std::collections::{HashMap, VecDeque};
+use std::time::Duration;
 
 use mis_types::*;
 use uuid::Uuid;
@@ -29,6 +31,10 @@ pub enum Effect {
         task: TaskId,
         prompt: String,
     },
+    /// Drop this connection's socket so a silent worker must reconnect with Hello.
+    Close {
+        conn: ConnId,
+    },
 }
 
 struct Worker {
@@ -37,6 +43,10 @@ struct Worker {
     conn: Option<ConnId>,
     /// Bumped on every (re)connect so a stale grace timer can't expire a live worker.
     generation: u64,
+    /// Latest stats and the Unix second they arrived; cleared on (re)connect.
+    stats: Option<(WorkerStats, u64)>,
+    /// Last Hello or Stats; `tick` drops the worker when this gets too old.
+    last_seen: Duration,
 }
 
 /// Per-task transcript cap: sum of each event's serialized JSON size. Oldest
@@ -139,6 +149,8 @@ impl Ledger {
                     info: w.info.clone(),
                     busy: self.is_busy(*id),
                     online: w.conn.is_some(),
+                    stats: w.stats.as_ref().map(|(s, _)| s.clone()),
+                    stats_at: w.stats.as_ref().map(|(_, at)| *at),
                 })
                 .collect(),
             tasks: self.tasks.iter().map(TaskEntry::summary).collect(),
@@ -267,6 +279,7 @@ impl Ledger {
         info: WorkerInfo,
         running: &[TaskId],
         conn: ConnId,
+        now: Duration,
     ) -> (Vec<TaskId>, Vec<Effect>) {
         let generation = self.workers.get(&wid).map_or(0, |w| w.generation) + 1;
         self.workers.insert(
@@ -275,6 +288,8 @@ impl Ledger {
                 info,
                 conn: Some(conn),
                 generation,
+                stats: None,
+                last_seen: now,
             },
         );
         let unknown = running
@@ -300,6 +315,41 @@ impl Ledger {
             wid,
             generation: w.generation,
         }]
+    }
+
+    /// Heartbeat from `conn`: store the stats, stamped `unix_secs` for clients.
+    /// Ignored unless `conn` is live.
+    pub fn worker_stats(
+        &mut self,
+        wid: WorkerId,
+        conn: ConnId,
+        stats: WorkerStats,
+        now: Duration,
+        unix_secs: u64,
+    ) {
+        if let Some(w) = self.workers.get_mut(&wid).filter(|w| w.conn == Some(conn)) {
+            w.stats = Some((stats, unix_secs));
+            w.last_seen = now;
+        }
+    }
+
+    /// Disconnect every online worker not heard from within `stale_after`, and
+    /// close its socket. From there the normal grace/expire path applies.
+    pub fn tick(&mut self, now: Duration, stale_after: Duration) -> Vec<Effect> {
+        let stale: Vec<(WorkerId, ConnId)> = self
+            .workers
+            .iter()
+            .filter(|(_, w)| now.saturating_sub(w.last_seen) > stale_after)
+            .filter_map(|(wid, w)| Some((*wid, w.conn?)))
+            .collect();
+        stale
+            .into_iter()
+            .flat_map(|(wid, conn)| {
+                let mut effects = self.disconnect(wid, conn);
+                effects.push(Effect::Close { conn });
+                effects
+            })
+            .collect()
     }
 
     /// Grace period ended. Drops the worker and fails its tasks unless it came back.
@@ -414,6 +464,90 @@ impl Ledger {
 mod tests {
     use super::*;
 
+    const T0: Duration = Duration::ZERO;
+    const STALE: Duration = Duration::from_secs(35);
+
+    fn secs(s: u64) -> Duration {
+        Duration::from_secs(s)
+    }
+
+    fn stats(cpu: u8) -> WorkerStats {
+        WorkerStats {
+            cpu_pct: cpu,
+            ..Default::default()
+        }
+    }
+
+    fn summary(l: &Ledger, wid: WorkerId) -> WorkerSummary {
+        let ServerMsg::Status { workers, .. } = l.status() else {
+            panic!()
+        };
+        workers.into_iter().find(|w| w.id == wid).unwrap()
+    }
+
+    #[test]
+    fn stats_are_stored_and_reported() {
+        let mut l = Ledger::default();
+        let wid = Uuid::new_v4();
+        l.connect(wid, info(), &[], 1, T0);
+        assert_eq!(summary(&l, wid).stats, None);
+        assert_eq!(summary(&l, wid).stats_at, None);
+        l.worker_stats(wid, 1, stats(64), secs(10), 1_700_000_000);
+        let s = summary(&l, wid);
+        assert_eq!(s.stats, Some(stats(64)));
+        assert_eq!(s.stats_at, Some(1_700_000_000));
+        // A stale connection's stats are ignored.
+        l.worker_stats(wid, 9, stats(1), secs(11), 0);
+        assert_eq!(summary(&l, wid).stats, Some(stats(64)));
+    }
+
+    #[test]
+    fn tick_drops_silent_worker_through_disconnect_path() {
+        let (mut l, wid, task) = running_setup();
+        l.worker_stats(wid, 1, stats(5), secs(10), 0);
+        assert!(l.tick(secs(45), STALE).is_empty()); // exactly at the limit: kept
+        assert_eq!(
+            l.tick(secs(46), STALE),
+            vec![
+                Effect::StartGrace { wid, generation: 1 },
+                Effect::Close { conn: 1 }
+            ]
+        );
+        assert!(!summary(&l, wid).online);
+        // Already offline: not dropped twice. Task waits out the grace period.
+        assert!(l.tick(secs(100), STALE).is_empty());
+        assert_eq!(task_status(&l, task), TaskStatus::Running);
+        let eff = l.expire(wid, 1);
+        assert_eq!(finished(&eff, task), Some(false));
+    }
+
+    #[test]
+    fn tick_keeps_worker_that_keeps_beating() {
+        let mut l = Ledger::default();
+        let wid = Uuid::new_v4();
+        l.connect(wid, info(), &[], 1, T0);
+        for t in (15..200).step_by(15) {
+            l.worker_stats(wid, 1, stats(1), secs(t), 0);
+            assert!(l.tick(secs(t + 5), STALE).is_empty());
+        }
+        assert!(summary(&l, wid).online);
+    }
+
+    #[test]
+    fn hello_counts_as_a_beat_and_reconnect_resets() {
+        let mut l = Ledger::default();
+        let wid = Uuid::new_v4();
+        l.connect(wid, info(), &[], 1, T0);
+        l.worker_stats(wid, 1, stats(9), secs(1), 0);
+        assert_eq!(l.tick(secs(40), STALE).len(), 2);
+        l.connect(wid, info(), &[], 2, secs(50));
+        let s = summary(&l, wid);
+        assert!(s.online);
+        assert_eq!((s.stats, s.stats_at), (None, None));
+        assert!(l.tick(secs(80), STALE).is_empty());
+        assert_eq!(l.tick(secs(90), STALE).len(), 2);
+    }
+
     fn info() -> WorkerInfo {
         WorkerInfo {
             hostname: "h".into(),
@@ -456,7 +590,7 @@ mod tests {
     fn running_setup() -> (Ledger, WorkerId, TaskId) {
         let mut l = Ledger::default();
         let wid = Uuid::new_v4();
-        l.connect(wid, info(), &[], 1);
+        l.connect(wid, info(), &[], 1, T0);
         let (task, eff) = l.submit("p".into(), None, Some("claude".into()));
         assert_eq!(assigned(&eff), vec![(1, task)]);
         (l, wid, task)
@@ -471,7 +605,7 @@ mod tests {
         );
         assert_eq!(task_status(&l, task), TaskStatus::Running);
 
-        let (unknown, eff) = l.connect(wid, info(), &[task], 2);
+        let (unknown, eff) = l.connect(wid, info(), &[task], 2, T0);
         assert!(unknown.is_empty());
         assert_eq!(finished(&eff, task), None);
         assert!(l.is_busy(wid));
@@ -508,7 +642,7 @@ mod tests {
     #[test]
     fn reconnect_without_task_fails_it() {
         let (mut l, wid, task) = running_setup();
-        let (_, eff) = l.connect(wid, info(), &[], 2);
+        let (_, eff) = l.connect(wid, info(), &[], 2, T0);
         assert_eq!(finished(&eff, task), Some(false));
         assert!(!l.is_busy(wid));
     }
@@ -527,11 +661,11 @@ mod tests {
         );
         l.disconnect(wid, 1); // offline, so the next task must land on `other`
         let other = Uuid::new_v4();
-        l.connect(other, info(), &[], 5);
+        l.connect(other, info(), &[], 5, T0);
         let (foreign, eff) = l.submit("f".into(), None, Some("claude".into()));
         assert_eq!(assigned(&eff), vec![(5, foreign)]);
 
-        let (unknown, _) = l.connect(wid, info(), &[task, foreign, Uuid::nil()], 2);
+        let (unknown, _) = l.connect(wid, info(), &[task, foreign, Uuid::nil()], 2, T0);
         assert_eq!(unknown, vec![Uuid::nil()]);
         assert!(!l.is_busy(wid));
         assert!(l.is_busy(other));
@@ -540,7 +674,7 @@ mod tests {
     #[test]
     fn stale_connection_cannot_report_or_disconnect() {
         let (mut l, wid, task) = running_setup();
-        l.connect(wid, info(), &[task], 2);
+        l.connect(wid, info(), &[task], 2, T0);
         assert!(l
             .event(
                 wid,
@@ -561,12 +695,12 @@ mod tests {
     fn offline_worker_is_not_scheduled() {
         let mut l = Ledger::default();
         let wid = Uuid::new_v4();
-        l.connect(wid, info(), &[], 1);
+        l.connect(wid, info(), &[], 1, T0);
         l.disconnect(wid, 1);
         let (task, eff) = l.submit("p".into(), None, Some("claude".into()));
         assert!(assigned(&eff).is_empty());
         assert_eq!(task_status(&l, task), TaskStatus::Queued);
-        let (_, eff) = l.connect(wid, info(), &[], 2);
+        let (_, eff) = l.connect(wid, info(), &[], 2, T0);
         assert_eq!(assigned(&eff), vec![(2, task)]);
     }
 
@@ -644,7 +778,7 @@ mod tests {
     #[test]
     fn worker_loss_is_recorded_in_transcript() {
         let (mut l, wid, task) = running_setup();
-        l.connect(wid, info(), &[], 2);
+        l.connect(wid, info(), &[], 2, T0);
         let (info, got, _) = l.show(task).unwrap();
         assert_eq!(info.summary.as_deref(), Some("worker restarted"));
         assert!(matches!(got, [AgentEvent::Finished { ok: false, .. }]));
@@ -667,7 +801,7 @@ mod tests {
         let wid = Uuid::new_v4();
         let mut both = info();
         both.harnesses.push("codex".into());
-        l.connect(wid, both, &[], 1);
+        l.connect(wid, both, &[], 1, T0);
         let (task, eff) = l.submit("hey run as codex and say hi".into(), None, None);
         assert_eq!(task_status(&l, task), TaskStatus::Planning);
         let [Effect::Plan { task: t, prompt }] = &eff[..] else {
@@ -727,7 +861,7 @@ mod tests {
     #[test]
     fn bad_plan_fails_task() {
         let mut l = Ledger::default();
-        l.connect(Uuid::new_v4(), info(), &[], 1);
+        l.connect(Uuid::new_v4(), info(), &[], 1, T0);
         let (task, _) = l.submit("p".into(), None, None);
         let eff = l.planning_event(
             task,
@@ -759,7 +893,7 @@ mod tests {
         assert_eq!(task_status(&l, task), TaskStatus::Queued);
         let mut codex = info();
         codex.harnesses = vec!["codex".into()];
-        let (_, eff) = l.connect(Uuid::new_v4(), codex, &[], 3);
+        let (_, eff) = l.connect(Uuid::new_v4(), codex, &[], 3, T0);
         assert_eq!(assigned(&eff), vec![(3, task)]);
     }
 }

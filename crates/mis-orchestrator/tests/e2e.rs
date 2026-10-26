@@ -697,3 +697,60 @@ async fn planner_routes_to_codex_and_streams_its_output() {
             .is_err()
     );
 }
+
+/// The sole worker's summary from a fresh Status.
+async fn only_worker(client: &mut Ws) -> WorkerSummary {
+    send(client, &ClientMsg::Status).await;
+    let ServerMsg::Status { mut workers, .. } = recv(client).await else {
+        panic!()
+    };
+    assert_eq!(workers.len(), 1);
+    workers.pop().unwrap()
+}
+
+#[tokio::test]
+async fn stats_reported_then_silent_worker_goes_offline() {
+    use std::time::{Duration, Instant};
+    let app = App::new(None)
+        .with_grace(Duration::from_secs(5))
+        .with_liveness(Duration::from_millis(300), Duration::from_millis(50));
+    let base = start_app(app).await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    let wid = uuid::Uuid::new_v4();
+    let mut worker = join(&base, wid, "claude", vec![]).await;
+    let stats = WorkerStats {
+        disk_free_gb: 120.5,
+        disk_used_pct: 38,
+        cpu_pct: 64,
+        mem_pct: 82,
+    };
+    send(&mut worker, &WorkerMsg::Stats(stats.clone())).await;
+
+    // Stats and Status ride different sockets, so poll until it lands.
+    let start = Instant::now();
+    let w = loop {
+        let w = only_worker(&mut client).await;
+        if w.stats.is_some() {
+            break w;
+        }
+        assert!(start.elapsed() < Duration::from_secs(1), "no stats");
+    };
+    assert!(w.online);
+    assert_eq!(w.stats, Some(stats));
+    assert!(w.stats_at.unwrap() > 1_700_000_000);
+
+    // Silent from here: flagged offline (threshold timing is unit-tested) and its socket closed.
+    while only_worker(&mut client).await.online {
+        assert!(start.elapsed() < Duration::from_secs(2), "still online");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let closed = tokio::time::timeout(Duration::from_secs(1), async {
+        while let Some(Ok(_)) = worker.next().await {}
+    })
+    .await;
+    assert!(closed.is_ok(), "socket not closed");
+
+    // Reconnecting brings it back.
+    let _worker = join(&base, wid, "claude", vec![]).await;
+    assert!(only_worker(&mut client).await.online);
+}

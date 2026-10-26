@@ -219,6 +219,16 @@ fn first_line(s: &str, max: usize) -> String {
     format!("{cut}…")
 }
 
+/// `disk 38% cpu 64% mem 82%`, or `stats: -` before the first report.
+fn stats_text(s: Option<&WorkerStats>) -> String {
+    s.map_or("stats: -".into(), |s| {
+        format!(
+            "disk {}% cpu {}% mem {}%",
+            s.disk_used_pct, s.cpu_pct, s.mem_pct
+        )
+    })
+}
+
 /// The one task whose id starts with `prefix`.
 fn resolve(tasks: &[TaskSummary], prefix: &str) -> Result<TaskId> {
     let hits: Vec<_> = tasks
@@ -249,12 +259,13 @@ async fn main() -> Result<()> {
             println!("workers ({}):", workers.len());
             for w in workers {
                 println!(
-                    "  {} {} {} {:?} roots={}{}",
+                    "  {} {} {} {:?} roots={} {}{}",
                     w.id,
                     w.info.hostname,
                     w.info.os,
                     w.info.harnesses,
                     w.info.roots.join(","),
+                    stats_text(w.stats.as_ref()),
                     if !w.online {
                         " [offline]"
                     } else if w.busy {
@@ -414,6 +425,18 @@ mod tests {
         assert_eq!(resolve(&tasks, "aaab").unwrap(), tasks[1].id);
         assert!(resolve(&tasks, "aaa").is_err());
         assert!(resolve(&tasks, "b").is_err());
+    }
+
+    #[test]
+    fn stats_text_formats_or_dashes() {
+        assert_eq!(stats_text(None), "stats: -");
+        let s = WorkerStats {
+            disk_free_gb: 1.0,
+            disk_used_pct: 38,
+            cpu_pct: 64,
+            mem_pct: 82,
+        };
+        assert_eq!(stats_text(Some(&s)), "disk 38% cpu 64% mem 82%");
     }
 
     #[test]

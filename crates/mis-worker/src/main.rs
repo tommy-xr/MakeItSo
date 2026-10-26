@@ -4,6 +4,7 @@
 mod config;
 mod roots;
 mod setup;
+mod stats;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -109,6 +110,7 @@ async fn main() -> Result<()> {
         pending: None,
         running: HashSet::new(),
         backoff: Duration::from_secs(1),
+        sampler: stats::Sampler::new(ctx.roots.first().cloned().unwrap_or_else(|| "/".into())),
     };
 
     loop {
@@ -137,6 +139,7 @@ struct Conn {
     /// Tasks assigned and not yet reported Finished; sent in Hello on reconnect.
     running: HashSet<TaskId>,
     backoff: Duration,
+    sampler: stats::Sampler,
 }
 
 /// One connection's lifetime: handshake, then forward events and run assignments
@@ -161,6 +164,12 @@ async fn session(
         running,
     }))
     .await?;
+    // Heartbeat with stats. The first tick fires at once, so the orchestrator
+    // has numbers right after Hello. Sampling (~20ms) runs inline; at one per
+    // 15s that stall is negligible.
+    let mut beat = tokio::time::interval(STATS_INTERVAL);
+    // After a stall (e.g. laptop sleep), send one beat, not a burst.
+    beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         // Resend a stranded event before pulling a new one.
@@ -170,6 +179,13 @@ async fn session(
                 ev = c.ev_rx.recv() => ev,
                 msg = stream.next() => {
                     handle_incoming(msg, ctx, ev_tx, &mut c.running, &mut c.backoff)?;
+                    continue;
+                }
+                _ = beat.tick() => {
+                    let t = std::time::Instant::now();
+                    let s = c.sampler.sample();
+                    tracing::debug!(?s, took = ?t.elapsed(), "sending stats");
+                    sink.send(text(&WorkerMsg::Stats(s))).await?;
                     continue;
                 }
             },
