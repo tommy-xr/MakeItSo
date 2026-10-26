@@ -236,8 +236,9 @@ impl Ledger {
         fleet
     }
 
-    /// Planner output for a Planning task. Only Finished matters: it carries the
-    /// plan (the reply's JSON), which queues the task or fails it.
+    /// Planner output for a Planning task. Started gives the planner's model, kept
+    /// in case it answers; Finished carries the plan (the reply's JSON), which
+    /// answers, queues, or fails the task.
     pub fn planning_event(&mut self, task: TaskId, event: AgentEvent) -> Vec<Effect> {
         let fleet = self.fleet();
         let Some(t) = self.tasks.iter_mut().find(|t| t.task.id == task) else {
@@ -260,7 +261,28 @@ impl Ledger {
                     (_, summary) => Err(summary.unwrap_or_else(|| "planner failed".into())),
                 };
                 match plan {
+                    // Answered by the planner: Done, credited to it, no worker.
+                    Ok(plan::Plan {
+                        answer: Some(answer),
+                        ..
+                    }) => {
+                        t.task.harness = "planner".into();
+                        t.status = TaskStatus::Done;
+                        let events = [
+                            AgentEvent::Text {
+                                text: answer.clone(),
+                            },
+                            AgentEvent::Finished {
+                                ok: true,
+                                summary: Some(answer),
+                            },
+                        ];
+                        events.iter().for_each(|e| t.record(e));
+                        events.into_iter().map(broadcast).collect()
+                    }
                     Ok(p) => {
+                        // The worker reports its own model.
+                        t.reported_model = None;
                         t.task.harness = p.harness.clone();
                         t.task.prompt = p.prompt.clone();
                         t.task.model = p.model.clone();
@@ -290,6 +312,10 @@ impl Ledger {
                         vec![broadcast(event)]
                     }
                 }
+            }
+            AgentEvent::Started { model, .. } => {
+                t.reported_model = model;
+                vec![]
             }
             _ => vec![],
         }
@@ -970,6 +996,76 @@ mod tests {
             .collect();
         assert_eq!(sent, [Some("sonnet"), Some("sonnet")]);
         assert_eq!(l.show(task).unwrap().0.model.as_deref(), Some("sonnet"));
+    }
+
+    #[test]
+    fn planner_answer_finishes_task_without_worker() {
+        let mut l = Ledger::default();
+        l.connect(Uuid::new_v4(), info(), &[], 1, T0);
+        let (task, _) = l.submit("what is 2+2?".into(), None, None, None);
+        l.planning_event(
+            task,
+            AgentEvent::Started {
+                session: None,
+                model: Some("claude-sonnet-4-5".into()),
+            },
+        );
+        let eff = l.planning_event(
+            task,
+            AgentEvent::Finished {
+                ok: true,
+                summary: Some(r#"{"answer":"4","reason":"arithmetic"}"#.into()),
+            },
+        );
+        assert!(assigned(&eff).is_empty());
+        assert_eq!(finished(&eff, task), Some(true));
+        let (t, transcript, _) = l.show(task).unwrap();
+        assert_eq!(t.status, TaskStatus::Done);
+        assert_eq!(
+            (t.harness.as_str(), t.model.as_deref(), t.worker),
+            ("planner", Some("claude-sonnet-4-5"), None)
+        );
+        assert_eq!(t.summary.as_deref(), Some("4"));
+        assert_eq!(
+            transcript,
+            [
+                text("4"),
+                AgentEvent::Finished {
+                    ok: true,
+                    summary: Some("4".into())
+                }
+            ]
+        );
+        // An explicit harness skips the planner, so an answer can't land.
+        let (q, _) = l.submit("what is 2+2?".into(), None, Some("claude".into()), None);
+        let late = AgentEvent::Finished {
+            ok: true,
+            summary: Some(r#"{"answer":"4"}"#.into()),
+        };
+        assert!(l.planning_event(q, late).is_empty());
+        assert_ne!(l.show(q).unwrap().0.harness, "planner");
+    }
+
+    #[test]
+    fn dispatched_task_drops_planner_model() {
+        let mut l = Ledger::default();
+        l.connect(Uuid::new_v4(), info(), &[], 1, T0);
+        let (task, _) = l.submit("fix the bug".into(), None, None, None);
+        l.planning_event(
+            task,
+            AgentEvent::Started {
+                session: None,
+                model: Some("claude-sonnet-4-5".into()),
+            },
+        );
+        l.planning_event(
+            task,
+            AgentEvent::Finished {
+                ok: true,
+                summary: Some(r#"{"harness":"claude"}"#.into()),
+            },
+        );
+        assert_eq!(l.show(task).unwrap().0.model, None);
     }
 
     #[test]

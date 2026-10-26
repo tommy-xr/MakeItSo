@@ -171,7 +171,8 @@ async fn submit_assign_finish() {
 #[tokio::test]
 async fn model_reaches_worker_and_status() {
     // FakePlanner would route to codex: an explicit model must skip it.
-    let base = start_app(App::new(None).with_planner(std::sync::Arc::new(FakePlanner))).await;
+    let base =
+        start_app(App::new(None).with_planner(std::sync::Arc::new(FakePlanner(ROUTE_CODEX)))).await;
     let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
     send(&mut client, &ClientMsg::Subscribe).await;
     let mut worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
@@ -681,8 +682,12 @@ async fn show_returns_transcript() {
     };
 }
 
-/// Planner stub: picks codex and its advertised model, and rewrites the prompt.
-struct FakePlanner;
+/// Picks codex and its advertised model, and rewrites the prompt.
+const ROUTE_CODEX: &str =
+    r#"{"harness":"codex","model":"codex-mini","prompt":"say hi","reason":"user asked for codex"}"#;
+
+/// Planner stub replying with its JSON plan, after reporting model `fake-sonnet`.
+struct FakePlanner(&'static str);
 impl mis_agent::Agent for FakePlanner {
     fn name(&self) -> &'static str {
         "fake"
@@ -707,12 +712,14 @@ impl mis_agent::Agent for FakePlanner {
                 prompt.contains("- codex: codex-mini"),
                 "fleet models in prompt"
             );
+            tx.send(AgentEvent::Started {
+                session: None,
+                model: Some("fake-sonnet".into()),
+            })
+            .await?;
             tx.send(AgentEvent::Finished {
                 ok: true,
-                summary: Some(
-                    r#"{"harness":"codex","model":"codex-mini","prompt":"say hi","reason":"user asked for codex"}"#
-                        .into(),
-                ),
+                summary: Some(self.0.into()),
             })
             .await?;
             Ok(())
@@ -722,7 +729,8 @@ impl mis_agent::Agent for FakePlanner {
 
 #[tokio::test]
 async fn planner_routes_to_codex_and_streams_its_output() {
-    let base = start_app(App::new(None).with_planner(std::sync::Arc::new(FakePlanner))).await;
+    let base =
+        start_app(App::new(None).with_planner(std::sync::Arc::new(FakePlanner(ROUTE_CODEX)))).await;
     let mut claude = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
     let codex_id = uuid::Uuid::new_v4();
     let mut codex = join(&base, codex_id, "codex", vec![]).await;
@@ -789,6 +797,79 @@ async fn planner_routes_to_codex_and_streams_its_output() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn planner_answers_trivial_question_without_a_worker() {
+    let planner = FakePlanner(r#"{"answer":"4","reason":"arithmetic"}"#);
+    let base = start_app(App::new(None).with_planner(std::sync::Arc::new(planner))).await;
+    let mut claude = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+    let mut codex = join(&base, uuid::Uuid::new_v4(), "codex", vec![]).await;
+
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    send(&mut client, &ClientMsg::Subscribe).await;
+    send(
+        &mut client,
+        &ClientMsg::Submit {
+            prompt: "what is 2+2?".into(),
+            cwd: None,
+            harness: None,
+            model: None,
+        },
+    )
+    .await;
+    let ServerMsg::Submitted { task } = recv(&mut client).await else {
+        panic!()
+    };
+    let ServerMsg::Event {
+        worker: None,
+        event: AgentEvent::Text { text },
+        ..
+    } = recv(&mut client).await
+    else {
+        panic!()
+    };
+    assert_eq!(text, "4");
+    let ServerMsg::Event {
+        worker: None,
+        event: AgentEvent::Finished { ok: true, summary },
+        ..
+    } = recv(&mut client).await
+    else {
+        panic!()
+    };
+    assert_eq!(summary.as_deref(), Some("4"));
+
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { tasks, workers } = recv(&mut client).await else {
+        panic!()
+    };
+    let t = tasks.iter().find(|t| t.id == task).unwrap();
+    assert_eq!(
+        (
+            t.status,
+            t.summary.as_deref(),
+            t.harness.as_str(),
+            t.model.as_deref(),
+            t.worker
+        ),
+        (
+            TaskStatus::Done,
+            Some("4"),
+            "planner",
+            Some("fake-sonnet"),
+            None
+        )
+    );
+    assert!(workers.iter().all(|w| !w.busy));
+    for w in [&mut claude, &mut codex] {
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), w.next())
+                .await
+                .is_err(),
+            "worker got a task"
+        );
+    }
 }
 
 /// The sole worker's summary from a fresh Status.
