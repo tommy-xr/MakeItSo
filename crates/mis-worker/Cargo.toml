@@ -17,6 +17,6 @@ tokio-tungstenite.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
-toml = "1.1.8"
+toml.workspace = true
 rpassword = "7.5.4"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system", "disk"] }

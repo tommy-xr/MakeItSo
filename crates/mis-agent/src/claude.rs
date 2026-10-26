@@ -17,6 +17,27 @@ pub struct ClaudeAgent {
     pub extra_args: Vec<String>,
 }
 
+/// Model aliases the claude CLI documents for `--model`.
+pub const ALIASES: [&str; 4] = ["haiku", "sonnet", "opus", "fable"];
+
+/// `ALIASES` plus the extra models this account offers, from
+/// `additionalModelOptionsCache[].value` in `~/.claude.json` (claude has no
+/// command to list models).
+pub fn claude_models(claude_json: &str) -> Result<Vec<String>, String> {
+    let v: Value = serde_json::from_str(claude_json).map_err(|e| e.to_string())?;
+    let mut out: Vec<String> = ALIASES.map(String::from).to_vec();
+    let extra = v["additionalModelOptionsCache"]
+        .as_array()
+        .into_iter()
+        .flatten();
+    for m in extra.filter_map(|o| o["value"].as_str()) {
+        if !out.iter().any(|o| o == m) {
+            out.push(m.to_string());
+        }
+    }
+    Ok(out)
+}
+
 /// Map one stream-json line to zero or more events.
 pub fn parse_line(line: &str) -> Vec<AgentEvent> {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -74,6 +95,16 @@ fn tool_result_text(c: &Value) -> String {
 impl Agent for ClaudeAgent {
     fn name(&self) -> &'static str {
         "claude"
+    }
+
+    fn models(&self) -> Vec<String> {
+        // claude keeps `.claude.json` in CLAUDE_CONFIG_DIR when set, else in home.
+        let dir = std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(crate::home, |d| Ok(d.into()));
+        let models = dir.and_then(|d| crate::parse_file(&d.join(".claude.json"), claude_models));
+        models.unwrap_or_else(|e| {
+            tracing::warn!("{e}; offering only the claude model aliases");
+            ALIASES.map(String::from).to_vec()
+        })
     }
 
     fn run<'a>(
@@ -194,5 +225,18 @@ mod tests {
 
         assert!(parse_line(r#"{"type":"rate_limit_event"}"#).is_empty());
         assert!(parse_line("not json").is_empty());
+    }
+
+    #[test]
+    fn models_are_aliases_plus_account_extras() {
+        let json = r#"{"numStartups":3,"additionalModelOptionsCache":[
+            {"value":"claude-fable-5-1[1m]","label":"Fable","description":"x"},
+            {"value":"opus","label":"dup"},{"label":"no value"}]}"#;
+        assert_eq!(
+            claude_models(json).unwrap(),
+            ["haiku", "sonnet", "opus", "fable", "claude-fable-5-1[1m]"]
+        );
+        assert_eq!(claude_models("{}").unwrap(), ALIASES);
+        assert!(claude_models("not json").is_err());
     }
 }

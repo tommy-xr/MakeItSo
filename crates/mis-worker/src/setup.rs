@@ -87,10 +87,8 @@ pub async fn run(a: SetupArgs) -> Result<()> {
     // Locking the id means setup refuses to run beside a live worker, whose
     // ledger entry this test connection would otherwise replace.
     let (id, _lock) = crate::worker_id()?;
-    let harnesses: Vec<String> = mis_agent::available(false)
-        .iter()
-        .map(|a| a.name().to_string())
-        .collect();
+    let agents = mis_agent::available(false);
+    let harnesses: Vec<String> = agents.iter().map(|a| a.name().to_string()).collect();
     let info = WorkerInfo {
         hostname: crate::hostname(),
         os: std::env::consts::OS.into(),
@@ -108,6 +106,7 @@ pub async fn run(a: SetupArgs) -> Result<()> {
             cf_access_client_id: cf_id.clone(),
             cf_access_client_secret: cf_secret.clone(),
             roots: roots.clone(),
+            models: saved.models.clone(),
         };
         let resolved = config::merge(cfg.clone(), Config::default(), cwd.clone());
         match test_connect(&resolved, id, &info).await {
@@ -130,6 +129,18 @@ pub async fn run(a: SetupArgs) -> Result<()> {
     );
     if harnesses.is_empty() {
         eprintln!("warning: no `claude` or `codex` on PATH; mis-worker needs one to run");
+    }
+    let models = crate::advertised(&agents, &saved.models);
+    for h in &harnesses {
+        let from = if saved.models.contains_key(h) {
+            "worker.toml"
+        } else {
+            "discovered"
+        };
+        let list = models
+            .get(h)
+            .map_or("none (runs its default)".into(), |m| m.join(", "));
+        println!("{h} models ({from}): {list}");
     }
     config::write(&path, &cfg)?;
     println!("wrote {}", path.display());

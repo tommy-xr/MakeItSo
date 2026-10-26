@@ -15,6 +15,39 @@ pub struct CodexAgent {
     pub skip_permissions: bool,
 }
 
+/// Slugs from codex's `models_cache.json` with visibility "list", by priority,
+/// after the default `model` set at the top level of `config.toml` (if any).
+/// Either file failing to parse is an error.
+pub fn codex_models(cache_json: &str, config_toml: &str) -> Result<Vec<String>, String> {
+    let v: Value = serde_json::from_str(cache_json).map_err(|e| e.to_string())?;
+    let mut listed: Vec<(i64, &str)> = v["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["visibility"] == "list")
+        .filter_map(|m| {
+            Some((
+                m["priority"].as_i64().unwrap_or(i64::MAX),
+                m["slug"].as_str()?,
+            ))
+        })
+        .collect();
+    listed.sort_by_key(|(p, _)| *p);
+    let config: toml::Table =
+        toml::from_str(config_toml).map_err(|e| format!("config.toml: {e}"))?;
+    let default = config
+        .get("model")
+        .and_then(|m| m.as_str())
+        .map(String::from);
+    let mut out: Vec<String> = default.into_iter().collect();
+    for (_, slug) in listed {
+        if !out.iter().any(|o| o == slug) {
+            out.push(slug.to_string());
+        }
+    }
+    Ok(out)
+}
+
 /// Map one `--json` line to zero or more events.
 pub fn parse_line(line: &str) -> Vec<AgentEvent> {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -61,6 +94,24 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
 impl Agent for CodexAgent {
     fn name(&self) -> &'static str {
         "codex"
+    }
+
+    fn models(&self) -> Vec<String> {
+        let dir = std::env::var_os("CODEX_HOME")
+            .map_or_else(|| crate::home().map(|h| h.join(".codex")), |d| Ok(d.into()));
+        let models = dir.and_then(|dir| {
+            // No config just means no default to put first.
+            let config = dir.join("config.toml");
+            let config = match std::fs::read_to_string(&config) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                r => r.map_err(|e| format!("{}: {e}", config.display()))?,
+            };
+            crate::parse_file(&dir.join("models_cache.json"), |c| codex_models(c, &config))
+        });
+        models.unwrap_or_else(|e| {
+            tracing::warn!("{e}; codex will run its default model");
+            vec![]
+        })
     }
 
     fn run<'a>(
@@ -182,5 +233,28 @@ mod tests {
             }]
         );
         assert!(parse_line(r#"{"type":"turn.started"}"#).is_empty());
+    }
+
+    #[test]
+    fn models_listed_by_priority_after_configured_default() {
+        let cache = r#"{"fetched_at":"x","models":[
+            {"slug":"gpt-b","visibility":"list","priority":4},
+            {"slug":"gpt-hidden","visibility":"hide","priority":0},
+            {"slug":"gpt-a","visibility":"list","priority":1},
+            {"slug":"gpt-c","visibility":"list","priority":2}]}"#;
+        let config = "model = \"gpt-c\"\nmodel_reasoning_effort = \"high\"\n\
+                      [projects.\"/x\"]\nmodel = \"gpt-b\"\n";
+        assert_eq!(
+            codex_models(cache, config).unwrap(),
+            ["gpt-c", "gpt-a", "gpt-b"]
+        );
+        assert_eq!(
+            codex_models(cache, "").unwrap(),
+            ["gpt-a", "gpt-c", "gpt-b"]
+        );
+        assert!(codex_models(cache, "model = ")
+            .unwrap_err()
+            .contains("config.toml"));
+        assert!(codex_models("{", "").is_err());
     }
 }
