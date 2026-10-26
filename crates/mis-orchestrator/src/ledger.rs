@@ -61,6 +61,8 @@ struct TaskEntry {
     status: TaskStatus,
     worker: Option<WorkerId>,
     session: Option<String>,
+    /// Model the agent reported in `Started`; shown when none was requested.
+    reported_model: Option<String>,
     summary: Option<String>,
     events: Vec<AgentEvent>,
     /// Serialized size of `events`.
@@ -75,6 +77,7 @@ impl TaskEntry {
             status: TaskStatus::Queued,
             worker: None,
             session: None,
+            reported_model: None,
             summary: None,
             events: vec![],
             bytes: 0,
@@ -89,7 +92,7 @@ impl TaskEntry {
             status: self.status,
             worker: self.worker,
             harness: self.task.harness.clone(),
-            model: self.task.model.clone(),
+            model: self.task.model.clone().or(self.reported_model.clone()),
             session: self.session.clone(),
             summary: self.summary.clone(),
         }
@@ -102,10 +105,7 @@ impl TaskEntry {
                 if session.is_some() {
                     self.session = session.clone();
                 }
-                // A requested model wins over the one the agent reports.
-                if self.task.model.is_none() {
-                    self.task.model = model.clone();
-                }
+                self.reported_model = model.clone();
             }
             AgentEvent::Finished { summary, .. } => self.summary = summary.clone(),
             _ => {}

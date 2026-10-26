@@ -165,6 +165,7 @@ pub struct TaskSummary {
     pub worker: Option<WorkerId>,
     pub harness: String,
     /// Requested model, else the one the `Started` event reported.
+    #[serde(default)]
     pub model: Option<String>,
     /// Agent session id, from the `Started` event.
     pub session: Option<String>,

@@ -416,6 +416,7 @@ async fn client_conn(mut sock: WebSocket, app: App) {
                     send_json(&mut sock, &status).await;
                 }
                 Some(ClientMsg::Submit { prompt, cwd, harness, model }) => {
+                    let model = model.filter(|m| !m.trim().is_empty());
                     // A chosen model pins the default harness: the planner could pick
                     // one that doesn't know that model.
                     let unplanned = app.planner.is_none() || model.is_some();
