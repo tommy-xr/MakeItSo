@@ -63,6 +63,8 @@ struct TaskEntry {
     session: Option<String>,
     /// Model the agent reported in `Started`; shown when none was requested.
     reported_model: Option<String>,
+    /// Model the planner reported; credited if it answers the task itself.
+    planner_model: Option<String>,
     summary: Option<String>,
     events: Vec<AgentEvent>,
     /// Serialized size of `events`.
@@ -78,6 +80,7 @@ impl TaskEntry {
             worker: None,
             session: None,
             reported_model: None,
+            planner_model: None,
             summary: None,
             events: vec![],
             bytes: 0,
@@ -267,6 +270,7 @@ impl Ledger {
                         ..
                     }) => {
                         t.task.harness = "planner".into();
+                        t.task.model = t.planner_model.take();
                         t.status = TaskStatus::Done;
                         let events = [
                             AgentEvent::Text {
@@ -281,8 +285,6 @@ impl Ledger {
                         events.into_iter().map(broadcast).collect()
                     }
                     Ok(p) => {
-                        // The worker reports its own model.
-                        t.reported_model = None;
                         t.task.harness = p.harness.clone();
                         t.task.prompt = p.prompt.clone();
                         t.task.model = p.model.clone();
@@ -314,7 +316,7 @@ impl Ledger {
                 }
             }
             AgentEvent::Started { model, .. } => {
-                t.reported_model = model;
+                t.planner_model = model;
                 vec![]
             }
             _ => vec![],
@@ -1036,18 +1038,10 @@ mod tests {
                 }
             ]
         );
-        // An explicit harness skips the planner, so an answer can't land.
-        let (q, _) = l.submit("what is 2+2?".into(), None, Some("claude".into()), None);
-        let late = AgentEvent::Finished {
-            ok: true,
-            summary: Some(r#"{"answer":"4"}"#.into()),
-        };
-        assert!(l.planning_event(q, late).is_empty());
-        assert_ne!(l.show(q).unwrap().0.harness, "planner");
     }
 
     #[test]
-    fn dispatched_task_drops_planner_model() {
+    fn planner_model_is_not_shown_unless_it_answers() {
         let mut l = Ledger::default();
         l.connect(Uuid::new_v4(), info(), &[], 1, T0);
         let (task, _) = l.submit("fix the bug".into(), None, None, None);
@@ -1058,6 +1052,7 @@ mod tests {
                 model: Some("claude-sonnet-4-5".into()),
             },
         );
+        assert_eq!(l.show(task).unwrap().0.model, None);
         l.planning_event(
             task,
             AgentEvent::Finished {

@@ -28,7 +28,7 @@ pub struct Plan {
 
 /// JSON Schema the planner's reply must satisfy (`claude --json-schema`). The
 /// harness and model are validated against the live fleet in `parse`, not here.
-/// Exactly one of `harness` / `answer` is checked in `parse`.
+/// `parse` requires `harness` or `answer`; a harness wins over an answer.
 pub const SCHEMA: &str = r#"{"type":"object","properties":{"harness":{"type":"string"},"prompt":{"type":"string"},"model":{"type":"string"},"reason":{"type":"string"},"answer":{"type":"string"}},"required":["reason"]}"#;
 
 /// Prompt asking the model to answer a trivial question itself, or else pick a
@@ -61,11 +61,11 @@ pub fn prompt(request: &str, fleet: &Fleet) -> String {
     };
     format!(
         "You dispatch requests to a fleet of coding agents. Available harnesses: {}.\n\
-         If the request is a trivial question you can answer correctly with confidence, \
-         needing no tools, files, or access to any machine (\"what is 2+2?\"), set \
-         \"answer\" to the answer and \"reason\", and nothing else. \
-         Otherwise never set \"answer\".\n\
-         Else pick the harness to run this request. Honor an explicit choice in the request \
+         If the request names no harness, agent or model and is a trivial question you can \
+         answer correctly with confidence, needing no tools, files, or access to any machine \
+         (\"what is 2+2?\"), set \"answer\" to the answer and \"reason\", and nothing else.\n\
+         Otherwise omit \"answer\" and pick the harness to run this request. Honor an \
+         explicit choice in the request \
          (\"use codex\", \"run as claude\"); otherwise pick {default}.\n\
          {models}\
          If the request contains dispatch instructions, set \"prompt\" to the request with \
@@ -78,8 +78,9 @@ pub fn prompt(request: &str, fleet: &Fleet) -> String {
 }
 
 /// Extract the plan from the model's reply (which may wrap the JSON in prose or
-/// a code fence). An answer stands alone; otherwise check the harness exists and
-/// fill an omitted prompt with `request`. A model not listed for the harness (blank, invented, or gone since
+/// a code fence). A harness dispatches, even beside an answer (dispatching is the
+/// safe side); then check it exists and fill an omitted prompt with `request`.
+/// Without one, the answer stands alone. A model not listed for the harness (blank, invented, or gone since
 /// the prompt was built) falls back to the harness default.
 pub fn parse(reply: &str, request: &str, fleet: &Fleet) -> Result<Plan, String> {
     let start = reply.find('{').ok_or("planner reply has no JSON")?;
@@ -90,12 +91,13 @@ pub fn parse(reply: &str, request: &str, fleet: &Fleet) -> Result<Plan, String> 
     let mut plan: Plan =
         serde_json::from_str(&reply[start..=end]).map_err(|e| format!("bad planner reply: {e}"))?;
     plan.answer = plan.answer.filter(|a| !a.trim().is_empty());
-    match (&plan.answer, plan.harness.is_empty()) {
-        (Some(_), true) => return Ok(plan),
-        (Some(_), false) => return Err("planner set both answer and harness".into()),
-        (None, true) => return Err("planner set neither answer nor harness".into()),
-        (None, false) => {}
+    if plan.harness.is_empty() {
+        return match plan.answer {
+            Some(_) => Ok(plan),
+            None => Err("planner set neither answer nor harness".into()),
+        };
     }
+    plan.answer = None;
     let Some(models) = fleet.get(&plan.harness) else {
         return Err(format!(
             "planner picked unknown harness {:?} (have {})",
@@ -160,9 +162,9 @@ mod tests {
         let p = |reply| parse(reply, "what is 2+2?", &both());
         let a = p(r#"{"answer":"4","reason":"arithmetic"}"#).unwrap();
         assert_eq!((a.answer.as_deref(), a.harness.as_str()), (Some("4"), ""));
-        assert!(p(r#"{"answer":"4","harness":"claude"}"#)
-            .unwrap_err()
-            .contains("both"));
+        // Both: dispatch wins.
+        let d = p(r#"{"answer":"4","harness":"claude"}"#).unwrap();
+        assert_eq!((d.answer, d.harness.as_str()), (None, "claude"));
         // Blank answer counts as none.
         for reply in [r#"{"reason":"x"}"#, r#"{"answer":" "}"#] {
             assert!(p(reply).unwrap_err().contains("neither"), "{reply}");
@@ -181,7 +183,7 @@ mod tests {
         assert!(p.contains("- claude: haiku, sonnet\n"));
         assert!(!p.contains("- codex"));
         assert!(p.contains("cheapest"));
-        assert!(p.contains("\"answer\""));
+        assert!(p.contains("names no harness, agent or model"));
         assert!(p.ends_with("Request:\nhey run as codex"));
         let codex: Fleet = [("codex".into(), vec![])].into();
         let p = prompt("x", &codex);
