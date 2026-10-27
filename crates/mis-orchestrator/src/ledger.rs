@@ -63,6 +63,8 @@ struct TaskEntry {
     session: Option<String>,
     /// Model the agent reported in `Started`; shown when none was requested.
     reported_model: Option<String>,
+    /// Model the planner reported; credited if it answers the task itself.
+    planner_model: Option<String>,
     summary: Option<String>,
     events: Vec<AgentEvent>,
     /// Serialized size of `events`.
@@ -78,6 +80,7 @@ impl TaskEntry {
             worker: None,
             session: None,
             reported_model: None,
+            planner_model: None,
             summary: None,
             events: vec![],
             bytes: 0,
@@ -236,8 +239,9 @@ impl Ledger {
         fleet
     }
 
-    /// Planner output for a Planning task. Only Finished matters: it carries the
-    /// plan (the reply's JSON), which queues the task or fails it.
+    /// Planner output for a Planning task. Started gives the planner's model, kept
+    /// in case it answers; Finished carries the plan (the reply's JSON), which
+    /// answers, queues, or fails the task.
     pub fn planning_event(&mut self, task: TaskId, event: AgentEvent) -> Vec<Effect> {
         let fleet = self.fleet();
         let Some(t) = self.tasks.iter_mut().find(|t| t.task.id == task) else {
@@ -260,6 +264,26 @@ impl Ledger {
                     (_, summary) => Err(summary.unwrap_or_else(|| "planner failed".into())),
                 };
                 match plan {
+                    // Answered by the planner: Done, credited to it, no worker.
+                    Ok(plan::Plan {
+                        answer: Some(answer),
+                        ..
+                    }) => {
+                        t.task.harness = "planner".into();
+                        t.task.model = t.planner_model.take();
+                        t.status = TaskStatus::Done;
+                        let events = [
+                            AgentEvent::Text {
+                                text: answer.clone(),
+                            },
+                            AgentEvent::Finished {
+                                ok: true,
+                                summary: Some(answer),
+                            },
+                        ];
+                        events.iter().for_each(|e| t.record(e));
+                        events.into_iter().map(broadcast).collect()
+                    }
                     Ok(p) => {
                         t.task.harness = p.harness.clone();
                         t.task.prompt = p.prompt.clone();
@@ -290,6 +314,10 @@ impl Ledger {
                         vec![broadcast(event)]
                     }
                 }
+            }
+            AgentEvent::Started { model, .. } => {
+                t.planner_model = model;
+                vec![]
             }
             _ => vec![],
         }
@@ -970,6 +998,69 @@ mod tests {
             .collect();
         assert_eq!(sent, [Some("sonnet"), Some("sonnet")]);
         assert_eq!(l.show(task).unwrap().0.model.as_deref(), Some("sonnet"));
+    }
+
+    #[test]
+    fn planner_answer_finishes_task_without_worker() {
+        let mut l = Ledger::default();
+        l.connect(Uuid::new_v4(), info(), &[], 1, T0);
+        let (task, _) = l.submit("what is 2+2?".into(), None, None, None);
+        l.planning_event(
+            task,
+            AgentEvent::Started {
+                session: None,
+                model: Some("claude-sonnet-4-5".into()),
+            },
+        );
+        let eff = l.planning_event(
+            task,
+            AgentEvent::Finished {
+                ok: true,
+                summary: Some(r#"{"answer":"4","reason":"arithmetic"}"#.into()),
+            },
+        );
+        assert!(assigned(&eff).is_empty());
+        assert_eq!(finished(&eff, task), Some(true));
+        let (t, transcript, _) = l.show(task).unwrap();
+        assert_eq!(t.status, TaskStatus::Done);
+        assert_eq!(
+            (t.harness.as_str(), t.model.as_deref(), t.worker),
+            ("planner", Some("claude-sonnet-4-5"), None)
+        );
+        assert_eq!(t.summary.as_deref(), Some("4"));
+        assert_eq!(
+            transcript,
+            [
+                text("4"),
+                AgentEvent::Finished {
+                    ok: true,
+                    summary: Some("4".into())
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn planner_model_is_not_shown_unless_it_answers() {
+        let mut l = Ledger::default();
+        l.connect(Uuid::new_v4(), info(), &[], 1, T0);
+        let (task, _) = l.submit("fix the bug".into(), None, None, None);
+        l.planning_event(
+            task,
+            AgentEvent::Started {
+                session: None,
+                model: Some("claude-sonnet-4-5".into()),
+            },
+        );
+        assert_eq!(l.show(task).unwrap().0.model, None);
+        l.planning_event(
+            task,
+            AgentEvent::Finished {
+                ok: true,
+                summary: Some(r#"{"harness":"claude"}"#.into()),
+            },
+        );
+        assert_eq!(l.show(task).unwrap().0.model, None);
     }
 
     #[test]
