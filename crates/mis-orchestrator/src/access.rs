@@ -90,7 +90,10 @@ pub fn verify(jwt: &str, keys: &Jwks, team: &str, aud: &str, now: u64) -> Result
     if now > claims.exp.saturating_add(LEEWAY) {
         return Err(Error::Expired);
     }
-    if claims.nbf.is_some_and(|nbf| nbf > now.saturating_add(LEEWAY)) {
+    if claims
+        .nbf
+        .is_some_and(|nbf| nbf > now.saturating_add(LEEWAY))
+    {
         return Err(Error::NotYetValid);
     }
     [claims.email, claims.common_name]

@@ -684,9 +684,8 @@ mod tests {
     #[test]
     fn authorized_combines_origin_and_token() {
         let lo: IpAddr = "127.0.0.1".parse().unwrap();
-        let ok = |app: &App, pairs: &[(&'static str, &str)]| {
-            app.authorized(&headers(pairs), lo, None)
-        };
+        let ok =
+            |app: &App, pairs: &[(&'static str, &str)]| app.authorized(&headers(pairs), lo, None);
         let open = App::new(None);
         // Same-origin page needs no allowlist entry.
         let local = [

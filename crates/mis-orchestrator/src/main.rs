@@ -66,7 +66,10 @@ fn one_shot_claude(model: &str, extra: &[&str]) -> std::sync::Arc<mis_agent::cla
 /// `--cf-access-team` / `--cf-access-aud`: both or neither; `MIS_..=` means unset.
 async fn access_gate(args: &Args) -> anyhow::Result<Option<AccessGate>> {
     let nonempty = |v: &Option<String>| v.clone().filter(|v| !v.is_empty());
-    let (team, aud) = match (nonempty(&args.cf_access_team), nonempty(&args.cf_access_aud)) {
+    let (team, aud) = match (
+        nonempty(&args.cf_access_team),
+        nonempty(&args.cf_access_aud),
+    ) {
         (Some(team), Some(aud)) => (team, aud),
         (None, None) => return Ok(None),
         _ => anyhow::bail!("--cf-access-team and --cf-access-aud go together"),
