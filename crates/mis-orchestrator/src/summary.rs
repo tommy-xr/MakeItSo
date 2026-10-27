@@ -40,9 +40,10 @@ pub fn prompt(task_prompt: &str, events: &[AgentEvent]) -> String {
     };
     lines.reverse();
     format!(
-        "Summarize what a coding agent did, for someone glancing at a phone. Reply with \
-         1-2 plain sentences and nothing else (no preamble, no markdown): what was done, \
-         the outcome with any key names or numbers, and anything the user must act on.\n\n\
+        "Summarize a coding agent's finished task for someone glancing at a phone. Reply \
+         with 1-2 plain sentences and nothing else (no preamble, no markdown, don't start \
+         with \"The agent\"): what was done and the outcome, with any key names or numbers; \
+         then anything the user must act on, only if there is something.\n\n\
          Task:\n{task_prompt}\n\nTranscript:\n{omitted}{}",
         lines.join("\n")
     )
