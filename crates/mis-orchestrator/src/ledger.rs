@@ -521,7 +521,9 @@ impl Ledger {
             } else {
                 TaskStatus::Failed
             };
-            if *ok && summary::wanted(&t.events, t.summary.as_deref()) {
+            // Truncated: the transcript was too long to be a short answer.
+            let wanted = t.truncated || summary::wanted(&t.events, t.summary.as_deref());
+            if *ok && wanted {
                 summarize = Some(Effect::Summarize {
                     task,
                     prompt: summary::prompt(&t.task.prompt, &t.events),
@@ -1340,6 +1342,26 @@ mod tests {
             (Some("Listed files. All fine."), TaskStatus::Done)
         );
         assert!(l.summarized(Uuid::new_v4(), "x").is_empty());
+    }
+
+    #[test]
+    fn evicted_tool_calls_still_count_as_work() {
+        let (mut l, wid, task) = running_setup();
+        let big = "x".repeat(MAX_TOOL_RESULT_BYTES - 100);
+        for _ in 0..(MAX_TRANSCRIPT_BYTES / big.len() + 2) {
+            l.event(wid, 1, task, text(&big));
+        }
+        let eff = l.event(
+            wid,
+            1,
+            task,
+            AgentEvent::Finished {
+                ok: true,
+                summary: Some("ok".into()),
+            },
+        );
+        assert!(l.show(task).unwrap().2, "truncated");
+        assert!(eff.iter().any(|e| matches!(e, Effect::Summarize { .. })));
     }
 
     #[test]
