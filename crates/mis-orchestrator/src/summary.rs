@@ -57,6 +57,7 @@ fn line(e: &AgentEvent) -> Option<String> {
         AgentEvent::ToolResult { content } => {
             cut(&format!("< {}", content.trim()), MAX_EVENT_CHARS)
         }
+        AgentEvent::Status { text } => cut(&format!("status: {}", text.trim()), MAX_EVENT_CHARS),
         AgentEvent::Finished { ok, .. } => if *ok { "done" } else { "FAILED" }.into(),
         _ => return None,
     })

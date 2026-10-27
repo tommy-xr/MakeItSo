@@ -169,6 +169,7 @@ function eventLine(e) {
     case 'text': return e.text;
     case 'tool_use': return `> ${e.name} ${JSON.stringify(e.input)}`;
     case 'tool_result': return `< ${(e.content || '').split(/\r?\n/)[0]}`;
+    case 'status': return `status: ${e.text}`;
     case 'finished': return `${e.ok ? 'done' : 'FAILED'} ${e.summary || ''}`;
     default: return `[${e.type}] ${JSON.stringify(e)}`;
   }

@@ -7,7 +7,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use crate::{Agent, BoxFut};
+use crate::{Agent, BoxFut, Mcp, MCP_SERVER, MCP_TOKEN_ENV};
 
 #[derive(Default)]
 pub struct ClaudeAgent {
@@ -36,6 +36,24 @@ pub fn claude_models(claude_json: &str) -> Result<Vec<String>, String> {
         }
     }
     Ok(out)
+}
+
+/// Flags offering `url` as MCP server `MCP_SERVER` and nothing else. The bearer
+/// token is read from `MCP_TOKEN_ENV` (claude expands `${VAR}` in the config).
+/// Its tools are pre-approved so they work without `--dangerously-skip-permissions`.
+pub fn mcp_args(url: &str) -> Vec<String> {
+    let config = serde_json::json!({"mcpServers": {MCP_SERVER: {
+        "type": "http",
+        "url": url,
+        "headers": {"Authorization": format!("Bearer ${{{MCP_TOKEN_ENV}}}")},
+    }}});
+    vec![
+        "--mcp-config".into(),
+        config.to_string(),
+        "--strict-mcp-config".into(),
+        "--allowedTools".into(),
+        format!("mcp__{MCP_SERVER}"),
+    ]
 }
 
 /// Map one stream-json line to zero or more events, without token usage
@@ -162,6 +180,7 @@ impl Agent for ClaudeAgent {
         prompt: &'a str,
         cwd: Option<&'a str>,
         model: Option<&'a str>,
+        mcp: Option<&'a Mcp>,
         tx: mpsc::Sender<AgentEvent>,
     ) -> BoxFut<'a> {
         Box::pin(async move {
@@ -171,6 +190,9 @@ impl Agent for ClaudeAgent {
                 cmd.arg("--dangerously-skip-permissions");
             }
             cmd.args(&self.extra_args);
+            if let Some(m) = mcp {
+                cmd.args(mcp_args(&m.url)).env(MCP_TOKEN_ENV, &m.token);
+            }
             // One `=` token, so a model starting with '-' can't be read as a flag.
             if let Some(m) = model {
                 cmd.arg(format!("--model={m}"));
@@ -306,6 +328,23 @@ mod tests {
             ]
         );
         assert!(p.line(r#"{"type":"system","subtype":"init"}"#).len() == 1);
+    }
+
+    #[test]
+    fn mcp_config_names_url_and_token_env_only() {
+        let args = mcp_args("http://127.0.0.1:9/mcp");
+        assert_eq!(args[0], "--mcp-config");
+        let config: Value = serde_json::from_str(&args[1]).unwrap();
+        let mis = &config["mcpServers"]["mis"];
+        assert_eq!(
+            (mis["type"].as_str(), mis["url"].as_str()),
+            (Some("http"), Some("http://127.0.0.1:9/mcp"))
+        );
+        assert_eq!(mis["headers"]["Authorization"], "Bearer ${MIS_MCP_TOKEN}");
+        assert_eq!(
+            args[2..],
+            ["--strict-mcp-config", "--allowedTools", "mcp__mis"]
+        );
     }
 
     #[test]

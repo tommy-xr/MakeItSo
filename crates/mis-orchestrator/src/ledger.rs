@@ -84,7 +84,8 @@ struct TaskEntry {
     step: Option<String>,
 }
 
-/// Activity text for an event worth showing: `> Bash ls`, or the first line of text.
+/// Activity text for an event worth showing: `> Bash ls`, `status: <text>`, or
+/// the first line of text. The latest of these is the task's activity.
 fn step(event: &AgentEvent) -> Option<String> {
     let line = match event {
         AgentEvent::ToolUse { name, input } => {
@@ -97,6 +98,7 @@ fn step(event: &AgentEvent) -> Option<String> {
             format!("> {name} {arg}")
         }
         AgentEvent::Text { text } if !text.trim().is_empty() => text.clone(),
+        AgentEvent::Status { text } => format!("status: {}", text.trim_start()),
         _ => return None,
     };
     Some(first_line(line.trim_end(), 80))
@@ -1409,6 +1411,40 @@ mod tests {
             },
         );
         assert!(!summarizes(&eff));
+    }
+
+    #[test]
+    fn latest_status_or_step_is_the_activity() {
+        let (mut l, wid, task) = running_setup();
+        let activity = |l: &Ledger| l.show(task).unwrap().0.activity;
+        let status = |t: &str| AgentEvent::Status { text: t.into() };
+        l.event(wid, 1, task, text("Looking."));
+        let eff = l.event(wid, 1, task, status("Counting repos"));
+        assert_eq!(eff.len(), 1, "broadcast");
+        assert_eq!(activity(&l), "status: Counting repos");
+        // Results don't replace it; the next tool call does, and a newer status wins again.
+        l.event(
+            wid,
+            1,
+            task,
+            AgentEvent::ToolResult {
+                content: "x".into(),
+            },
+        );
+        assert_eq!(activity(&l), "status: Counting repos");
+        l.event(
+            wid,
+            1,
+            task,
+            AgentEvent::ToolUse {
+                name: "Bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+            },
+        );
+        assert_eq!(activity(&l), "> Bash ls");
+        l.event(wid, 1, task, status("Writing summary"));
+        assert_eq!(activity(&l), "status: Writing summary");
+        assert!(l.show(task).unwrap().1.contains(&status("Counting repos")));
     }
 
     #[test]

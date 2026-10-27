@@ -209,6 +209,7 @@ fn print_event(task: TaskId, event: &AgentEvent) {
             let first = content.lines().next().unwrap_or("");
             println!("[{short}] < {first}");
         }
+        AgentEvent::Status { text } => println!("[{short}] status: {text}"),
         // Running totals; `mis status` shows the latest.
         AgentEvent::Usage { .. } => {}
         AgentEvent::Finished { ok, summary } => {

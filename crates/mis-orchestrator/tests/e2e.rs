@@ -751,6 +751,7 @@ impl mis_agent::Agent for FakePlanner {
         prompt: &'a str,
         _cwd: Option<&'a str>,
         _model: Option<&'a str>,
+        _mcp: Option<&'a mis_agent::Mcp>,
         tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> mis_agent::BoxFut<'a> {
         Box::pin(async move {
@@ -994,6 +995,7 @@ impl mis_agent::Agent for FakeSummarizer {
         prompt: &'a str,
         _cwd: Option<&'a str>,
         _model: Option<&'a str>,
+        _mcp: Option<&'a mis_agent::Mcp>,
         tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> mis_agent::BoxFut<'a> {
         Box::pin(async move {
@@ -1078,4 +1080,53 @@ async fn finished_task_gets_summary_but_planner_answer_does_not() {
         panic!()
     };
     assert_eq!(info.summary.as_deref(), Some("Listed 2 files."));
+}
+
+#[tokio::test]
+async fn status_event_sets_activity_and_is_kept() {
+    let base = start().await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    send(&mut client, &ClientMsg::Subscribe).await;
+    let mut worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+    send(
+        &mut client,
+        &ClientMsg::Submit {
+            prompt: "hi".into(),
+            cwd: None,
+            harness: Some("claude".into()),
+            model: None,
+        },
+    )
+    .await;
+    let ServerMsg::Submitted { task } = recv(&mut client).await else {
+        panic!()
+    };
+    let OrchMsg::Assign { .. } = recv(&mut worker).await else {
+        panic!()
+    };
+    let status = AgentEvent::Status {
+        text: "Counting repos".into(),
+    };
+    send(
+        &mut worker,
+        &WorkerMsg::Event {
+            task,
+            event: status.clone(),
+        },
+    )
+    .await;
+    let ServerMsg::Event { event, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    assert_eq!(event, status);
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { tasks, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    assert_eq!(tasks[0].activity, "status: Counting repos");
+    send(&mut client, &ClientMsg::Show { task }).await;
+    let ServerMsg::TaskDetail { events, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    assert_eq!(events, [status]);
 }

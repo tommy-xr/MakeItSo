@@ -12,6 +12,21 @@ pub mod codex;
 
 pub type BoxFut<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 
+/// Env var carrying the bearer token for the worker's MCP server, so the
+/// secret stays out of the agent's argv (visible to `ps`).
+pub const MCP_TOKEN_ENV: &str = "MIS_MCP_TOKEN";
+/// Name the worker's MCP server is registered under in each harness.
+pub const MCP_SERVER: &str = "mis";
+
+/// Loopback MCP server the agent may call for the duration of one run.
+#[derive(Debug, Clone)]
+pub struct Mcp {
+    /// e.g. `http://127.0.0.1:53817/mcp`.
+    pub url: String,
+    /// Sent as `Authorization: Bearer <token>`; passed via `MCP_TOKEN_ENV`.
+    pub token: String,
+}
+
 pub trait Agent: Send + Sync {
     /// Harness name as advertised to the orchestrator, e.g. "claude".
     fn name(&self) -> &'static str;
@@ -20,13 +35,15 @@ pub trait Agent: Send + Sync {
     fn models(&self) -> Vec<String>;
     /// Run to completion. Must end with exactly one `AgentEvent::Finished`.
     /// The agent process sees `MIS_TASK=<task>` so nested `mis task` calls can be refused.
-    /// `model` None leaves the harness's default.
+    /// `model` None leaves the harness's default. `mcp`, if set, is offered to
+    /// the agent as server `MCP_SERVER`.
     fn run<'a>(
         &'a self,
         task: TaskId,
         prompt: &'a str,
         cwd: Option<&'a str>,
         model: Option<&'a str>,
+        mcp: Option<&'a Mcp>,
         tx: mpsc::Sender<AgentEvent>,
     ) -> BoxFut<'a>;
 }
@@ -42,9 +59,10 @@ pub async fn run_guarded(
     prompt: &str,
     cwd: Option<&str>,
     model: Option<&str>,
+    mcp: Option<&Mcp>,
     tx: mpsc::Sender<AgentEvent>,
 ) {
-    let run = agent.run(task, prompt, cwd, model, tx.clone());
+    let run = agent.run(task, prompt, cwd, model, mcp, tx.clone());
     let res = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(run)).await;
     let why = match res {
         Ok(Ok(())) => return,
