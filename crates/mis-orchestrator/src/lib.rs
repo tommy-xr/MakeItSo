@@ -19,10 +19,12 @@ use tokio::sync::{broadcast, mpsc};
 
 pub mod ledger;
 pub mod plan;
+pub mod summary;
 
 /// A stuck planner (auth prompt, network stall) fails the task instead of
 /// leaving it in Planning forever.
 const PLANNER_TIMEOUT: Duration = Duration::from_secs(90);
+const SUMMARY_TIMEOUT: Duration = Duration::from_secs(60);
 
 use ledger::{ConnId, Effect, Ledger};
 use mis_agent::Agent;
@@ -43,6 +45,10 @@ pub struct App {
     planner: Option<Arc<dyn Agent>>,
     /// Bounds concurrent planner processes; tasks wait in Planning.
     planner_slots: Arc<tokio::sync::Semaphore>,
+    /// Summarizes finished tasks. None: they keep the agent's own summary.
+    summarizer: Option<Arc<dyn Agent>>,
+    /// Bounds concurrent summarizer processes, apart from the planner's.
+    summary_slots: Arc<tokio::sync::Semaphore>,
     /// A worker silent (no Hello/Stats) this long is treated as disconnected.
     stale_after: Duration,
     /// How often to check for silent workers.
@@ -64,6 +70,8 @@ impl App {
             grace: Duration::from_secs(60),
             planner: None,
             planner_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            summarizer: None,
+            summary_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             // Two missed beats plus slack for network jitter.
             stale_after: 2 * STATS_INTERVAL + Duration::from_secs(5),
             tick_every: Duration::from_secs(5),
@@ -96,6 +104,11 @@ impl App {
 
     pub fn with_planner(mut self, planner: Arc<dyn Agent>) -> Self {
         self.planner = Some(planner);
+        self
+    }
+
+    pub fn with_summarizer(mut self, summarizer: Arc<dyn Agent>) -> Self {
+        self.summarizer = Some(summarizer);
         self
     }
 
@@ -136,6 +149,12 @@ impl App {
                     let app = self.clone();
                     tokio::spawn(async move { app.run_planner(task, prompt).await });
                 }
+                Effect::Summarize { task, prompt } => {
+                    if let Some(agent) = self.summarizer.clone() {
+                        let app = self.clone();
+                        tokio::spawn(async move { app.run_summarizer(agent, task, prompt).await });
+                    }
+                }
                 // Dropping the sender ends that socket's `worker_conn` loop.
                 Effect::Close { conn } => {
                     self.conns.lock().unwrap().remove(&conn);
@@ -148,30 +167,42 @@ impl App {
     /// is set, since `client_conn` fills in the default harness otherwise.
     async fn run_planner(&self, task: TaskId, prompt: String) {
         let planner = self.planner.clone().expect("planner");
-        let _slot = self.planner_slots.acquire().await.expect("semaphore open");
-        let (tx, mut rx) = mpsc::channel(64);
-        let run = tokio::time::timeout(
+        run_oneshot(
+            "planner",
+            planner.as_ref(),
+            &self.planner_slots,
+            task,
+            &prompt,
             PLANNER_TIMEOUT,
-            mis_agent::run_guarded(planner.as_ref(), task, &prompt, None, None, tx),
-        );
-        let feed = async {
-            while let Some(ev) = rx.recv().await {
+            |ev| {
                 let effects = self.ledger().planning_event(task, ev);
                 self.apply(effects);
-            }
-        };
-        let (timed_out, _) = tokio::join!(run, feed);
-        if timed_out.is_err() {
-            // Dropping `run` killed the process (kill_on_drop) without a Finished.
-            let effects = self.ledger().planning_event(
-                task,
+            },
+        )
+        .await;
+    }
+
+    /// Replace a Done task's summary with the summarizer's; on failure keep it.
+    async fn run_summarizer(&self, agent: Arc<dyn Agent>, task: TaskId, prompt: String) {
+        run_oneshot(
+            "summarizer",
+            agent.as_ref(),
+            &self.summary_slots,
+            task,
+            &prompt,
+            SUMMARY_TIMEOUT,
+            |ev| match ev {
                 AgentEvent::Finished {
-                    ok: false,
-                    summary: Some(format!("planner timed out after {PLANNER_TIMEOUT:?}")),
-                },
-            );
-            self.apply(effects);
-        }
+                    ok: true,
+                    summary: Some(reply),
+                } => self.transition(|l| ((), l.summarized(task, &reply))),
+                AgentEvent::Finished { summary, .. } => {
+                    tracing::warn!(%task, "summarizer failed: {}", summary.unwrap_or_default())
+                }
+                _ => {}
+            },
+        )
+        .await;
     }
 
     /// Periodically disconnect workers that stopped sending heartbeats.
@@ -217,6 +248,39 @@ impl App {
             None => true,
             Some(t) => bearer_from(headers) == Some(t.as_str()),
         }
+    }
+}
+
+/// Run a one-shot `agent` call (planner, summarizer) once a slot is free,
+/// feeding its events to `on_event`. Past `timeout` the process is killed and a
+/// failed `Finished` is fed instead.
+async fn run_oneshot(
+    what: &str,
+    agent: &dyn Agent,
+    slots: &tokio::sync::Semaphore,
+    task: TaskId,
+    prompt: &str,
+    timeout: Duration,
+    mut on_event: impl FnMut(AgentEvent),
+) {
+    let _slot = slots.acquire().await.expect("semaphore open");
+    let (tx, mut rx) = mpsc::channel(64);
+    let run = tokio::time::timeout(
+        timeout,
+        mis_agent::run_guarded(agent, task, prompt, None, None, tx),
+    );
+    let feed = async {
+        while let Some(ev) = rx.recv().await {
+            on_event(ev);
+        }
+    };
+    let (timed_out, _) = tokio::join!(run, feed);
+    if timed_out.is_err() {
+        // Dropping `run` killed the process (kill_on_drop) without a Finished.
+        on_event(AgentEvent::Finished {
+            ok: false,
+            summary: Some(format!("{what} timed out after {timeout:?}")),
+        });
     }
 }
 

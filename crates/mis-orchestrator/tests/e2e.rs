@@ -978,3 +978,104 @@ async fn stats_reported_then_silent_worker_goes_offline() {
     let _worker = join(&base, wid, "claude", vec![]).await;
     assert!(only_worker(&mut client).await.online);
 }
+
+/// Summarizer that counts its calls and replies with a fixed summary.
+struct FakeSummarizer(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl mis_agent::Agent for FakeSummarizer {
+    fn name(&self) -> &'static str {
+        "fake-summarizer"
+    }
+    fn models(&self) -> Vec<String> {
+        vec![]
+    }
+    fn run<'a>(
+        &'a self,
+        _task: TaskId,
+        prompt: &'a str,
+        _cwd: Option<&'a str>,
+        _model: Option<&'a str>,
+        tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> mis_agent::BoxFut<'a> {
+        Box::pin(async move {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert!(prompt.contains("> Bash"), "transcript in prompt");
+            tx.send(AgentEvent::Finished {
+                ok: true,
+                summary: Some("Summary: Listed 2 files.".into()),
+            })
+            .await?;
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn finished_task_gets_summary_but_planner_answer_does_not() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let app = App::new(None)
+        .with_planner(std::sync::Arc::new(FakePlanner(
+            r#"{"answer":"4","reason":"arithmetic"}"#,
+        )))
+        .with_summarizer(std::sync::Arc::new(FakeSummarizer(calls.clone())));
+    let base = start_app(app).await;
+    let mut worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+    let _codex = join(&base, uuid::Uuid::new_v4(), "codex", vec![]).await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    send(&mut client, &ClientMsg::Subscribe).await;
+
+    // Planner-answered: Done with the answer, never summarized.
+    let submit = |harness: Option<&str>| ClientMsg::Submit {
+        prompt: "q".into(),
+        cwd: None,
+        harness: harness.map(String::from),
+        model: None,
+    };
+    send(&mut client, &submit(None)).await;
+    let ServerMsg::Submitted { task: answered } = recv(&mut client).await else {
+        panic!()
+    };
+    for _ in 0..2 {
+        let ServerMsg::Event { .. } = recv(&mut client).await else {
+            panic!()
+        };
+    }
+
+    // Worker task with a tool call: the summary replaces the agent's own.
+    send(&mut client, &submit(Some("claude"))).await;
+    let ServerMsg::Submitted { task } = recv(&mut client).await else {
+        panic!()
+    };
+    let OrchMsg::Assign { .. } = recv(&mut worker).await else {
+        panic!()
+    };
+    for event in [
+        AgentEvent::ToolUse {
+            name: "Bash".into(),
+            input: serde_json::json!({"command": "ls"}),
+        },
+        AgentEvent::Finished {
+            ok: true,
+            summary: Some("a.txt\nb.txt".into()),
+        },
+    ] {
+        send(&mut worker, &WorkerMsg::Event { task, event }).await;
+        let ServerMsg::Event { .. } = recv(&mut client).await else {
+            panic!()
+        };
+    }
+    // Followers get a fresh Status carrying the new summary.
+    let ServerMsg::Status { tasks, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    let by_id = |id| tasks.iter().find(|t| t.id == id).unwrap();
+    assert_eq!(by_id(task).summary.as_deref(), Some("Listed 2 files."));
+    assert_eq!(by_id(task).status, TaskStatus::Done);
+    assert_eq!(by_id(answered).summary.as_deref(), Some("4"));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    send(&mut client, &ClientMsg::Show { task }).await;
+    let ServerMsg::TaskDetail { task: info, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    assert_eq!(info.summary.as_deref(), Some("Listed 2 files."));
+}
