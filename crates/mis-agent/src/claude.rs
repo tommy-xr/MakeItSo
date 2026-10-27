@@ -7,6 +7,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
+use std::collections::HashSet;
+
 use crate::{Agent, BoxFut, Mcp, MCP_SERVER, MCP_TOKEN_ENV};
 
 #[derive(Default)]
@@ -59,7 +61,8 @@ pub fn mcp_args(url: &str) -> Vec<String> {
 /// Map one stream-json line to zero or more events, without token usage
 /// (that needs the whole stream; see `Parser`).
 pub fn parse_line(line: &str) -> Vec<AgentEvent> {
-    serde_json::from_str::<Value>(line).map_or(vec![], |v| events(&v))
+    let mut hidden = Default::default();
+    serde_json::from_str::<Value>(line).map_or(vec![], |v| events(&v, &mut hidden))
 }
 
 /// `parse_line` plus a running `Usage`. Each assistant API message repeats its
@@ -70,6 +73,8 @@ pub struct Parser {
     /// Latest usage per message id; lines of different messages may interleave.
     messages: std::collections::HashMap<String, (u64, u64)>,
     sent: Option<(u64, u64)>,
+    /// Ids of tool calls `events` hid, so it can hide their results too.
+    hidden: HashSet<String>,
 }
 
 impl Parser {
@@ -77,7 +82,7 @@ impl Parser {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return vec![];
         };
-        let mut out = events(&v);
+        let mut out = events(&v, &mut self.hidden);
         let total = match v["type"].as_str() {
             Some("assistant") => usage(&v["message"]["usage"]).map(|u| {
                 let id = v["message"]["id"].as_str().unwrap_or_default();
@@ -109,7 +114,19 @@ fn usage(u: &Value) -> Option<(u64, u64)> {
     })
 }
 
-fn events(v: &Value) -> Vec<AgentEvent> {
+/// Calls to the worker's own `report_status` tool, including claude's lookup of
+/// it: the worker already reports them as `Status`, so the echo is noise (and
+/// would make every task look like it used tools).
+fn is_own_tool(block: &Value) -> bool {
+    let tool = format!("mcp__{MCP_SERVER}__report_status");
+    block["name"] == tool.as_str()
+        || (block["name"] == "ToolSearch"
+            && block["input"]["query"] == format!("select:{tool}").as_str())
+}
+
+/// Events for one line. Tool calls hidden by `is_own_tool` go into `hidden`,
+/// and their results are dropped when they arrive.
+fn events(v: &Value, hidden: &mut HashSet<String>) -> Vec<AgentEvent> {
     match v["type"].as_str() {
         Some("system") if v["subtype"] == "init" => {
             vec![AgentEvent::Started {
@@ -122,6 +139,10 @@ fn events(v: &Value) -> Vec<AgentEvent> {
                 "text" => Some(AgentEvent::Text {
                     text: b["text"].as_str()?.to_string(),
                 }),
+                "tool_use" if is_own_tool(b) => {
+                    hidden.insert(b["id"].as_str()?.to_string());
+                    None
+                }
                 "tool_use" => Some(AgentEvent::ToolUse {
                     name: b["name"].as_str()?.to_string(),
                     input: b["input"].clone(),
@@ -131,6 +152,11 @@ fn events(v: &Value) -> Vec<AgentEvent> {
             .collect(),
         Some("user") => blocks(v)
             .filter(|b| b["type"] == "tool_result")
+            .filter(|b| {
+                !b["tool_use_id"]
+                    .as_str()
+                    .is_some_and(|id| hidden.remove(id))
+            })
             .map(|b| AgentEvent::ToolResult {
                 content: tool_result_text(&b["content"]),
             })
@@ -328,6 +354,42 @@ mod tests {
             ]
         );
         assert!(p.line(r#"{"type":"system","subtype":"init"}"#).len() == 1);
+    }
+
+    #[test]
+    fn own_status_tool_calls_and_lookup_are_hidden() {
+        let call = |id: &str, name: &str, input: &str| {
+            format!(
+                r#"{{"type":"assistant","message":{{"id":"m","content":[{{"type":"tool_use","id":"{id}","name":"{name}","input":{input}}}]}}}}"#
+            )
+        };
+        let result = |id: &str| {
+            format!(
+                r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"{id}","content":"ok"}}]}}}}"#
+            )
+        };
+        let mut p = Parser::default();
+        let own = [
+            call(
+                "t1",
+                "ToolSearch",
+                r#"{"query":"select:mcp__mis__report_status"}"#,
+            ),
+            result("t1"),
+            call("t2", "mcp__mis__report_status", r#"{"text":"x"}"#),
+            result("t2"),
+        ];
+        for line in own {
+            assert!(p.line(&line).is_empty(), "{line}");
+        }
+        // Other tools, and other tool searches, still show.
+        assert_eq!(
+            p.line(&call("t3", "ToolSearch", r#"{"query":"git"}"#))
+                .len(),
+            1
+        );
+        assert_eq!(p.line(&result("t3")).len(), 1);
+        assert!(p.hidden.is_empty());
     }
 
     #[test]

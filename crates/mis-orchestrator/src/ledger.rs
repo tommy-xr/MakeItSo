@@ -98,7 +98,7 @@ fn step(event: &AgentEvent) -> Option<String> {
             format!("> {name} {arg}")
         }
         AgentEvent::Text { text } if !text.trim().is_empty() => text.clone(),
-        AgentEvent::Status { text } => format!("status: {}", text.trim_start()),
+        AgentEvent::Status { text } => format!("status: {text}"),
         _ => return None,
     };
     Some(first_line(line.trim_end(), 80))

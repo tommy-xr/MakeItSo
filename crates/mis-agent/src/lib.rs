@@ -13,7 +13,8 @@ pub mod codex;
 pub type BoxFut<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 
 /// Env var carrying the bearer token for the worker's MCP server, so the
-/// secret stays out of the agent's argv (visible to `ps`).
+/// secret stays out of the agent's argv (visible to `ps`). The agent's own
+/// commands inherit it; acceptable, as it only works on loopback for this task.
 pub const MCP_TOKEN_ENV: &str = "MIS_MCP_TOKEN";
 /// Name the worker's MCP server is registered under in each harness.
 pub const MCP_SERVER: &str = "mis";
