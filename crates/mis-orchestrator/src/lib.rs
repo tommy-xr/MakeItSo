@@ -2,12 +2,13 @@
 //! workers with a matching harness, and fans agent events out to clients.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
@@ -20,6 +21,8 @@ use tokio::sync::{broadcast, mpsc};
 /// `0.1.0+abc1234`, with `-dirty` when built from uncommitted changes.
 pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("MIS_GIT_REV"));
 
+pub mod access;
+pub mod access_gate;
 pub mod ledger;
 pub mod plan;
 pub mod summary;
@@ -29,6 +32,8 @@ pub mod summary;
 const PLANNER_TIMEOUT: Duration = Duration::from_secs(90);
 const SUMMARY_TIMEOUT: Duration = Duration::from_secs(60);
 
+use access::Identity;
+use access_gate::{AccessGate, JWT_HEADER};
 use ledger::{ConnId, Effect, Ledger};
 use mis_agent::Agent;
 
@@ -58,6 +63,8 @@ pub struct App {
     tick_every: Duration,
     /// Origin of the ledger's monotonic `now`.
     started: Instant,
+    /// Cloudflare Access in front: remote requests need its JWT.
+    access: Option<Arc<AccessGate>>,
 }
 
 impl App {
@@ -79,6 +86,7 @@ impl App {
             stale_after: 2 * STATS_INTERVAL + Duration::from_secs(5),
             tick_every: Duration::from_secs(5),
             started: Instant::now(),
+            access: None,
         }
     }
 
@@ -102,6 +110,12 @@ impl App {
     /// Allow browser pages from these origins (already normalised, see [`normalize_origins`]).
     pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
         self.allowed_origins = origins;
+        self
+    }
+
+    /// Require a valid Cloudflare Access JWT on non-local requests.
+    pub fn with_access(mut self, gate: AccessGate) -> Self {
+        self.access = Some(Arc::new(gate));
         self
     }
 
@@ -231,7 +245,42 @@ impl App {
         self.transition(|l| ((), l.disconnect(wid, conn)));
     }
 
-    fn authorized(&self, headers: &HeaderMap) -> bool {
+    /// None when Access is off; else the identity from a valid Access JWT, if any.
+    async fn access_check(&self, headers: &HeaderMap) -> Option<Option<Identity>> {
+        let gate = self.access.as_ref()?;
+        let Some(jwt) = headers.get(JWT_HEADER) else {
+            return Some(None);
+        };
+        match gate.verify(jwt.to_str().unwrap_or_default()).await {
+            Ok(id) => Some(Some(id)),
+            Err(e) => {
+                tracing::warn!("rejected Cloudflare Access JWT: {e:?}");
+                Some(None)
+            }
+        }
+    }
+
+    /// Auth for a WebSocket upgrade; logs who Cloudflare Access let through.
+    async fn admit(&self, headers: &HeaderMap, peer: SocketAddr, path: &str) -> bool {
+        let access = self.access_check(headers).await;
+        let ok = self.authorized(headers, peer.ip(), access.as_ref().map(Option::is_some));
+        if let (true, Some(Some(id))) = (ok, &access) {
+            tracing::info!(subject = %id.subject, "{path}: Cloudflare Access");
+        }
+        ok
+    }
+
+    /// `access`: None when Access is off, else whether a valid Access JWT came with
+    /// the request. `peer` is the TCP peer.
+    fn authorized(&self, headers: &HeaderMap, peer: IpAddr, access: Option<bool>) -> bool {
+        let passed = access == Some(true);
+        // Behind Access only direct local connections may skip it. cloudflared also
+        // connects from loopback, but always adds Cloudflare's headers. (Any local
+        // process can still connect directly, as without Access.)
+        if access == Some(false) && (!peer.to_canonical().is_loopback() || via_cloudflare(headers))
+        {
+            return false;
+        }
         let origin = match headers.get("origin").map(|v| v.to_str()) {
             None => None,
             Some(Ok(o)) => Some(o),
@@ -241,7 +290,9 @@ impl App {
         let own_page = match (origin, host) {
             // Without a token, only loopback: a DNS-rebound name (evil.com -> 127.0.0.1)
             // would otherwise pass as same-origin.
-            (Some(o), Some(h)) => same_origin(o, h) && (self.token.is_some() || loopback_host(h)),
+            (Some(o), Some(h)) => {
+                same_origin(o, h) && (passed || self.token.is_some() || loopback_host(h))
+            }
             _ => false,
         };
         if !own_page && !origin_allowed(origin, &self.allowed_origins) {
@@ -249,7 +300,7 @@ impl App {
         }
         match &self.token {
             None => true,
-            Some(t) => bearer_from(headers) == Some(t.as_str()),
+            Some(t) => passed || bearer_from(headers) == Some(t.as_str()),
         }
     }
 }
@@ -285,6 +336,13 @@ async fn run_oneshot(
             summary: Some(format!("{what} timed out after {timeout:?}")),
         });
     }
+}
+
+/// Request came through Cloudflare's edge (e.g. via cloudflared).
+fn via_cloudflare(headers: &HeaderMap) -> bool {
+    [JWT_HEADER, "cf-ray", "cf-connecting-ip"]
+        .iter()
+        .any(|h| headers.contains_key(*h))
 }
 
 /// Token from `Authorization: Bearer <t>`, or `Sec-WebSocket-Protocol: bearer, <t>`
@@ -359,7 +417,8 @@ fn unix_ms() -> u64 {
 
 pub async fn serve(listener: TcpListener, app: App) -> anyhow::Result<()> {
     app.spawn_liveness();
-    axum::serve(listener, router(app)).await?;
+    let svc = router(app).into_make_service_with_connect_info::<SocketAddr>();
+    axum::serve(listener, svc).await?;
     Ok(())
 }
 
@@ -371,17 +430,24 @@ async fn page() -> impl IntoResponse {
     )
 }
 
-/// Lets the page decide whether to ask for a token, and shows what is running.
-async fn info(State(app): State<App>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "auth": app.token.is_some(), "version": VERSION }))
+/// Lets the page decide whether to ask for a token (not when Access already let
+/// it in), and shows what is running.
+async fn info(State(app): State<App>, headers: HeaderMap) -> Json<serde_json::Value> {
+    let access = matches!(app.access_check(&headers).await, Some(Some(_)));
+    Json(serde_json::json!({
+        "auth": app.token.is_some() && !access,
+        "access": access,
+        "version": VERSION,
+    }))
 }
 
 async fn ws_worker(
     ws: WebSocketUpgrade,
     State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if !app.authorized(&headers) {
+    if !app.admit(&headers, peer, "/ws/worker").await {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     ws.on_upgrade(move |sock| worker_conn(sock, app))
@@ -391,9 +457,10 @@ async fn ws_worker(
 async fn ws_client(
     ws: WebSocketUpgrade,
     State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if !app.authorized(&headers) {
+    if !app.admit(&headers, peer, "/ws/client").await {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     // Browsers abort unless the server echoes a protocol they offered.
@@ -616,7 +683,10 @@ mod tests {
 
     #[test]
     fn authorized_combines_origin_and_token() {
-        let ok = |app: &App, pairs: &[(&'static str, &str)]| app.authorized(&headers(pairs));
+        let lo: IpAddr = "127.0.0.1".parse().unwrap();
+        let ok = |app: &App, pairs: &[(&'static str, &str)]| {
+            app.authorized(&headers(pairs), lo, None)
+        };
         let open = App::new(None);
         // Same-origin page needs no allowlist entry.
         let local = [
@@ -643,6 +713,37 @@ mod tests {
             &t,
             &[foreign, h, ("sec-websocket-protocol", "bearer, s")]
         ));
+    }
+
+    #[test]
+    fn authorized_behind_access() {
+        let lo: IpAddr = "127.0.0.1".parse().unwrap();
+        let mapped_lo: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        let remote: IpAddr = "192.0.2.1".parse().unwrap();
+        let t = App::new(Some("s".into()));
+        let bearer = ("authorization", "Bearer s");
+        let ok = |pairs: &[(&'static str, &str)], peer, access| {
+            t.authorized(&headers(pairs), peer, Some(access))
+        };
+        // Valid JWT: no token needed, from anywhere.
+        assert!(ok(&[], remote, true));
+        assert!(ok(&[(JWT_HEADER, "j")], lo, true));
+        // No valid JWT: only a direct local connection, and it still needs the token.
+        assert!(ok(&[bearer], lo, false));
+        assert!(ok(&[bearer], mapped_lo, false));
+        assert!(!ok(&[], lo, false));
+        assert!(!ok(&[bearer], remote, false));
+        // Through cloudflared (loopback peer, Cloudflare headers): never falls back.
+        assert!(!ok(&[bearer, (JWT_HEADER, "bad")], lo, false));
+        assert!(!ok(&[bearer, ("cf-ray", "x")], lo, false));
+        assert!(!ok(&[bearer, ("cf-connecting-ip", "192.0.2.1")], lo, false));
+        // A valid JWT does not bypass the origin check; its own page passes.
+        let foreign = [("origin", "https://evil.example"), ("host", "m.example")];
+        assert!(!ok(&foreign, remote, true));
+        let open = App::new(None);
+        let page = [("origin", "https://m.example"), ("host", "m.example")];
+        assert!(open.authorized(&headers(&page), remote, Some(true)));
+        assert!(!open.authorized(&headers(&page), lo, Some(false)));
     }
 
     #[test]

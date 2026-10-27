@@ -1,5 +1,6 @@
 use clap::Parser;
-use mis_orchestrator::{normalize_origins, App};
+use mis_orchestrator::access_gate::AccessGate;
+use mis_orchestrator::{access, normalize_origins, App};
 
 #[derive(Parser)]
 #[command(about = "Make It So orchestrator", version = mis_orchestrator::VERSION)]
@@ -31,6 +32,16 @@ struct Args {
     /// Model that summarizes finished tasks.
     #[arg(long, default_value = "haiku", value_parser = clap::builder::NonEmptyStringValueParser::new())]
     summary_model: String,
+    /// Cloudflare Access team: the `<team>` in `<team>.cloudflareaccess.com`. With
+    /// --cf-access-aud, non-local requests need a valid Access JWT.
+    #[arg(long, env = "MIS_CF_ACCESS_TEAM")]
+    cf_access_team: Option<String>,
+    /// Application Audience (AUD) tag of the Access application.
+    #[arg(long, env = "MIS_CF_ACCESS_AUD")]
+    cf_access_aud: Option<String>,
+    /// Fetch Access keys from here instead of the team's certs URL (testing).
+    #[arg(long, hide = true)]
+    cf_access_certs_url: Option<String>,
 }
 
 /// Local `claude` for one tool-less turn on `model`: no user/project settings
@@ -50,6 +61,27 @@ fn one_shot_claude(model: &str, extra: &[&str]) -> std::sync::Arc<mis_agent::cla
         skip_permissions: false,
         extra_args: base.iter().chain(extra).map(|s| s.to_string()).collect(),
     })
+}
+
+/// `--cf-access-team` / `--cf-access-aud`: both or neither; `MIS_..=` means unset.
+async fn access_gate(args: &Args) -> anyhow::Result<Option<AccessGate>> {
+    let nonempty = |v: &Option<String>| v.clone().filter(|v| !v.is_empty());
+    let (team, aud) = match (nonempty(&args.cf_access_team), nonempty(&args.cf_access_aud)) {
+        (Some(team), Some(aud)) => (team, aud),
+        (None, None) => return Ok(None),
+        _ => anyhow::bail!("--cf-access-team and --cf-access-aud go together"),
+    };
+    if !team.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        anyhow::bail!("--cf-access-team is the <team> in <team>.cloudflareaccess.com");
+    }
+    let url = nonempty(&args.cf_access_certs_url).unwrap_or_else(|| access::certs_url(&team));
+    tracing::info!(%team, "Cloudflare Access: non-local requests need its JWT");
+    let gate = AccessGate::remote(team, aud, url);
+    // Unreachable now is not fatal: the first request with a JWT refetches.
+    if let Err(e) = gate.refresh().await {
+        tracing::warn!("fetching Cloudflare Access keys: {e:#}; retrying on first request");
+    }
+    Ok(Some(gate))
 }
 
 /// Print ready-to-paste worker/CLI commands for every way to reach this orchestrator.
@@ -113,6 +145,7 @@ async fn main() -> anyhow::Result<()> {
     let mut args = Args::parse();
     args.token = args.token.filter(|t| !t.is_empty()); // `MIS_TOKEN=` means no token
     let addr: std::net::SocketAddr = args.bind.parse()?;
+    let gate = access_gate(&args).await?;
     if !addr.ip().is_loopback() && args.token.is_none() {
         anyhow::bail!("refusing to bind {addr} without --token / MIS_TOKEN");
     }
@@ -127,6 +160,9 @@ async fn main() -> anyhow::Result<()> {
         &origins,
     );
     let mut app = App::new(args.token).with_allowed_origins(origins);
+    if let Some(gate) = gate {
+        app = app.with_access(gate);
+    }
     if args.no_planner {
         tracing::info!("planner off; tasks without --harness run on claude");
     } else if mis_agent::which("claude") {
