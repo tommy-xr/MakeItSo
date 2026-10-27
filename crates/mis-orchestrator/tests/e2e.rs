@@ -67,17 +67,27 @@ async fn start_app(app: App) -> String {
     format!("ws://{addr}")
 }
 
-/// `/ws/client` upgrade request carrying a browser `Origin` header.
-fn client_req_with_origin(
+/// `/ws/client` upgrade request with extra headers.
+fn client_req(
     base: &str,
-    origin: &str,
+    pairs: &[(&'static str, &str)],
 ) -> tokio_tungstenite::tungstenite::handshake::client::Request {
     let mut req = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
         format!("{base}/ws/client"),
     )
     .unwrap();
-    req.headers_mut().insert("origin", origin.parse().unwrap());
+    for (k, v) in pairs {
+        req.headers_mut().insert(*k, v.parse().unwrap());
+    }
     req
+}
+
+/// `/ws/client` upgrade request carrying a browser `Origin` header.
+fn client_req_with_origin(
+    base: &str,
+    origin: &str,
+) -> tokio_tungstenite::tungstenite::handshake::client::Request {
+    client_req(base, &[("origin", origin)])
 }
 
 fn allow_mis_example(app: App) -> App {
@@ -416,10 +426,15 @@ async fn same_origin_page_connects_with_subprotocol_token() {
 
 /// Minimal HTTP/1.1 GET; returns the raw response.
 async fn http_get(base: &str, path: &str) -> String {
+    http_get_with(base, path, "").await
+}
+
+/// [`http_get`] with extra raw header lines (`"name: value\r\n"`).
+async fn http_get_with(base: &str, path: &str, extra: &str) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let addr = base.trim_start_matches("ws://");
     let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n{extra}Connection: close\r\n\r\n");
     s.write_all(req.as_bytes()).await.unwrap();
     let mut out = String::new();
     s.read_to_string(&mut out).await.unwrap();
@@ -435,7 +450,10 @@ async fn serves_page_and_info_without_token() {
     assert!(page.contains("frame-ancestors 'none'"));
     assert!(page.contains("<title>Make It So</title>"));
     let info = http_get(&base, "/api/info").await;
-    assert!(info.contains(r#"{"access":false,"auth":true,"version":"#), "{info}");
+    assert!(
+        info.contains(r#"{"access":false,"auth":true,"version":"#),
+        "{info}"
+    );
 }
 
 const ACCESS_AUD: &str = "aud-tag";
@@ -470,14 +488,7 @@ fn access_jwt(aud: &str) -> String {
 
 /// `/ws/client` upgrade with extra headers; returns the HTTP status on failure.
 async fn client_status(base: &str, pairs: &[(&'static str, &str)]) -> u16 {
-    let mut req = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
-        format!("{base}/ws/client"),
-    )
-    .unwrap();
-    for (k, v) in pairs {
-        req.headers_mut().insert(*k, v.parse().unwrap());
-    }
-    match connect_async(req).await {
+    match connect_async(client_req(base, pairs)).await {
         Ok((_, resp)) => resp.status().as_u16(),
         Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => resp.status().as_u16(),
         Err(e) => panic!("{e}"),
@@ -512,20 +523,18 @@ async fn access_jwt_admits_and_bad_or_missing_is_401() {
 
 #[tokio::test]
 async fn info_reports_access_so_page_skips_token() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let base = start_behind_access().await;
-    let addr = base.trim_start_matches("ws://");
-    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let jwt = access_jwt(ACCESS_AUD);
-    let req = format!(
-        "GET /api/info HTTP/1.1\r\nHost: {addr}\r\ncf-access-jwt-assertion: {jwt}\r\nConnection: close\r\n\r\n"
+    let jwt = format!("cf-access-jwt-assertion: {}\r\n", access_jwt(ACCESS_AUD));
+    let info = http_get_with(&base, "/api/info", &jwt).await;
+    assert!(
+        info.contains(r#"{"access":true,"auth":false,"version":"#),
+        "{info}"
     );
-    s.write_all(req.as_bytes()).await.unwrap();
-    let mut info = String::new();
-    s.read_to_string(&mut info).await.unwrap();
-    assert!(info.contains(r#"{"access":true,"auth":false,"version":"#), "{info}");
     let info = http_get(&base, "/api/info").await;
-    assert!(info.contains(r#"{"access":false,"auth":true,"version":"#), "{info}");
+    assert!(
+        info.contains(r#"{"access":false,"auth":true,"version":"#),
+        "{info}"
+    );
 }
 
 #[tokio::test]

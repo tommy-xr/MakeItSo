@@ -245,17 +245,18 @@ impl App {
         self.transition(|l| ((), l.disconnect(wid, conn)));
     }
 
-    /// None when Access is off; else the identity from a valid Access JWT, if any.
-    async fn access_check(&self, headers: &HeaderMap) -> Option<Option<Identity>> {
-        let gate = self.access.as_ref()?;
+    async fn access_check(&self, headers: &HeaderMap) -> Access {
+        let Some(gate) = &self.access else {
+            return Access::Off;
+        };
         let Some(jwt) = headers.get(JWT_HEADER) else {
-            return Some(None);
+            return Access::Failed;
         };
         match gate.verify(jwt.to_str().unwrap_or_default()).await {
-            Ok(id) => Some(Some(id)),
+            Ok(id) => Access::Passed(id),
             Err(e) => {
                 tracing::warn!("rejected Cloudflare Access JWT: {e:?}");
-                Some(None)
+                Access::Failed
             }
         }
     }
@@ -263,21 +264,21 @@ impl App {
     /// Auth for a WebSocket upgrade; logs who Cloudflare Access let through.
     async fn admit(&self, headers: &HeaderMap, peer: SocketAddr, path: &str) -> bool {
         let access = self.access_check(headers).await;
-        let ok = self.authorized(headers, peer.ip(), access.as_ref().map(Option::is_some));
-        if let (true, Some(Some(id))) = (ok, &access) {
+        let ok = self.authorized(headers, peer.ip(), &access);
+        if let (true, Access::Passed(id)) = (ok, &access) {
             tracing::info!(subject = %id.subject, "{path}: Cloudflare Access");
         }
         ok
     }
 
-    /// `access`: None when Access is off, else whether a valid Access JWT came with
-    /// the request. `peer` is the TCP peer.
-    fn authorized(&self, headers: &HeaderMap, peer: IpAddr, access: Option<bool>) -> bool {
-        let passed = access == Some(true);
+    /// `peer` is the TCP peer.
+    fn authorized(&self, headers: &HeaderMap, peer: IpAddr, access: &Access) -> bool {
+        let passed = matches!(access, Access::Passed(_));
         // Behind Access only direct local connections may skip it. cloudflared also
         // connects from loopback, but always adds Cloudflare's headers. (Any local
         // process can still connect directly, as without Access.)
-        if access == Some(false) && (!peer.to_canonical().is_loopback() || via_cloudflare(headers))
+        if matches!(access, Access::Failed)
+            && (!peer.to_canonical().is_loopback() || via_cloudflare(headers))
         {
             return false;
         }
@@ -338,6 +339,15 @@ async fn run_oneshot(
     }
 }
 
+/// Cloudflare Access outcome for one request.
+enum Access {
+    /// Not configured.
+    Off,
+    Passed(Identity),
+    /// No valid Access JWT.
+    Failed,
+}
+
 /// Request came through Cloudflare's edge (e.g. via cloudflared).
 fn via_cloudflare(headers: &HeaderMap) -> bool {
     [JWT_HEADER, "cf-ray", "cf-connecting-ip"]
@@ -394,6 +404,7 @@ pub fn normalize_origins(raw: impl IntoIterator<Item = String>) -> Vec<String> {
         .collect()
 }
 
+/// Needs `ConnectInfo<SocketAddr>`; see [`serve`].
 pub fn router(app: App) -> Router {
     Router::new()
         .route("/", get(page))
@@ -433,7 +444,7 @@ async fn page() -> impl IntoResponse {
 /// Lets the page decide whether to ask for a token (not when Access already let
 /// it in), and shows what is running.
 async fn info(State(app): State<App>, headers: HeaderMap) -> Json<serde_json::Value> {
-    let access = matches!(app.access_check(&headers).await, Some(Some(_)));
+    let access = matches!(app.access_check(&headers).await, Access::Passed(_));
     Json(serde_json::json!({
         "auth": app.token.is_some() && !access,
         "access": access,
@@ -684,8 +695,9 @@ mod tests {
     #[test]
     fn authorized_combines_origin_and_token() {
         let lo: IpAddr = "127.0.0.1".parse().unwrap();
-        let ok =
-            |app: &App, pairs: &[(&'static str, &str)]| app.authorized(&headers(pairs), lo, None);
+        let ok = |app: &App, pairs: &[(&'static str, &str)]| {
+            app.authorized(&headers(pairs), lo, &Access::Off)
+        };
         let open = App::new(None);
         // Same-origin page needs no allowlist entry.
         let local = [
@@ -721,8 +733,14 @@ mod tests {
         let remote: IpAddr = "192.0.2.1".parse().unwrap();
         let t = App::new(Some("s".into()));
         let bearer = ("authorization", "Bearer s");
-        let ok = |pairs: &[(&'static str, &str)], peer, access| {
-            t.authorized(&headers(pairs), peer, Some(access))
+        let pass = || {
+            Access::Passed(Identity {
+                subject: "me".into(),
+            })
+        };
+        let ok = |pairs: &[(&'static str, &str)], peer, passed: bool| {
+            let access = if passed { pass() } else { Access::Failed };
+            t.authorized(&headers(pairs), peer, &access)
         };
         // Valid JWT: no token needed, from anywhere.
         assert!(ok(&[], remote, true));
@@ -741,8 +759,8 @@ mod tests {
         assert!(!ok(&foreign, remote, true));
         let open = App::new(None);
         let page = [("origin", "https://m.example"), ("host", "m.example")];
-        assert!(open.authorized(&headers(&page), remote, Some(true)));
-        assert!(!open.authorized(&headers(&page), lo, Some(false)));
+        assert!(open.authorized(&headers(&page), remote, &pass()));
+        assert!(!open.authorized(&headers(&page), lo, &Access::Failed));
     }
 
     #[test]

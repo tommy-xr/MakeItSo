@@ -115,7 +115,8 @@ mis-worker setup --url wss://mis.example.com \
 
 Requests with a valid Access JWT need no `MIS_TOKEN`, so the page skips the token prompt. Requests
 without one are rejected unless they come straight from loopback with no Cloudflare headers;
-those still follow `MIS_TOKEN`. So any local process can still connect, as without Access.
+those still follow `MIS_TOKEN`. So any local process can still connect, as without Access; set
+`MIS_TOKEN` too to close that. The JWT is checked when a socket opens, not again while it stays open.
 
 
 The orchestrator serves a text-only page at `http://<host>:7474/`: tasks (list, submit, transcripts) and workers.

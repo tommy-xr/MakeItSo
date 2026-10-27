@@ -104,7 +104,7 @@ pub fn verify(jwt: &str, keys: &Jwks, team: &str, aud: &str, now: u64) -> Result
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use jsonwebtoken::{encode, EncodingKey, Header};
     use serde_json::{json, Value};
@@ -114,7 +114,7 @@ mod tests {
     const NOW: u64 = 1_800_000_000;
     const AUD: &str = "aud-tag";
 
-    fn keys() -> Jwks {
+    pub(crate) fn keys() -> Jwks {
         serde_json::from_str(JWKS).unwrap()
     }
 
@@ -129,7 +129,7 @@ mod tests {
         })
     }
 
-    fn mint(kid: Option<&str>, claims: &Value) -> String {
+    pub(crate) fn mint(kid: Option<&str>, claims: &Value) -> String {
         let mut h = Header::new(Algorithm::RS256);
         h.kid = kid.map(String::from);
         let key = EncodingKey::from_rsa_pem(KEY.as_bytes()).unwrap();
