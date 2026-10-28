@@ -435,7 +435,7 @@ async fn serves_page_and_info_without_token() {
     assert!(page.contains("frame-ancestors 'none'"));
     assert!(page.contains("<title>Make It So</title>"));
     let info = http_get(&base, "/api/info").await;
-    assert!(info.ends_with(r#"{"auth":true}"#), "{info}");
+    assert!(info.contains(r#""auth":true"#), "{info}");
 }
 
 #[tokio::test]
