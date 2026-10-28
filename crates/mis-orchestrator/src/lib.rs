@@ -662,6 +662,7 @@ async fn client_conn(mut sock: WebSocket, app: App) {
                     send_json(&mut sock, &ServerMsg::Submitted { task }).await;
                 }
                 Some(ClientMsg::Subscribe) => sub = Some(app.events.subscribe()),
+                Some(ClientMsg::Seen { task }) => app.transition(|l| ((), l.seen(task))),
                 Some(ClientMsg::Show { task }) => {
                     let reply = match app.ledger().show(task) {
                         Some((task, events, truncated)) => ServerMsg::TaskDetail {

@@ -94,6 +94,21 @@ struct TaskEntry {
     /// recently mentioned last. Kept apart from `events`, so transcript eviction
     /// never drops them.
     links: Vec<Link>,
+    /// The agent reported a usage limit.
+    limited: bool,
+    /// A client opened it after it finished.
+    seen: bool,
+}
+
+/// What a task needs from the user; opening it once finished clears it.
+fn attention(status: TaskStatus, limited: bool, seen: bool) -> Attention {
+    match status {
+        _ if seen => Attention::None,
+        TaskStatus::Done => Attention::Unread,
+        _ if limited => Attention::Limited,
+        TaskStatus::Failed => Attention::Failed,
+        _ => Attention::None,
+    }
 }
 
 /// Activity text for an event worth showing: `> Bash ls`, `status: <text>`, or
@@ -136,6 +151,8 @@ impl TaskEntry {
             parent: None,
             pin: None,
             links: vec![],
+            limited: false,
+            seen: false,
         }
     }
 
@@ -167,6 +184,7 @@ impl TaskEntry {
             activity: self.activity(),
             parent: self.parent,
             links: self.links.clone(),
+            attention: attention(self.status, self.limited, self.seen),
         }
     }
 
@@ -212,6 +230,7 @@ impl TaskEntry {
                 self.summary = summary.clone();
                 self.finished_at = Some(now_ms);
             }
+            AgentEvent::Limited { .. } => self.limited = true,
             _ => {}
         }
         let event = match event {
@@ -671,6 +690,19 @@ impl Ledger {
             return vec![];
         }
         t.summary = Some(text);
+        vec![Effect::Broadcast(self.status())]
+    }
+
+    /// A client opened `task`. Only a finished task can be seen; a fresh Status
+    /// tells every client it no longer needs attention.
+    pub fn seen(&mut self, task: TaskId) -> Vec<Effect> {
+        let Some(t) = self.tasks.iter_mut().find(|t| t.task.id == task) else {
+            return vec![];
+        };
+        if t.seen || !matches!(t.status, TaskStatus::Done | TaskStatus::Failed) {
+            return vec![];
+        }
+        t.seen = true;
         vec![Effect::Broadcast(self.status())]
     }
 
@@ -1674,6 +1706,87 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn attention_of(l: &Ledger, task: TaskId) -> Attention {
+        l.show(task).unwrap().0.attention
+    }
+
+    fn finish(l: &mut Ledger, wid: WorkerId, task: TaskId, ok: bool) {
+        let summary = None;
+        l.event(wid, 1, task, AgentEvent::Finished { ok, summary });
+    }
+
+    #[test]
+    fn attention_needs_a_finish_and_clears_once_seen() {
+        let (mut l, wid, task) = running_setup();
+        assert_eq!(attention_of(&l, task), Attention::None);
+        // Seen before it finishes: ignored, so the result still shows as unread.
+        assert!(l.seen(task).is_empty());
+        finish(&mut l, wid, task, true);
+        assert_eq!(attention_of(&l, task), Attention::Unread);
+        let eff = l.seen(task);
+        let [Effect::Broadcast(ServerMsg::Status { tasks, .. })] = &eff[..] else {
+            panic!("{eff:?}")
+        };
+        assert_eq!(tasks[0].attention, Attention::None);
+        assert!(l.seen(task).is_empty(), "seen twice: nothing new to tell");
+        assert!(l.seen(Uuid::new_v4()).is_empty());
+
+        let (failed, _) = l.submit("q".into(), None, Some("claude".into()), None);
+        finish(&mut l, wid, failed, false);
+        assert_eq!(attention_of(&l, failed), Attention::Failed);
+        l.seen(failed);
+        assert_eq!(attention_of(&l, failed), Attention::None);
+    }
+
+    #[test]
+    fn worker_loss_fails_into_attention() {
+        let (mut l, wid, task) = running_setup();
+        l.disconnect(wid, 1);
+        l.expire(wid, 1);
+        assert_eq!(attention_of(&l, task), Attention::Failed);
+    }
+
+    #[test]
+    fn usage_limit_shows_until_it_finishes_ok_or_is_seen() {
+        let limited = AgentEvent::Limited {
+            resets_at: Some(1_800_000_000),
+        };
+        let (mut l, wid, task) = running_setup();
+        l.event(wid, 1, task, limited.clone());
+        assert_eq!(attention_of(&l, task), Attention::Limited, "while running");
+        finish(&mut l, wid, task, false);
+        assert_eq!(
+            attention_of(&l, task),
+            Attention::Limited,
+            "outranks failed"
+        );
+        assert!(
+            l.show(task).unwrap().1.contains(&limited),
+            "kept in the transcript"
+        );
+        l.seen(task);
+        assert_eq!(attention_of(&l, task), Attention::None);
+
+        // Limited, then carried on and finished ok: just a result to read.
+        let (next, _) = l.submit("q".into(), None, Some("claude".into()), None);
+        l.event(wid, 1, next, limited);
+        finish(&mut l, wid, next, true);
+        assert_eq!(attention_of(&l, next), Attention::Unread);
+    }
+
+    #[test]
+    fn replies_carry_their_own_attention() {
+        let (mut l, wid, parent) = finished_setup();
+        l.seen(parent);
+        let (reply, _) = l.reply(parent, "and tests?".into(), true).unwrap();
+        assert_eq!(attention_of(&l, reply), Attention::None);
+        finish(&mut l, wid, reply, false);
+        assert_eq!(
+            (attention_of(&l, parent), attention_of(&l, reply)),
+            (Attention::None, Attention::Failed)
+        );
     }
 
     #[test]

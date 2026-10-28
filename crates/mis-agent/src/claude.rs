@@ -168,6 +168,16 @@ fn events(v: &Value, hidden: &mut HashSet<String>) -> Vec<AgentEvent> {
                 content: tool_result_text(&b["content"]),
             })
             .collect(),
+        // `allowed` / `allowed_warning` still run; anything else (e.g. `rejected`) is a hit limit.
+        Some("rate_limit_event") => {
+            let info = &v["rate_limit_info"];
+            match info["status"].as_str() {
+                Some(s) if !s.starts_with("allowed") => vec![AgentEvent::Limited {
+                    resets_at: info["resetsAt"].as_u64(),
+                }],
+                _ => vec![],
+            }
+        }
         Some("result") => vec![AgentEvent::Finished {
             ok: v["is_error"] != true && v["subtype"].as_str().is_none_or(|s| s == "success"),
             summary: v["result"].as_str().map(String::from),
@@ -345,6 +355,20 @@ mod tests {
         );
 
         assert!(parse_line(r#"{"type":"rate_limit_event"}"#).is_empty());
+        // Only the session's own status counts; a rejected overage doesn't stop it.
+        let limit = |status: &str| {
+            parse_line(&format!(
+                r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"{status}","resetsAt":1793223000,"rateLimitType":"five_hour","overageStatus":"rejected"}}}}"#
+            ))
+        };
+        assert!(limit("allowed").is_empty());
+        assert!(limit("allowed_warning").is_empty());
+        assert_eq!(
+            limit("rejected"),
+            vec![AgentEvent::Limited {
+                resets_at: Some(1793223000)
+            }]
+        );
         assert!(parse_line("not json").is_empty());
     }
 
