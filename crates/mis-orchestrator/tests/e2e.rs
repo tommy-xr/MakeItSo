@@ -440,7 +440,11 @@ async fn serves_page_and_info_without_token() {
     assert!(page.contains("frame-ancestors 'none'"));
     assert!(page.contains("<title>Make It So</title>"));
     // Voice: mic buttons on both composers, readback controls.
-    assert_eq!(page.matches(r#"class="mic""#).count(), 2, "mic on composer and reply");
+    assert_eq!(
+        page.matches(r#"class="mic""#).count(),
+        2,
+        "mic on composer and reply"
+    );
     assert!(page.contains(r#"id="autoread""#));
     assert!(page.contains(r#"id="speak""#));
     let info = http_get(&base, "/api/info").await;

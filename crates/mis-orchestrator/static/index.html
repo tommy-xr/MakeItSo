@@ -46,6 +46,7 @@
   .row { display: flex; gap: .5rem; margin: .5rem 0 1.5rem; }
   .row button { flex: 1; }
   .row input { flex: 1; min-width: 0; min-height: 2.75rem; padding: 0 .75rem; }
+  .row.tight { margin-bottom: 0; }
   .row .mic, #speak { flex: none; }
   /* Listening / speaking: inverse of the normal button, with the hot dot. */
   .mic[aria-pressed=true], #speak.on { background: var(--field); color: var(--hot); border-color: var(--hot); }
@@ -124,12 +125,11 @@
 <main id="list" hidden>
   <form id="new">
     <textarea id="prompt" placeholder="New task…" required></textarea>
-    <div class="row">
+    <div class="row tight">
       <select id="harness" aria-label="harness"><option value="">auto</option></select>
       <input id="model" aria-label="model" placeholder="model (optional)" autocapitalize="off" autocorrect="off" spellcheck="false">
-      <button type="button" class="mic" aria-pressed="false" hidden>mic</button>
-      <button>Submit</button>
     </div>
+    <div class="row"><button type="button" class="mic" aria-pressed="false" hidden>mic</button><button>Submit</button></div>
     <label class="toggle dim" hidden><input type="checkbox" id="autoread"> auto-read answers</label>
   </form>
   <ul id="tasks"></ul>
