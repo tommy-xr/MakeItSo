@@ -197,6 +197,7 @@ mod tests {
             parent: None,
             links: vec![],
             attention: Default::default(),
+            blocked_until: None,
         }
     }
 
