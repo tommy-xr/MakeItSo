@@ -160,8 +160,8 @@ impl Ctx {
         merge_limits(all.entry(harness.to_string()).or_default(), windows);
     }
 
-    /// Every harness's windows, after polling those that keep their own.
-    fn limits(&self) -> BTreeMap<String, Vec<LimitWindow>> {
+    /// Poll the harnesses that keep their own readings, then every harness's windows.
+    fn poll_limits(&self) -> BTreeMap<String, Vec<LimitWindow>> {
         for a in self.agents.iter() {
             if let Some(w) = a.limits() {
                 self.add_limits(a.name(), w);
@@ -229,7 +229,11 @@ async fn session(
                 _ = beat.tick() => {
                     let t = std::time::Instant::now();
                     let mut s = c.sampler.sample();
-                    s.limits = ctx.limits();
+                    // File reads: off the runtime's threads.
+                    let poll = ctx.clone();
+                    s.limits = tokio::task::spawn_blocking(move || poll.poll_limits())
+                        .await
+                        .unwrap_or_default();
                     tracing::debug!(?s, took = ?t.elapsed(), "sending stats");
                     sink.send(text(&WorkerMsg::Stats(s))).await?;
                     continue;

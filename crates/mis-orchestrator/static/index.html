@@ -47,8 +47,9 @@
   .dot.listen { background: var(--warn); box-shadow: 0 0 10px var(--warn); }
   #tabs { display: flex; margin-left: auto; border: 1px solid var(--rule); }
   /* Limit gauges: the fullest fresh window per harness. They grow into the room left beside the tabs from zero,
-     so they never start a new line (a narrow screen clips them); a tap opens Workers. */
-  .gauges { flex: 1 1 0; min-width: 0; display: flex; justify-content: flex-end; align-items: center; gap: .375rem; min-height: 2.75rem; overflow: hidden; text-decoration: none; }
+     and the negative margin cancels their gap, so showing them never starts a new line (a narrow screen clips
+     them). They stretch to the row's height for a taller tap target (it opens Workers) without setting it. */
+  .gauges { flex: 1 1 0; align-self: stretch; min-width: 0; margin-left: -.625rem; display: flex; justify-content: flex-end; align-items: center; gap: .375rem; overflow: hidden; text-decoration: none; }
   .gz { display: inline-flex; align-items: flex-end; gap: 3px; font: 600 .5625rem/1 var(--display); color: var(--dim); --b: var(--accent); }
   .gz i { width: 5px; height: 12px; background: linear-gradient(to top, var(--b) var(--v, 0%), var(--rule) 0); }
   .gz.warn { --b: var(--warn); } .gz.crit { --b: var(--bad); }
@@ -532,8 +533,12 @@ function clock(t) {
   s.dataset.start = t.started_at;
   return s;
 }
+let ticks = 0;
+// Readings age without new messages: gauges drop stale ones each second, Workers redraws its "as of" each 30 s.
 function tick() {
   for (const s of document.querySelectorAll('[data-start]')) s.textContent = fmtElapsed(Date.now() + skew - Number(s.dataset.start));
+  renderGauges();
+  if (++ticks % 30 === 0 && everOpen && route().view === 'workers') renderWorkers();
 }
 // Known parts joined with ` · ` (or `sep`).
 const dots = (parts, sep = ' · ') => parts.filter(Boolean).flatMap((p, i) => (i ? [sep, p] : [p]));
