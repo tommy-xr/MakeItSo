@@ -420,6 +420,9 @@ pub fn normalize_origins(raw: impl IntoIterator<Item = String>) -> Vec<String> {
 pub fn router(app: App) -> Router {
     Router::new()
         .route("/", get(page))
+        .route("/manifest.webmanifest", get(manifest))
+        .route("/icon.svg", get(icon))
+        .route("/apple-touch-icon.png", get(touch_icon))
         .route("/api/info", get(info))
         .route("/ws/worker", get(ws_worker))
         .route("/ws/client", get(ws_client))
@@ -451,6 +454,26 @@ async fn page() -> impl IntoResponse {
     (
         [(header::CONTENT_SECURITY_POLICY, "frame-ancestors 'none'")],
         Html(include_str!("../static/index.html")),
+    )
+}
+
+// Home-screen install: manifest and icons, baked in like the page.
+async fn manifest() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/manifest+json")],
+        include_str!("../static/manifest.webmanifest"),
+    )
+}
+async fn icon() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/svg+xml")],
+        include_str!("../static/icon.svg"),
+    )
+}
+async fn touch_icon() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/png")],
+        include_bytes!("../static/apple-touch-icon.png").as_slice(),
     )
 }
 

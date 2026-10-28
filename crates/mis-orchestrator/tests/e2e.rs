@@ -467,6 +467,14 @@ async fn serves_page_and_info_without_token() {
         info.contains(r#"{"access":false,"auth":true,"version":"#),
         "{info}"
     );
+    // Home-screen install assets.
+    let manifest = http_get(&base, "/manifest.webmanifest").await;
+    assert!(manifest.contains("application/manifest+json"), "{manifest}");
+    assert!(
+        manifest.contains(r#""display": "standalone""#),
+        "{manifest}"
+    );
+    assert!(http_get(&base, "/icon.svg").await.contains("image/svg+xml"));
 }
 
 const ACCESS_AUD: &str = "aud-tag";

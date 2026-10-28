@@ -2,7 +2,13 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#050A12">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <title>Make It So</title>
 <!-- Quest browser: VR panels are read at arm's length, so `html.vr` enlarges type. In head to avoid a 16px first paint. -->
 <script>if (/OculusBrowser|Quest/.test(navigator.userAgent)) document.documentElement.classList.add('vr');</script>
@@ -25,10 +31,10 @@
   }
   /* Faint grid lines behind everything. */
   html { min-height: 100%; background: linear-gradient(90deg, var(--grid) 1px, transparent 0) 0 0 / 3rem 3rem, linear-gradient(var(--grid) 1px, transparent 0) 0 0 / 3rem 3rem, var(--bg); }
-  body { --pad: 1.25rem; box-sizing: border-box; margin: 0 auto; max-width: 46rem; min-height: 100vh; padding: 0 var(--pad) 3rem; color: var(--fg); font: 1rem/1.55 var(--mono); }
+  body { --pad: 1.25rem; box-sizing: border-box; margin: 0 auto; max-width: 46rem; min-height: 100svh; padding: 0 var(--pad) 3rem; color: var(--fg); font: 1rem/1.55 var(--mono); }
   @media (min-width: 64rem) { body { --pad: 2.5rem; border-inline: 1px solid var(--rule); } }
   /* Title strip: dot, wordmark and tabs; then the ticker of live work; then the light-cycle line. */
-  .strip { margin: 0 calc(-1 * var(--pad)) 1.25rem; padding: 1rem var(--pad) 0; background: linear-gradient(var(--field), transparent); }
+  .strip { margin: 0 calc(-1 * var(--pad)) 1.25rem; padding: calc(1rem + env(safe-area-inset-top, 0px)) var(--pad) 0; background: linear-gradient(var(--field), transparent); }
   .top { display: flex; flex-wrap: wrap; align-items: center; gap: .625rem; }
   .title { font: 700 1rem/1 var(--display); text-transform: uppercase; letter-spacing: .16em; white-space: nowrap; color: var(--accent); text-shadow: 0 0 10px var(--glow); }
   /* Connection and work: dim = idle, bright with glow = working, hollow = reconnecting, warn = offline or no workers,
