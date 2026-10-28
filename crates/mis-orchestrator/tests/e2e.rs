@@ -1162,6 +1162,58 @@ async fn status_event_sets_activity_and_is_kept() {
     assert_eq!(events, [status]);
 }
 
+#[tokio::test]
+async fn pr_link_in_agent_text_reaches_status_and_show() {
+    let base = start().await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    send(&mut client, &ClientMsg::Subscribe).await;
+    let mut worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+    send(
+        &mut client,
+        &ClientMsg::Submit {
+            prompt: "open a PR".into(),
+            cwd: None,
+            harness: Some("claude".into()),
+            model: None,
+            reply_to: None,
+        },
+    )
+    .await;
+    let ServerMsg::Submitted { task } = recv(&mut client).await else {
+        panic!()
+    };
+    let OrchMsg::Assign { .. } = recv(&mut worker).await else {
+        panic!()
+    };
+    let text = "Opened (https://github.com/o/r/pull/42).".into();
+    send(
+        &mut worker,
+        &WorkerMsg::Event {
+            task,
+            event: AgentEvent::Text { text },
+        },
+    )
+    .await;
+    let ServerMsg::Event { .. } = recv(&mut client).await else {
+        panic!()
+    };
+    let want = vec![Link {
+        kind: LinkKind::Pr,
+        url: "https://github.com/o/r/pull/42".into(),
+        label: "o/r#42".into(),
+    }];
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { tasks, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    assert_eq!(tasks[0].links, want);
+    send(&mut client, &ClientMsg::Show { task }).await;
+    let ServerMsg::TaskDetail { task: info, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    assert_eq!(info.links, want);
+}
+
 /// POST a JSON-RPC body to `/mcp`; returns (status line, JSON body if any).
 async fn mcp_post(
     base: &str,

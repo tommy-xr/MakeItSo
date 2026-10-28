@@ -684,6 +684,7 @@ mod tests {
             tokens_out: None,
             activity: String::new(),
             parent: None,
+            links: vec![],
         }
     }
 
