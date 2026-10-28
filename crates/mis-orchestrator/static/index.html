@@ -31,12 +31,14 @@
   .strip { margin: 0 calc(-1 * var(--pad)) 1.25rem; padding: 1rem var(--pad) 0; background: linear-gradient(var(--field), transparent); }
   .top { display: flex; flex-wrap: wrap; align-items: center; gap: .625rem; }
   .title { font: 700 1rem/1 var(--display); text-transform: uppercase; letter-spacing: .16em; white-space: nowrap; color: var(--accent); text-shadow: 0 0 10px var(--glow); }
-  /* Connection and work: dim = idle, bright with glow = working, hollow = reconnecting, warn = offline or no workers. */
+  /* Connection and work: dim = idle, bright with glow = working, hollow = reconnecting, warn = offline or no workers,
+     warn with glow = the mic is listening. */
   .dot { flex: none; box-sizing: border-box; width: .625rem; height: .625rem; border-radius: 50%; background: var(--accent); }
   .dot.rest { background: var(--idle); }
   .dot.work { box-shadow: 0 0 3px 1px var(--glow), 0 0 10px var(--glow); }
   .dot.hollow { background: none; border: 2px solid var(--dim); }
   .dot.down { background: var(--warn); }
+  .dot.listen { background: var(--warn); box-shadow: 0 0 10px var(--warn); }
   #tabs { display: flex; margin-left: auto; border: 1px solid var(--rule); }
   [role=tab] { display: inline-flex; align-items: center; justify-content: center; min-height: 2.75rem; min-width: 2.75rem; padding: 0 .75rem; color: var(--dim); text-decoration: none; text-transform: uppercase; letter-spacing: .14em; font: 600 .8125rem var(--display); }
   [role=tab][aria-selected=true] { color: var(--bg); background: var(--accent); box-shadow: 0 0 10px var(--glow); }
@@ -73,11 +75,19 @@
   .row input { flex: 1; min-width: 0; min-height: 2.75rem; padding: 0 .75rem; }
   .row.tight { margin-bottom: 0; }
   .row .mic, #speak { flex: none; }
-  .mic { display: grid; place-items: center; width: 2.75rem; padding: 0; }
+  /* No scroll, selection or callout under a held finger. */
+  .mic { display: grid; place-items: center; width: 2.75rem; padding: 0; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
   .mic svg { width: 1.25rem; height: 1.25rem; }
   button:disabled { opacity: .5; cursor: default; }
   /* Listening / speaking: lit edge. */
   .mic[aria-pressed=true], #speak.on { color: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--glow), 0 0 12px var(--glow); }
+  /* Recording: warn fill with a stop square. A finger hides it, so the field glows, the dot turns warn and Submit shows the hint. */
+  .mic[data-mic=live] { background: var(--warn); border-color: var(--warn); color: var(--bg); box-shadow: 0 0 12px var(--warn); }
+  .mic[data-mic=live] svg { display: none; }
+  .mic[data-mic=live]::before { content: ""; width: .875rem; height: .875rem; background: currentColor; }
+  form.listening textarea { border-color: var(--accent); box-shadow: 0 0 10px var(--glow); }
+  /* The mic's hint stands in for Submit in the same box, so nothing moves under the finger. Two lines fit. */
+  .row .hint { flex: 1; display: flex; align-items: center; justify-content: center; box-sizing: border-box; height: 2.75rem; overflow: hidden; padding: 0 .5rem; border: 1px solid var(--warn); color: var(--warn); font-size: .8125rem; line-height: 1.25; text-align: center; }
   .toggle { display: flex; align-items: center; gap: .5rem; min-height: 2.75rem; margin: -1rem 0 1rem; }
   .toggle input { width: 1.25rem; height: 1.25rem; margin: 0; accent-color: var(--accent); }
   .dim { color: var(--dim); }
@@ -172,7 +182,7 @@
       <select id="harness" aria-label="harness"><option value="">auto</option></select>
       <input id="model" aria-label="model" placeholder="model (optional)" autocapitalize="off" autocorrect="off" spellcheck="false">
     </div>
-    <div class="row"><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><button id="send">Submit</button></div>
+    <div class="row"><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><span class="hint" hidden></span><button id="send">Submit</button></div>
     <label class="toggle dim" hidden><input type="checkbox" id="autoread"> auto-read answers</label>
   </form>
   <ul id="tasks"></ul>
@@ -188,7 +198,7 @@
   <div id="thread" class="meta dim"></div>
   <form id="reply" hidden>
     <textarea id="reply-text" aria-label="reply" placeholder="Reply in this thread…" required></textarea>
-    <div class="row"><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><button id="send-reply">Reply</button></div>
+    <div class="row"><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><span class="hint" hidden></span><button id="send-reply">Reply</button></div>
     <p id="reply-error" class="bad" hidden></p>
   </form>
   <details><summary>transcript</summary><pre id="log"></pre></details>
@@ -272,35 +282,146 @@ function flash(text) {
   renderStrip();
 }
 
-// Dictation: words stream into the field after its text; nothing is sent until Submit.
-// Absent API (e.g. some iOS home-screen apps): the buttons stay hidden; keyboard dictation still works.
+// Dictation into a composer's field. Tap the mic: words stream in until a second tap; nothing is sent.
+// Hold it: release sends, sliding off cancels (text kept). Absent API (e.g. some iOS home-screen apps):
+// the buttons stay hidden; keyboard dictation still works.
 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-let rec = null; // the live recognizer, at most one
+const HOLD_MS = 300, SLIDE_PX = 24, START_MS = 3000, STOP_MS = 2000;
+// A press that started dictation, by how it ended: slid off or interrupted, short (keep listening), or held.
+const pressOutcome = (end, heldMs) => (end !== 'up' ? 'cancel' : heldMs < HOLD_MS ? 'tap' : 'send');
+// The finger is more than SLIDE_PX outside the button.
+const slidOff = (r, x, y) => x < r.left - SLIDE_PX || x > r.right + SLIDE_PX || y < r.top - SLIDE_PX || y > r.bottom + SLIDE_PX;
+// A held release sends only when dictation added words.
+const hasNewText = (base, text) => text.trim() !== '' && text.trim() !== base.trim();
+// Hint for a session, shown in Submit's place: nothing once stopping; `starting` until the browser says it hears.
+const micLine = (s) => (s.stopping ? '' : !s.live ? 'starting…' : s.held ? 'release to send · slide away to cancel' : 'tap mic to stop');
+
+// The dictation session, at most one: { r, btn, form, field, base, live, held, send, stopping, dead, timer, tickerH }.
+// `tickerH`: the ticker's height when it began (0 = hidden), kept while dictating.
+let rec = null;
+function micShow(s) {
+  const on = rec === s && !s.stopping, state = on ? (s.live ? 'live' : 'starting') : '';
+  if (state) s.btn.dataset.mic = state; else delete s.btn.dataset.mic;
+  s.btn.setAttribute('aria-pressed', String(on));
+  s.btn.setAttribute('aria-label', !on ? 'Start dictation' : s.live ? 'Stop dictation' : 'Starting dictation');
+  s.form.classList.toggle('listening', on && s.live);
+  const hint = rec === s ? micLine(s) : '', box = s.form.querySelector('.hint');
+  box.textContent = hint;
+  box.hidden = !hint;
+  s.form.querySelector('button:not([type=button])').hidden = !!hint;
+  renderStrip();
+}
+// Sends the field when the composer can; offline, the text stays for later.
+function deliver(s) {
+  if (!hasNewText(s.base, s.field.value)) return;
+  const submit = s.form.querySelector('button:not([type=button])');
+  if (submit.disabled) flash('offline · text kept'); else submit.click();
+}
+// Settles a session once: on onend, an error, the watchdogs, or micOff. A held release sends here.
+function micEnd(s) {
+  if (rec !== s) return;
+  rec = null;
+  clearTimeout(s.timer);
+  micShow(s);
+  if (s.send && !s.dead) deliver(s);
+}
+function micStart(btn, held) {
+  hush(); // else the mic hears the readback
+  const form = btn.closest('form'), field = form.querySelector('textarea'), r = new Recognition();
+  const tk = $('ticker'), tickerH = tk.hidden ? 0 : tk.offsetHeight;
+  const s = rec = { r, btn, form, field, base: field.value.trimEnd(), live: false, held, send: false, stopping: false, dead: false, timer: 0, tickerH };
+  Object.assign(r, { lang: navigator.language, interimResults: true });
+  r.onresult = (e) => {
+    if (rec !== s) return;
+    const said = [...e.results].map((x) => x[0].transcript).join('').trim();
+    field.value = s.base && said ? `${s.base} ${said}` : s.base || said;
+  };
+  // Live only once the browser hears, so the user knows when to speak.
+  r.onstart = r.onaudiostart = () => { if (rec === s && !s.live) { s.live = true; clearTimeout(s.timer); micShow(s); } };
+  // Some browsers (Chrome on iOS) expose the API, refuse it, and never fire onend: settle here too.
+  r.onerror = (e) => {
+    if (e.error === 'aborted' || rec !== s) return;
+    if (s.stopping) { micEnd(s); return; } // e.g. no-speech after a release: what was heard still counts
+    s.dead = true;
+    flash(e.error === 'not-allowed' ? 'mic not allowed: use Safari or keyboard dictation' : `mic error: ${e.error}`);
+    micEnd(s);
+  };
+  r.onend = () => micEnd(s);
+  // A recognizer that never starts (seen in the iOS home-screen app) would leave the button stuck: give up.
+  // Not while a permission prompt has the focus: onstart waits for the answer.
+  const giveUp = () => {
+    if (document.hidden || !document.hasFocus()) { s.timer = setTimeout(giveUp, START_MS); return; }
+    s.dead = true; r.abort(); micEnd(s); flash("mic didn't start: try again");
+  };
+  s.timer = setTimeout(giveUp, START_MS);
+  micShow(s);
+  try { r.start(); } catch (e) { s.dead = true; flash(`mic error: ${e.message}`); micEnd(s); }
+  return s;
+}
+// Stop listening, keeping what was heard; `send` submits once the final words land.
+function micStop(s, send) {
+  if (rec !== s || s.stopping) return;
+  s.send = send;
+  if (!s.live) { s.dead = true; s.r.abort(); micEnd(s); return; } // nothing heard yet
+  s.stopping = true;
+  micShow(s);
+  s.r.stop();
+  clearTimeout(s.timer);
+  s.timer = setTimeout(() => { s.r.abort(); micEnd(s); }, STOP_MS); // onend never came
+}
 // Abort drops pending results, so nothing lands in a sent or abandoned field.
-function micOff() { if (rec) { rec.abort(); rec = null; } }
-function listening(btn, on) { btn.setAttribute('aria-pressed', String(on)); btn.setAttribute('aria-label', on ? 'Stop dictation' : 'Start dictation'); }
+// A finger still down on a session that already ended must not send it either.
+function micOff() {
+  if (press && press.session) press.session.dead = true;
+  const s = rec;
+  if (s) { s.dead = true; s.r.abort(); micEnd(s); }
+}
+
+// One finger on a mic at a time. `stops`: it pressed a mic that was already on, so it only turns it off.
+// `rect` is the button where the finger landed: the ticker showing up can move the button under it.
+// `touched`: the touch behind the current press, whose trailing click is dropped.
+let press = null, pressedAt = -Infinity, touched = false;
+function pressEnd(end, e) {
+  const p = press;
+  if (!p || e.pointerId !== p.id) return;
+  press = null;
+  pressedAt = performance.now();
+  if (p.btn.hasPointerCapture(e.pointerId)) p.btn.releasePointerCapture(e.pointerId);
+  if (p.stops) {
+    if (rec && end === 'cancel') rec.send = false; // sliding off also calls off a send still waiting for onend
+    if (rec) micStop(rec, false);
+    return;
+  }
+  const s = p.session, out = pressOutcome(end, e.timeStamp - p.t0);
+  if (out === 'cancel') { micStop(s, false); if (!s.dead) flash('cancelled · text kept'); return; }
+  // A tap whose start was refused (e.g. needing a gesture a touch pointerdown isn't) retries inside this pointerup.
+  if (out === 'tap') { if (s.dead && !s.live) micStart(p.btn, false); else { s.held = false; micShow(s); } return; }
+  // Held: send. If recognition already ended on its own, the words are in the field.
+  unlock(); // a pointerup is a gesture, so auto-read can speak the answer later
+  s.send = true;
+  if (rec === s) micStop(s, true); else if (!s.dead) deliver(s);
+}
 for (const btn of document.querySelectorAll('.mic')) {
-  const field = btn.closest('form').querySelector('textarea');
   btn.hidden = !Recognition;
-  btn.onclick = () => {
-    if (rec) { rec.stop(); return; } // tap again: stop, keeping what was heard
-    hush(); // else the mic hears the readback
-    const r = rec = new Recognition(), base = field.value.trimEnd();
-    Object.assign(r, { lang: navigator.language, interimResults: true });
-    r.onresult = (e) => {
-      const said = [...e.results].map((x) => x[0].transcript).join('').trim();
-      field.value = base && said ? `${base} ${said}` : base || said;
-    };
-    // Some browsers (Chrome on iOS) expose the API, refuse it, and never fire onend: reset here too.
-    const done = () => { if (rec === r) rec = null; listening(btn, false); };
-    r.onerror = (e) => {
-      if (e.error === 'aborted') return;
-      flash(e.error === 'not-allowed' ? 'mic not allowed: use Safari or keyboard dictation' : `mic error: ${e.error}`);
-      done();
-    };
-    r.onend = done;
-    listening(btn, true);
-    r.start();
+  btn.oncontextmenu = (e) => e.preventDefault();
+  // No click after a touch press: the strip can change height mid-press, so it would land on whatever moved under the finger.
+  btn.addEventListener('touchend', (e) => { if (touched) { touched = false; e.preventDefault(); } });
+  btn.onpointerdown = (e) => {
+    if (press && !press.btn.hasPointerCapture(press.id)) press = null; // its up/cancel never came
+    if (press || !e.isPrimary || e.button !== 0) return;
+    touched = e.pointerType === 'touch';
+    btn.setPointerCapture(e.pointerId);
+    const stops = !!rec && rec.btn === btn;
+    if (!stops) micOff();
+    press = { id: e.pointerId, btn, rect: btn.getBoundingClientRect(), t0: e.timeStamp, stops, session: stops ? null : micStart(btn, true) };
+  };
+  btn.onpointermove = (e) => { if (press && press.btn === btn && slidOff(press.rect, e.clientX, e.clientY)) pressEnd('cancel', e); };
+  btn.onpointerup = (e) => { pressEnd('up', e); pressedAt = performance.now(); };
+  btn.onpointercancel = btn.onlostpointercapture = (e) => pressEnd('cancel', e);
+  // Keyboard and assistive activation (detail 0) always act; a pointer press already acted, so skip its click.
+  btn.onclick = (e) => {
+    if (e.detail !== 0 && performance.now() - pressedAt < 1000) return;
+    if (rec && rec.btn === btn) micStop(rec, false); else { micOff(); micStart(btn, false); }
   };
 }
 
@@ -378,10 +499,11 @@ function ticker() {
 }
 
 // Dot, then the ticker: a flash wins, then the connection until a socket has opened, then offline, then work.
-// The dot alone says idle; an idle ticker collapses.
+// The dot alone says idle (or listening); an idle ticker collapses.
 function renderStrip() {
   const live = ws && ws.readyState === WebSocket.OPEN, trying = ws || retryTimer, work = ticker();
-  const [cls, label] = !live ? (offline || !trying ? ['down', 'offline'] : ['hollow', everOpen ? 'reconnecting' : 'connecting'])
+  const [cls, label] = rec && rec.live && !rec.stopping ? ['listen', 'listening']
+    : !live ? (offline || !trying ? ['down', 'offline'] : ['hollow', everOpen ? 'reconnecting' : 'connecting'])
     : work.cls === 'bad' ? ['down', 'no workers'] : work.parts.length ? ['work', 'working'] : ['rest', 'idle'];
   $('dot').className = `dot ${cls}`;
   $('dot').setAttribute('aria-label', label);
@@ -392,7 +514,10 @@ function renderStrip() {
     : work;
   const tk = $('ticker');
   tk.replaceChildren(...t.parts);
-  tk.hidden = !t.parts.length;
+  // While dictating the ticker keeps its height, so nothing moves under the finger.
+  const keep = rec && rec.tickerH;
+  tk.hidden = rec ? !keep : !t.parts.length;
+  Object.assign(tk.style, { height: keep ? `${keep}px` : '', overflow: keep ? 'hidden' : '' });
   tk.className = t.cls;
   if (t.open) tk.href = `#task/${t.open}`; else tk.removeAttribute('href');
   $('cycle').classList.toggle('run', everOpen && !offline && tasks.some((x) => x.status === 'running'));
