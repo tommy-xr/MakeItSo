@@ -60,7 +60,7 @@ pub const MAX_TRANSCRIPT_BYTES: usize = 256 * 1024;
 /// A single stored `ToolResult` keeps at most this many bytes of content.
 pub const MAX_TOOL_RESULT_BYTES: usize = 16 * 1024;
 const TRUNCATED: &str = "…[truncated]";
-/// Evidence rows kept per task; the least recently mentioned go first.
+/// Evidence rows kept per task; the least recently mentioned non-PR rows go first.
 pub const MAX_LINKS: usize = 32;
 /// A fresh reply's context keeps at most this much of the parent's prompt and answer.
 const MAX_CONTEXT_CHARS: usize = 4_000;
@@ -190,8 +190,10 @@ impl TaskEntry {
         }
         for link in links {
             self.links.retain(|l| key(l) != key(&link));
+            // Full: drop the oldest row that isn't a PR, the task's most telling link.
             if self.links.len() == MAX_LINKS {
-                self.links.remove(0);
+                let i = self.links.iter().position(|l| l.kind != LinkKind::Pr);
+                self.links.remove(i.unwrap_or(0));
             }
             self.links.push(link);
         }
@@ -1929,8 +1931,10 @@ mod tests {
     }
 
     #[test]
-    fn reported_evidence_shares_the_bound() {
+    fn reported_evidence_shares_the_bound_keeping_prs() {
         let (mut l, wid, task) = running_setup();
+        let pr = "https://github.com/o/r/pull/1";
+        l.event(wid, 1, task, text(pr));
         for i in 0..MAX_LINKS + 1 {
             l.event(
                 wid,
@@ -1941,6 +1945,6 @@ mod tests {
         }
         let links = l.show(task).unwrap().0.links;
         assert_eq!(links.len(), MAX_LINKS);
-        assert_eq!(links[0].label, "1");
+        assert_eq!((links[0].url.as_str(), links[1].label.as_str()), (pr, "2"));
     }
 }

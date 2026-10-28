@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 /// Longest status, evidence title or test detail kept; each is one line.
-const MAX_STATUS_CHARS: usize = 200;
+const MAX_LINE_CHARS: usize = 200;
 /// Longest evidence URL accepted.
 const MAX_URL_BYTES: usize = 2048;
 
@@ -22,7 +22,8 @@ pub fn with_hint(prompt: &str) -> String {
     format!(
         "(You have a `report_status` tool: call it with a one-line status at each major \
          step so the user can follow along. After you push, open a PR, run tests or CI, or \
-         capture screenshots, call `report_evidence` once for each.)\n\n{prompt}"
+         capture screenshots, call `report_evidence` once for each (a screenshot without an \
+         https URL: a note naming its path).)\n\n{prompt}"
     )
 }
 
@@ -61,7 +62,7 @@ pub fn handle(req: &Value) -> (Option<Value>, Option<AgentEvent>) {
         event = Some(match name {
             "report_evidence" => AgentEvent::Evidence(evidence(args)?),
             _ => {
-                let text = first_line(args["text"].as_str().unwrap_or(""), MAX_STATUS_CHARS);
+                let text = first_line(args["text"].as_str().unwrap_or(""), MAX_LINE_CHARS);
                 if text.is_empty() {
                     return Err("text must be a non-empty string".into());
                 }
@@ -77,14 +78,15 @@ pub fn handle(req: &Value) -> (Option<Value>, Option<AgentEvent>) {
 /// GitHub link becomes its PR/commit/CI/issue row, so it dedupes with the same
 /// link found in the agent's output.
 fn evidence(args: &Value) -> Result<Link, String> {
-    let line = |k: &str| first_line(args[k].as_str().unwrap_or(""), MAX_STATUS_CHARS);
+    let line = |k: &str| first_line(args[k].as_str().unwrap_or(""), MAX_LINE_CHARS);
     let label = line("title");
     if label.is_empty() {
         return Err("title must be a non-empty string".into());
     }
-    let url = match args["url"].as_str() {
-        Some(u) if !is_https_url(u) => return Err("url must be an https URL".into()),
-        u => u.unwrap_or("").to_string(),
+    // Checked only for kinds that keep it.
+    let url = || match args["url"].as_str() {
+        Some(u) if !is_https_url(u) => Err("url must be an https URL".to_string()),
+        u => Ok(u.unwrap_or("").to_string()),
     };
     let row = |kind, url: String, ok, detail| Link {
         kind,
@@ -94,26 +96,33 @@ fn evidence(args: &Value) -> Result<Link, String> {
         detail,
     };
     match args["kind"].as_str() {
-        Some("link") if url.is_empty() => Err("a link needs a url".into()),
-        Some("link") => {
-            Ok(github_link(&url).unwrap_or_else(|| row(LinkKind::Url, url, None, None)))
-        }
+        Some("link") => match url()? {
+            u if u.is_empty() => Err("a link needs a url".into()),
+            u => Ok(github_link(&u).unwrap_or_else(|| row(LinkKind::Url, u, None, None))),
+        },
         Some("test") => {
             let detail = Some(line("detail")).filter(|d| !d.is_empty());
-            Ok(row(LinkKind::Test, url, args["ok"].as_bool(), detail))
+            Ok(row(LinkKind::Test, url()?, args["ok"].as_bool(), detail))
         }
         Some("note") => Ok(row(LinkKind::Note, String::new(), None, None)),
         _ => Err("kind must be link, test or note".into()),
     }
 }
 
-/// `https://<host>…`, no whitespace or control chars, at most `MAX_URL_BYTES`.
+/// `https://<host>[:port]…` with an ASCII DNS-style host (no userinfo or IPv6
+/// literal, which browsers may parse differently), no whitespace or control
+/// chars, at most `MAX_URL_BYTES`.
 fn is_https_url(u: &str) -> bool {
-    let host = u
+    let authority = u
         .strip_prefix("https://")
         .and_then(|r| r.split(['/', '?', '#']).next())
         .unwrap_or("");
+    let (host, port) = authority.split_once(':').unwrap_or((authority, "443"));
     !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+        && port.parse::<u16>().is_ok_and(|p| p > 0)
         && u.len() <= MAX_URL_BYTES
         && !u.chars().any(|c| c.is_whitespace() || c.is_control())
 }
@@ -225,7 +234,7 @@ mod tests {
             json!({"kind": "link", "title": "my PR", "url": "https://github.com/o/r/pull/42/files"}),
         );
         assert_eq!(pr, github_link("https://github.com/o/r/pull/42").unwrap());
-        let url = "https://preview.example.com/a?b=1#c";
+        let url = "https://preview.example.com:8443/a?b=1#c";
         let preview = reported(json!({"kind": "link", "title": "Preview", "url": url}));
         assert_eq!((preview.kind, preview.url.as_str()), (LinkKind::Url, url));
         let test = reported(json!({
@@ -237,9 +246,9 @@ mod tests {
         );
         assert_eq!(test.detail.as_deref(), Some("78 passed"));
         let long = "y".repeat(300);
-        let note = reported(json!({"kind": "note", "title": long, "url": "https://x.io"}));
+        let note = reported(json!({"kind": "note", "title": long, "url": "file:///x.png"}));
         assert_eq!((note.kind, note.url.as_str()), (LinkKind::Note, ""));
-        assert_eq!(note.label.chars().count(), MAX_STATUS_CHARS);
+        assert_eq!(note.label.chars().count(), MAX_LINE_CHARS);
     }
 
     #[test]
@@ -250,6 +259,11 @@ mod tests {
             json!({"kind": "link", "title": "t", "url": "javascript:alert(1)"}),
             json!({"kind": "link", "title": "t", "url": "https://"}),
             json!({"kind": "link", "title": "t", "url": "https:///x"}),
+            json!({"kind": "link", "title": "t", "url": "https://:443/x"}),
+            json!({"kind": "link", "title": "t", "url": "https://x.io:99999/"}),
+            json!({"kind": "link", "title": "t", "url": "https://x.io:/"}),
+            json!({"kind": "link", "title": "t", "url": "https://[bad/"}),
+            json!({"kind": "link", "title": "t", "url": "https://github.com@evil.io/"}),
             json!({"kind": "link", "title": "t", "url": "https://x.io/a b"}),
             json!({"kind": "link", "title": "t", "url": format!("https://x.io/{}", "a".repeat(MAX_URL_BYTES))}),
             json!({"kind": "test", "title": "t", "url": "ftp://x.io"}),
