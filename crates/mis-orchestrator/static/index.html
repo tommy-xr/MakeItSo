@@ -598,18 +598,64 @@ function attDot(t) {
   return d;
 }
 
+// `rows` ([depth, task]) in the order of `ids`; rows not in it go last, unindented (they'd sit under the wrong thread).
+function keepOrder(ids, rows) {
+  const at = new Map(ids.map((id, i) => [id, i]));
+  return rows.filter(([, t]) => at.has(t.id)).sort((x, y) => at.get(x[1].id) - at.get(y[1].id))
+    .concat(rows.filter(([, t]) => !at.has(t.id)).map(([, t]) => [0, t]));
+}
+
+// Rows hold still under a tap: a finish re-sorts a task list, which could move another row under the finger.
+// From a press until CLICK_MS after its release (a touch's click comes later) the lists don't re-render.
+// For SETTLE_MS after the last press or scroll, rows keep their order (content updates in place). Then they re-sort.
+const SETTLE_MS = 1500, CLICK_MS = 500;
+const presses = new Set(), shown = new Map(); // pointers down on a list; each list's ids as last shown
+let clickTimer = 0, settleTimer = 0;
+const frozen = () => presses.size > 0 || clickTimer !== 0;
+const onList = () => ['list', 'machine'].includes(route().view);
+function relist() { if (!frozen() && onList()) render(); }
+function settle() {
+  if (!onList()) return; // a scroll elsewhere doesn't hold the list met on return
+  clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => { settleTimer = 0; relist(); }, SETTLE_MS);
+}
+window.addEventListener('pointerdown', (e) => {
+  if (e.button === 0 && ($('tasks').contains(e.target) || $('wbody').contains(e.target))) { presses.add(e.pointerId); settle(); }
+}, true);
+const lift = (e) => {
+  if (!presses.delete(e.pointerId)) return;
+  clearTimeout(clickTimer);
+  clickTimer = setTimeout(() => { clickTimer = 0; relist(); }, CLICK_MS);
+  settle();
+};
+window.addEventListener('pointerup', lift, true);
+window.addEventListener('pointercancel', lift, true);
+// Ends of a press the page may never see as a pointerup: a context menu, a drag, focus leaving.
+// Not capturing: a capturing window listener would also hear every element's blur.
+const liftAll = () => { if (presses.size) { presses.clear(); relist(); } };
+for (const type of ['contextmenu', 'dragstart', 'blur']) window.addEventListener(type, liftAll);
+document.addEventListener('visibilitychange', liftAll);
+window.addEventListener('scroll', settle);
+// `threaded(list)`, kept in its last shown order (under `key`) while the lists settle.
+function heldRows(key, list) {
+  let rows = threaded(list);
+  if (settleTimer && shown.has(key)) rows = keepOrder(shown.get(key), rows);
+  shown.set(key, rows.map(([, t]) => t.id));
+  return rows;
+}
+
 // Status + prompt, then placement/time/tokens, then what a running task is doing, then the answer preview.
-function taskRows(ul, list) {
-  ul.replaceChildren(...threaded(list).map(([depth, t]) => el('li', depth ? { className: 'reply', style: `--depth: ${depth}` } : {},
+function taskRows(ul, rows) {
+  ul.replaceChildren(...rows.map(([depth, t]) => el('li', depth ? { className: 'reply', style: `--depth: ${depth}` } : {},
     el('a', { href: `#task/${t.id}` },
       el('div', { className: 'head clamp2' }, depth ? '↳ ' : '', attDot(t), chip(t.status), t.prompt),
       el('div', { className: 'sub dim' }, ...dots([...placement(t), clock(t), tokensOf(t), linksBrief(t)])),
       t.status === 'running' && t.activity ? el('div', { className: 'activity' }, t.activity) : '',
       t.summary ? el('pre', { className: 'answer clamp3' }, t.summary) : ''))));
-  if (!list.length) ul.append(el('li', { className: 'dim' }, 'no tasks yet'));
+  if (!rows.length) ul.append(el('li', { className: 'dim' }, 'no tasks yet'));
 }
 
-function renderList() { taskRows($('tasks'), tasks); }
+function renderList() { if (!frozen()) taskRows($('tasks'), heldRows('list', tasks)); }
 
 const KIND = { pr: 'PR', commit: 'commit', ci_run: 'CI', issue: 'issue', url: 'link', test: 'test', note: 'note' };
 const GITHUB = ['pr', 'commit', 'ci_run', 'issue'];
@@ -714,12 +760,13 @@ function meter(label, v) {
 }
 
 function renderMachine(id) {
+  if (frozen()) return;
   const w = workers.find((x) => x.id === id);
   if (!w) { $('wbody').replaceChildren(el('p', { className: 'dim' }, `unknown worker ${id}`)); return; }
   const st = workerState(w), s = w.stats || {};
   const [disk, free, cpu, mem] = [s.disk_used_pct, s.disk_free_gb, s.cpu_pct, s.mem_pct].map(num);
   const mine = el('ul');
-  taskRows(mine, tasks.filter((t) => t.worker === id));
+  taskRows(mine, heldRows(id, tasks.filter((t) => t.worker === id)));
   $('wbody').className = st === 'offline' ? 'off' : '';
   $('wbody').replaceChildren(
     el('h2', {}, `${w.info.hostname} `, chip(st)),
@@ -901,7 +948,8 @@ $('clear').onclick = (e) => {
   render();
 };
 // Leaving a view stops dictation into it and any readback.
-window.onhashchange = () => { micOff(); hush(); render(); };
+// A press's click has landed once the view changes: nothing left to hold for.
+window.onhashchange = () => { micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; render(); };
 setInterval(tick, 1000);
 
 fetch('/api/info').then((r) => r.json()).then((info) => { authNeeded = info.auth; $('ver').textContent = info.version || ''; connect(); })
