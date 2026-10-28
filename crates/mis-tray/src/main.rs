@@ -30,6 +30,9 @@ struct Args {
     cf_access_client_id: Option<String>,
     #[arg(long, env = "CF_ACCESS_CLIENT_SECRET", hide_env_values = true)]
     cf_access_client_secret: Option<String>,
+    /// Print the menu once as text and exit, instead of showing the tray icon.
+    #[arg(long)]
+    print: bool,
 }
 
 enum UserEvent {
@@ -42,7 +45,8 @@ const THROTTLE: Duration = Duration::from_secs(1);
 const REFRESH_TICKS: u32 = 15;
 const RETRY: Duration = Duration::from_secs(3);
 
-async fn session(args: &Args, url: &str, proxy: &EventLoopProxy<UserEvent>) -> Result<()> {
+/// One connection: subscribe, call `on_status` with every status, until it drops.
+async fn session(args: &Args, url: &str, on_status: impl Fn(Fleet)) -> Result<()> {
     let mut req = format!("{url}/ws/client").into_client_request()?;
     if let Some(t) = &args.token {
         req.headers_mut()
@@ -69,8 +73,7 @@ async fn session(args: &Args, url: &str, proxy: &EventLoopProxy<UserEvent>) -> R
                 Some(Ok(Message::Text(t))) => match serde_json::from_str(&t)? {
                     ServerMsg::Status { workers, tasks, now_ms } => {
                         let now_ms = now_ms.unwrap_or_else(unix_ms);
-                        let fleet = Fleet { workers, tasks, now_ms };
-                        let _ = proxy.send_event(UserEvent::Status(Some(fleet)));
+                        on_status(Fleet { workers, tasks, now_ms });
                     }
                     ServerMsg::Event { .. } => dirty = true,
                     ServerMsg::Error { message } => eprintln!("mis-tray: {message}"),
@@ -94,18 +97,24 @@ async fn session(args: &Args, url: &str, proxy: &EventLoopProxy<UserEvent>) -> R
 
 /// Reconnects forever; the menu shows "Disconnected" while down.
 fn network(args: Args, url: String, proxy: EventLoopProxy<UserEvent>) {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    rt.block_on(async {
+    runtime().block_on(async {
         loop {
-            let err = session(&args, &url, &proxy).await.unwrap_err();
+            let on_status = |f| {
+                let _ = proxy.send_event(UserEvent::Status(Some(f)));
+            };
+            let err = session(&args, &url, on_status).await.unwrap_err();
             eprintln!("mis-tray: {err}; retrying in {}s", RETRY.as_secs());
             let _ = proxy.send_event(UserEvent::Status(None));
             tokio::time::sleep(RETRY).await;
         }
     });
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
 }
 
 fn unix_ms() -> u64 {
@@ -162,11 +171,22 @@ fn main() {
         .and_then(|h| std::fs::read_to_string(format!("{h}/.config/mis/orchestrator.env")).ok())
         .map(|t| model::parse_env(&t))
         .unwrap_or_default();
-    let url = args.url.clone().unwrap_or_else(|| model::local_url(&file));
+    let url =
+        (args.url.clone().filter(|u| !u.is_empty())).unwrap_or_else(|| model::local_url(&file));
     args.token = args.token.or_else(|| file.get("MIS_TOKEN").cloned());
     args.token = args.token.filter(|t| !t.is_empty());
     let page = http_url(&url);
     eprintln!("mis-tray {}: {page}", env!("CARGO_PKG_VERSION"));
+    if args.print {
+        let print = |f: Fleet| {
+            print!("{}", model::text(&menu_model(Some(&f), &page)));
+            std::process::exit(0)
+        };
+        if let Err(e) = runtime().block_on(session(&args, &url, print)) {
+            eprintln!("mis-tray: {e}");
+            std::process::exit(1)
+        }
+    }
 
     let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     #[cfg(target_os = "macos")]

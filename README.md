@@ -60,6 +60,7 @@ export MIS_TOKEN=secret                    # optional; omit on both sides to dis
 
 ```sh
 cargo run -p mis-tray            # same --url/--token (MIS_URL/MIS_TOKEN) as `mis`
+cargo run -p mis-tray -- --print # print the menu once as text and exit
 ```
 
 Shows the fleet and the 8 newest tasks; click one to open it in the browser. Without

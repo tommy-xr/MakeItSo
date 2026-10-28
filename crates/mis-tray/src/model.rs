@@ -70,6 +70,20 @@ pub fn menu_model(fleet: Option<&Fleet>, page: &str) -> MenuModel {
     MenuModel { title, items }
 }
 
+/// The menu as text, one item per line, for `--print`.
+pub fn text(m: &MenuModel) -> String {
+    let mut out = format!("title: {}\n", m.title);
+    for i in &m.items {
+        match i {
+            Item::Label(l) => out += &format!("{l}\n"),
+            Item::Separator => out += "---\n",
+            Item::Open { label, url } => out += &format!("{label}  <{url}>\n"),
+            Item::Quit => out += "Quit\n",
+        }
+    }
+    out
+}
+
 fn count(tasks: &[TaskSummary], f: impl Fn(TaskStatus) -> bool) -> usize {
     tasks.iter().filter(|t| f(t.status)).count()
 }
@@ -284,6 +298,14 @@ mod tests {
                 label: l[2].clone(),
                 url: format!("http://h:1/#task/{}", uuid_from(9))
             }
+        );
+    }
+
+    #[test]
+    fn text_lists_items_and_urls() {
+        assert_eq!(
+            text(&menu_model(None, "http://h")),
+            "title: \nDisconnected · retrying\n---\nOpen Make It So  <http://h/>\nQuit\n"
         );
     }
 
