@@ -1672,3 +1672,56 @@ async fn reply_to_a_planner_answer_is_planned_with_context() {
         .prompt
         .ends_with("Earlier request:\nwhat is 2+2?\n\nEarlier answer:\n4"));
 }
+
+#[tokio::test]
+async fn failed_and_unread_tasks_need_attention_until_seen() {
+    let base = start().await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    let wid = uuid::Uuid::new_v4();
+    let mut worker = join(&base, wid, "claude", vec![]).await;
+    // One at a time on the one worker: the first fails, the second succeeds.
+    let mut ids = vec![];
+    for ok in [false, true] {
+        let submit = ClientMsg::Submit {
+            prompt: format!("ok={ok}"),
+            cwd: None,
+            harness: Some("claude".into()),
+            model: None,
+            reply_to: None,
+        };
+        send(&mut client, &submit).await;
+        let ServerMsg::Submitted { task } = recv(&mut client).await else {
+            panic!()
+        };
+        let OrchMsg::Assign { task: assigned } = recv(&mut worker).await else {
+            panic!()
+        };
+        assert_eq!(assigned.id, task);
+        let event = AgentEvent::Finished { ok, summary: None };
+        send(&mut worker, &WorkerMsg::Event { task, event }).await;
+        ids.push(task);
+    }
+    let attention = |tasks: &[TaskSummary]| -> Vec<Attention> {
+        ids.iter()
+            .map(|id| tasks.iter().find(|t| t.id == *id).unwrap().attention)
+            .collect()
+    };
+    // Status until both finishes have landed.
+    let tasks = loop {
+        send(&mut client, &ClientMsg::Status).await;
+        let ServerMsg::Status { tasks, .. } = recv(&mut client).await else {
+            panic!()
+        };
+        if tasks.iter().all(|t| t.status != TaskStatus::Running) {
+            break tasks;
+        }
+    };
+    assert_eq!(attention(&tasks), [Attention::Failed, Attention::Unread]);
+
+    send(&mut client, &ClientMsg::Seen { task: ids[1] }).await;
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { tasks, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    assert_eq!(attention(&tasks), [Attention::Failed, Attention::None]);
+}

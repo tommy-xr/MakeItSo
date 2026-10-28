@@ -52,7 +52,7 @@
   /* One line while work runs; the activity is the part the ellipsis cuts. */
   #ticker.run { white-space: pre; overflow: hidden; color: var(--run); }
   #ticker .act { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  #ticker.warn { color: var(--warn); } #ticker.bad { color: var(--bad); } #ticker.note { color: var(--fg); }
+  #ticker.warn { color: var(--warn); } #ticker.bad { color: var(--bad); } #ticker.note, #ticker.need { color: var(--fg); }
   #ticker[href]::after { content: " ›"; white-space: pre; }
   /* Light cycle: a short bright segment rides the line while work runs; still when idle or offline. */
   .cycle { position: relative; height: 2px; margin: 0 calc(-1 * var(--pad)); background: var(--rule); overflow: hidden; }
@@ -104,6 +104,9 @@
   li > a { display: block; padding: 1rem 0; text-decoration: none; }
   .queued { --s: var(--dim); } .running { --s: var(--run); } .done { --s: var(--ok); } .failed { --s: var(--bad); }
   .busy { --s: var(--run); } .idle { --s: var(--ok); } .offline { --s: var(--dim); }
+  /* Needs you: a lit dot before the status, red failed, orange usage limit, cyan unread. A glyph, so it stays inline (see .chip). */
+  .att { margin-right: .375em; font-size: .75em; color: var(--a); text-shadow: 0 0 6px var(--a); }
+  .att.failed { --a: var(--bad); } .att.limited { --a: var(--warn); } .att.unread { --a: var(--accent); }
   /* Status outlined in its colour. */
   /* Inline, not inline-block: WebKit adds a stray ellipsis to line-clamped text holding an inline-block. */
   .chip { margin-right: .5em; padding: .0625em .375em; border: 1px solid; color: var(--s); font: 600 .75em var(--display); text-transform: uppercase; letter-spacing: .1em; }
@@ -258,6 +261,7 @@ function eventLine(e) {
     case 'tool_use': return `> ${e.name} ${JSON.stringify(e.input)}`;
     case 'tool_result': return `< ${(e.content || '').split(/\r?\n/)[0]}`;
     case 'status': return `status: ${e.text}`;
+    case 'limited': return `usage limit hit${e.resets_at ? `; resets ${new Date(e.resets_at * 1000).toLocaleString()}` : ''}`;
     case 'evidence': return `evidence: ${[`${e.label}${verdict(e.ok)}`, e.detail, e.url].filter(Boolean).join(' ')}`;
     case 'finished': return `${e.ok ? 'done' : 'FAILED'} ${e.summary || ''}`;
     default: return `[${e.type}] ${JSON.stringify(e)}`;
@@ -488,7 +492,7 @@ function tick() {
 const dots = (parts, sep = ' · ') => parts.filter(Boolean).flatMap((p, i) => (i ? [sep, p] : [p]));
 
 // Whether work is happening, in one line: `● 2 running · <newest's activity> · +1 queued`,
-// or `queued · no workers`; no parts when idle. `open` is the task a tap opens.
+// or `queued · no workers`; when idle, `2 need you` or no parts. `open` is the task a tap opens.
 function ticker() {
   const count = (s) => tasks.filter((t) => t.status === s).length;
   const running = tasks.filter((t) => t.status === 'running'), queued = count('queued'), planning = count('planning');
@@ -501,6 +505,9 @@ function ticker() {
   }
   if (queued && !workers.some((w) => w.online)) return { parts: ['queued · no workers'], cls: 'bad' };
   if (queued || planning) return { parts: dots([planning && `${planning} planning`, queued && `${queued} queued`]), cls: 'run' };
+  // A tap opens the most urgent, newest first; opening it settles it, so the next tap opens the next.
+  const need = tasks.filter((t) => ATTENTION[t.attention]).reverse().sort((a, b) => rank(a) - rank(b));
+  if (need.length) return { parts: [`${need.length} need${need.length === 1 ? 's' : ''} you`], cls: 'need', open: need[0].id };
   return { parts: [], cls: '' };
 }
 
@@ -510,7 +517,7 @@ function renderStrip() {
   const live = ws && ws.readyState === WebSocket.OPEN, trying = ws || retryTimer, work = ticker();
   const [cls, label] = rec && rec.live && !rec.stopping ? ['listen', 'listening']
     : !live ? (offline || !trying ? ['down', 'offline'] : ['hollow', everOpen ? 'reconnecting' : 'connecting'])
-    : work.cls === 'bad' ? ['down', 'no workers'] : work.parts.length ? ['work', 'working'] : ['rest', 'idle'];
+    : work.cls === 'bad' ? ['down', 'no workers'] : work.cls === 'run' ? ['work', 'working'] : ['rest', 'idle'];
   $('dot').className = `dot ${cls}`;
   $('dot').setAttribute('aria-label', label);
   $('dot').title = label;
@@ -559,30 +566,96 @@ function render() {
 // `claude · sonnet · host`, leaving out what isn't known yet.
 const placement = (t) => [t.harness, t.model, t.worker && hostOf(t.worker)].filter(Boolean);
 
-// Newest threads first, each followed by its replies (oldest first), nested: [depth, task].
-// A reply whose parent isn't in `list` starts its own thread.
+// Why a task needs the user, most urgent first: [rank, label].
+const ATTENTION = { failed: [0, 'needs you'], limited: [1, 'needs you: usage limit'], unread: [2, 'needs you: unread'] };
+// Needs you, then working, then the rest.
+const rank = (t) => ATTENTION[t.attention]?.[0] ?? (['planning', 'queued', 'running'].includes(t.status) ? 3 : 4);
+// Threads, each followed by its replies (oldest first), nested: [depth, task]. A thread ranks as its
+// most urgent task, then by its newest task. A reply whose parent isn't in `list` starts its own thread.
 function threaded(list) {
-  const ids = new Set(list.map((t) => t.id)), out = [];
+  const ids = new Set(list.map((t) => t.id)), at = new Map(list.map((t, i) => [t.id, i])), out = [];
+  const kids = (t) => list.filter((r) => r.parent === t.id);
+  const all = (t) => [t, ...kids(t).flatMap(all)];
   const add = (t, depth) => {
     out.push([depth, t]);
-    for (const r of list) if (r.parent === t.id) add(r, depth + 1);
+    for (const r of kids(t)) add(r, depth + 1);
   };
-  for (const t of [...list].reverse()) if (!t.parent || !ids.has(t.parent)) add(t, 0);
+  const threads = list.filter((t) => !t.parent || !ids.has(t.parent)).map((root) => {
+    const ts = all(root);
+    return { root, rank: Math.min(...ts.map(rank)), last: Math.max(...ts.map((t) => at.get(t.id))) };
+  });
+  threads.sort((a, b) => a.rank - b.rank || b.last - a.last);
+  for (const th of threads) add(th.root, 0);
   return out;
 }
 
+function attDot(t) {
+  const a = ATTENTION[t.attention];
+  if (!a) return '';
+  const d = el('span', { className: `att ${t.attention}`, title: a[1] }, '●');
+  d.setAttribute('role', 'img');
+  d.setAttribute('aria-label', a[1]);
+  return d;
+}
+
+// `rows` ([depth, task]) in the order of `ids`; rows not in it go last, unindented (they'd sit under the wrong thread).
+function keepOrder(ids, rows) {
+  const at = new Map(ids.map((id, i) => [id, i]));
+  return rows.filter(([, t]) => at.has(t.id)).sort((x, y) => at.get(x[1].id) - at.get(y[1].id))
+    .concat(rows.filter(([, t]) => !at.has(t.id)).map(([, t]) => [0, t]));
+}
+
+// Rows hold still under a tap: a finish re-sorts a task list, which could move another row under the finger.
+// From a press until CLICK_MS after its release (a touch's click comes later) the lists don't re-render.
+// For SETTLE_MS after the last press or scroll, rows keep their order (content updates in place). Then they re-sort.
+const SETTLE_MS = 1500, CLICK_MS = 500;
+const presses = new Set(), shown = new Map(); // pointers down on a list; each list's ids as last shown
+let clickTimer = 0, settleTimer = 0;
+const frozen = () => presses.size > 0 || clickTimer !== 0;
+const onList = () => ['list', 'machine'].includes(route().view);
+function relist() { if (!frozen() && onList()) render(); }
+function settle() {
+  if (!onList()) return; // a scroll elsewhere doesn't hold the list met on return
+  clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => { settleTimer = 0; relist(); }, SETTLE_MS);
+}
+window.addEventListener('pointerdown', (e) => {
+  if (e.button === 0 && ($('tasks').contains(e.target) || $('wbody').contains(e.target))) { presses.add(e.pointerId); settle(); }
+}, true);
+const lift = (e) => {
+  if (!presses.delete(e.pointerId)) return;
+  clearTimeout(clickTimer);
+  clickTimer = setTimeout(() => { clickTimer = 0; relist(); }, CLICK_MS);
+  settle();
+};
+window.addEventListener('pointerup', lift, true);
+window.addEventListener('pointercancel', lift, true);
+// Ends of a press the page may never see as a pointerup: a context menu, a drag, focus leaving.
+// Not capturing: a capturing window listener would also hear every element's blur.
+const liftAll = () => { if (presses.size) { presses.clear(); relist(); } };
+for (const type of ['contextmenu', 'dragstart', 'blur']) window.addEventListener(type, liftAll);
+document.addEventListener('visibilitychange', liftAll);
+window.addEventListener('scroll', settle);
+// `threaded(list)`, kept in its last shown order (under `key`) while the lists settle.
+function heldRows(key, list) {
+  let rows = threaded(list);
+  if (settleTimer && shown.has(key)) rows = keepOrder(shown.get(key), rows);
+  shown.set(key, rows.map(([, t]) => t.id));
+  return rows;
+}
+
 // Status + prompt, then placement/time/tokens, then what a running task is doing, then the answer preview.
-function taskRows(ul, list) {
-  ul.replaceChildren(...threaded(list).map(([depth, t]) => el('li', depth ? { className: 'reply', style: `--depth: ${depth}` } : {},
+function taskRows(ul, rows) {
+  ul.replaceChildren(...rows.map(([depth, t]) => el('li', depth ? { className: 'reply', style: `--depth: ${depth}` } : {},
     el('a', { href: `#task/${t.id}` },
-      el('div', { className: 'head clamp2' }, depth ? '↳ ' : '', chip(t.status), t.prompt),
+      el('div', { className: 'head clamp2' }, depth ? '↳ ' : '', attDot(t), chip(t.status), t.prompt),
       el('div', { className: 'sub dim' }, ...dots([...placement(t), clock(t), tokensOf(t), linksBrief(t)])),
       t.status === 'running' && t.activity ? el('div', { className: 'activity' }, t.activity) : '',
       t.summary ? el('pre', { className: 'answer clamp3' }, t.summary) : ''))));
-  if (!list.length) ul.append(el('li', { className: 'dim' }, 'no tasks yet'));
+  if (!rows.length) ul.append(el('li', { className: 'dim' }, 'no tasks yet'));
 }
 
-function renderList() { taskRows($('tasks'), tasks); }
+function renderList() { if (!frozen()) taskRows($('tasks'), heldRows('list', tasks)); }
 
 const KIND = { pr: 'PR', commit: 'commit', ci_run: 'CI', issue: 'issue', url: 'link', test: 'test', note: 'note' };
 const GITHUB = ['pr', 'commit', 'ci_run', 'issue'];
@@ -636,6 +709,8 @@ function renderDetail(id) {
     send({ type: 'show', task: id });
   }
   const t = tasks.find((x) => x.id === id) || detail.task;
+  // Looking at a finished task that needs the user settles it; repeats until the Status says so are harmless.
+  if (t && ATTENTION[t.attention] && ['done', 'failed'].includes(t.status) && !document.hidden) send({ type: 'seen', task: id });
   // The answer is what a question-style task is for; everything else is secondary.
   const answer = t && t.summary ? t.summary : (t && t.status === 'running' ? 'working…' : '');
   $('answer').textContent = answer;
@@ -685,12 +760,13 @@ function meter(label, v) {
 }
 
 function renderMachine(id) {
+  if (frozen()) return;
   const w = workers.find((x) => x.id === id);
   if (!w) { $('wbody').replaceChildren(el('p', { className: 'dim' }, `unknown worker ${id}`)); return; }
   const st = workerState(w), s = w.stats || {};
   const [disk, free, cpu, mem] = [s.disk_used_pct, s.disk_free_gb, s.cpu_pct, s.mem_pct].map(num);
   const mine = el('ul');
-  taskRows(mine, tasks.filter((t) => t.worker === id));
+  taskRows(mine, heldRows(id, tasks.filter((t) => t.worker === id)));
   $('wbody').className = st === 'offline' ? 'off' : '';
   $('wbody').replaceChildren(
     el('h2', {}, `${w.info.hostname} `, chip(st)),
@@ -872,7 +948,8 @@ $('clear').onclick = (e) => {
   render();
 };
 // Leaving a view stops dictation into it and any readback.
-window.onhashchange = () => { micOff(); hush(); render(); };
+// A press's click has landed once the view changes: nothing left to hold for.
+window.onhashchange = () => { micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; render(); };
 setInterval(tick, 1000);
 
 fetch('/api/info').then((r) => r.json()).then((info) => { authNeeded = info.auth; $('ver').textContent = info.version || ''; connect(); })

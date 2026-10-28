@@ -347,6 +347,7 @@ fn print_event(task: TaskId, event: &AgentEvent) {
         }
         AgentEvent::Status { text } => println!("[{short}] status: {text}"),
         AgentEvent::Evidence(l) => println!("[{short}] evidence: {}", l.line()),
+        AgentEvent::Limited { .. } => println!("[{short}] usage limit hit"),
         // Running totals; `mis status` shows the latest.
         AgentEvent::Usage { .. } => {}
         AgentEvent::Finished { ok, summary } => {
@@ -686,6 +687,7 @@ mod tests {
             activity: String::new(),
             parent: None,
             links: vec![],
+            attention: Attention::None,
         }
     }
 

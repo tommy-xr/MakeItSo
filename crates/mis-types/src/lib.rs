@@ -109,6 +109,11 @@ pub enum AgentEvent {
     },
     /// Proof of work the agent posted via the worker's `report_evidence` tool.
     Evidence(Link),
+    /// The agent hit a usage limit; `resets_at` is Unix seconds when it lifts, if known.
+    Limited {
+        #[serde(default)]
+        resets_at: Option<u64>,
+    },
     /// Tokens used so far this run: cumulative, so each replaces the last.
     /// `input` includes cached prompt tokens. Sent before `Finished`.
     Usage {
@@ -172,6 +177,10 @@ pub enum ClientMsg {
     Show {
         task: TaskId,
     },
+    /// The user opened this finished task: it no longer needs attention.
+    Seen {
+        task: TaskId,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -185,6 +194,20 @@ pub struct WorkerSummary {
     pub stats: Option<WorkerStats>,
     /// Unix seconds when `stats` arrived, so clients can judge staleness.
     pub stats_at: Option<u64>,
+}
+
+/// Why a task needs the user, until they open it (`ClientMsg::Seen`).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Attention {
+    #[default]
+    None,
+    /// Finished not-ok, or failed by the orchestrator.
+    Failed,
+    /// The agent hit a usage limit and didn't finish ok.
+    Limited,
+    /// Finished ok; the user hasn't opened it yet.
+    Unread,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -222,6 +245,8 @@ pub struct TaskSummary {
     /// eviction nor summarizing loses them.
     #[serde(default)]
     pub links: Vec<Link>,
+    #[serde(default)]
+    pub attention: Attention,
 }
 
 /// First non-blank line of `s`, cut to `max` chars with a trailing ellipsis.
@@ -427,6 +452,7 @@ mod tests {
         .unwrap();
         assert_eq!((old.started_at, old.tokens_in), (None, None));
         assert!(old.activity.is_empty() && old.links.is_empty());
+        assert_eq!(old.attention, Attention::None);
     }
 
     fn task(status: TaskStatus, started_at: u64, activity: &str) -> TaskSummary {
@@ -446,6 +472,7 @@ mod tests {
             activity: activity.into(),
             parent: None,
             links: vec![],
+            attention: Attention::None,
         }
     }
 
