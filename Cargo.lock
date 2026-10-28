@@ -627,6 +627,7 @@ dependencies = [
  "anyhow",
  "clap",
  "futures-util",
+ "mis-agent",
  "mis-types",
  "serde_json",
  "tokio",

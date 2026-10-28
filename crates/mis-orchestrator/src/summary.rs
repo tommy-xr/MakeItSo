@@ -24,8 +24,20 @@ pub fn wanted(events: &[AgentEvent], summary: Option<&str>) -> bool {
 /// Prompt asking for 1-2 sentences over the task prompt and its latest events.
 pub fn prompt(task_prompt: &str, events: &[AgentEvent]) -> String {
     let task_prompt = cut(task_prompt.trim(), MAX_PROMPT_CHARS);
-    // Newest first until the budget runs out, then back in order.
-    let mut budget = MAX_CHARS.saturating_sub(task_prompt.chars().count());
+    let budget = MAX_CHARS.saturating_sub(task_prompt.chars().count());
+    format!(
+        "Summarize a coding agent's finished task for someone glancing at a phone. Reply \
+         with 1-2 plain sentences and nothing else (no preamble, no markdown, don't start \
+         with \"The agent\"): what was done and the outcome, with any key names or numbers; \
+         then anything the user must act on, only if there is something.\n\n\
+         Task:\n{task_prompt}\n\nTranscript:\n{}",
+        transcript(events, budget)
+    )
+}
+
+/// The latest events as `mis show`-style lines within `budget` chars, oldest
+/// first, led by `(earlier events omitted)` when some didn't fit.
+pub fn transcript(events: &[AgentEvent], mut budget: usize) -> String {
     let mut lines: Vec<String> = vec![];
     let mut omitted = "";
     for line in events.iter().rev().filter_map(line) {
@@ -38,14 +50,7 @@ pub fn prompt(task_prompt: &str, events: &[AgentEvent]) -> String {
         lines.push(line);
     }
     lines.reverse();
-    format!(
-        "Summarize a coding agent's finished task for someone glancing at a phone. Reply \
-         with 1-2 plain sentences and nothing else (no preamble, no markdown, don't start \
-         with \"The agent\"): what was done and the outcome, with any key names or numbers; \
-         then anything the user must act on, only if there is something.\n\n\
-         Task:\n{task_prompt}\n\nTranscript:\n{omitted}{}",
-        lines.join("\n")
-    )
+    format!("{omitted}{}", lines.join("\n"))
 }
 
 /// One transcript line, like `mis show`; None for events with nothing to say.

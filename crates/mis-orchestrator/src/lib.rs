@@ -6,11 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::{Html, IntoResponse};
-use axum::routing::get;
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::StreamExt;
 use mis_types::*;
@@ -23,6 +24,7 @@ pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("MIS_GIT_
 pub mod ledger;
 pub mod plan;
 pub mod summary;
+pub mod tools;
 
 /// A stuck planner (auth prompt, network stall) fails the task instead of
 /// leaving it in Planning forever.
@@ -342,6 +344,7 @@ pub fn router(app: App) -> Router {
         .route("/api/info", get(info))
         .route("/ws/worker", get(ws_worker))
         .route("/ws/client", get(ws_client))
+        .route("/mcp", post(mcp))
         .with_state(app)
 }
 
@@ -374,6 +377,24 @@ async fn page() -> impl IntoResponse {
 /// Lets the page decide whether to ask for a token, and shows what is running.
 async fn info(State(app): State<App>) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "auth": app.token.is_some(), "version": VERSION }))
+}
+
+/// Read-only fleet tools over MCP (streamable HTTP, JSON replies only), behind
+/// the same token and origin checks as the WebSockets.
+async fn mcp(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Response {
+    if !app.authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Ok(req) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return (StatusCode::BAD_REQUEST, Json(mcp::parse_error())).into_response();
+    };
+    let reply = mcp::handle(&req, "mis", &tools::list(), |name, args| {
+        tools::call(&app.ledger(), name, args).map(|v| v.to_string())
+    });
+    match reply {
+        Some(r) => Json(r).into_response(),
+        None => StatusCode::ACCEPTED.into_response(),
+    }
 }
 
 async fn ws_worker(

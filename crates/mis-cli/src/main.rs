@@ -52,6 +52,15 @@ enum Cmd {
     },
     /// Stream all task events.
     Tail,
+    /// Ask a local model about the fleet; it reads the orchestrator's MCP tools.
+    /// `mis ask`, `mis ask "<question>"`, `mis ask <task-id> ["<question>"]`.
+    Ask {
+        #[arg(num_args = 0..=2, value_names = ["TASK_ID", "QUESTION"])]
+        words: Vec<String>,
+        /// Model `claude` answers with.
+        #[arg(long, env = "MIS_ASK_MODEL", default_value = "haiku")]
+        ask_model: String,
+    },
     /// Run an orchestrator and a worker on this machine for quick testing.
     Dev {
         /// Let agents run tools without permission prompts.
@@ -138,6 +147,124 @@ async fn terminate() {
 #[cfg(not(unix))]
 async fn terminate() {
     std::future::pending().await
+}
+
+const FLEET_QUESTION: &str = "Give a one-paragraph status of the fleet: what's running, \
+     what finished, anything needing attention.";
+
+const ASK_SYSTEM: &str = "You answer questions about a Make It So fleet: worker machines \
+     running coding-agent tasks. Look things up with the mis tools; never guess. Be terse: \
+     plain sentences, no headings, no tables. Name tasks by their first 8 id characters.";
+
+/// The question to send: `[task-id] [question]`, a lone hex word being an id.
+fn ask_question(words: &[String]) -> String {
+    let is_id = |w: &str| w.len() >= 4 && w.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+    match words {
+        [] => FLEET_QUESTION.into(),
+        [id] if is_id(id) => format!(
+            "About task {id}: what was it asked, what did it do, and how did it end? One paragraph."
+        ),
+        [q] => q.clone(),
+        [id, q, ..] => format!("About task {id}: {q}"),
+    }
+}
+
+/// `ws://h:1/` -> `http://h:1/mcp`, `wss://h` -> `https://h/mcp`.
+fn mcp_url(ws: &str) -> Result<String> {
+    let rest = ws
+        .strip_prefix("ws")
+        .with_context(|| format!("need a ws:// or wss:// url, got {ws}"))?;
+    Ok(format!("http{}/mcp", rest.trim_end_matches('/')))
+}
+
+/// `claude` argv and env for `mis ask`. Header values ride in env vars
+/// (`${MIS_ASK_H0}`, which claude expands) so secrets stay out of `ps`.
+fn ask_command(
+    url: &str,
+    model: &str,
+    question: &str,
+    headers: &[(&str, String)],
+) -> (Vec<String>, Vec<(String, String)>) {
+    let env: Vec<(String, String)> = headers
+        .iter()
+        .enumerate()
+        .map(|(i, (_, v))| (format!("MIS_ASK_H{i}"), v.clone()))
+        .collect();
+    let names: serde_json::Map<String, serde_json::Value> = headers
+        .iter()
+        .zip(&env)
+        .map(|((k, _), (var, _))| (k.to_string(), format!("${{{var}}}").into()))
+        .collect();
+    let server = mis_agent::MCP_SERVER;
+    let config =
+        serde_json::json!({"mcpServers": {server: {"type": "http", "url": url, "headers": names}}});
+    let argv = [
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        &format!("--model={model}"),
+        "--system-prompt",
+        ASK_SYSTEM,
+        // No user hooks, CLAUDE.md, other MCP servers or built-in tools: only ours.
+        "--setting-sources",
+        "",
+        "--tools",
+        "",
+        "--mcp-config",
+        &config.to_string(),
+        "--strict-mcp-config",
+        "--allowedTools",
+        &format!("mcp__{server}__*"),
+        "--max-turns",
+        "6",
+        "--",
+        question,
+    ]
+    .map(String::from)
+    .to_vec();
+    (argv, env)
+}
+
+/// Run `claude` per `ask_command`, printing its text as it arrives.
+async fn ask(args: &Args, words: &[String], model: &str) -> Result<()> {
+    use tokio::io::AsyncBufReadExt;
+    let mut headers: Vec<(&str, String)> = access_headers(
+        args.cf_access_client_id.as_deref(),
+        args.cf_access_client_secret.as_deref(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    if let Some(t) = &args.token {
+        headers.push(("authorization", format!("Bearer {t}")));
+    }
+    // Same auth as /mcp: a bad token fails here, not as a vague model answer.
+    connect(args).await?;
+    let (argv, env) = ask_command(&mcp_url(&args.url)?, model, &ask_question(words), &headers);
+    let mut child = tokio::process::Command::new("claude")
+        .args(argv)
+        .envs(env)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("spawning claude")?;
+    let mut lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+    while let Some(line) = lines.next_line().await? {
+        for e in mis_agent::claude::parse_line(&line) {
+            match e {
+                AgentEvent::Text { text } => println!("{}", text.trim()),
+                AgentEvent::Finished { ok: false, summary } => {
+                    bail!("claude failed: {}", summary.unwrap_or_default())
+                }
+                _ => {}
+            }
+        }
+    }
+    let status = child.wait().await?;
+    if !status.success() {
+        bail!("claude exited: {status}");
+    }
+    Ok(())
 }
 
 /// An agent submitting to the fleet that is running it deadlocks on a single
@@ -302,6 +429,9 @@ async fn main() -> Result<()> {
     if let Cmd::Dev { skip_permissions } = args.cmd {
         return dev(&args.url, args.token.as_deref(), skip_permissions).await;
     }
+    if let Cmd::Ask { words, ask_model } = &args.cmd {
+        return ask(&args, words, ask_model).await;
+    }
     check_nested(&args.cmd, std::env::var(TASK_ENV).ok().as_deref())?;
     let mut ws = connect(&args).await?;
     match &args.cmd {
@@ -446,7 +576,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Dev { .. } => unreachable!(),
+        Cmd::Dev { .. } | Cmd::Ask { .. } => unreachable!(),
     }
     Ok(())
 }
@@ -491,6 +621,46 @@ mod tests {
         assert!(check_nested(&task(false), None).is_ok());
         assert!(check_nested(&task(false), Some("")).is_ok());
         assert!(check_nested(&Cmd::Status, Some("abc")).is_ok());
+    }
+
+    #[test]
+    fn ask_question_reads_id_and_question() {
+        let w = |xs: &[&str]| ask_question(&xs.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(w(&[]), FLEET_QUESTION);
+        assert_eq!(w(&["why so slow?"]), "why so slow?");
+        assert!(w(&["81df88c0"]).starts_with("About task 81df88c0: what was it asked"));
+        assert_eq!(w(&["81df", "why?"]), "About task 81df: why?");
+    }
+
+    #[test]
+    fn ask_command_points_claude_at_mcp_only() {
+        assert_eq!(
+            mcp_url("ws://127.0.0.1:7474/").unwrap(),
+            "http://127.0.0.1:7474/mcp"
+        );
+        assert_eq!(mcp_url("wss://m.example").unwrap(), "https://m.example/mcp");
+        assert!(mcp_url("http://x").is_err());
+        let headers = [("authorization", "Bearer s3cret".to_string())];
+        let (argv, env) = ask_command("http://h/mcp", "haiku", "-q", &headers);
+        assert!(
+            !argv.iter().any(|a| a.contains("s3cret")),
+            "secret not in argv"
+        );
+        assert_eq!(
+            env,
+            [("MIS_ASK_H0".to_string(), "Bearer s3cret".to_string())]
+        );
+        let at = |flag: &str| &argv[argv.iter().position(|a| a == flag).unwrap() + 1];
+        let config: serde_json::Value = serde_json::from_str(at("--mcp-config")).unwrap();
+        let mis = &config["mcpServers"]["mis"];
+        assert_eq!(mis["url"], "http://h/mcp");
+        assert_eq!(mis["headers"]["authorization"], "${MIS_ASK_H0}");
+        assert_eq!(at("--allowedTools"), "mcp__mis__*");
+        assert_eq!(at("--tools"), "");
+        assert_eq!(at("--max-turns"), "6");
+        assert!(argv.contains(&"--model=haiku".to_string()));
+        // Question last, after `--`, so a leading '-' isn't a flag.
+        assert_eq!(argv[argv.len() - 2..], ["--", "-q"]);
     }
 
     #[test]

@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 mod access;
 pub use access::access_headers;
+pub mod mcp;
 
 pub type WorkerId = Uuid;
 pub type TaskId = Uuid;
