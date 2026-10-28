@@ -67,17 +67,27 @@ async fn start_app(app: App) -> String {
     format!("ws://{addr}")
 }
 
-/// `/ws/client` upgrade request carrying a browser `Origin` header.
-fn client_req_with_origin(
+/// `/ws/client` upgrade request with extra headers.
+fn client_req(
     base: &str,
-    origin: &str,
+    pairs: &[(&'static str, &str)],
 ) -> tokio_tungstenite::tungstenite::handshake::client::Request {
     let mut req = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
         format!("{base}/ws/client"),
     )
     .unwrap();
-    req.headers_mut().insert("origin", origin.parse().unwrap());
+    for (k, v) in pairs {
+        req.headers_mut().insert(*k, v.parse().unwrap());
+    }
     req
+}
+
+/// `/ws/client` upgrade request carrying a browser `Origin` header.
+fn client_req_with_origin(
+    base: &str,
+    origin: &str,
+) -> tokio_tungstenite::tungstenite::handshake::client::Request {
+    client_req(base, &[("origin", origin)])
 }
 
 fn allow_mis_example(app: App) -> App {
@@ -421,10 +431,15 @@ async fn same_origin_page_connects_with_subprotocol_token() {
 
 /// Minimal HTTP/1.1 GET; returns the raw response.
 async fn http_get(base: &str, path: &str) -> String {
+    http_get_with(base, path, "").await
+}
+
+/// [`http_get`] with extra raw header lines (`"name: value\r\n"`).
+async fn http_get_with(base: &str, path: &str, extra: &str) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let addr = base.trim_start_matches("ws://");
     let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n{extra}Connection: close\r\n\r\n");
     s.write_all(req.as_bytes()).await.unwrap();
     let mut out = String::new();
     s.read_to_string(&mut out).await.unwrap();
@@ -448,7 +463,91 @@ async fn serves_page_and_info_without_token() {
     assert!(page.contains(r#"id="autoread""#));
     assert!(page.contains(r#"id="speak""#));
     let info = http_get(&base, "/api/info").await;
-    assert!(info.contains(r#""auth":true"#), "{info}");
+    assert!(
+        info.contains(r#"{"access":false,"auth":true,"version":"#),
+        "{info}"
+    );
+}
+
+const ACCESS_AUD: &str = "aud-tag";
+
+/// Orchestrator behind (simulated) Cloudflare Access, with test keys injected.
+async fn start_behind_access() -> String {
+    let jwks = serde_json::from_str(include_str!("fixtures/access-test-jwks.json")).unwrap();
+    let gate = mis_orchestrator::access_gate::AccessGate::with_keys(
+        "team".into(),
+        ACCESS_AUD.into(),
+        jwks,
+    );
+    start_app(App::new(Some("s".into())).with_access(gate)).await
+}
+
+/// RS256 Access JWT signed by the fixture key, valid for an hour.
+fn access_jwt(aud: &str) -> String {
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut h = Header::new(Algorithm::RS256);
+    h.kid = Some("test-kid".into());
+    let claims = serde_json::json!({
+        "aud": [aud], "iss": "https://team.cloudflareaccess.com",
+        "exp": now + 3600, "iat": now, "email": "me@example.com",
+    });
+    let key = include_bytes!("fixtures/access-test-key.pem");
+    encode(&h, &claims, &EncodingKey::from_rsa_pem(key).unwrap()).unwrap()
+}
+
+/// `/ws/client` upgrade with extra headers; returns the HTTP status on failure.
+async fn client_status(base: &str, pairs: &[(&'static str, &str)]) -> u16 {
+    match connect_async(client_req(base, pairs)).await {
+        Ok((_, resp)) => resp.status().as_u16(),
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => resp.status().as_u16(),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+#[tokio::test]
+async fn access_jwt_admits_and_bad_or_missing_is_401() {
+    let base = start_behind_access().await;
+    let jwt = access_jwt(ACCESS_AUD);
+    let via_tunnel = ("cf-ray", "8f00-SJC");
+    // Valid JWT: no token needed.
+    let ok = [("cf-access-jwt-assertion", jwt.as_str()), via_tunnel];
+    assert_eq!(client_status(&base, &ok).await, 101);
+    // Bad JWT, even with the right token.
+    let wrong_aud = access_jwt("other");
+    let bad = [
+        ("cf-access-jwt-assertion", wrong_aud.as_str()),
+        ("authorization", "Bearer s"),
+    ];
+    assert_eq!(client_status(&base, &bad).await, 401);
+    // Through the tunnel without a JWT (Access not covering the path): no fallback.
+    let bare = [via_tunnel, ("authorization", "Bearer s")];
+    assert_eq!(client_status(&base, &bare).await, 401);
+    // Direct local connection: the bearer token still works, and is still needed.
+    assert_eq!(
+        client_status(&base, &[("authorization", "Bearer s")]).await,
+        101
+    );
+    assert_eq!(client_status(&base, &[]).await, 401);
+}
+
+#[tokio::test]
+async fn info_reports_access_so_page_skips_token() {
+    let base = start_behind_access().await;
+    let jwt = format!("cf-access-jwt-assertion: {}\r\n", access_jwt(ACCESS_AUD));
+    let info = http_get_with(&base, "/api/info", &jwt).await;
+    assert!(
+        info.contains(r#"{"access":true,"auth":false,"version":"#),
+        "{info}"
+    );
+    let info = http_get(&base, "/api/info").await;
+    assert!(
+        info.contains(r#"{"access":false,"auth":true,"version":"#),
+        "{info}"
+    );
 }
 
 #[tokio::test]

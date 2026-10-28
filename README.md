@@ -94,7 +94,30 @@ via `--allowed-origin https://mis.example.com` (repeatable, or comma-separated `
 Browsers send the token as WebSocket subprotocols `bearer, <token>`, so keep it to letters, digits
 and `-._` (e.g. `openssl rand -hex 24`).
 
-## From your phone
+## Behind Cloudflare Access
+
+With a Cloudflare Tunnel (`cloudflared`, ingress -> `http://localhost:7474`), put an Access app in front
+and have the orchestrator check the JWT Access adds to each request.
+
+In the Zero Trust dashboard:
+
+1. Access -> Service credentials -> Service Tokens: create one for workers and `mis`.
+2. Access -> Applications -> Add -> Self-hosted, for the tunnel's hostname, with two policies:
+   *Allow* with *Emails* = you (phone browser), and *Service Auth* with that service token.
+3. Copy the app's *Application Audience (AUD) Tag*; the team name is the `<team>` in
+   `<team>.cloudflareaccess.com` (Settings -> Team name and domain).
+
+```sh
+mis-orchestrator --cf-access-team <team> --cf-access-aud <aud-tag>   # or MIS_CF_ACCESS_TEAM / _AUD
+mis-worker setup --url wss://mis.example.com \
+  --cf-access-client-id <id>.access --cf-access-client-secret <secret>
+```
+
+Requests with a valid Access JWT need no `MIS_TOKEN`, so the page skips the token prompt. Requests
+without one are rejected unless they come straight from loopback with no Cloudflare headers;
+those still follow `MIS_TOKEN`. So any local process can still connect, as without Access; set
+`MIS_TOKEN` too to close that. The JWT is checked when a socket opens, not again while it stays open.
+
 
 The orchestrator serves a text-only page at `http://<host>:7474/`: tasks (list, submit, transcripts) and workers.
 Open it and paste the token (set `MIS_TOKEN`; without one, only `localhost` pages may connect). To reach
