@@ -25,6 +25,31 @@ struct Args {
     /// Model the planner itself runs on.
     #[arg(long, default_value = "sonnet", value_parser = clap::builder::NonEmptyStringValueParser::new())]
     planner_model: String,
+    /// Don't summarize finished tasks; they keep the agent's own last message.
+    #[arg(long)]
+    no_summary: bool,
+    /// Model that summarizes finished tasks.
+    #[arg(long, default_value = "haiku", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    summary_model: String,
+}
+
+/// Local `claude` for one tool-less turn on `model`: no user/project settings
+/// (hooks, CLAUDE.md), MCP servers, or tools. (`--bare` would also drop the login.)
+fn one_shot_claude(model: &str, extra: &[&str]) -> std::sync::Arc<mis_agent::claude::ClaudeAgent> {
+    let base = [
+        &format!("--model={model}"),
+        "--setting-sources",
+        "",
+        "--strict-mcp-config",
+        "--tools",
+        "",
+        "--max-turns",
+        "1",
+    ];
+    std::sync::Arc::new(mis_agent::claude::ClaudeAgent {
+        skip_permissions: false,
+        extra_args: base.iter().chain(extra).map(|s| s.to_string()).collect(),
+    })
 }
 
 /// Print ready-to-paste worker/CLI commands for every way to reach this orchestrator.
@@ -106,27 +131,16 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("planner off; tasks without --harness run on claude");
     } else if mis_agent::which("claude") {
         tracing::info!(model = %args.planner_model, "planner: local claude (tool-less)");
-        app = app.with_planner(std::sync::Arc::new(mis_agent::claude::ClaudeAgent {
-            skip_permissions: false,
-            // No user/project settings (hooks, CLAUDE.md), MCP servers, or tools; one
-            // turn. (`--bare` would also drop the login.)
-            extra_args: [
-                &format!("--model={}", args.planner_model),
-                "--setting-sources",
-                "",
-                "--strict-mcp-config",
-                "--tools",
-                "",
-                "--max-turns",
-                "1",
-                "--json-schema",
-                mis_orchestrator::plan::SCHEMA,
-            ]
-            .map(String::from)
-            .to_vec(),
-        }));
+        app = app.with_planner(one_shot_claude(
+            &args.planner_model,
+            &["--json-schema", mis_orchestrator::plan::SCHEMA],
+        ));
     } else {
         tracing::warn!("no `claude` on PATH: planner off; tasks without --harness run on claude");
+    }
+    if !args.no_summary && mis_agent::which("claude") {
+        tracing::info!(model = %args.summary_model, "summaries: local claude (tool-less)");
+        app = app.with_summarizer(one_shot_claude(&args.summary_model, &[]));
     }
     mis_orchestrator::serve(listener, app).await
 }

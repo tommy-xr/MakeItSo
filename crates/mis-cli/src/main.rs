@@ -417,11 +417,11 @@ async fn main() -> Result<()> {
                 },
             )
             .await?;
-            // Other tasks' events may interleave once subscribed; skip them until Submitted.
+            // Broadcasts may interleave once subscribed; skip them until Submitted.
             let task = loop {
                 match recv(&mut ws).await? {
                     ServerMsg::Submitted { task } => break task,
-                    ServerMsg::Event { .. } => continue,
+                    ServerMsg::Event { .. } | ServerMsg::Status { .. } => continue,
                     other => bail!("unexpected reply: {other:?}"),
                 }
             };

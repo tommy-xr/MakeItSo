@@ -8,7 +8,7 @@ use std::time::Duration;
 use mis_types::*;
 use uuid::Uuid;
 
-use crate::plan;
+use crate::{plan, summary};
 
 /// Opaque handle for one worker connection; the shell maps it to a socket.
 pub type ConnId = u64;
@@ -28,6 +28,11 @@ pub enum Effect {
     },
     /// Run the planner on `prompt`; feed its events to `planning_event(task, ..)`.
     Plan {
+        task: TaskId,
+        prompt: String,
+    },
+    /// Run the summarizer on `prompt`; feed its reply to `summarized(task, ..)`.
+    Summarize {
         task: TaskId,
         prompt: String,
     },
@@ -509,20 +514,44 @@ impl Ledger {
             return vec![];
         }
         t.record(&event, now);
+        let mut summarize = None;
         if let AgentEvent::Finished { ok, .. } = &event {
             t.status = if *ok {
                 TaskStatus::Done
             } else {
                 TaskStatus::Failed
             };
+            // Truncated: the transcript was too long to be a short answer.
+            let wanted = t.truncated || summary::wanted(&t.events, t.summary.as_deref());
+            if *ok && wanted {
+                summarize = Some(Effect::Summarize {
+                    task,
+                    prompt: summary::prompt(&t.task.prompt, &t.events),
+                });
+            }
         }
         let mut effects = vec![Effect::Broadcast(ServerMsg::Event {
             task,
             worker: Some(wid),
             event,
         })];
+        effects.extend(summarize);
         effects.extend(self.schedule());
         effects
+    }
+
+    /// Summarizer reply for a Done task: replaces the agent's own summary unless
+    /// blank, and broadcasts a fresh Status so open views pick it up.
+    pub fn summarized(&mut self, task: TaskId, reply: &str) -> Vec<Effect> {
+        let text = summary::parse(reply);
+        let Some(t) = self.tasks.iter_mut().find(|t| t.task.id == task) else {
+            return vec![];
+        };
+        if text.is_empty() || t.status != TaskStatus::Done {
+            return vec![];
+        }
+        t.summary = Some(text);
+        vec![Effect::Broadcast(self.status())]
     }
 
     /// Hand queued tasks to online, idle workers that support the task's harness.
@@ -1267,6 +1296,119 @@ mod tests {
             (s.tokens_in, s.activity.as_str(), s.finished_at),
             (Some(4_000), "done", Some(5_000))
         );
+    }
+
+    #[test]
+    fn finished_work_is_summarized_and_replaced() {
+        let (mut l, wid, task) = running_setup();
+        let summarize = |eff: &[Effect]| {
+            eff.iter().find_map(|e| match e {
+                Effect::Summarize { task, prompt } => Some((*task, prompt.clone())),
+                _ => None,
+            })
+        };
+        l.event(
+            wid,
+            1,
+            task,
+            AgentEvent::ToolUse {
+                name: "Bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+            },
+        );
+        let eff = l.event(
+            wid,
+            1,
+            task,
+            AgentEvent::Finished {
+                ok: true,
+                summary: Some("raw".into()),
+            },
+        );
+        let (t, prompt) = summarize(&eff).expect("summarize");
+        assert_eq!(t, task);
+        assert!(prompt.contains("> Bash"));
+        // Agent's own summary stands until the better one arrives; still Done.
+        assert_eq!(l.show(task).unwrap().0.summary.as_deref(), Some("raw"));
+        assert!(l.summarized(task, " \n").is_empty(), "blank keeps it");
+        let eff = l.summarized(task, "Listed files.\nAll fine.");
+        assert!(matches!(
+            &eff[..],
+            [Effect::Broadcast(ServerMsg::Status { .. })]
+        ));
+        let s = l.show(task).unwrap().0;
+        assert_eq!(
+            (s.summary.as_deref(), s.status),
+            (Some("Listed files. All fine."), TaskStatus::Done)
+        );
+        assert!(l.summarized(Uuid::new_v4(), "x").is_empty());
+    }
+
+    #[test]
+    fn evicted_tool_calls_still_count_as_work() {
+        let (mut l, wid, task) = running_setup();
+        let big = "x".repeat(MAX_TOOL_RESULT_BYTES - 100);
+        for _ in 0..(MAX_TRANSCRIPT_BYTES / big.len() + 2) {
+            l.event(wid, 1, task, text(&big));
+        }
+        let eff = l.event(
+            wid,
+            1,
+            task,
+            AgentEvent::Finished {
+                ok: true,
+                summary: Some("ok".into()),
+            },
+        );
+        assert!(l.show(task).unwrap().2, "truncated");
+        assert!(eff.iter().any(|e| matches!(e, Effect::Summarize { .. })));
+    }
+
+    #[test]
+    fn short_answers_and_failures_are_not_summarized() {
+        let summarizes = |eff: &[Effect]| eff.iter().any(|e| matches!(e, Effect::Summarize { .. }));
+        // One short text answer.
+        let (mut l, wid, task) = running_setup();
+        l.event(wid, 1, task, text("hi"));
+        let eff = l.event(
+            wid,
+            1,
+            task,
+            AgentEvent::Finished {
+                ok: true,
+                summary: Some("hi".into()),
+            },
+        );
+        assert!(!summarizes(&eff));
+        // Failed after tools: the failure reason stays.
+        let (mut l, wid, task) = running_setup();
+        l.event(
+            wid,
+            1,
+            task,
+            AgentEvent::ToolUse {
+                name: "Bash".into(),
+                input: serde_json::json!({}),
+            },
+        );
+        let fail = AgentEvent::Finished {
+            ok: false,
+            summary: Some("boom".into()),
+        };
+        assert!(!summarizes(&l.event(wid, 1, task, fail)));
+        assert!(l.summarized(task, "better").is_empty());
+        assert_eq!(l.show(task).unwrap().0.summary.as_deref(), Some("boom"));
+        // Planner answers never reach `event`, so never summarize.
+        let mut l = Ledger::default();
+        let (task, _) = l.submit("2+2".into(), None, None, None);
+        let eff = l.planning_event(
+            task,
+            AgentEvent::Finished {
+                ok: true,
+                summary: Some(r#"{"answer":"4"}"#.into()),
+            },
+        );
+        assert!(!summarizes(&eff));
     }
 
     #[test]
