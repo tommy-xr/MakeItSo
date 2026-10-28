@@ -466,9 +466,14 @@ async fn info(State(app): State<App>, headers: HeaderMap) -> Json<serde_json::Va
 }
 
 /// Read-only fleet tools over MCP (streamable HTTP, JSON replies only), behind
-/// the same token and origin checks as the WebSockets.
-async fn mcp(State(app): State<App>, headers: HeaderMap, body: Bytes) -> Response {
-    if !app.authorized(&headers) {
+/// the same token, origin and Cloudflare Access checks as the WebSockets.
+async fn mcp(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !app.admit(&headers, peer, "/mcp").await {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let Ok(req) = serde_json::from_slice::<serde_json::Value>(&body) else {

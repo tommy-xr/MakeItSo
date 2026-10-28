@@ -535,6 +535,19 @@ async fn access_jwt_admits_and_bad_or_missing_is_401() {
 }
 
 #[tokio::test]
+async fn mcp_goes_through_access() {
+    let base = start_behind_access().await;
+    let list = || rpc("tools/list", serde_json::json!({}));
+    let jwt = access_jwt(ACCESS_AUD);
+    let via_tunnel = ("cf-ray", "8f00-SJC");
+    let ok = [("cf-access-jwt-assertion", jwt.as_str()), via_tunnel];
+    assert!(mcp_post(&base, &ok, list()).await.0.contains("200"));
+    // Through the tunnel without a JWT, even with the token: refused.
+    let bare = [via_tunnel, ("authorization", "Bearer s")];
+    assert!(mcp_post(&base, &bare, list()).await.0.contains("401"));
+}
+
+#[tokio::test]
 async fn info_reports_access_so_page_skips_token() {
     let base = start_behind_access().await;
     let jwt = format!("cf-access-jwt-assertion: {}\r\n", access_jwt(ACCESS_AUD));
@@ -1362,18 +1375,19 @@ async fn reported_evidence_reaches_status_and_show() {
     assert_eq!(info.links, [test]);
 }
 
-/// POST a JSON-RPC body to `/mcp`; returns (status line, JSON body if any).
+/// POST a JSON-RPC body to `/mcp` with extra headers; returns (status line, JSON body if any).
 async fn mcp_post(
     base: &str,
-    token: Option<&str>,
+    headers: &[(&str, &str)],
     body: serde_json::Value,
 ) -> (String, Option<serde_json::Value>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let addr = base.trim_start_matches("ws://");
     let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let auth = token
-        .map(|t| format!("Authorization: Bearer {t}\r\n"))
-        .unwrap_or_default();
+    let auth: String = headers
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}\r\n"))
+        .collect();
     let body = body.to_string();
     let req = format!(
         "POST /mcp HTTP/1.1\r\nHost: {addr}\r\n{auth}Content-Type: application/json\r\n\
@@ -1435,7 +1449,7 @@ async fn mcp_lists_tools_and_shows_a_finished_task() {
         }
     ) {}
 
-    let (status, list) = mcp_post(&base, None, rpc("tools/list", serde_json::json!({}))).await;
+    let (status, list) = mcp_post(&base, &[], rpc("tools/list", serde_json::json!({}))).await;
     assert!(status.contains("200"), "{status}");
     let names: Vec<_> = list.unwrap()["result"]["tools"]
         .as_array()
@@ -1447,7 +1461,7 @@ async fn mcp_lists_tools_and_shows_a_finished_task() {
 
     let args =
         serde_json::json!({"name": "show_task", "arguments": {"id": &task.to_string()[..8]}});
-    let (_, reply) = mcp_post(&base, None, rpc("tools/call", args)).await;
+    let (_, reply) = mcp_post(&base, &[], rpc("tools/call", args)).await;
     let text = reply.unwrap()["result"]["content"][0]["text"]
         .as_str()
         .unwrap()
@@ -1462,9 +1476,12 @@ async fn mcp_lists_tools_and_shows_a_finished_task() {
 async fn mcp_needs_the_token() {
     let base = start_app(App::new(Some("s".into()))).await;
     let list = || rpc("tools/list", serde_json::json!({}));
-    assert!(mcp_post(&base, None, list()).await.0.contains("401"));
-    assert!(mcp_post(&base, Some("x"), list()).await.0.contains("401"));
-    let (status, reply) = mcp_post(&base, Some("s"), list()).await;
+    assert!(mcp_post(&base, &[], list()).await.0.contains("401"));
+    assert!(mcp_post(&base, &[("authorization", "Bearer x")], list())
+        .await
+        .0
+        .contains("401"));
+    let (status, reply) = mcp_post(&base, &[("authorization", "Bearer s")], list()).await;
     assert!(status.contains("200"), "{status}");
     assert!(reply.unwrap()["result"]["tools"].is_array());
     // GET (SSE stream) is not offered.
