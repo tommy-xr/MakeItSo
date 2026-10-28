@@ -44,6 +44,7 @@ cargo build
 ./target/debug/mis dev --skip-permissions  # orchestrator + worker on 127.0.0.1:7474
 ./target/debug/mis task "list files in /tmp" --follow
 ./target/debug/mis task "say hi" --harness codex --follow
+./target/debug/mis task "run the tests" --wait  # prints the summary; exit 0 done, 1 failed, 2 no result (--json: the task)
 ./target/debug/mis status
 ./target/debug/mis show 1a2b3c4d                # one task's details + transcript (id prefix from status)
 ```

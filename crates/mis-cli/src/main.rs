@@ -41,6 +41,13 @@ enum Cmd {
         /// Stream this task's events until it finishes.
         #[arg(long, short)]
         follow: bool,
+        /// Wait quietly for the task to finish, then print the agent's summary. Exit 0 if it succeeded,
+        /// 1 if it failed, 2 if there's no result (connection or usage error).
+        #[arg(long, conflicts_with = "follow")]
+        wait: bool,
+        /// With --wait: print the finished task as JSON instead.
+        #[arg(long, requires = "wait")]
+        json: bool,
         /// Allow submitting from inside a running task (set by MIS_TASK).
         #[arg(long)]
         nested: bool,
@@ -53,6 +60,13 @@ enum Cmd {
         /// Return once submitted instead of streaming the reply's events.
         #[arg(long)]
         no_follow: bool,
+        /// Wait quietly for the task to finish, then print the agent's summary. Exit 0 if it succeeded,
+        /// 1 if it failed, 2 if there's no result (connection or usage error).
+        #[arg(long, conflicts_with = "no_follow")]
+        wait: bool,
+        /// With --wait: print the finished task as JSON instead.
+        #[arg(long, requires = "wait")]
+        json: bool,
     },
     /// Show one task's details and transcript.
     Show {
@@ -449,6 +463,66 @@ async fn follow_task(ws: &mut Ws, task: TaskId) -> Result<()> {
     }
 }
 
+/// Where a `--wait` stands after one message from the orchestrator.
+#[derive(Debug, PartialEq)]
+enum Wait {
+    Pending,
+    /// Ask for a Status: the task just finished, or its Finished may have been dropped.
+    Check,
+    Over(Box<TaskSummary>),
+}
+
+fn wait_step(task: TaskId, msg: ServerMsg) -> Wait {
+    match msg {
+        ServerMsg::Event {
+            task: t,
+            event: AgentEvent::Finished { .. },
+            ..
+        } if t == task => Wait::Check,
+        // e.g. "dropped N events" when this subscriber lagged.
+        ServerMsg::Error { .. } => Wait::Check,
+        ServerMsg::Status { tasks, .. } => tasks
+            .into_iter()
+            .find(|t| t.id == task && matches!(t.status, TaskStatus::Done | TaskStatus::Failed))
+            .map_or(Wait::Pending, |t| Wait::Over(Box::new(t))),
+        _ => Wait::Pending,
+    }
+}
+
+/// Follow `task` quietly until it finishes; the task as it was then (a summarizer
+/// may still replace its summary later).
+async fn wait_task(ws: &mut Ws, task: TaskId) -> Result<TaskSummary> {
+    loop {
+        match wait_step(task, recv(ws).await?) {
+            Wait::Pending => {}
+            Wait::Check => send(ws, &ClientMsg::Status).await?,
+            Wait::Over(t) => return Ok(*t),
+        }
+    }
+}
+
+/// `--wait`'s output: the summary (else the status), or the whole task as JSON.
+fn print_final(t: &TaskSummary, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string(t)?);
+    } else {
+        let status = format!("{:?}", t.status).to_lowercase();
+        println!("{}", t.summary.as_deref().unwrap_or(&status));
+    }
+    Ok(())
+}
+
+/// 0 ok; 1 a waited-for task failed, or an error; 2 an error under `--wait`, so
+/// scripts can tell "the task failed" from "no result".
+fn exit_code(waits: bool, result: &Result<Option<TaskSummary>>) -> u8 {
+    match result {
+        Ok(Some(t)) if t.status != TaskStatus::Done => 1,
+        Ok(_) => 0,
+        Err(_) if waits => 2,
+        Err(_) => 1,
+    }
+}
+
 /// Tasks in order with each one's replies right after it, nested: (depth, task).
 /// A reply whose parent isn't listed shows at the top level.
 fn threaded(tasks: &[TaskSummary]) -> Vec<(usize, &TaskSummary)> {
@@ -478,13 +552,28 @@ fn unix_ms() -> u64 {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
     let args = Args::parse();
+    let waits = matches!(
+        args.cmd,
+        Cmd::Task { wait: true, .. } | Cmd::Reply { wait: true, .. }
+    );
+    let result = run(args).await;
+    if let Err(e) = &result {
+        eprintln!("Error: {e:?}");
+    }
+    exit_code(waits, &result).into()
+}
+
+/// Runs the command; the finished task when it waited for one.
+async fn run(args: Args) -> Result<Option<TaskSummary>> {
     if let Cmd::Dev { skip_permissions } = args.cmd {
-        return dev(&args.url, args.token.as_deref(), skip_permissions).await;
+        dev(&args.url, args.token.as_deref(), skip_permissions).await?;
+        return Ok(None);
     }
     if let Cmd::Ask { words, ask_model } = &args.cmd {
-        return ask(&args, words, ask_model).await;
+        ask(&args, words, ask_model).await?;
+        return Ok(None);
     }
     check_nested(&args.cmd, std::env::var(TASK_ENV).ok().as_deref())?;
     let mut ws = connect(&args).await?;
@@ -590,9 +679,11 @@ async fn main() -> Result<()> {
             harness,
             model,
             follow,
+            wait,
+            json,
             nested: _,
         } => {
-            if *follow {
+            if *follow || *wait {
                 send(&mut ws, &ClientMsg::Subscribe).await?;
             }
             send(
@@ -607,6 +698,12 @@ async fn main() -> Result<()> {
             )
             .await?;
             let task = submitted(&mut ws).await?;
+            if *wait {
+                eprintln!("submitted {task}");
+                let t = wait_task(&mut ws, task).await?;
+                print_final(&t, *json)?;
+                return Ok(Some(t));
+            }
             println!("submitted {task}");
             if *follow {
                 follow_task(&mut ws, task).await?;
@@ -616,6 +713,8 @@ async fn main() -> Result<()> {
             id,
             text,
             no_follow,
+            wait,
+            json,
         } => {
             send(&mut ws, &ClientMsg::Status).await?;
             let ServerMsg::Status { tasks, .. } = recv(&mut ws).await? else {
@@ -637,7 +736,14 @@ async fn main() -> Result<()> {
             )
             .await?;
             let task = submitted(&mut ws).await?;
-            println!("submitted {task} (reply to {})", &parent.to_string()[..8]);
+            let line = format!("submitted {task} (reply to {})", &parent.to_string()[..8]);
+            if *wait {
+                eprintln!("{line}");
+                let t = wait_task(&mut ws, task).await?;
+                print_final(&t, *json)?;
+                return Ok(Some(t));
+            }
+            println!("{line}");
             if !no_follow {
                 follow_task(&mut ws, task).await?;
             }
@@ -654,7 +760,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Dev { .. } | Cmd::Ask { .. } => unreachable!(),
     }
-    Ok(())
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -668,6 +774,8 @@ mod tests {
             harness: None,
             model: None,
             follow: false,
+            wait: false,
+            json: false,
             nested,
         }
     }
@@ -705,8 +813,76 @@ mod tests {
             id: "a".into(),
             text: "t".into(),
             no_follow: false,
+            wait: false,
+            json: false,
         };
         assert!(check_nested(&reply, Some("abc")).is_err());
+    }
+
+    #[test]
+    fn wait_checks_on_finish_or_error_and_ends_on_a_final_status() {
+        let id: TaskId = "00000000-0000-0000-0000-00000000000a".parse().unwrap();
+        let other: TaskId = "00000000-0000-0000-0000-00000000000b".parse().unwrap();
+        let finished = |task| ServerMsg::Event {
+            task,
+            worker: None,
+            event: AgentEvent::Finished {
+                ok: true,
+                summary: None,
+            },
+        };
+        let status = |s| {
+            let mut t = summary(&id.to_string());
+            t.status = s;
+            ServerMsg::Status {
+                workers: vec![],
+                tasks: vec![summary(&other.to_string()), t],
+                now_ms: None,
+            }
+        };
+        assert_eq!(wait_step(id, finished(other)), Wait::Pending);
+        assert_eq!(wait_step(id, finished(id)), Wait::Check);
+        let lagged = ServerMsg::Error {
+            message: "dropped 3 events; re-run status".into(),
+        };
+        assert_eq!(wait_step(id, lagged), Wait::Check);
+        let text = ServerMsg::Event {
+            task: id,
+            worker: None,
+            event: AgentEvent::Text { text: "hi".into() },
+        };
+        assert_eq!(wait_step(id, text), Wait::Pending);
+        assert_eq!(wait_step(id, status(TaskStatus::Running)), Wait::Pending);
+        for s in [TaskStatus::Done, TaskStatus::Failed] {
+            let Wait::Over(t) = wait_step(id, status(s)) else {
+                panic!("{s:?}")
+            };
+            assert_eq!((t.id, t.status), (id, s));
+        }
+    }
+
+    #[test]
+    fn exit_codes_tell_failed_from_no_result() {
+        let done = Ok(Some(summary("00000000-0000-0000-0000-00000000000a")));
+        let mut t = summary("00000000-0000-0000-0000-00000000000a");
+        t.status = TaskStatus::Failed;
+        let failed = Ok(Some(t));
+        let err = || Err(anyhow::anyhow!("connecting"));
+        assert_eq!(exit_code(true, &done), 0);
+        assert_eq!(exit_code(true, &failed), 1);
+        assert_eq!(exit_code(true, &err()), 2);
+        assert_eq!(exit_code(false, &Ok(None)), 0);
+        assert_eq!(exit_code(false, &err()), 1);
+    }
+
+    #[test]
+    fn json_needs_wait_and_wait_excludes_follow() {
+        let parse = |xs: &[&str]| Args::try_parse_from([&["mis"], xs].concat());
+        assert!(parse(&["task", "p", "--wait", "--json"]).is_ok());
+        assert!(parse(&["reply", "ab", "t", "--wait"]).is_ok());
+        assert!(parse(&["task", "p", "--json"]).is_err());
+        assert!(parse(&["task", "p", "--wait", "--follow"]).is_err());
+        assert!(parse(&["reply", "ab", "t", "--wait", "--no-follow"]).is_err());
     }
 
     #[test]
