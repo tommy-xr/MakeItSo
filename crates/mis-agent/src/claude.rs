@@ -191,7 +191,11 @@ fn events(v: &Value, hidden: &mut HashSet<String>) -> Vec<AgentEvent> {
 
 /// `unifiedWindows.{five_hour,seven_day}` of a `rate_limit_info`, skipping any
 /// without a utilization (0-1). `observed_at` is 0: the worker stamps it.
+/// Overage counts when `overageStatus` is `allowed*`.
 fn windows(info: &Value) -> Vec<LimitWindow> {
+    let overage = info["overageStatus"]
+        .as_str()
+        .is_some_and(|s| s.starts_with("allowed"));
     [("five_hour", "5h"), ("seven_day", "7d")]
         .into_iter()
         .filter_map(|(key, name)| {
@@ -201,6 +205,7 @@ fn windows(info: &Value) -> Vec<LimitWindow> {
                 used_pct: (w["utilization"].as_f64()? * 100.0).clamp(0.0, 100.0) as f32,
                 resets_at: w["resetsAt"].as_u64().map(|s| s * 1000),
                 observed_at: 0,
+                overage,
             })
         })
         .collect()
@@ -402,6 +407,7 @@ mod tests {
             used_pct,
             resets_at,
             observed_at: 0,
+            overage: false, // `overageStatus: rejected`
         };
         assert_eq!(
             parse_line(RATE_LIMIT_LINE),
@@ -431,6 +437,15 @@ mod tests {
                 windows: vec![w("7d", 100.0, None)]
             }]
         );
+        // Overage allowed: a full window doesn't stop it.
+        let over = RATE_LIMIT_LINE.replace(
+            r#""overageStatus":"rejected""#,
+            r#""overageStatus":"allowed""#,
+        );
+        let AgentEvent::Limits { windows } = &parse_line(&over)[0] else {
+            panic!()
+        };
+        assert!(windows.iter().all(|w| w.overage));
     }
 
     #[test]

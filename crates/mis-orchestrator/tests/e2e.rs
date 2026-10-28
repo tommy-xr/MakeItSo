@@ -1168,6 +1168,64 @@ async fn limits_ride_worker_stats_into_status() {
     assert_eq!(limits["codex"][0].resets_at, None);
 }
 
+#[tokio::test]
+async fn out_of_usage_worker_waits_until_its_limit_lifts() {
+    let base = start().await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    let mut worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let claude_5h = |used_pct| WorkerStats {
+        limits: [(
+            "claude".to_string(),
+            vec![LimitWindow {
+                name: "5h".into(),
+                used_pct,
+                resets_at: Some(now + 3_600_000),
+                observed_at: now,
+                overage: false,
+            }],
+        )]
+        .into(),
+        ..Default::default()
+    };
+    send(&mut worker, &WorkerMsg::Stats(claude_5h(100.0))).await;
+    // Stats and Submit ride different sockets: wait until the reading has landed.
+    while only_worker(&mut client).await.stats.is_none() {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    send(
+        &mut client,
+        &ClientMsg::Submit {
+            prompt: "hi".into(),
+            cwd: None,
+            harness: Some("claude".into()),
+            model: None,
+            reply_to: None,
+        },
+    )
+    .await;
+    let ServerMsg::Submitted { task } = recv(&mut client).await else {
+        panic!()
+    };
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { tasks, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    assert_eq!(tasks[0].status, TaskStatus::Queued);
+    assert_eq!(tasks[0].blocked_until, Some(now + 3_600_000));
+    assert!(tasks[0].activity.starts_with("queued · claude resets "));
+
+    // A later beat reads under the limit: the task goes out.
+    send(&mut worker, &WorkerMsg::Stats(claude_5h(20.0))).await;
+    let OrchMsg::Assign { task: assigned } = recv(&mut worker).await else {
+        panic!()
+    };
+    assert_eq!(assigned.id, task);
+}
+
 /// Summarizer that counts its calls and replies with a fixed summary.
 struct FakeSummarizer(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 impl mis_agent::Agent for FakeSummarizer {
