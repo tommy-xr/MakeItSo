@@ -28,6 +28,7 @@
   #conn::after { content: ""; display: inline-block; width: .6em; height: 1.1em; margin-left: .2em; vertical-align: -.2em; background: var(--fg); animation: blink 1.1s steps(1) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
   @media (prefers-reduced-motion: reduce) { #conn::after { animation: none; } }
+  #headline { margin: 0 0 1rem; overflow-wrap: anywhere; }
   #tabs { display: flex; gap: 1.5rem; margin: 0 0 1.25rem; border-bottom: 1px solid var(--rule); }
   [role=tab] { display: inline-flex; align-items: center; justify-content: center; min-height: 2.75rem; min-width: 2.75rem; color: var(--dim); text-decoration: none; }
   [role=tab][aria-selected=true] { color: var(--fg); box-shadow: inset 0 -2px var(--answer); }
@@ -97,6 +98,7 @@
 <body>
 <h1>Make It So</h1>
 <div id="conn" class="dim">connecting…</div>
+<div id="headline" hidden></div>
 
 <nav id="tabs" role="tablist" aria-label="View" hidden>
   <a href="#" id="tab-tasks" role="tab" aria-selected="true">Tasks</a>
@@ -222,6 +224,21 @@ function tick() {
 // Known parts joined with ` · `.
 const dots = (parts) => parts.filter(Boolean).flatMap((p, i) => (i ? [' · ', p] : [p]));
 
+// Fleet in one line, as `mis status` prints it first; the running task's time ticks.
+function headline() {
+  const n = workers.length, count = (s) => tasks.filter((t) => t.status === s).length;
+  const parts = [n ? `${n} worker${n === 1 ? '' : 's'}` : 'no workers'];
+  const running = tasks.filter((t) => t.status === 'running');
+  const newest = running.reduce((a, t) => (!a || (t.started_at || 0) > (a.started_at || 0) ? t : a), null);
+  if (newest) {
+    const what = (newest.activity || '').replace(/^status: /, ''), since = clock(newest);
+    parts.push(el('span', {}, `${running.length} running (`, ...[what, since].filter(Boolean).flatMap((p, i) => (i ? [', ', p] : [p])), ')'));
+  }
+  if (!['planning', 'queued', 'running'].some(count)) parts.push('idle');
+  for (const s of ['done', 'failed', 'planning', 'queued']) if (count(s)) parts.push(`${count(s)} ${s}`);
+  return dots(parts);
+}
+
 // `#` tasks, `#task/<id>`, `#workers`, `#worker/<id>`.
 function route() {
   const m = location.hash.match(/^#(task|worker)\/([0-9a-f-]{36})$/);
@@ -235,6 +252,8 @@ function render() {
   const views = { list: renderList, detail: renderDetail, workers: renderWorkers, machine: renderMachine };
   $('auth').hidden = live || !authNeeded || !!store.get();
   $('tabs').hidden = !live;
+  $('headline').hidden = !live;
+  $('headline').replaceChildren(...headline());
   for (const v in views) $(v).hidden = !live || v !== r.view;
   if (r.view === 'detail') $('detail').querySelector('.back').href = from;
   else from = location.hash || '#';
