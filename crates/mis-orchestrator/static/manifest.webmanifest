@@ -1,0 +1,12 @@
+{
+  "name": "Make It So",
+  "short_name": "MIS",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#141320",
+  "theme_color": "#141320",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" },
+    { "src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}
