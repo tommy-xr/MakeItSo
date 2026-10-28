@@ -453,6 +453,7 @@ async fn serves_page_and_info_without_token() {
     assert!(page.starts_with("HTTP/1.1 200"), "{page}");
     assert!(page.contains("text/html"));
     assert!(page.contains("frame-ancestors 'none'"));
+    assert!(page.contains("cache-control: no-cache"), "{page}");
     assert!(page.contains("<title>Make It So</title>"));
     // Voice: mic buttons on both composers, readback controls.
     assert_eq!(

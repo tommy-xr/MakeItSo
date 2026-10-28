@@ -450,9 +450,13 @@ pub async fn serve(listener: TcpListener, app: App) -> anyhow::Result<()> {
 }
 
 /// The phone page. Not framable: it acts with the token stored for this origin.
+/// `no-cache` makes browsers revalidate, so a rebuilt orchestrator's page shows on reload.
 async fn page() -> impl IntoResponse {
     (
-        [(header::CONTENT_SECURITY_POLICY, "frame-ancestors 'none'")],
+        [
+            (header::CONTENT_SECURITY_POLICY, "frame-ancestors 'none'"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
         Html(include_str!("../static/index.html")),
     )
 }
