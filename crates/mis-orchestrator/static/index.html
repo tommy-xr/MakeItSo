@@ -305,8 +305,8 @@ function micShow(s) {
 // Sends the field when the composer can; offline, the text stays for later.
 function deliver(s) {
   if (!hasNewText(s.base, s.field.value)) return;
-  if (s.form.querySelector('button:not([type=button])').disabled) flash('offline · text kept');
-  else s.form.requestSubmit();
+  const submit = s.form.querySelector('button:not([type=button])');
+  if (submit.disabled) flash('offline · text kept'); else submit.click();
 }
 // Settles a session once: on onend, an error, the watchdogs, or micOff. A held release sends here.
 function micEnd(s) {
@@ -331,13 +331,19 @@ function micStart(btn, held) {
   // Some browsers (Chrome on iOS) expose the API, refuse it, and never fire onend: settle here too.
   r.onerror = (e) => {
     if (e.error === 'aborted' || rec !== s) return;
+    if (s.stopping) { micEnd(s); return; } // e.g. no-speech after a release: what was heard still counts
     s.dead = true;
     flash(e.error === 'not-allowed' ? 'mic not allowed: use Safari or keyboard dictation' : `mic error: ${e.error}`);
     micEnd(s);
   };
   r.onend = () => micEnd(s);
   // A recognizer that never starts (seen in the iOS home-screen app) would leave the button stuck: give up.
-  s.timer = setTimeout(() => { s.dead = true; r.abort(); micEnd(s); flash("mic didn't start: try again"); }, START_MS);
+  // Not while a permission prompt has the focus: onstart waits for the answer.
+  const giveUp = () => {
+    if (document.hidden || !document.hasFocus()) { s.timer = setTimeout(giveUp, START_MS); return; }
+    s.dead = true; r.abort(); micEnd(s); flash("mic didn't start: try again");
+  };
+  s.timer = setTimeout(giveUp, START_MS);
   micShow(s);
   try { r.start(); } catch (e) { s.dead = true; flash(`mic error: ${e.message}`); micEnd(s); }
   return s;
@@ -354,43 +360,57 @@ function micStop(s, send) {
   s.timer = setTimeout(() => { s.r.abort(); micEnd(s); }, STOP_MS); // onend never came
 }
 // Abort drops pending results, so nothing lands in a sent or abandoned field.
-function micOff() { const s = rec; if (s) { s.dead = true; s.r.abort(); micEnd(s); } }
+// A finger still down on a session that already ended must not send it either.
+function micOff() {
+  if (press && press.session) press.session.dead = true;
+  const s = rec;
+  if (s) { s.dead = true; s.r.abort(); micEnd(s); }
+}
 
 // One finger on a mic at a time. `stops`: it pressed a mic that was already on, so it only turns it off.
 // `rect` is the button where the finger landed: the ticker showing up can move the button under it.
-let press = null, pressedAt = 0;
+// `touched`: the touch behind the current press, whose trailing click is dropped.
+let press = null, pressedAt = -Infinity, touched = false;
 function pressEnd(end, e) {
   const p = press;
   if (!p || e.pointerId !== p.id) return;
   press = null;
   pressedAt = performance.now();
   if (p.btn.hasPointerCapture(e.pointerId)) p.btn.releasePointerCapture(e.pointerId);
-  if (p.stops) { if (rec) micStop(rec, false); return; }
+  if (p.stops) {
+    if (rec && end === 'cancel') rec.send = false; // sliding off also calls off a send still waiting for onend
+    if (rec) micStop(rec, false);
+    return;
+  }
   const s = p.session, out = pressOutcome(end, e.timeStamp - p.t0);
-  if (out === 'cancel') { micStop(s, false); flash('cancelled · text kept'); return; }
-  if (out === 'tap') { s.held = false; micShow(s); return; }
+  if (out === 'cancel') { micStop(s, false); if (!s.dead) flash('cancelled · text kept'); return; }
+  // A tap whose start was refused (e.g. needing a gesture a touch pointerdown isn't) retries inside this pointerup.
+  if (out === 'tap') { if (s.dead && !s.live) micStart(p.btn, false); else { s.held = false; micShow(s); } return; }
   // Held: send. If recognition already ended on its own, the words are in the field.
+  unlock(); // a pointerup is a gesture, so auto-read can speak the answer later
   s.send = true;
   if (rec === s) micStop(s, true); else if (!s.dead) deliver(s);
 }
 for (const btn of document.querySelectorAll('.mic')) {
   btn.hidden = !Recognition;
   btn.oncontextmenu = (e) => e.preventDefault();
-  // No click after a touch: the strip can change height mid-press, so it would land on whatever moved under the finger.
-  btn.addEventListener('touchend', (e) => e.preventDefault());
+  // No click after a touch press: the strip can change height mid-press, so it would land on whatever moved under the finger.
+  btn.addEventListener('touchend', (e) => { if (touched) { touched = false; e.preventDefault(); } });
   btn.onpointerdown = (e) => {
+    if (press && !press.btn.hasPointerCapture(press.id)) press = null; // its up/cancel never came
     if (press || !e.isPrimary || e.button !== 0) return;
+    touched = e.pointerType === 'touch';
     btn.setPointerCapture(e.pointerId);
     const stops = !!rec && rec.btn === btn;
     if (!stops) micOff();
     press = { id: e.pointerId, btn, rect: btn.getBoundingClientRect(), t0: e.timeStamp, stops, session: stops ? null : micStart(btn, true) };
   };
   btn.onpointermove = (e) => { if (press && press.btn === btn && slidOff(press.rect, e.clientX, e.clientY)) pressEnd('cancel', e); };
-  btn.onpointerup = (e) => pressEnd('up', e);
+  btn.onpointerup = (e) => { pressEnd('up', e); pressedAt = performance.now(); };
   btn.onpointercancel = btn.onlostpointercapture = (e) => pressEnd('cancel', e);
-  // Keyboard and assistive activation; a pointer press already acted, so skip the click that follows it.
-  btn.onclick = () => {
-    if (performance.now() - pressedAt < 1000) return;
+  // Keyboard and assistive activation (detail 0) always act; a pointer press already acted, so skip its click.
+  btn.onclick = (e) => {
+    if (e.detail !== 0 && performance.now() - pressedAt < 1000) return;
     if (rec && rec.btn === btn) micStop(rec, false); else { micOff(); micStart(btn, false); }
   };
 }
