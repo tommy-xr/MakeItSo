@@ -28,6 +28,8 @@
   /* Connection and work: dim = idle, bright with glow = working, hollow = reconnecting, warn = offline or no workers. */
   .dot { flex: none; box-sizing: border-box; width: .625rem; height: .625rem; border-radius: 50%; background: var(--answer); }
   .dot.rest { background: color-mix(in srgb, var(--answer) 45%, var(--screen)); }
+  /* Light: dim enough to read as idle, dark enough for 3:1 on the screen. */
+  @media (prefers-color-scheme: light) { .dot.rest { background: color-mix(in srgb, var(--answer) 70%, var(--screen)); } }
   .dot.work { box-shadow: 0 0 .375rem .0625rem var(--answer); }
   .dot.hollow { background: none; border: 2px solid var(--dim); }
   .dot.down { background: var(--run); }
