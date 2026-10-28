@@ -35,6 +35,51 @@ pub struct Link {
     /// A test's result, e.g. `78 passed`.
     #[serde(default)]
     pub detail: Option<String>,
+    /// A PR's live state, as the task's worker last read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<PrStatus>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrState {
+    Open,
+    Draft,
+    Merged,
+    Closed,
+}
+
+/// The PR's CI checks, rolled up.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Checks {
+    Pending,
+    Passing,
+    Failing,
+    /// The head commit has no checks.
+    None,
+}
+
+/// A PR's state and checks, read with `gh pr view` by the worker that ran the task.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrStatus {
+    pub state: PrState,
+    pub checks: Checks,
+    /// Names of failing checks, at most a few.
+    #[serde(default)]
+    pub failing: Vec<String>,
+    /// None while GitHub is still computing it.
+    #[serde(default)]
+    pub mergeable: Option<bool>,
+    /// `approved`, `changes_requested`, `review_required`; None without review rules.
+    #[serde(default)]
+    pub review: Option<String>,
+    /// Head commit sha.
+    #[serde(default)]
+    pub head: String,
+    /// Unix millis when the orchestrator received it.
+    #[serde(default)]
+    pub observed_at: u64,
 }
 
 impl Link {
@@ -113,6 +158,7 @@ fn parse(rest: &str) -> Option<Link> {
         label,
         ok: None,
         detail: None,
+        pr: None,
     })
 }
 
@@ -253,6 +299,7 @@ mod tests {
             label: "cargo test".into(),
             ok: Some(false),
             detail: Some("3 failed".into()),
+            pr: None,
         };
         assert_eq!(test.line(), "cargo test ✗ 3 failed");
         let pr = github_link("https://github.com/o/r/pull/4").unwrap();

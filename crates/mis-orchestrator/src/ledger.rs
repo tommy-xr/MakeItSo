@@ -91,6 +91,10 @@ pub const MAX_TOOL_RESULT_BYTES: usize = 16 * 1024;
 const TRUNCATED: &str = "…[truncated]";
 /// Evidence rows kept per task; the least recently mentioned non-PR rows go first.
 pub const MAX_LINKS: usize = 32;
+/// PR links per task whose state the worker checks; the most recent win.
+pub const MAX_PR_CHECKS: usize = 5;
+/// Label prefix of the note saying the worker can't read PR state.
+const PR_UNAVAILABLE: &str = "PR status unavailable: ";
 /// A fresh reply's context keeps at most this much of the parent's prompt and answer.
 const MAX_CONTEXT_CHARS: usize = 4_000;
 
@@ -196,6 +200,26 @@ impl TaskEntry {
         }
     }
 
+    /// Add `link` last, replacing the row it matches but keeping that row's PR status.
+    fn add_link(&mut self, mut link: Link) {
+        if let Some(i) = self.links.iter().position(|l| key(l) == key(&link)) {
+            let old = self.links.remove(i);
+            link.pr = link.pr.or(old.pr);
+        }
+        // Full: drop the oldest row that isn't a PR, the task's most telling link.
+        if self.links.len() == MAX_LINKS {
+            let i = self.links.iter().position(|l| l.kind != LinkKind::Pr);
+            self.links.remove(i.unwrap_or(0));
+        }
+        self.links.push(link);
+    }
+
+    /// The most recent PR links, for the worker to check.
+    fn pr_urls(&self) -> Vec<String> {
+        let prs = self.links.iter().rev().filter(|l| l.kind == LinkKind::Pr);
+        prs.take(MAX_PR_CHECKS).map(|l| l.url.clone()).collect()
+    }
+
     fn summary(&self) -> TaskSummary {
         TaskSummary {
             id: self.task.id,
@@ -238,13 +262,7 @@ impl TaskEntry {
             links.push(link.clone());
         }
         for link in links {
-            self.links.retain(|l| key(l) != key(&link));
-            // Full: drop the oldest row that isn't a PR, the task's most telling link.
-            if self.links.len() == MAX_LINKS {
-                let i = self.links.iter().position(|l| l.kind != LinkKind::Pr);
-                self.links.remove(i.unwrap_or(0));
-            }
-            self.links.push(link);
+            self.add_link(link);
         }
         match event {
             AgentEvent::Usage { input, output } => {
@@ -772,7 +790,13 @@ impl Ledger {
             u.limited.remove(&t.task.harness);
         }
         let mut summarize = None;
+        let mut check = None;
         if let AgentEvent::Finished { ok, .. } = &event {
+            let urls = t.pr_urls();
+            if !urls.is_empty() {
+                let msg = OrchMsg::CheckPrs { task, urls };
+                check = Some(Effect::Send { conn, msg });
+            }
             t.status = if *ok {
                 TaskStatus::Done
             } else {
@@ -793,8 +817,89 @@ impl Ledger {
             event,
         })];
         effects.extend(summarize);
+        effects.extend(check);
         effects.extend(self.schedule());
         effects
+    }
+
+    /// The task's worker read a PR link's state: stored on that link, stamped
+    /// with this clock (the page's "as of"), and broadcast. Clears any
+    /// unavailable note. Only the worker that ran the task, on its live
+    /// connection, may report.
+    pub fn pr_status(
+        &mut self,
+        wid: WorkerId,
+        conn: ConnId,
+        task: TaskId,
+        url: &str,
+        mut status: PrStatus,
+    ) -> Vec<Effect> {
+        status.observed_at = self.now_ms;
+        let Some(t) = self.owned_task(wid, conn, task) else {
+            return vec![];
+        };
+        let Some(link) = t
+            .links
+            .iter_mut()
+            .find(|l| l.kind == LinkKind::Pr && l.url == url)
+        else {
+            return vec![];
+        };
+        link.pr = Some(status);
+        t.links
+            .retain(|l| !(l.kind == LinkKind::Note && l.label.starts_with(PR_UNAVAILABLE)));
+        vec![Effect::Broadcast(self.status())]
+    }
+
+    /// The task's worker can't read PR state: say so as a note.
+    pub fn pr_unavailable(
+        &mut self,
+        wid: WorkerId,
+        conn: ConnId,
+        task: TaskId,
+        why: &str,
+    ) -> Vec<Effect> {
+        let Some(t) = self.owned_task(wid, conn, task) else {
+            return vec![];
+        };
+        t.add_link(Link {
+            kind: LinkKind::Note,
+            url: String::new(),
+            label: first_line(&format!("{PR_UNAVAILABLE}{why}"), 200),
+            ok: None,
+            detail: None,
+            pr: None,
+        });
+        vec![Effect::Broadcast(self.status())]
+    }
+
+    /// Ask the task's worker to re-read its PR links now. Err when it can't.
+    pub fn refresh_evidence(&self, task: TaskId) -> Result<Vec<Effect>, String> {
+        let t = self
+            .tasks
+            .iter()
+            .find(|t| t.task.id == task)
+            .ok_or_else(|| format!("unknown task {task}"))?;
+        let urls = t.pr_urls();
+        if urls.is_empty() {
+            return Ok(vec![]);
+        }
+        let conn = t
+            .worker
+            .and_then(|w| self.workers.get(&w))
+            .and_then(|w| w.conn)
+            .ok_or("the task's worker is offline")?;
+        let msg = OrchMsg::CheckPrs { task, urls };
+        Ok(vec![Effect::Send { conn, msg }])
+    }
+
+    /// `task`, if `wid` ran it and `conn` is that worker's live connection.
+    fn owned_task(&mut self, wid: WorkerId, conn: ConnId, task: TaskId) -> Option<&mut TaskEntry> {
+        if !self.workers.get(&wid).is_some_and(|w| w.conn == Some(conn)) {
+            return None;
+        }
+        let t = self.tasks.iter_mut().find(|t| t.task.id == task)?;
+        (t.worker == Some(wid)).then_some(t)
     }
 
     /// Summarizer reply for a Done task: replaces the agent's own summary unless
@@ -2188,6 +2293,7 @@ mod tests {
 
     fn reported(kind: LinkKind, url: &str, label: &str, ok: Option<bool>) -> AgentEvent {
         AgentEvent::Evidence(Link {
+            pr: None,
             kind,
             url: url.into(),
             label: label.into(),
@@ -2249,6 +2355,191 @@ mod tests {
         let links = l.show(task).unwrap().0.links;
         assert_eq!(links.len(), MAX_LINKS);
         assert_eq!((links[0].url.as_str(), links[1].label.as_str()), (pr, "2"));
+    }
+
+    fn pr(checks: Checks, observed_at: u64) -> PrStatus {
+        PrStatus {
+            state: PrState::Open,
+            checks,
+            failing: vec![],
+            mergeable: Some(true),
+            review: None,
+            head: "abc".into(),
+            observed_at,
+        }
+    }
+
+    fn checks_sent(effects: &[Effect]) -> Vec<(ConnId, Vec<String>)> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Send {
+                    conn,
+                    msg: OrchMsg::CheckPrs { urls, .. },
+                } => Some((*conn, urls.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn broadcasts(effects: &[Effect]) -> usize {
+        let status = |e: &&Effect| matches!(e, Effect::Broadcast(ServerMsg::Status { .. }));
+        effects.iter().filter(status).count()
+    }
+
+    fn pr_of(l: &Ledger, task: TaskId, url: &str) -> Option<PrStatus> {
+        let links = l.show(task).unwrap().0.links;
+        links.into_iter().find(|l| l.url == url).and_then(|l| l.pr)
+    }
+
+    #[test]
+    fn finishing_with_prs_asks_its_worker_to_check_the_latest_few() {
+        let (mut l, wid, task) = running_setup();
+        let urls: Vec<String> = (1..=7)
+            .map(|n| format!("https://github.com/o/r/pull/{n}"))
+            .collect();
+        l.event(wid, 1, task, text(&urls.join(" ")));
+        let eff = l.event(
+            wid,
+            1,
+            task,
+            AgentEvent::Finished {
+                ok: true,
+                summary: None,
+            },
+        );
+        let latest: Vec<String> = urls.iter().rev().take(MAX_PR_CHECKS).cloned().collect();
+        assert_eq!(checks_sent(&eff), [(1, latest)]);
+        // Without PR links there is nothing to check.
+        let (mut l, wid, task) = running_setup();
+        let done = AgentEvent::Finished {
+            ok: true,
+            summary: Some("https://github.com/o/r/issues/1".into()),
+        };
+        assert!(checks_sent(&l.event(wid, 1, task, done)).is_empty());
+    }
+
+    #[test]
+    fn pr_status_is_stamped_stored_on_its_link_and_broadcast() {
+        let (mut l, wid, task) = running_setup();
+        let url = "https://github.com/o/r/pull/42";
+        l.event(wid, 1, task, text(url));
+        l.event(
+            wid,
+            1,
+            task,
+            AgentEvent::Finished {
+                ok: true,
+                summary: None,
+            },
+        );
+        l.now_ms = 5_000;
+        assert_eq!(
+            broadcasts(&l.pr_status(wid, 1, task, url, pr(Checks::Pending, 1))),
+            1
+        );
+        assert_eq!(pr_of(&l, task, url), Some(pr(Checks::Pending, 5_000)));
+        // Unknown link, other worker, stale connection: ignored.
+        let other = "https://github.com/o/r/pull/9";
+        assert!(l
+            .pr_status(wid, 1, task, other, pr(Checks::Failing, 0))
+            .is_empty());
+        let w2 = Uuid::new_v4();
+        l.connect(w2, info(), &[], 2, T0);
+        assert!(l
+            .pr_status(w2, 2, task, url, pr(Checks::Failing, 0))
+            .is_empty());
+        assert!(l
+            .pr_status(wid, 3, task, url, pr(Checks::Failing, 0))
+            .is_empty());
+        assert_eq!(pr_of(&l, task, url).unwrap().checks, Checks::Pending);
+    }
+
+    #[test]
+    fn pr_status_survives_remention_eviction_and_summary() {
+        let (mut l, wid, task) = running_setup();
+        let url = "https://github.com/o/r/pull/42";
+        l.event(wid, 1, task, text(url));
+        l.pr_status(wid, 1, task, url, pr(Checks::Failing, 1));
+        // Mentioned and reported again: the row moves last, its status stays.
+        l.event(wid, 1, task, text(&format!("still {url}")));
+        l.event(wid, 1, task, reported(LinkKind::Pr, url, "o/r#42", None));
+        for _ in 0..40 {
+            l.event(wid, 1, task, text(&"x".repeat(10 * 1024)));
+        }
+        l.event(
+            wid,
+            1,
+            task,
+            AgentEvent::Finished {
+                ok: true,
+                summary: Some("long".into()),
+            },
+        );
+        l.summarized(task, "short");
+        let (s, _, truncated) = l.show(task).unwrap();
+        assert!(truncated);
+        assert_eq!(s.links.len(), 1);
+        assert_eq!(s.links[0].pr, Some(pr(Checks::Failing, 0)));
+        let ServerMsg::Status { tasks, .. } = l.status() else {
+            panic!()
+        };
+        assert_eq!(tasks[0].links, s.links);
+    }
+
+    #[test]
+    fn refresh_asks_the_owning_worker_if_online() {
+        let (mut l, wid, task) = running_setup();
+        let url = "https://github.com/o/r/pull/42";
+        l.event(wid, 1, task, text(url));
+        l.event(
+            wid,
+            1,
+            task,
+            AgentEvent::Finished {
+                ok: true,
+                summary: None,
+            },
+        );
+        let eff = l.refresh_evidence(task).unwrap();
+        assert_eq!(checks_sent(&eff), [(1, vec![url.to_string()])]);
+        assert!(l
+            .refresh_evidence(Uuid::new_v4())
+            .unwrap_err()
+            .contains("unknown"));
+        l.disconnect(wid, 1);
+        assert!(l.refresh_evidence(task).unwrap_err().contains("offline"));
+        // No PR links: nothing to do.
+        let (l, _, task) = finished_setup();
+        assert_eq!(l.refresh_evidence(task), Ok(vec![]));
+    }
+
+    #[test]
+    fn pr_unavailable_is_one_note_until_a_read_succeeds() {
+        let (mut l, wid, task) = running_setup();
+        let url = "https://github.com/o/r/pull/42";
+        l.event(wid, 1, task, text(url));
+        assert_eq!(
+            broadcasts(&l.pr_unavailable(wid, 1, task, "gh not found")),
+            1
+        );
+        l.pr_unavailable(wid, 1, task, "gh not found");
+        assert!(l.pr_unavailable(wid, 2, task, "other").is_empty());
+        let labels = |l: &Ledger| -> Vec<String> {
+            l.show(task)
+                .unwrap()
+                .0
+                .links
+                .into_iter()
+                .map(|l| l.label)
+                .collect()
+        };
+        assert_eq!(
+            labels(&l),
+            ["o/r#42", "PR status unavailable: gh not found"]
+        );
+        l.pr_status(wid, 1, task, url, pr(Checks::Passing, 0));
+        assert_eq!(labels(&l), ["o/r#42"]);
     }
 
     const NOW: u64 = 1_800_000_000_000;

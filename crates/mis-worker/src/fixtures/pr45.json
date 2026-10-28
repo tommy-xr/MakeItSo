@@ -1,0 +1,67 @@
+{
+ "headRefOid": "86a2184b36bee166d6cdc47d51964c726a19ae6d",
+ "isDraft": false,
+ "mergeable": "MERGEABLE",
+ "number": 45,
+ "reviewDecision": "",
+ "state": "OPEN",
+ "statusCheckRollup": [
+  {
+   "__typename": "CheckRun",
+   "conclusion": "SUCCESS",
+   "name": "check (ubuntu-latest)",
+   "startedAt": "2026-10-28T18:14:42Z",
+   "status": "COMPLETED",
+   "workflowName": "CI"
+  },
+  {
+   "__typename": "CheckRun",
+   "conclusion": "SUCCESS",
+   "name": "check (windows-latest)",
+   "startedAt": "2026-10-28T18:14:42Z",
+   "status": "COMPLETED",
+   "workflowName": "CI"
+  },
+  {
+   "__typename": "CheckRun",
+   "conclusion": "",
+   "name": "build (macos-latest, aarch64-apple-darwin)",
+   "startedAt": "2026-10-28T18:17:16Z",
+   "status": "QUEUED",
+   "workflowName": "CI"
+  },
+  {
+   "__typename": "CheckRun",
+   "conclusion": "SUCCESS",
+   "name": "build (macos-latest, x86_64-apple-darwin)",
+   "startedAt": "2026-10-28T20:35:09Z",
+   "status": "COMPLETED",
+   "workflowName": "CI"
+  },
+  {
+   "__typename": "CheckRun",
+   "conclusion": "SUCCESS",
+   "name": "build (ubuntu-latest, x86_64-unknown-linux-gnu)",
+   "startedAt": "2026-10-28T18:17:41Z",
+   "status": "COMPLETED",
+   "workflowName": "CI"
+  },
+  {
+   "__typename": "CheckRun",
+   "conclusion": "SUCCESS",
+   "name": "build (ubuntu-24.04-arm, aarch64-unknown-linux-gnu)",
+   "startedAt": "2026-10-28T18:18:00Z",
+   "status": "COMPLETED",
+   "workflowName": "CI"
+  },
+  {
+   "__typename": "CheckRun",
+   "conclusion": "SUCCESS",
+   "name": "build (windows-latest, x86_64-pc-windows-msvc, .exe)",
+   "startedAt": "2026-10-28T18:18:19Z",
+   "status": "COMPLETED",
+   "workflowName": "CI"
+  }
+ ],
+ "title": "fix: mcp route goes through the access check"
+}

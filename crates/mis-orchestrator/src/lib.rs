@@ -592,6 +592,12 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
                         let now = app.now();
                         app.transition(|l| ((), l.worker_stats(wid, conn, stats, now, unix_secs())));
                     }
+                    Some(WorkerMsg::PrStatus { task, url, status }) => {
+                        app.transition(|l| ((), l.pr_status(wid, conn, task, &url, status)));
+                    }
+                    Some(WorkerMsg::PrUnavailable { task, why }) => {
+                        app.transition(|l| ((), l.pr_unavailable(wid, conn, task, &why)));
+                    }
                     Some(WorkerMsg::Hello { .. }) => {}
                     None => break,
                 }
@@ -673,6 +679,15 @@ async fn client_conn(mut sock: WebSocket, app: App) {
                         None => ServerMsg::Error { message: format!("unknown task {task}") },
                     };
                     send_json(&mut sock, &reply).await;
+                }
+                Some(ClientMsg::RefreshEvidence { task }) => {
+                    let refused = app.transition(|l| match l.refresh_evidence(task) {
+                        Ok(effects) => (None, effects),
+                        Err(why) => (Some(why), vec![]),
+                    });
+                    if let Some(message) = refused {
+                        send_json(&mut sock, &ServerMsg::Error { message }).await;
+                    }
                 }
                 None => break,
             },

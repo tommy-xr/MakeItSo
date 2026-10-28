@@ -148,13 +148,23 @@
   /* Evidence: one row per item; kind, text, verdict (tests), chevron (links) in aligned columns. */
   #evidence { margin: 0 0 1rem; }
   #evidence h3 { margin: 0 0 .25rem; }
+  .evh { display: flex; align-items: center; justify-content: space-between; }
+  .evh h3 { margin: 0; }
+  #refresh-ev { width: 2.75rem; padding: 0; border: 0; color: var(--accent); font-size: 1.25rem; letter-spacing: 0; }
+  #refresh-ev:disabled { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   .evl li:last-child { border-bottom: 1px solid var(--rule); }
-  .evl li > * { display: grid; grid-template-columns: 4rem minmax(0, 1fr) 1rem 1rem; gap: .5rem; align-items: center; min-height: 2.75rem; padding: 0; }
+  .evl li > * { display: grid; grid-template-columns: 4rem minmax(0, 1fr) minmax(1rem, auto) 1rem; gap: 0 .5rem; align-items: center; min-height: 2.75rem; padding: 0; }
   .evl .k { font: 600 .6875rem/1 var(--display); letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
   .evl .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* A row that can't be opened shows all of its text. */
   .evl div .t { white-space: normal; overflow-wrap: anywhere; padding: .5rem 0; }
-  .evl .v.ok { color: var(--ok); }
+  .evl .v { white-space: nowrap; text-align: right; }
+  .sub .ok { color: var(--ok); } .sub .run { color: var(--run); }
+  .evl .v.ok { color: var(--ok); } .evl .v.run { color: var(--run); } .evl .v.merged { color: var(--accent); } .evl .v.dim { color: var(--dim); }
+  /* A PR's failing checks and age, under its text. */
+  .evl li > :has(.s) { padding: .5rem 0; }
+  .evl .s { grid-column: 2 / -1; font-size: .8125rem; color: var(--dim); overflow-wrap: anywhere; }
   .evl .go { color: var(--accent); text-align: right; }
   .meta { margin: .25rem 0; }
   dl { display: grid; grid-template-columns: auto 1fr; gap: .25rem 1rem; margin: 1rem 0; }
@@ -229,7 +239,7 @@
   <p><a href="#" class="back">← back</a></p>
   <pre id="answer" class="answer"></pre>
   <div class="row" hidden><button type="button" id="speak">speak</button></div>
-  <section id="evidence" hidden><h3>evidence</h3><ul class="evl"></ul></section>
+  <section id="evidence" hidden><div class="evh"><h3>evidence</h3><button type="button" id="refresh-ev" aria-label="Refresh PR status" hidden>↻</button></div><ul class="evl"></ul></section>
   <div id="meta" class="meta"></div>
   <div id="ask" class="meta dim"></div>
   <div id="thread" class="meta dim"></div>
@@ -261,7 +271,7 @@ const store = {
   get() { try { return localStorage.getItem('mis-token') || ''; } catch { return ''; } },
   set(v) { try { v ? localStorage.setItem('mis-token', v) : localStorage.removeItem('mis-token'); } catch {} },
 };
-let ws = null, authNeeded = false, tasks = [], workers = [], detail = null, retries = 0, retryTimer = 0, statusTimer = 0;
+let ws = null, authNeeded = false, tasks = [], workers = [], detail = null, retries = 0, retryTimer = 0, statusTimer = 0, refreshing = null;
 // Connection, shown calmly: once a socket has opened, views stay up through drops and only the dot
 // changes, until OFFLINE_MS without a socket marks the page offline.
 const OFFLINE_MS = 8000;
@@ -573,6 +583,7 @@ function tick() {
   for (const s of document.querySelectorAll('[data-start]')) s.textContent = fmtElapsed(Date.now() + skew - Number(s.dataset.start));
   renderStrip();
   if (++ticks % 30 === 0 && everOpen && route().view === 'workers') renderWorkers();
+  for (const s of document.querySelectorAll('[data-asof]')) s.textContent = asOf(Number(s.dataset.asof));
 }
 // Known parts joined with ` · ` (or `sep`).
 const dots = (parts, sep = ' · ') => parts.filter(Boolean).flatMap((p, i) => (i ? [sep, p] : [p]));
@@ -770,13 +781,38 @@ function parts(l) {
 }
 // `PR #42`, `commit abc1234`, `CI run 123`, `link example.com`.
 const brief = (l) => `${KIND[l.kind] || l.kind} ${l.kind === 'url' ? parts(l)[1] : parts(l)[0]}`;
-// List rows name the latest PR (else the latest link), and how many more items there are.
+// List rows name the latest PR (else the latest link), its checks, and how many more items there are.
 function linksBrief(t) {
   const links = t.links || [];
   if (!links.length) return '';
   const lead = links.findLast((l) => l.kind === 'pr') || links.findLast((l) => l.url);
   if (!lead) return `${links.length} reported`;
-  return links.length > 1 ? `${brief(lead)} +${links.length - 1}` : brief(lead);
+  const text = links.length > 1 ? `${brief(lead)} +${links.length - 1}` : brief(lead);
+  const p = lead.pr;
+  const mark = p && p.state === 'open' && CHECK_MARK[p.checks];
+  return mark ? el('span', {}, `${text} `, el('span', { className: mark[1] }, mark[0])) : text;
+}
+const CHECK_MARK = { passing: ['✓', 'ok'], pending: ['●', 'run'], failing: ['✗', 'bad'] };
+// A PR's verdict cell: `✓ checks`, `● checks`, `✗ 2 failing`, or its state when not open.
+function prVerdict(p) {
+  if (p.state !== 'open') return [p.state, p.state === 'merged' ? 'v merged' : 'v dim'];
+  if (p.checks === 'passing') return ['✓ checks', 'v ok'];
+  if (p.checks === 'pending') return ['● checks', 'v run'];
+  // The worker sends at most 5 names.
+  if (p.checks === 'failing') return [`✗ ${p.failing.length < 5 ? p.failing.length : '5+'} failing`, 'v bad'];
+  return ['', 'v'];
+}
+// `12s`, `4m`, `3h` since `ms` (orchestrator clock).
+function asOf(ms) {
+  const s = Math.max(0, Math.floor((Date.now() + skew - ms) / 1000));
+  return `as of ${s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h`}`;
+}
+// Failing checks, conflicts, review and age, for a PR row's sub-line.
+function prSub(p) {
+  const age = el('span', {}, asOf(p.observed_at));
+  age.dataset.asof = p.observed_at;
+  const review = p.review && p.review.replace(/_/g, ' ');
+  return el('span', { className: 's' }, ...dots([p.failing.join(', '), p.mergeable === false && 'conflicts', review, age]));
 }
 function renderEvidence(t) {
   const rows = ((t && t.links) || []).flatMap((l) => {
@@ -784,16 +820,31 @@ function renderEvidence(t) {
     // A link that can't be opened is dropped; tests and notes stand on their own.
     if (!url && !['test', 'note'].includes(l.kind)) return [];
     const [text, aside] = parts(l);
-    const v = verdict(l.ok).trim();
+    const [v, vc] = l.pr ? prVerdict(l.pr) : [verdict(l.ok).trim(), l.ok === true ? 'v ok' : l.ok === false ? 'v bad' : 'v'];
     const cells = [el('span', { className: 'k' }, KIND[l.kind] || l.kind),
       el('span', { className: 't' }, text, ' ', el('span', { className: 'dim' }, aside)),
-      el('span', { className: l.ok === true ? 'v ok' : l.ok === false ? 'v bad' : 'v' }, v),
-      el('span', { className: 'go' }, url ? '›' : '')];
+      el('span', { className: vc }, v),
+      el('span', { className: 'go' }, url ? '›' : ''),
+      l.pr ? prSub(l.pr) : ''];
     return [el('li', {}, url ? el('a', { href: url.href, target: '_blank', rel: 'noopener' }, ...cells) : el('div', {}, ...cells))];
   });
   $('evidence').querySelector('ul').replaceChildren(...rows);
   $('evidence').hidden = !rows.length;
+  $('refresh-ev').hidden = !((t && t.links) || []).some((l) => l.kind === 'pr');
+  if (refreshing && (!t || t.id !== refreshing.id || JSON.stringify(t.links) !== refreshing.links)) refreshDone();
+  $('refresh-ev').disabled = !!refreshing;
 }
+// Ask the task's worker to re-read its PRs. Spins until the task's evidence changes
+// (each read moves its "as of") or the request is refused, at most 10s.
+function refreshDone() { if (refreshing) { clearTimeout(refreshing.timer); refreshing = null; } }
+$('refresh-ev').onclick = () => {
+  if (!detail) return;
+  const t = tasks.find((x) => x.id === detail.id);
+  refreshDone();
+  refreshing = { id: detail.id, links: JSON.stringify(t && t.links), timer: setTimeout(() => { refreshing = null; render(); }, 10000) };
+  send({ type: 'refresh_evidence', task: detail.id });
+  render();
+};
 
 function renderDetail(id) {
   if (!detail || detail.id !== id) {
@@ -933,6 +984,12 @@ function onMessage(msg) {
       if (replying) {
         replying = false;
         Object.assign($('reply-error'), { textContent: msg.message, hidden: false });
+        break;
+      }
+      // A refused refresh (worker offline): say so, keep the view.
+      if (refreshing) {
+        refreshDone();
+        flash(`error: ${msg.message}`);
         break;
       }
       flash(`error: ${msg.message}`);
