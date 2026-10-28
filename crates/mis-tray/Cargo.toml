@@ -12,6 +12,9 @@ futures-util.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
+
+# The tray needs GTK on Linux; there only --print is built.
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
 tao = "0.37.2"
 tray-icon = "0.26.1"
 png = "0.18.1"

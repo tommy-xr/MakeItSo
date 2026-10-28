@@ -6,8 +6,6 @@ use mis_types::*;
 
 /// Tasks listed in the menu, newest first.
 pub const MAX_TASKS: usize = 8;
-/// Menu id of the Quit item; every other clickable item's id is its URL.
-pub const QUIT: &str = "quit";
 
 /// Latest `ServerMsg::Status`.
 #[derive(Debug, Clone, Default)]
@@ -84,6 +82,17 @@ pub fn text(m: &MenuModel) -> String {
     out
 }
 
+/// Same kinds of item in the same order, so `new` can relabel `old`'s menu in place.
+pub fn same_shape(old: &MenuModel, new: &MenuModel) -> bool {
+    let kinds = |m: &MenuModel| {
+        m.items
+            .iter()
+            .map(std::mem::discriminant)
+            .collect::<Vec<_>>()
+    };
+    kinds(old) == kinds(new)
+}
+
 fn count(tasks: &[TaskSummary], f: impl Fn(TaskStatus) -> bool) -> usize {
     tasks.iter().filter(|t| f(t.status)).count()
 }
@@ -127,14 +136,14 @@ fn task_label(t: &TaskSummary, now_ms: u64) -> String {
         TaskStatus::Failed => '✗',
     };
     let time = t.started_at.map_or(String::new(), |s| {
-        fmt_elapsed(t.finished_at.unwrap_or(now_ms).saturating_sub(s))
+        fmt_elapsed(t.finished_at.unwrap_or(now_ms).saturating_sub(s)) + " "
     });
     let activity = t.activity.strip_prefix("status: ").unwrap_or(&t.activity);
     let what = match t.status {
         TaskStatus::Running if !activity.is_empty() => activity,
         _ => &t.prompt,
     };
-    format!("{glyph} {time}  {}", first_line(what, 50))
+    format!("{glyph} {time} {}", first_line(what, 50))
 }
 
 /// `KEY=value` lines of a shell env file; skips comments, strips quotes and `export`.
@@ -155,13 +164,14 @@ pub fn parse_env(text: &str) -> HashMap<String, String> {
         .collect()
 }
 
-/// Loopback URL for the orchestrator `MIS_BIND` names, else the default port.
+/// URL of the orchestrator at `MIS_BIND`; a wildcard host means loopback.
 pub fn local_url(env: &HashMap<String, String>) -> String {
-    let port = env
-        .get("MIS_BIND")
-        .and_then(|b| b.rsplit_once(':'))
-        .map_or("7474", |(_, p)| p);
-    format!("ws://127.0.0.1:{port}")
+    let bind = env.get("MIS_BIND").map_or("127.0.0.1:7474", String::as_str);
+    match bind.rsplit_once(':') {
+        Some(("0.0.0.0", port)) => format!("ws://127.0.0.1:{port}"),
+        Some(("[::]", port)) => format!("ws://[::1]:{port}"),
+        _ => format!("ws://{bind}"),
+    }
 }
 
 #[cfg(test)]
@@ -288,7 +298,7 @@ mod tests {
         assert_eq!(l.len(), 1 + 1 + MAX_TASKS + 3);
         assert_eq!(l[2], "✓ 42s  prompt 9");
         assert_eq!(l[3], "✗ 3m12s  prompt 8");
-        assert_eq!(l[4], "○   prompt 7");
+        assert_eq!(l[4], "○  prompt 7");
         assert_eq!(l[5], "● 3m12s  counting tests");
         assert_eq!(l[6], "● 3m12s  prompt 5");
         assert_eq!(l[9], "✓ 3m12s  prompt 2"); // tasks 0 and 1 cut
@@ -299,6 +309,19 @@ mod tests {
                 url: format!("http://h:1/#task/{}", uuid_from(9))
             }
         );
+    }
+
+    #[test]
+    fn shape_ignores_labels() {
+        let a = menu_model(None, "p");
+        let mut b = menu_model(None, "p");
+        b.items[0] = Item::Label("other".into());
+        assert!(same_shape(&a, &b));
+        let one = Fleet {
+            tasks: vec![task(1, TaskStatus::Done, "")],
+            ..Default::default()
+        };
+        assert!(!same_shape(&a, &menu_model(Some(&one), "p")));
     }
 
     #[test]
@@ -316,5 +339,8 @@ mod tests {
         assert_eq!(env["X"], "1=2");
         assert_eq!(local_url(&env), "ws://127.0.0.1:7575");
         assert_eq!(local_url(&HashMap::new()), "ws://127.0.0.1:7474");
+        let bind = |b: &str| local_url(&parse_env(&format!("MIS_BIND={b}")));
+        assert_eq!(bind("[::]:7474"), "ws://[::1]:7474");
+        assert_eq!(bind("100.64.1.2:7474"), "ws://100.64.1.2:7474");
     }
 }
