@@ -590,7 +590,7 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
                     }
                     Some(WorkerMsg::Stats(stats)) => {
                         let now = app.now();
-                        app.ledger().worker_stats(wid, conn, stats, now, unix_secs());
+                        app.transition(|l| ((), l.worker_stats(wid, conn, stats, now, unix_secs())));
                     }
                     Some(WorkerMsg::Hello { .. }) => {}
                     None => break,

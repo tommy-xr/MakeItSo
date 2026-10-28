@@ -46,6 +46,12 @@
   .dot.down { background: var(--warn); }
   .dot.listen { background: var(--warn); box-shadow: 0 0 10px var(--warn); }
   #tabs { display: flex; margin-left: auto; border: 1px solid var(--rule); }
+  /* Limit gauges: the fullest fresh window per harness. They grow into the room left beside the tabs from zero,
+     so they never start a new line (a narrow screen clips them); a tap opens Workers. */
+  .gauges { flex: 1 1 0; min-width: 0; display: flex; justify-content: flex-end; align-items: center; gap: .375rem; min-height: 2.75rem; overflow: hidden; text-decoration: none; }
+  .gz { display: inline-flex; align-items: flex-end; gap: 3px; font: 600 .5625rem/1 var(--display); color: var(--dim); --b: var(--accent); }
+  .gz i { width: 5px; height: 12px; background: linear-gradient(to top, var(--b) var(--v, 0%), var(--rule) 0); }
+  .gz.warn { --b: var(--warn); } .gz.crit { --b: var(--bad); }
   [role=tab] { display: inline-flex; align-items: center; justify-content: center; min-height: 2.75rem; min-width: 2.75rem; padding: 0 .75rem; color: var(--dim); text-decoration: none; text-transform: uppercase; letter-spacing: .14em; font: 600 .8125rem var(--display); }
   [role=tab][aria-selected=true] { color: var(--bg); background: var(--accent); box-shadow: 0 0 10px var(--glow); }
   #ticker { display: flex; align-items: center; min-height: 2.75rem; color: var(--dim); text-decoration: none; overflow-wrap: anywhere; }
@@ -157,6 +163,13 @@
   .meter.warn { --b: var(--warn); } .meter.crit { --b: var(--bad); }
   .bar { display: block; height: .1875rem; margin-top: .25rem; background: linear-gradient(var(--b), var(--b)) 0 0 / var(--v, 0%) 100% no-repeat, var(--rule); }
   .off .meter, .off .meters span { color: var(--dim); --b: var(--dim); }
+  /* Usage limits: a row per window, accent fill, warn from 75%, bad from 90%; old readings dimmed. */
+  .lims { margin-top: .5rem; font-size: .875rem; }
+  .lim { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr) 2.75rem 6rem; gap: .5rem; align-items: center; --b: var(--accent); }
+  .lim .bar { margin: 0; height: .375rem; }
+  .lim .v { text-align: right; }
+  .lim.warn { --b: var(--warn); } .lim.crit { --b: var(--bad); }
+  .lim.stale, .off .lim { color: var(--dim); --b: var(--dim); }
   body > p.dim { margin-top: 1.5rem; }
   #clear { display: inline-block; padding: .625rem 0; }
   [hidden] { display: none !important; }
@@ -169,6 +182,7 @@
   <div class="top">
     <span id="dot" class="dot hollow" role="img" aria-label="connecting" title="connecting"></span>
     <span class="title">Make It So</span>
+    <a id="gauges" class="gauges" href="#workers" hidden></a>
     <nav id="tabs" role="tablist" aria-label="View" hidden>
       <a href="#" id="tab-tasks" role="tab" aria-selected="true">Tasks</a>
       <a href="#workers" id="tab-workers" role="tab" aria-selected="false">Workers</a>
@@ -275,6 +289,39 @@ const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const pct = (v) => (v === null ? '—' : `${Math.round(v)}%`);
 // Grey when fine or unknown, yellow from 75%, red from 90%.
 const level = (v) => (v === null ? '' : v >= 90 ? 'crit' : v >= 75 ? 'warn' : '');
+// A limit reading too old to trust (6 h, as the orchestrator judges it), or whose window has reset since.
+const LIMIT_STALE_MS = 6 * 3600e3;
+const staleLimit = (x, now) => now - x.observed_at > LIMIT_STALE_MS || (num(x.resets_at) !== null && x.resets_at <= now);
+const limitsOf = (w) => Object.entries((w.stats && w.stats.limits) || {});
+// `now`, `4m`, `3h`, `2d`.
+function ago(ms) {
+  const m = Math.floor(ms / 60e3);
+  return m < 1 ? 'now' : m < 60 ? `${m}m` : m < 1440 ? `${Math.floor(m / 60)}h` : `${Math.floor(m / 1440)}d`;
+}
+// `↻ 21:30` within a day, else `↻ Sat 09:00`; `↻ passed` once it has reset.
+function resetLabel(at, now) {
+  if (at <= now) return '↻ passed';
+  const d = new Date(at), hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  return `↻ ${at - now < 86400e3 ? hm : `${d.toLocaleDateString([], { weekday: 'short' })} ${hm}`}`;
+}
+// The fullest fresh window per harness across online workers: [[harness, pct]], by harness.
+function gaugeLevels(now) {
+  const max = new Map();
+  for (const w of workers.filter((x) => x.online)) for (const [h, ws] of limitsOf(w))
+    for (const x of ws) if (num(x.used_pct) !== null && !staleLimit(x, now)) max.set(h, Math.max(max.get(h) ?? 0, x.used_pct));
+  return [...max].sort(([a], [b]) => a.localeCompare(b));
+}
+const GAUGE = { claude: 'C', codex: 'X' }; // codex isn't C too
+function renderGauges() {
+  const g = $('gauges'), levels = everOpen ? gaugeLevels(Date.now() + skew) : [];
+  g.hidden = !levels.length;
+  g.setAttribute('aria-label', `usage limits: ${levels.map(([h, v]) => `${h} ${pct(v)}`).join(', ')}`);
+  g.replaceChildren(...levels.map(([h, v]) => {
+    const bar = el('i');
+    bar.style.setProperty('--v', `${Math.min(100, Math.max(0, v))}%`);
+    return el('span', { className: `gz ${level(v)}`, title: `${h} ${pct(v)}` }, GAUGE[h] || h[0].toUpperCase(), bar);
+  }));
+}
 const workerState = (w) => (!w.online ? 'offline' : w.busy ? 'busy' : 'idle');
 const runningOn = (wid) => tasks.find((t) => t.worker === wid && t.status === 'running');
 // Hostname from the last Status; short id if the worker is gone.
@@ -534,6 +581,7 @@ function renderStrip() {
   tk.className = t.cls;
   if (t.open) tk.href = `#task/${t.open}`; else tk.removeAttribute('href');
   $('cycle').classList.toggle('run', everOpen && !offline && tasks.some((x) => x.status === 'running'));
+  renderGauges();
 }
 
 // `#` tasks, `#task/<id>`, `#workers`, `#worker/<id>`.
@@ -737,6 +785,23 @@ function meterLine(w) {
     .flatMap(([k, v], i) => [i ? ' · ' : '', `${k} `, el('span', { className: level(num(v)) }, pct(num(v)))]));
 }
 
+// `claude 5h ▮▮▯ 12% ↻ 21:30` per window, then how old each harness's reading is.
+function limitRows(w) {
+  const now = Date.now() + skew, rows = [], ages = [];
+  for (const [h, ws] of limitsOf(w)) {
+    const read = ws.filter((x) => num(x.used_pct) !== null);
+    for (const x of read) {
+      const bar = el('span', { className: 'bar' });
+      bar.setAttribute('aria-hidden', 'true');
+      bar.style.setProperty('--v', `${Math.min(100, Math.max(0, x.used_pct))}%`);
+      rows.push(el('div', { className: `lim ${staleLimit(x, now) ? 'stale' : level(x.used_pct)}` },
+        `${h} ${x.name}`, bar, el('span', { className: 'v' }, pct(x.used_pct)), num(x.resets_at) === null ? '' : resetLabel(x.resets_at, now)));
+    }
+    if (read.length) ages.push(`${h} as of ${ago(now - Math.max(...read.map((x) => x.observed_at)))}`);
+  }
+  return rows.length ? el('div', { className: 'lims' }, ...rows, el('div', { className: 'dim' }, ages.join(' · '))) : '';
+}
+
 function renderWorkers() {
   $('fleet').textContent = `${workers.filter((w) => w.online).length}/${workers.length} online`;
   $('machines').replaceChildren(...workers.map((w) => {
@@ -746,7 +811,7 @@ function renderWorkers() {
         run ? el('a', { href: `#task/${run.id}`, className: 'task' }, short(run.id)) : ''),
       // Activity last: it's the part the ellipsis may cut.
       run ? el('div', { className: 'activity' }, ...dots([clock(run), tokensOf(run), run.activity])) : '',
-      meterLine(w));
+      meterLine(w), limitRows(w));
   }));
   if (!workers.length) $('machines').append(el('li', { className: 'dim' }, 'no workers connected'));
 }
