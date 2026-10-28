@@ -315,12 +315,14 @@ impl Ledger {
         let by_planner = p.task.harness == "planner" || p.task.harness.is_empty();
         let (id, effects) = match (&p.session, p.worker) {
             (Some(session), Some(wid)) if !by_planner => {
-                let w = self.workers.get(&wid).filter(|w| w.conn.is_some());
-                if w.is_none() {
+                let host = &wid.to_string()[..8];
+                let Some(w) = self.workers.get(&wid).filter(|w| w.conn.is_some()) else {
                     return Err(format!(
-                        "worker {} is offline; task {short}'s session lives there",
-                        &wid.to_string()[..8]
+                        "worker {host} is offline; task {short}'s session lives there"
                     ));
+                };
+                if !w.info.harnesses.contains(&p.task.harness) {
+                    return Err(format!("worker {host} no longer runs {}", p.task.harness));
                 }
                 let task = Task {
                     id: Uuid::new_v4(),
@@ -497,6 +499,13 @@ impl Ledger {
             .filter(|id| !self.tasks.iter().any(|t| t.task.id == *id))
             .collect();
         let mut effects = self.fail_running(wid, running, "worker restarted");
+        // Replies waiting for this worker can't run if it dropped their harness.
+        let harnesses = self.workers[&wid].info.harnesses.clone();
+        effects.extend(
+            self.fail_pinned(wid, "worker no longer runs this harness", |t| {
+                !harnesses.contains(&t.task.harness)
+            }),
+        );
         effects.extend(self.schedule());
         (unknown, effects)
     }
@@ -563,17 +572,7 @@ impl Ledger {
         self.workers.remove(&wid);
         let mut effects = self.fail_running(wid, &[], "worker disconnected");
         // Replies waiting for this worker's session can never run now.
-        effects.extend(
-            self.fail_where(wid, "worker left; its session is gone", |t| {
-                t.pin == Some(wid) && t.status == TaskStatus::Queued
-            }),
-        );
-        let tasks = &self.tasks;
-        self.queue.retain(|id| {
-            tasks
-                .iter()
-                .any(|t| t.task.id == *id && t.status == TaskStatus::Queued)
-        });
+        effects.extend(self.fail_pinned(wid, "worker left; its session is gone", |_| true));
         effects
     }
 
@@ -678,6 +677,25 @@ impl Ledger {
         self.fail_where(wid, why, |t| {
             t.worker == Some(wid) && t.status == TaskStatus::Running && !keep.contains(&t.task.id)
         })
+    }
+
+    /// Fail queued replies pinned to `wid` that match `pred`, and unqueue them.
+    fn fail_pinned(
+        &mut self,
+        wid: WorkerId,
+        why: &str,
+        pred: impl Fn(&TaskEntry) -> bool,
+    ) -> Vec<Effect> {
+        let effects = self.fail_where(wid, why, |t| {
+            t.pin == Some(wid) && t.status == TaskStatus::Queued && pred(t)
+        });
+        let tasks = &self.tasks;
+        self.queue.retain(|id| {
+            tasks
+                .iter()
+                .any(|t| t.task.id == *id && t.status == TaskStatus::Queued)
+        });
+        effects
     }
 
     /// Fail every task matching `pred`, telling followers why (as from `wid`).
@@ -1694,6 +1712,20 @@ mod tests {
         // Gone from the queue: a new worker doesn't pick it up.
         let (_, eff) = l.connect(Uuid::new_v4(), info(), &[], 3, T0);
         assert!(assigned(&eff).is_empty());
+    }
+
+    #[test]
+    fn queued_reply_fails_when_its_worker_drops_the_harness() {
+        let (mut l, wid, parent) = finished_setup();
+        let (busy, _) = l.submit("busy".into(), None, Some("claude".into()), None);
+        let (reply, _) = l.reply(parent, "x".into(), true).unwrap();
+        let mut codex = info();
+        codex.harnesses = vec!["codex".into()];
+        let (_, eff) = l.connect(wid, codex, &[busy], 2, T0);
+        assert_eq!(finished(&eff, reply), Some(false));
+        assert!(!l.queue.contains(&reply));
+        let why = l.reply(parent, "y".into(), true).unwrap_err();
+        assert!(why.contains("no longer runs claude"), "{why}");
     }
 
     #[test]

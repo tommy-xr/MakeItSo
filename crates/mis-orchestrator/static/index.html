@@ -69,6 +69,7 @@
   li.reply > a { padding-left: calc(var(--depth) * 1.25rem); }
   .thread { display: block; margin: .25rem 0; }
   #reply { margin-top: 1.25rem; }
+  .bad { color: var(--bad); }
   .back { display: inline-flex; align-items: center; min-height: 2.75rem; padding: 0 1rem; border: 1px solid var(--line); text-decoration: none; }
   #answer { margin: 1.5rem 0 1rem; }
   .meta { margin: .25rem 0; }
@@ -136,6 +137,7 @@
   <form id="reply" hidden>
     <textarea id="reply-text" aria-label="reply" placeholder="Reply in this thread…" required></textarea>
     <div class="row"><button>Reply</button></div>
+    <p id="reply-error" class="bad" hidden></p>
   </form>
   <details><summary>transcript</summary><pre id="log"></pre></details>
   <details><summary>ids</summary><dl id="ids"></dl></details>
@@ -304,6 +306,8 @@ function renderList() { taskRows($('tasks'), tasks); }
 
 function renderDetail(id) {
   if (!detail || detail.id !== id) {
+    // A draft belongs to the thread it was typed in.
+    if (detail) { $('reply-text').value = ''; $('reply-error').hidden = true; }
     detail = { id, task: null, lines: [], ready: false };
     send({ type: 'show', task: id });
   }
@@ -409,7 +413,12 @@ function onMessage(msg) {
       break;
     }
     case 'error':
-      replying = false;
+      // A refused reply (e.g. its worker is offline): say so by the form, keep the view.
+      if (replying) {
+        replying = false;
+        Object.assign($('reply-error'), { textContent: msg.message, hidden: false });
+        break;
+      }
       $('conn').textContent = `error: ${msg.message}`;
       // A pending Show failed (unknown task): say so. Otherwise events were dropped: re-fetch.
       if (detail && !detail.ready) Object.assign(detail, { ready: true, lines: [msg.message] });
@@ -479,6 +488,7 @@ $('reply').onsubmit = (e) => {
   const prompt = $('reply-text').value.trim();
   if (!prompt || !detail) return;
   replying = true;
+  $('reply-error').hidden = true;
   send({ type: 'submit', prompt, cwd: null, harness: null, model: null, reply_to: detail.id });
 };
 $('clear').onclick = (e) => {

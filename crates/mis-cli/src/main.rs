@@ -413,6 +413,19 @@ fn task_line(t: &TaskSummary, workers: &[WorkerSummary], now_ms: u64) -> String 
     parts.join(" · ")
 }
 
+/// The id from the reply to a Submit. Broadcasts may interleave once
+/// subscribed; skip them until Submitted.
+async fn submitted(ws: &mut Ws) -> Result<TaskId> {
+    loop {
+        match recv(ws).await? {
+            ServerMsg::Submitted { task } => return Ok(task),
+            ServerMsg::Error { message } => bail!(message),
+            ServerMsg::Event { .. } | ServerMsg::Status { .. } => continue,
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+}
+
 /// Print `task`'s events until it finishes; exit 1 if it failed.
 async fn follow_task(ws: &mut Ws, task: TaskId) -> Result<()> {
     loop {
@@ -589,14 +602,7 @@ async fn main() -> Result<()> {
                 },
             )
             .await?;
-            // Broadcasts may interleave once subscribed; skip them until Submitted.
-            let task = loop {
-                match recv(&mut ws).await? {
-                    ServerMsg::Submitted { task } => break task,
-                    ServerMsg::Event { .. } | ServerMsg::Status { .. } => continue,
-                    other => bail!("unexpected reply: {other:?}"),
-                }
-            };
+            let task = submitted(&mut ws).await?;
             println!("submitted {task}");
             if *follow {
                 follow_task(&mut ws, task).await?;
@@ -626,13 +632,7 @@ async fn main() -> Result<()> {
                 },
             )
             .await?;
-            let task = loop {
-                match recv(&mut ws).await? {
-                    ServerMsg::Submitted { task } => break task,
-                    ServerMsg::Error { message } => bail!(message),
-                    _ => continue,
-                }
-            };
+            let task = submitted(&mut ws).await?;
             println!("submitted {task} (reply to {})", &parent.to_string()[..8]);
             if !no_follow {
                 follow_task(&mut ws, task).await?;

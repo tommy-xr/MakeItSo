@@ -208,8 +208,9 @@ impl ClaudeAgent {
         if let Some(m) = o.model {
             a.push(format!("--model={m}"));
         }
+        // Forked, so two replies to one task don't see each other's turns.
         if let Some(s) = o.resume {
-            a.push(format!("--resume={s}"));
+            a.extend([format!("--resume={s}"), "--fork-session".into()]);
         }
         a.extend(["--".into(), prompt.into()]); // prompt may start with '-'
         a
@@ -453,6 +454,7 @@ mod tests {
                 "1",
                 "--model=haiku",
                 "--resume=s-1",
+                "--fork-session",
                 "--",
                 "-hi"
             ]

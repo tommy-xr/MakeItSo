@@ -118,7 +118,8 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
 
 impl CodexAgent {
     /// `codex` argv for one run: `exec [opts] -- <prompt>`, or
-    /// `exec resume [opts] -- <session> <prompt>` to continue a session.
+    /// `exec resume [opts] -- <session> <prompt>` to continue a session. Codex
+    /// can't fork one, so replies to the same task share a single history.
     pub fn argv(&self, prompt: &str, o: &RunOpts) -> Vec<String> {
         let mut a: Vec<String> = vec!["exec".into()];
         if o.resume.is_some() {
