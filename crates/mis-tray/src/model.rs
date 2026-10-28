@@ -196,6 +196,7 @@ mod tests {
             activity: activity.into(),
             parent: None,
             links: vec![],
+            attention: Default::default(),
         }
     }
 
