@@ -308,9 +308,12 @@ async fn run_task(ctx: &Ctx, task: Task, tx: mpsc::Sender<(TaskId, AgentEvent)>)
         agent.as_ref(),
         id,
         &prompt,
-        Some(&cwd),
-        task.model.as_deref(),
-        server.as_ref().map(|s| &s.mcp),
+        mis_agent::RunOpts {
+            cwd: Some(&cwd),
+            model: task.model.as_deref(),
+            mcp: server.as_ref().map(|s| &s.mcp),
+            resume: task.resume.as_deref(),
+        },
         atx,
     );
     tokio::join!(run, fwd);
@@ -420,9 +423,7 @@ mod tests {
             &'a self,
             _: TaskId,
             _: &'a str,
-            _: Option<&'a str>,
-            _: Option<&'a str>,
-            _: Option<&'a mis_agent::Mcp>,
+            _: mis_agent::RunOpts<'a>,
             _: mpsc::Sender<AgentEvent>,
         ) -> mis_agent::BoxFut<'a> {
             unreachable!()

@@ -58,6 +58,9 @@ pub struct Task {
     /// Model passed to the harness (`--model`); None = harness default.
     #[serde(default)]
     pub model: Option<String>,
+    /// Agent session to continue (a reply in a task's thread).
+    #[serde(default)]
+    pub resume: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -154,6 +157,10 @@ pub enum ClientMsg {
         /// None = harness default.
         #[serde(default)]
         model: Option<String>,
+        /// Continue this task's thread: same worker and session when it has
+        /// one; `cwd`/`harness`/`model` are then taken from it.
+        #[serde(default)]
+        reply_to: Option<TaskId>,
     },
     /// Stream all task events from now on.
     Subscribe,
@@ -203,6 +210,9 @@ pub struct TaskSummary {
     /// What it is doing now, e.g. `> Bash ls`, `queued`, `done`.
     #[serde(default)]
     pub activity: String,
+    /// The task this one replies to.
+    #[serde(default)]
+    pub parent: Option<TaskId>,
 }
 
 /// First non-blank line of `s`, cut to `max` chars with a trailing ellipsis.
@@ -405,6 +415,7 @@ mod tests {
             tokens_in: None,
             tokens_out: None,
             activity: activity.into(),
+            parent: None,
         }
     }
 

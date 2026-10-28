@@ -7,7 +7,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use crate::{Agent, BoxFut, Mcp, MCP_SERVER, MCP_TOKEN_ENV};
+use crate::{Agent, BoxFut, RunOpts, MCP_SERVER, MCP_TOKEN_ENV};
 
 #[derive(Default)]
 pub struct CodexAgent {
@@ -116,6 +116,32 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
     }
 }
 
+impl CodexAgent {
+    /// `codex` argv for one run: `exec [opts] -- <prompt>`, or
+    /// `exec resume [opts] -- <session> <prompt>` to continue a session.
+    pub fn argv(&self, prompt: &str, o: &RunOpts) -> Vec<String> {
+        let mut a: Vec<String> = vec!["exec".into()];
+        if o.resume.is_some() {
+            a.push("resume".into());
+        }
+        a.extend(["--json", "--skip-git-repo-check"].map(String::from));
+        if self.skip_permissions {
+            a.push("--dangerously-bypass-approvals-and-sandbox".into());
+        }
+        // One `=` token, so a model starting with '-' can't be read as a flag.
+        if let Some(m) = o.model {
+            a.push(format!("--model={m}"));
+        }
+        if let Some(m) = o.mcp {
+            a.extend(mcp_args(&m.url));
+        }
+        a.push("--".into());
+        a.extend(o.resume.map(String::from));
+        a.push(prompt.into());
+        a
+    }
+}
+
 impl Agent for CodexAgent {
     fn name(&self) -> &'static str {
         "codex"
@@ -143,26 +169,16 @@ impl Agent for CodexAgent {
         &'a self,
         task: TaskId,
         prompt: &'a str,
-        cwd: Option<&'a str>,
-        model: Option<&'a str>,
-        mcp: Option<&'a Mcp>,
+        opts: RunOpts<'a>,
         tx: mpsc::Sender<AgentEvent>,
     ) -> BoxFut<'a> {
         Box::pin(async move {
             let mut cmd = Command::new("codex");
-            cmd.args(["exec", "--json", "--skip-git-repo-check"]);
-            if self.skip_permissions {
-                cmd.arg("--dangerously-bypass-approvals-and-sandbox");
+            cmd.args(self.argv(prompt, &opts));
+            if let Some(m) = opts.mcp {
+                cmd.env(MCP_TOKEN_ENV, &m.token);
             }
-            // One `=` token, so a model starting with '-' can't be read as a flag.
-            if let Some(m) = model {
-                cmd.arg(format!("--model={m}"));
-            }
-            if let Some(m) = mcp {
-                cmd.args(mcp_args(&m.url)).env(MCP_TOKEN_ENV, &m.token);
-            }
-            cmd.arg("--").arg(prompt);
-            if let Some(d) = cwd {
+            if let Some(d) = opts.cwd {
                 cmd.current_dir(d);
             }
             cmd.env(TASK_ENV, task.to_string());
@@ -270,6 +286,45 @@ mod tests {
             }]
         );
         assert!(parse_line(r#"{"type":"turn.started"}"#).is_empty());
+    }
+
+    #[test]
+    fn argv_new_and_resumed() {
+        let agent = CodexAgent {
+            skip_permissions: true,
+        };
+        let o = RunOpts {
+            model: Some("gpt-5"),
+            ..Default::default()
+        };
+        assert_eq!(
+            agent.argv("hi", &o),
+            [
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--model=gpt-5",
+                "--",
+                "hi"
+            ]
+        );
+        let o = RunOpts {
+            resume: Some("t-1"),
+            ..Default::default()
+        };
+        assert_eq!(
+            CodexAgent::default().argv("-more", &o),
+            [
+                "exec",
+                "resume",
+                "--json",
+                "--skip-git-repo-check",
+                "--",
+                "t-1",
+                "-more"
+            ]
+        );
     }
 
     #[test]
