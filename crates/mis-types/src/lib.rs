@@ -215,7 +215,7 @@ pub struct TaskSummary {
     /// The task this one replies to.
     #[serde(default)]
     pub parent: Option<TaskId>,
-    /// GitHub links the agent mentioned, first seen first; kept apart from the
+    /// GitHub links the agent mentioned, most recent last; kept apart from the
     /// transcript and summary so neither eviction nor summarizing loses them.
     #[serde(default)]
     pub links: Vec<Link>,

@@ -28,6 +28,7 @@ const PREFIX: &str = "https://github.com/";
 /// `notgithub.com`) and URLs embedded mid-word or inside another URL are skipped.
 pub fn github_links(text: &str) -> Vec<Link> {
     let mut out: Vec<Link> = vec![];
+    let mut seen = std::collections::HashSet::new();
     for (i, _) in text.match_indices(PREFIX) {
         // `xhttps://…` or `https://evil.io/?u=https://github.com/…`.
         let embedded = text[..i]
@@ -40,7 +41,7 @@ pub fn github_links(text: &str) -> Vec<Link> {
         let Some(link) = parse(&text[i + PREFIX.len()..]) else {
             continue;
         };
-        if !out.iter().any(|l| l.url == link.url) {
+        if seen.insert(link.url.clone()) {
             out.push(link);
         }
     }

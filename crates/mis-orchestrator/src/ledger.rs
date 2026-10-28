@@ -60,7 +60,7 @@ pub const MAX_TRANSCRIPT_BYTES: usize = 256 * 1024;
 /// A single stored `ToolResult` keeps at most this many bytes of content.
 pub const MAX_TOOL_RESULT_BYTES: usize = 16 * 1024;
 const TRUNCATED: &str = "…[truncated]";
-/// Links kept per task; later ones are dropped.
+/// Links kept per task; the least recently mentioned go first.
 pub const MAX_LINKS: usize = 32;
 /// A fresh reply's context keeps at most this much of the parent's prompt and answer.
 const MAX_CONTEXT_CHARS: usize = 4_000;
@@ -90,7 +90,8 @@ struct TaskEntry {
     parent: Option<TaskId>,
     /// Only this worker may run it: it holds the session being resumed.
     pin: Option<WorkerId>,
-    /// GitHub links seen in the agent's output; never evicted (see `MAX_LINKS`).
+    /// GitHub links in the agent's output, most recently mentioned last. Kept
+    /// apart from `events`, so transcript eviction never drops them.
     links: Vec<Link>,
 }
 
@@ -170,7 +171,8 @@ impl TaskEntry {
 
     /// Append to the transcript, evicting oldest events past `MAX_TRANSCRIPT_BYTES`.
     /// `Usage` only updates the counts; it isn't kept. Links are collected first,
-    /// from the full text, before any truncation.
+    /// from the full text, before any truncation; a link mentioned again moves to
+    /// the end, so the agent's closing PR outlives links from tool output it read.
     fn record(&mut self, event: &AgentEvent, now_ms: u64) {
         if let Some(s) = step(event) {
             self.step = Some(s);
@@ -182,9 +184,11 @@ impl TaskEntry {
             _ => None,
         };
         for link in text.map(|t| github_links(t)).unwrap_or_default() {
-            if self.links.len() < MAX_LINKS && !self.links.contains(&link) {
-                self.links.push(link);
+            self.links.retain(|l| l.url != link.url);
+            if self.links.len() == MAX_LINKS {
+                self.links.remove(0);
             }
+            self.links.push(link);
         }
         match event {
             AgentEvent::Usage { input, output } => {
@@ -1839,7 +1843,8 @@ mod tests {
         l.summarized(task, "Fixed it.");
         let s = l.show(task).unwrap().0;
         assert_eq!(s.summary.as_deref(), Some("Fixed it."));
-        assert_eq!(link_urls(&l, task), [pr, run, sha]);
+        // The PR, mentioned again at the end, moves last.
+        assert_eq!(link_urls(&l, task), [run, pr, sha]);
         let ServerMsg::Status { tasks, .. } = l.status() else {
             panic!()
         };
@@ -1847,13 +1852,18 @@ mod tests {
     }
 
     #[test]
-    fn links_are_bounded_per_task() {
+    fn links_are_bounded_keeping_the_latest_mentioned() {
         let (mut l, wid, task) = running_setup();
         let many: Vec<_> = (0..MAX_LINKS + 5)
             .map(|i| format!("https://github.com/o/r/pull/{i}"))
             .collect();
-        l.event(wid, 1, task, text(&many.join(" ")));
+        // Tool output full of links, then the agent names its own PR (#0, seen first).
+        let content = many.join(" ");
+        l.event(wid, 1, task, AgentEvent::ToolResult { content });
         l.event(wid, 1, task, text(&many[0]));
-        assert_eq!(link_urls(&l, task), many[..MAX_LINKS]);
+        let got = link_urls(&l, task);
+        assert_eq!(got.len(), MAX_LINKS);
+        assert_eq!(got[..MAX_LINKS - 1], many[6..]);
+        assert_eq!(got.last(), Some(&many[0]));
     }
 }

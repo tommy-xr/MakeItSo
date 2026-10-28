@@ -450,13 +450,19 @@ function taskRows(ul, list) {
 function renderList() { taskRows($('tasks'), tasks); }
 
 const KIND = { pr: 'PR', commit: 'commit', ci_run: 'CI', issue: 'issue' };
-// `PR #42`, `commit abc1234`, `CI run 123`: kind plus the label without its repo.
-const brief = (l) => `${KIND[l.kind] || l.kind} ${l.label.replace(/^\S+?([#@ ])/, (_, c) => (c === '#' ? '#' : ''))}`;
-// List rows name the first PR (else the first link), and how many more there are.
+// Label split into repo and the part that names the item: `o/r#42` -> [`o/r`, `#42`],
+// `o/r@abc1234` -> [`o/r`, `abc1234`], `o/r run 123` -> [`o/r`, `run 123`].
+function labelParts(l) {
+  const m = l.label.match(/^(\S+?)([#@ ])(.*)$/);
+  return m ? [m[1], m[2] === '#' ? `#${m[3]}` : m[3]] : ['', l.label];
+}
+// `PR #42`, `commit abc1234`, `CI run 123`.
+const brief = (l) => `${KIND[l.kind] || l.kind} ${labelParts(l)[1]}`;
+// List rows name the latest PR (else the latest link), and how many more there are.
 function linksBrief(t) {
   const links = t.links || [];
   if (!links.length) return '';
-  const lead = links.find((l) => l.kind === 'pr') || links[0];
+  const lead = links.findLast((l) => l.kind === 'pr') || links[links.length - 1];
   return links.length > 1 ? `${brief(lead)} +${links.length - 1}` : brief(lead);
 }
 // Only https GitHub URLs become anchors; anything else is dropped.
@@ -466,7 +472,9 @@ function githubUrl(u) {
 function renderEvidence(t) {
   const rows = ((t && t.links) || []).map((l) => [l, githubUrl(l.url)]).filter(([, href]) => href)
     .map(([l, href]) => el('li', {}, el('a', { href, target: '_blank', rel: 'noopener' },
-      el('span', { className: 'k' }, KIND[l.kind] || l.kind), el('span', { className: 't' }, l.label), el('span', { className: 'go' }, '›'))));
+      // The item first, so a narrow row cuts the repo, not the number.
+      el('span', { className: 'k' }, KIND[l.kind] || l.kind), el('span', { className: 't' }, labelParts(l)[1], ' ', el('span', { className: 'dim' }, labelParts(l)[0])),
+      el('span', { className: 'go' }, '›'))));
   $('evidence').querySelector('ul').replaceChildren(...rows);
   $('evidence').hidden = !rows.length;
 }
