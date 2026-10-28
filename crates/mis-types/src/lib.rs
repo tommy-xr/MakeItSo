@@ -214,6 +214,69 @@ pub fn first_line(s: &str, max: usize) -> String {
     format!("{cut}…")
 }
 
+/// `42s`, `3m04s`, `2h05m`.
+pub fn fmt_elapsed(ms: u64) -> String {
+    let s = ms / 1000;
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m{:02}s", s / 60, s % 60),
+        _ => format!("{}h{:02}m", s / 3600, s / 60 % 60),
+    }
+}
+
+/// One-line fleet summary, zero buckets left out:
+/// `2 workers · 1 running (counting tests, 3m12s) · 4 done · 1 failed · 2 queued`.
+/// The running clause is the most recently started running task's activity;
+/// `idle` when nothing is planning, queued or running. Offline workers don't count.
+pub fn headline(workers: &[WorkerSummary], tasks: &[TaskSummary], now_ms: u64) -> String {
+    let mut parts = vec![match workers.iter().filter(|w| w.online).count() {
+        0 => "no workers".to_string(),
+        1 => "1 worker".to_string(),
+        n => format!("{n} workers"),
+    }];
+    let count = |s| tasks.iter().filter(|t| t.status == s).count();
+    let newest = tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Running)
+        .max_by_key(|t| t.started_at);
+    if let Some(t) = newest {
+        let what = t.activity.strip_prefix("status: ").unwrap_or(&t.activity);
+        let since = t.started_at.map(|s| fmt_elapsed(now_ms.saturating_sub(s)));
+        let detail: Vec<&str> = [Some(what), since.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .collect();
+        let detail = match detail.is_empty() {
+            true => String::new(),
+            false => format!(" ({})", detail.join(", ")),
+        };
+        parts.push(format!("{} running{detail}", count(TaskStatus::Running)));
+    }
+    let idle = [
+        TaskStatus::Planning,
+        TaskStatus::Queued,
+        TaskStatus::Running,
+    ]
+    .iter()
+    .all(|s| count(*s) == 0);
+    if idle {
+        parts.push("idle".into());
+    }
+    for (s, name) in [
+        (TaskStatus::Done, "done"),
+        (TaskStatus::Failed, "failed"),
+        (TaskStatus::Planning, "planning"),
+        (TaskStatus::Queued, "queued"),
+    ] {
+        let n = count(s);
+        if n > 0 {
+            parts.push(format!("{n} {name}"));
+        }
+    }
+    parts.join(" · ")
+}
+
 /// Orchestrator -> client.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -310,6 +373,75 @@ mod tests {
         .unwrap();
         assert_eq!((old.started_at, old.tokens_in), (None, None));
         assert!(old.activity.is_empty());
+    }
+
+    fn task(status: TaskStatus, started_at: u64, activity: &str) -> TaskSummary {
+        TaskSummary {
+            id: Uuid::new_v4(),
+            prompt: "p".into(),
+            status,
+            worker: None,
+            harness: "claude".into(),
+            model: None,
+            session: None,
+            summary: None,
+            started_at: Some(started_at),
+            finished_at: None,
+            tokens_in: None,
+            tokens_out: None,
+            activity: activity.into(),
+        }
+    }
+
+    fn worker() -> WorkerSummary {
+        WorkerSummary {
+            id: Uuid::new_v4(),
+            info: WorkerInfo {
+                hostname: "h".into(),
+                os: "o".into(),
+                arch: "a".into(),
+                harnesses: vec![],
+                roots: vec![],
+                models: Default::default(),
+            },
+            busy: false,
+            online: true,
+            stats: None,
+            stats_at: None,
+        }
+    }
+
+    #[test]
+    fn headline_counts_buckets_and_names_newest_running() {
+        use TaskStatus::*;
+        assert_eq!(headline(&[], &[], 0), "no workers · idle");
+        let w = [worker(), worker()];
+        let mut tasks = vec![
+            task(Done, 0, "done"),
+            task(Done, 0, "done"),
+            task(Failed, 0, "FAILED"),
+        ];
+        assert_eq!(
+            headline(&w[..1], &tasks, 0),
+            "1 worker · idle · 2 done · 1 failed"
+        );
+        tasks.push(task(Running, 1_000, "> Bash ls"));
+        tasks.push(task(Running, 8_000, "status: counting tests"));
+        tasks.push(task(Queued, 9_000, "queued"));
+        tasks.push(task(Planning, 9_000, "planning…"));
+        assert_eq!(
+            headline(&w, &tasks, 200_000),
+            "2 workers · 2 running (counting tests, 3m12s) · 2 done · 1 failed · 1 planning · 1 queued"
+        );
+        // Queued with only an offline worker: not idle.
+        let mut off = worker();
+        off.online = false;
+        assert_eq!(headline(&[off], &tasks[5..6], 0), "no workers · 1 queued");
+        // Running with nothing known about it.
+        let mut bare = task(Running, 0, "");
+        bare.started_at = None;
+        assert_eq!(headline(&w[..1], &[bare], 0), "1 worker · 1 running");
+        assert_eq!(fmt_elapsed(7_530_000), "2h05m");
     }
 
     #[test]

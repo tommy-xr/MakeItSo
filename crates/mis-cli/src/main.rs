@@ -252,16 +252,6 @@ fn placement(t: &TaskSummary, workers: &[WorkerSummary]) -> String {
     s
 }
 
-/// `42s`, `3m04s`, `2h05m`.
-fn elapsed(ms: u64) -> String {
-    let s = ms / 1000;
-    match s {
-        0..60 => format!("{s}s"),
-        60..3600 => format!("{}m{:02}s", s / 60, s % 60),
-        _ => format!("{}h{:02}m", s / 3600, s / 60 % 60),
-    }
-}
-
 /// `850`, `12.3k`, `1.2M`.
 fn tokens(n: u64) -> String {
     match n {
@@ -276,7 +266,7 @@ fn tokens(n: u64) -> String {
 fn task_line(t: &TaskSummary, workers: &[WorkerSummary], now_ms: u64) -> String {
     let mut parts = vec![placement(t, workers)];
     if let Some(start) = t.started_at {
-        parts.push(elapsed(
+        parts.push(fmt_elapsed(
             t.finished_at.unwrap_or(now_ms).saturating_sub(start),
         ));
     }
@@ -327,6 +317,7 @@ async fn main() -> Result<()> {
             };
             // Orchestrator's clock, like the task timestamps; older ones don't send it.
             let now = now_ms.unwrap_or_else(unix_ms);
+            println!("{}", headline(&workers, &tasks, now));
             println!("workers ({}):", workers.len());
             for w in &workers {
                 let current = tasks
@@ -543,7 +534,6 @@ mod tests {
             task_line(&t, &[], 9_999_999),
             "claude · 42s · 12.3k/1.1k · > Bash ls"
         );
-        assert_eq!(elapsed(7_530_000), "2h05m");
         assert_eq!(
             (tokens(850), tokens(1_234_567)),
             ("850".into(), "1.2M".into())
