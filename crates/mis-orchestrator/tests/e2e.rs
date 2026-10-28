@@ -1185,6 +1185,7 @@ async fn out_of_usage_worker_waits_until_its_limit_lifts() {
                 used_pct,
                 resets_at: Some(now + 3_600_000),
                 observed_at: now,
+                overage: false,
             }],
         )]
         .into(),

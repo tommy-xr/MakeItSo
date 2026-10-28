@@ -66,9 +66,12 @@ pub fn rollout_limits(tail: &str, fallback_at: u64) -> Option<Vec<LimitWindow>> 
             .as_str()
             .and_then(utc_ms)
             .unwrap_or(fallback_at);
+        // Credits keep codex running past a full window.
+        let credits = &p["rate_limits"]["credits"];
+        let overage = credits["has_credits"] == true || credits["unlimited"] == true;
         let windows: Vec<_> = ["primary", "secondary"]
             .iter()
-            .filter_map(|k| window(&p["rate_limits"][k], at))
+            .filter_map(|k| window(&p["rate_limits"][k], at, overage))
             .collect();
         (!windows.is_empty()).then_some(windows)
     })
@@ -76,7 +79,7 @@ pub fn rollout_limits(tail: &str, fallback_at: u64) -> Option<Vec<LimitWindow>> 
 
 /// One `rate_limits` window. Older codex versions give `resets_in_seconds`
 /// rather than `resets_at`.
-fn window(w: &Value, observed_at: u64) -> Option<LimitWindow> {
+fn window(w: &Value, observed_at: u64, overage: bool) -> Option<LimitWindow> {
     let name = match w["window_minutes"].as_u64() {
         Some(300) => "5h".to_string(),
         Some(10080) => "7d".to_string(),
@@ -92,6 +95,7 @@ fn window(w: &Value, observed_at: u64) -> Option<LimitWindow> {
         used_pct: w["used_percent"].as_f64()?.clamp(0.0, 100.0) as f32,
         resets_at: resets_at.or(resets_in),
         observed_at,
+        overage,
     })
 }
 
@@ -376,14 +380,17 @@ mod tests {
             used_pct,
             resets_at,
             observed_at,
+            overage: false,
         };
+        // This account has credits: its full 5h window still runs.
+        let credit = |l: LimitWindow| LimitWindow { overage: true, ..l };
         // Observed when the event was written, not when the file last changed.
         const AT: u64 = 1_793_216_463_790;
         assert_eq!(
             rollout_limits(ROLLOUT_TAIL, 7),
             Some(vec![
-                w("5h", 100.0, Some(1_793_219_109_000), AT),
-                w("7d", 16.0, Some(1_793_805_909_000), AT)
+                credit(w("5h", 100.0, Some(1_793_219_109_000), AT)),
+                credit(w("7d", 16.0, Some(1_793_805_909_000), AT))
             ])
         );
         // A later reading wins; other window lengths are named in minutes; a window

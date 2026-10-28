@@ -2,7 +2,7 @@
 //! effects the shell must perform. No I/O, no clocks, no locks here; `now` is
 //! monotonic time from the shell, so wall-clock jumps can't fake silence.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Duration;
 
 use mis_types::*;
@@ -52,8 +52,15 @@ struct Worker {
     stats: Option<(WorkerStats, u64)>,
     /// Last Hello or Stats; `tick` drops the worker when this gets too old.
     last_seen: Duration,
-    /// Harness -> Unix millis until which a run here reported a hit usage limit.
-    /// Kept across reconnects.
+}
+
+/// What a worker's agents have left, kept apart from `Worker` so a reconnect,
+/// or a worker dropped and back, can't wipe a limit that still holds.
+#[derive(Default)]
+struct Usage {
+    /// Latest windows per harness, from stats.
+    limits: BTreeMap<String, Vec<LimitWindow>>,
+    /// Harness -> Unix millis until which a run here reported a hit limit.
     limited: HashMap<String, u64>,
 }
 
@@ -62,16 +69,15 @@ const LIMITED_FOR_MS: u64 = 3600 * 1000;
 /// Usage at or above this is out.
 const EXHAUSTED_PCT: f32 = 99.0;
 
-impl Worker {
-    /// Unix millis until which `harness` here is out of usage, if it is now: a
-    /// fresh window at `EXHAUSTED_PCT` (until it resets or goes stale), or a
-    /// reported limit hit.
+impl Usage {
+    /// Unix millis until which `harness` is out of usage, if it is now: a fresh
+    /// window at `EXHAUSTED_PCT` with no overage (until it resets or goes stale,
+    /// whichever is first), or a reported limit hit.
     fn exhausted_until(&self, harness: &str, now_ms: u64) -> Option<u64> {
-        let windows = self.stats.iter().filter_map(|(s, _)| s.limits.get(harness));
-        let full = windows
-            .flatten()
-            .filter(|w| w.used_pct >= EXHAUSTED_PCT && !w.stale(now_ms))
-            .map(|w| w.resets_at.unwrap_or(w.observed_at + LIMIT_STALE_MS));
+        let full = self.limits.get(harness).into_iter().flatten();
+        let full = full
+            .filter(|w| w.used_pct >= EXHAUSTED_PCT && !w.overage && !w.stale(now_ms))
+            .map(|w| (w.observed_at + LIMIT_STALE_MS).min(w.resets_at.unwrap_or(u64::MAX)));
         let hit = self.limited.get(harness).copied();
         full.chain(hit).filter(|until| *until > now_ms).max()
     }
@@ -303,6 +309,7 @@ pub struct Ledger {
     /// one; only stamped on tasks for display.
     pub now_ms: u64,
     workers: HashMap<WorkerId, Worker>,
+    usage: HashMap<WorkerId, Usage>,
     tasks: Vec<TaskEntry>, // insertion order = submission order
     queue: VecDeque<TaskId>,
 }
@@ -322,21 +329,25 @@ impl Ledger {
                     stats_at: w.stats.as_ref().map(|(_, at)| *at),
                 })
                 .collect(),
-            tasks: self
-                .tasks
-                .iter()
-                .map(|t| {
-                    let mut s = t.summary();
-                    s.blocked_until = self.blocked_until(t);
-                    if let Some(until) = s.blocked_until {
-                        let wait = fmt_elapsed(until.saturating_sub(self.now_ms));
-                        s.activity = format!("queued · {} resets {wait}", t.task.harness);
-                    }
-                    s
-                })
-                .collect(),
+            tasks: self.tasks.iter().map(|t| self.summary(t)).collect(),
             now_ms: Some(self.now_ms),
         }
+    }
+
+    fn exhausted_until(&self, wid: WorkerId, harness: &str) -> Option<u64> {
+        let usage = self.usage.get(&wid)?;
+        usage.exhausted_until(harness, self.now_ms)
+    }
+
+    /// `t`'s summary, with what the fleet adds: why it waits, if usage limits hold it.
+    fn summary(&self, t: &TaskEntry) -> TaskSummary {
+        let mut s = t.summary();
+        s.blocked_until = self.blocked_until(t);
+        if let Some(until) = s.blocked_until {
+            let wait = fmt_elapsed(until.saturating_sub(self.now_ms));
+            s.activity = format!("queued · {} resets {wait}", t.task.harness);
+        }
+        s
     }
 
     /// For a queued task that only usage limits hold back: when the first
@@ -345,23 +356,20 @@ impl Ledger {
         if t.status != TaskStatus::Queued {
             return None;
         }
-        let candidates: Vec<_> = self
+        let candidates: Option<Vec<u64>> = self
             .workers
             .iter()
             .filter(|(wid, w)| t.pin.is_none_or(|p| p == **wid) && w.conn.is_some())
             .filter(|(_, w)| w.info.harnesses.contains(&t.task.harness))
-            .map(|(_, w)| w.exhausted_until(&t.task.harness, self.now_ms))
+            .map(|(wid, _)| self.exhausted_until(*wid, &t.task.harness))
             .collect();
-        match candidates.iter().all(Option::is_some) {
-            true => candidates.into_iter().flatten().min(),
-            false => None,
-        }
+        candidates?.into_iter().min()
     }
 
     /// Task metadata, retained transcript (oldest first), and whether any was evicted.
     pub fn show(&self, task: TaskId) -> Option<(TaskSummary, &[AgentEvent], bool)> {
         let t = self.tasks.iter().find(|t| t.task.id == task)?;
-        Some((t.summary(), &t.events, t.truncated))
+        Some((self.summary(t), &t.events, t.truncated))
     }
 
     fn is_busy(&self, wid: WorkerId) -> bool {
@@ -466,7 +474,7 @@ impl Ledger {
     }
 
     /// What the planner may choose from: `known_fleet` less the harnesses out of
-    /// usage on every worker offering them, unless that leaves nothing (the task
+    /// usage on every online worker offering them, unless that leaves nothing (the task
     /// then waits on whichever it picks).
     pub fn fleet(&self) -> plan::Fleet {
         let all = self.known_fleet();
@@ -474,11 +482,15 @@ impl Ledger {
             .clone()
             .into_iter()
             .filter(|(h, _)| {
-                let mut offering = self
+                let online: Vec<_> = self
                     .workers
-                    .values()
-                    .filter(|w| w.info.harnesses.contains(h));
-                !offering.all(|w| w.exhausted_until(h, self.now_ms).is_some())
+                    .iter()
+                    .filter(|(_, w)| w.conn.is_some() && w.info.harnesses.contains(h))
+                    .collect();
+                online.is_empty()
+                    || online
+                        .iter()
+                        .any(|(wid, _)| self.exhausted_until(**wid, h).is_none())
             })
             .collect();
         if usable.is_empty() {
@@ -623,8 +635,7 @@ impl Ledger {
         conn: ConnId,
         now: Duration,
     ) -> (Vec<TaskId>, Vec<Effect>) {
-        let old = self.workers.remove(&wid);
-        let generation = old.as_ref().map_or(0, |w| w.generation) + 1;
+        let generation = self.workers.get(&wid).map_or(0, |w| w.generation) + 1;
         self.workers.insert(
             wid,
             Worker {
@@ -633,7 +644,6 @@ impl Ledger {
                 generation,
                 stats: None,
                 last_seen: now,
-                limited: old.map(|w| w.limited).unwrap_or_default(),
             },
         );
         let unknown = running
@@ -684,6 +694,7 @@ impl Ledger {
             return vec![];
         };
         let changed = w.stats.take().map(|(s, _)| s.limits).unwrap_or_default() != stats.limits;
+        self.usage.entry(wid).or_default().limits = stats.limits.clone();
         w.stats = Some((stats, unix_secs));
         w.last_seen = now;
         let mut effects = self.schedule();
@@ -749,9 +760,16 @@ impl Ledger {
         }
         t.record(&event, now);
         if let AgentEvent::Limited { resets_at } = &event {
-            let until = resets_at.map_or(now + LIMITED_FOR_MS, |s| s * 1000);
-            let w = self.workers.get_mut(&wid).expect("checked above");
-            w.limited.insert(t.task.harness.clone(), until);
+            // A later hit never shortens an earlier one.
+            let until = resets_at.map_or(now + LIMITED_FOR_MS, |s| s.saturating_mul(1000));
+            let limited = &mut self.usage.entry(wid).or_default().limited;
+            let held = limited.entry(t.task.harness.clone()).or_default();
+            *held = (*held).max(until);
+        }
+        // Finished ok after a hit (e.g. it carried on): the harness runs here after all.
+        if let (AgentEvent::Finished { ok: true, .. }, Some(u)) = (&event, self.usage.get_mut(&wid))
+        {
+            u.limited.remove(&t.task.harness);
         }
         let mut summarize = None;
         if let AgentEvent::Finished { ok, .. } = &event {
@@ -822,7 +840,7 @@ impl Ledger {
                 .iter()
                 .filter(|(wid, _)| pin.is_none_or(|p| p == **wid))
                 .filter(|(wid, w)| w.conn.is_some() && !self.is_busy(**wid))
-                .filter(|(_, w)| w.exhausted_until(harness, self.now_ms).is_none())
+                .filter(|(wid, _)| self.exhausted_until(**wid, harness).is_none())
                 .find(|(_, w)| w.info.harnesses.contains(harness))
                 .map(|(wid, w)| (*wid, w.conn.unwrap()));
             match picked {
@@ -961,6 +979,7 @@ mod tests {
             used_pct,
             resets_at: None,
             observed_at,
+            overage: false,
         };
         let with = |w: Vec<LimitWindow>| WorkerStats {
             limits: [("claude".to_string(), w)].into(),
@@ -2242,6 +2261,7 @@ mod tests {
             used_pct,
             resets_at,
             observed_at: NOW - age,
+            overage: false,
         };
         WorkerStats {
             limits: [("claude".to_string(), vec![w])].into(),
@@ -2311,9 +2331,9 @@ mod tests {
             secs(1),
             0,
         );
-        // No reset time: out until the reading goes stale.
+        // `a` is held until its window resets.
         assert_eq!(
-            l.workers[&a].exhausted_until("claude", NOW),
+            l.usage[&a].exhausted_until("claude", NOW),
             Some(NOW + 3 * HOUR)
         );
         let (task, eff) = l.submit("p".into(), None, Some("claude".into()), None);
@@ -2346,11 +2366,11 @@ mod tests {
         l.connect(a, info(), &[], 1, T0);
         l.worker_stats(a, 1, claude_5h(99.0, None, HOUR), secs(1), 0);
         let until = NOW - HOUR + LIMIT_STALE_MS;
-        assert_eq!(l.workers[&a].exhausted_until("claude", NOW), Some(until));
-        assert_eq!(l.workers[&a].exhausted_until("claude", until), None);
-        assert_eq!(l.workers[&a].exhausted_until("codex", NOW), None);
+        assert_eq!(l.usage[&a].exhausted_until("claude", NOW), Some(until));
+        assert_eq!(l.usage[&a].exhausted_until("claude", until), None);
+        assert_eq!(l.usage[&a].exhausted_until("codex", NOW), None);
         l.worker_stats(a, 1, claude_5h(98.9, None, 0), secs(2), 0);
-        assert_eq!(l.workers[&a].exhausted_until("claude", NOW), None);
+        assert_eq!(l.usage[&a].exhausted_until("claude", NOW), None);
     }
 
     /// A hit limit keeps that harness off the worker until it resets, across a
@@ -2376,7 +2396,7 @@ mod tests {
             l.event(wid, 1, task, e);
         }
         assert_eq!(
-            l.workers[&wid].exhausted_until("claude", NOW),
+            l.usage[&wid].exhausted_until("claude", NOW),
             Some(resets * 1000)
         );
         l.disconnect(wid, 1);
@@ -2399,13 +2419,84 @@ mod tests {
     }
 
     #[test]
-    fn hit_limit_without_reset_holds_an_hour() {
+    fn hit_limit_without_reset_holds_an_hour_unless_it_finishes_ok() {
         let (mut l, wid, task) = running_setup();
         l.now_ms = NOW;
         l.event(wid, 1, task, AgentEvent::Limited { resets_at: None });
         assert_eq!(
-            l.workers[&wid].exhausted_until("claude", NOW),
+            l.usage[&wid].exhausted_until("claude", NOW),
             Some(NOW + LIMITED_FOR_MS)
         );
+        finish(&mut l, wid, task, true);
+        assert_eq!(l.usage[&wid].exhausted_until("claude", NOW), None);
+    }
+
+    /// Codex on credits: its 5h window reads 100 % and it still runs.
+    #[test]
+    fn a_full_window_with_overage_doesnt_hold() {
+        let mut stats = claude_5h(100.0, Some(NOW + HOUR), 0);
+        stats.limits.get_mut("claude").unwrap()[0].overage = true;
+        let u = Usage {
+            limits: stats.limits,
+            ..Default::default()
+        };
+        assert_eq!(u.exhausted_until("claude", NOW), None);
+    }
+
+    /// Limits outlive the connection: a reconnect (before the first beat) and a
+    /// worker dropped after its grace period both come back still out.
+    #[test]
+    fn limits_survive_reconnect_and_expiry() {
+        let mut l = Ledger {
+            now_ms: NOW,
+            ..Default::default()
+        };
+        let a = Uuid::from_u128(1);
+        l.connect(a, info(), &[], 1, T0);
+        l.worker_stats(a, 1, claude_5h(100.0, Some(NOW + HOUR), 0), secs(1), 0);
+        l.disconnect(a, 1);
+        let (_, eff) = l.connect(a, info(), &[], 2, T0);
+        assert!(assigned(&eff).is_empty());
+        let (task, eff) = l.submit("p".into(), None, Some("claude".into()), None);
+        assert!(
+            assigned(&eff).is_empty(),
+            "reconnected, no beat yet: still out"
+        );
+        l.disconnect(a, 2);
+        l.expire(a, 2);
+        let (_, eff) = l.connect(a, info(), &[], 3, T0);
+        assert!(assigned(&eff).is_empty(), "dropped and back: still out");
+        assert_eq!(status_of(&l, task).blocked_until, Some(NOW + HOUR));
+    }
+
+    #[test]
+    fn a_later_shorter_hit_keeps_the_longer_hold() {
+        let (mut l, wid, task) = running_setup();
+        l.now_ms = NOW;
+        let long = NOW / 1000 + 5 * 3600;
+        l.event(
+            wid,
+            1,
+            task,
+            AgentEvent::Limited {
+                resets_at: Some(long),
+            },
+        );
+        l.event(wid, 1, task, AgentEvent::Limited { resets_at: None });
+        assert_eq!(
+            l.usage[&wid].exhausted_until("claude", NOW),
+            Some(long * 1000)
+        );
+    }
+
+    /// A full weekly window resetting in 3 days only counts while its reading is
+    /// fresh: the hold ends when it goes stale.
+    #[test]
+    fn a_full_window_holds_until_its_reset_or_staleness_whichever_first() {
+        let u = Usage {
+            limits: claude_5h(100.0, Some(NOW + 72 * HOUR), 0).limits,
+            ..Default::default()
+        };
+        assert_eq!(u.exhausted_until("claude", NOW), Some(NOW + LIMIT_STALE_MS));
     }
 }

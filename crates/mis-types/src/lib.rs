@@ -48,6 +48,10 @@ pub struct LimitWindow {
     pub resets_at: Option<u64>,
     /// Unix millis when this reading was taken.
     pub observed_at: u64,
+    /// Use past the window still runs (credits, paid overage): a full window
+    /// doesn't stop the agent.
+    #[serde(default)]
+    pub overage: bool,
 }
 
 /// A limit reading older than this says little about the account now.
@@ -478,6 +482,7 @@ mod tests {
                         used_pct: 12.5,
                         resets_at: Some(1_793_223_000_000),
                         observed_at: 1_793_200_000_000,
+                        overage: false,
                     }],
                 )]
                 .into(),
@@ -525,6 +530,7 @@ mod tests {
             used_pct,
             resets_at,
             observed_at,
+            overage: false,
         }
     }
 
