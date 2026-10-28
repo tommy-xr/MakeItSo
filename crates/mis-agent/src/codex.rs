@@ -1,7 +1,10 @@
 //! Codex CLI backend: `codex exec --json <prompt>`.
 
 use anyhow::Context;
-use mis_types::{AgentEvent, TaskId, TASK_ENV};
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+
+use mis_types::{AgentEvent, LimitWindow, TaskId, TASK_ENV};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -46,6 +49,108 @@ pub fn codex_models(cache_json: &str, config_toml: &str) -> Result<Vec<String>, 
         }
     }
     Ok(out)
+}
+
+/// Limit windows from the tail of a session rollout (JSONL): the last
+/// `token_count` event with a `rate_limits` window, its `primary` and `secondary`
+/// windows observed at the event's `timestamp` (else `fallback_at`).
+/// Unparsable lines (a cut first line) are skipped.
+pub fn rollout_limits(tail: &str, fallback_at: u64) -> Option<Vec<LimitWindow>> {
+    tail.lines().rev().find_map(|line| {
+        let v: Value = serde_json::from_str(line).ok()?;
+        let p = &v["payload"];
+        if v["type"] != "event_msg" || p["type"] != "token_count" {
+            return None;
+        }
+        let at = v["timestamp"]
+            .as_str()
+            .and_then(utc_ms)
+            .unwrap_or(fallback_at);
+        let windows: Vec<_> = ["primary", "secondary"]
+            .iter()
+            .filter_map(|k| window(&p["rate_limits"][k], at))
+            .collect();
+        (!windows.is_empty()).then_some(windows)
+    })
+}
+
+/// One `rate_limits` window. Older codex versions give `resets_in_seconds`
+/// rather than `resets_at`.
+fn window(w: &Value, observed_at: u64) -> Option<LimitWindow> {
+    let name = match w["window_minutes"].as_u64() {
+        Some(300) => "5h".to_string(),
+        Some(10080) => "7d".to_string(),
+        Some(n) => format!("{n}m"),
+        None => return None,
+    };
+    let resets_at = w["resets_at"].as_u64().map(|s| s * 1000);
+    let resets_in = w["resets_in_seconds"]
+        .as_u64()
+        .map(|s| observed_at + s * 1000);
+    Some(LimitWindow {
+        name,
+        used_pct: w["used_percent"].as_f64()?.clamp(0.0, 100.0) as f32,
+        resets_at: resets_at.or(resets_in),
+        observed_at,
+    })
+}
+
+/// Unix millis of a UTC timestamp like `2026-10-28T19:41:03.790Z`.
+fn utc_ms(s: &str) -> Option<u64> {
+    let (date, time) = s.strip_suffix('Z')?.split_once('T')?;
+    let (hms, frac) = time.split_once('.').unwrap_or((time, ""));
+    let num = |p: &str| p.parse::<i64>().ok();
+    let d: Vec<i64> = date.split('-').map(num).collect::<Option<_>>()?;
+    let t: Vec<i64> = hms.split(':').map(num).collect::<Option<_>>()?;
+    let (&[y, m, day], &[h, mi, sec]) = (&d[..], &t[..]) else {
+        return None;
+    };
+    let ms: String = frac.chars().chain("000".chars()).take(3).collect();
+    // Days since 1970-01-01 of a proleptic Gregorian date (Hinnant's days_from_civil).
+    let y = if m <= 2 { y - 1 } else { y };
+    let (era, yoe) = (y.div_euclid(400), y.rem_euclid(400));
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + day - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    let secs = ((days * 24 + h) * 60 + mi) * 60 + sec;
+    u64::try_from(secs * 1000 + num(&ms)?).ok()
+}
+
+/// Bytes read from the end of a rollout: most tails hold a `token_count` within
+/// the first size; a run of big tool outputs can push it further back.
+const TAIL_BYTES: [u64; 2] = [64 * 1024, 1024 * 1024];
+
+/// The most recently written `rollout-*.jsonl` under `sessions/YYYY/MM/DD`, from
+/// the newest two days (a session that crosses midnight stays in its first day's dir).
+fn newest_rollout(sessions: &Path) -> Option<PathBuf> {
+    let newest_first = |dir: &Path| {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| Some(e.ok()?.path()))
+            .collect();
+        v.sort_unstable_by(|a, b| b.cmp(a));
+        v
+    };
+    let days = newest_first(sessions)
+        .into_iter()
+        .filter(|p| p.is_dir())
+        .flat_map(|y| newest_first(&y).into_iter().filter(|p| p.is_dir()))
+        .flat_map(|m| newest_first(&m).into_iter().filter(|p| p.is_dir()))
+        .take(2);
+    days.flat_map(|d| newest_first(&d))
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            name.starts_with("rollout-") && name.ends_with(".jsonl")
+        })
+        .filter_map(|p| Some((p.metadata().ok()?.modified().ok()?, p)))
+        .max()
+        .map(|(_, p)| p)
+}
+
+/// `CODEX_HOME`, default `~/.codex`.
+fn codex_home() -> Result<PathBuf, String> {
+    std::env::var_os("CODEX_HOME")
+        .map_or_else(|| crate::home().map(|h| h.join(".codex")), |d| Ok(d.into()))
 }
 
 /// `-c` overrides offering `url` as MCP server `MCP_SERVER`, its bearer token read
@@ -149,9 +254,7 @@ impl Agent for CodexAgent {
     }
 
     fn models(&self) -> Vec<String> {
-        let dir = std::env::var_os("CODEX_HOME")
-            .map_or_else(|| crate::home().map(|h| h.join(".codex")), |d| Ok(d.into()));
-        let models = dir.and_then(|dir| {
+        let models = codex_home().and_then(|dir| {
             // No config just means no default to put first.
             let config = dir.join("config.toml");
             let config = match std::fs::read_to_string(&config) {
@@ -164,6 +267,30 @@ impl Agent for CodexAgent {
             tracing::warn!("{e}; codex will run its default model");
             vec![]
         })
+    }
+
+    /// From the newest session rollout, so interactive sessions on this account
+    /// count too.
+    fn limits(&self) -> Option<Vec<LimitWindow>> {
+        let path = newest_rollout(&codex_home().ok()?.join("sessions"))?;
+        let mut f = std::fs::File::open(&path).ok()?;
+        let meta = f.metadata().ok()?;
+        let mtime = meta
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        for size in TAIL_BYTES {
+            f.seek(SeekFrom::Start(meta.len().saturating_sub(size)))
+                .ok()?;
+            let mut tail = Vec::new();
+            f.read_to_end(&mut tail).ok()?;
+            let found = rollout_limits(&String::from_utf8_lossy(&tail), mtime.as_millis() as u64);
+            if found.is_some() || meta.len() <= size {
+                return found;
+            }
+        }
+        None
     }
 
     fn run<'a>(
@@ -229,6 +356,113 @@ impl Agent for CodexAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Shaped like a live rollout tail: a cut first line, `token_count` with the
+    /// `rate_limits` seen on this account (credits and usage numbers zeroed),
+    /// then a later event.
+    const ROLLOUT_TAIL: &str = concat!(
+        r#"put":"cut mid-line"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-10-28T19:41:03.790Z","ordinal":41,"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":100.0,"window_minutes":300,"resets_at":1793219109},"secondary":{"used_percent":16.0,"window_minutes":10080,"resets_at":1793805909},"credits":{"has_credits":true,"unlimited":false,"balance":"0"},"individual_limit":null,"spend_control_reached":null,"plan_type":"plus","rate_limit_reached_type":null}}}"#,
+        "\n",
+        r#"{"timestamp":"2026-10-28T19:41:04.002Z","ordinal":42,"type":"event_msg","payload":{"type":"agent_message","message":"done"}}"#,
+        "\n",
+    );
+
+    #[test]
+    fn rollout_limits_take_the_last_token_count() {
+        let w = |name: &str, used_pct, resets_at, observed_at| LimitWindow {
+            name: name.into(),
+            used_pct,
+            resets_at,
+            observed_at,
+        };
+        // Observed when the event was written, not when the file last changed.
+        const AT: u64 = 1_793_216_463_790;
+        assert_eq!(
+            rollout_limits(ROLLOUT_TAIL, 7),
+            Some(vec![
+                w("5h", 100.0, Some(1_793_219_109_000), AT),
+                w("7d", 16.0, Some(1_793_805_909_000), AT)
+            ])
+        );
+        // A later reading wins; other window lengths are named in minutes; a window
+        // without a percentage is skipped; no timestamp falls back.
+        let later = r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":3.5,"window_minutes":90},"secondary":{"window_minutes":10080}}}}"#;
+        assert_eq!(
+            rollout_limits(&format!("{ROLLOUT_TAIL}{later}\n"), 7),
+            Some(vec![w("90m", 3.5, None, 7)])
+        );
+        // Older codex: seconds until the reset.
+        let old = r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":50,"window_minutes":300,"resets_in_seconds":60}}}}"#;
+        assert_eq!(
+            rollout_limits(old, 7),
+            Some(vec![w("5h", 50.0, Some(60_007), 7)])
+        );
+        // No usable window (`rate_limits: null`, or windows null) is no reading:
+        // the one before it counts; nothing at all is None.
+        let empty = r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":null}}}"#;
+        assert_eq!(
+            rollout_limits(&format!("{ROLLOUT_TAIL}{empty}"), 7)
+                .unwrap()
+                .len(),
+            2
+        );
+        let null = r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":null}}"#;
+        assert_eq!(
+            rollout_limits(&format!("{ROLLOUT_TAIL}{null}"), 7)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(rollout_limits(null, 7), None);
+        assert_eq!(rollout_limits("", 7), None);
+    }
+
+    #[test]
+    fn utc_timestamps_parse_to_unix_ms() {
+        assert_eq!(utc_ms("2026-10-28T19:41:03.790Z"), Some(1_793_216_463_790));
+        assert_eq!(utc_ms("2000-02-29T00:00:00Z"), Some(951_782_400_000));
+        assert_eq!(
+            utc_ms("2026-10-28T19:41:03.7901234Z"),
+            Some(1_793_216_463_790)
+        );
+        for bad in [
+            "",
+            "2026-10-28 19:41:03Z",
+            "2026-10-28T19:41:03+00:00",
+            "2026-10-28T19:41Z",
+            "x-y-zTa:b:cZ",
+            "2026-10-28T19:41:03.éZ",
+        ] {
+            assert_eq!(utc_ms(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn newest_rollout_is_the_latest_write_in_the_last_two_days() {
+        let root = std::env::temp_dir().join(format!("mis-rollouts-{}", std::process::id()));
+        // Each file written a minute after the last, whatever the filesystem's clock resolution.
+        let t0 = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let n = std::cell::Cell::new(0);
+        let write = |rel: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let f = std::fs::File::create(&p).unwrap();
+            n.set(n.get() + 1);
+            f.set_modified(t0 + std::time::Duration::from_secs(60 * n.get()))
+                .unwrap();
+            p
+        };
+        assert_eq!(newest_rollout(&root), None);
+        write("2026/10/26/rollout-old.jsonl");
+        write("2026/10/28/rollout-today.jsonl");
+        // Written last, but in yesterday's dir: a session still running past midnight.
+        let still = write("2026/10/27/rollout-yesterday.jsonl");
+        write("2026/10/28/notes.txt");
+        assert_eq!(newest_rollout(&root), Some(still));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn parses_probe_output() {

@@ -587,7 +587,8 @@ impl Ledger {
     }
 
     /// Heartbeat from `conn`: store the stats, stamped `unix_secs` for clients.
-    /// Ignored unless `conn` is live.
+    /// Ignored unless `conn` is live. New usage-limit readings go out in a
+    /// Status at once; load figures wait for the next one.
     pub fn worker_stats(
         &mut self,
         wid: WorkerId,
@@ -595,10 +596,17 @@ impl Ledger {
         stats: WorkerStats,
         now: Duration,
         unix_secs: u64,
-    ) {
-        if let Some(w) = self.workers.get_mut(&wid).filter(|w| w.conn == Some(conn)) {
-            w.stats = Some((stats, unix_secs));
-            w.last_seen = now;
+    ) -> Vec<Effect> {
+        let Some(w) = self.workers.get_mut(&wid).filter(|w| w.conn == Some(conn)) else {
+            return vec![];
+        };
+        let changed = w.stats.take().map(|(s, _)| s.limits).unwrap_or_default() != stats.limits;
+        w.stats = Some((stats, unix_secs));
+        w.last_seen = now;
+        if changed {
+            vec![Effect::Broadcast(self.status())]
+        } else {
+            vec![]
         }
     }
 
@@ -851,6 +859,58 @@ mod tests {
         // A stale connection's stats are ignored.
         l.worker_stats(wid, 9, stats(1), secs(11), 0);
         assert_eq!(summary(&l, wid).stats, Some(stats(64)));
+    }
+
+    #[test]
+    fn new_limit_readings_are_broadcast_load_alone_is_not() {
+        let mut l = Ledger::default();
+        let wid = Uuid::new_v4();
+        l.connect(wid, info(), &[], 1, T0);
+        let window = |used_pct, observed_at| LimitWindow {
+            name: "5h".into(),
+            used_pct,
+            resets_at: None,
+            observed_at,
+        };
+        let with = |w: Vec<LimitWindow>| WorkerStats {
+            limits: [("claude".to_string(), w)].into(),
+            ..stats(5)
+        };
+        let broadcasts = |e: Vec<Effect>| {
+            e.iter()
+                .filter(|e| matches!(e, Effect::Broadcast(_)))
+                .count()
+        };
+        assert_eq!(broadcasts(l.worker_stats(wid, 1, stats(5), secs(1), 0)), 0);
+        assert_eq!(
+            broadcasts(l.worker_stats(wid, 1, with(vec![window(10.0, 1)]), secs(2), 0)),
+            1
+        );
+        // Same reading again, other load: nothing new to show.
+        assert_eq!(
+            broadcasts(l.worker_stats(
+                wid,
+                1,
+                WorkerStats {
+                    cpu_pct: 90,
+                    ..with(vec![window(10.0, 1)])
+                },
+                secs(3),
+                0
+            )),
+            0
+        );
+        assert_eq!(
+            broadcasts(l.worker_stats(wid, 1, with(vec![window(12.0, 2)]), secs(4), 0)),
+            1
+        );
+        let ServerMsg::Status { workers, .. } = l.status() else {
+            unreachable!()
+        };
+        assert_eq!(
+            workers[0].stats.as_ref().unwrap().limits["claude"][0].used_pct,
+            12.0
+        );
     }
 
     #[test]

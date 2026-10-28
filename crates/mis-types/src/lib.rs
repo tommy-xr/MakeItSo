@@ -31,6 +31,45 @@ pub struct WorkerStats {
     pub disk_used_pct: u8,
     pub cpu_pct: u8,
     pub mem_pct: u8,
+    /// Usage-limit windows per harness (e.g. "claude"), latest reading each.
+    #[serde(default)]
+    pub limits: BTreeMap<String, Vec<LimitWindow>>,
+}
+
+/// One usage-limit window of the account a harness runs as, e.g. claude's 5-hour window.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LimitWindow {
+    /// `5h`, `7d`, or `<n>m` for other lengths.
+    pub name: String,
+    /// 0-100.
+    pub used_pct: f32,
+    /// Unix millis when the window resets, if known.
+    #[serde(default)]
+    pub resets_at: Option<u64>,
+    /// Unix millis when this reading was taken.
+    pub observed_at: u64,
+}
+
+/// A limit reading older than this says little about the account now.
+pub const LIMIT_STALE_MS: u64 = 6 * 3600 * 1000;
+
+impl LimitWindow {
+    /// Too old to trust, or its window has reset since.
+    pub fn stale(&self, now_ms: u64) -> bool {
+        now_ms.saturating_sub(self.observed_at) > LIMIT_STALE_MS
+            || self.resets_at.is_some_and(|r| r <= now_ms)
+    }
+}
+
+/// Fold `new` readings into `have`: one window per name, the latest reading wins.
+pub fn merge_limits(have: &mut Vec<LimitWindow>, new: Vec<LimitWindow>) {
+    for w in new {
+        match have.iter_mut().find(|h| h.name == w.name) {
+            Some(h) if h.observed_at <= w.observed_at => *h = w,
+            Some(_) => {}
+            None => have.push(w),
+        }
+    }
 }
 
 /// Reported by a worker on connect; the orchestrator keeps these as its ledger.
@@ -113,6 +152,11 @@ pub enum AgentEvent {
     Limited {
         #[serde(default)]
         resets_at: Option<u64>,
+    },
+    /// Usage-limit windows the harness reported. The worker stamps `observed_at`
+    /// and folds them into its `WorkerStats.limits`; they never leave the worker.
+    Limits {
+        windows: Vec<LimitWindow>,
     },
     /// Tokens used so far this run: cumulative, so each replaces the last.
     /// `input` includes cached prompt tokens. Sent before `Finished`.
@@ -423,6 +467,16 @@ mod tests {
                 disk_used_pct: 38,
                 cpu_pct: 64,
                 mem_pct: 82,
+                limits: [(
+                    "claude".into(),
+                    vec![LimitWindow {
+                        name: "5h".into(),
+                        used_pct: 12.5,
+                        resets_at: Some(1_793_223_000_000),
+                        observed_at: 1_793_200_000_000,
+                    }],
+                )]
+                .into(),
             }),
         ];
         for m in msgs {
@@ -453,6 +507,47 @@ mod tests {
         assert_eq!((old.started_at, old.tokens_in), (None, None));
         assert!(old.activity.is_empty() && old.links.is_empty());
         assert_eq!(old.attention, Attention::None);
+        // Stats from workers predating limits have none; a window may lack its reset.
+        let s: WorkerStats = serde_json::from_str(r#"{"cpu_pct":7,"disk_used_pct":1}"#).unwrap();
+        assert!(s.limits.is_empty());
+        let w: LimitWindow =
+            serde_json::from_str(r#"{"name":"7d","used_pct":3,"observed_at":5}"#).unwrap();
+        assert_eq!(w.resets_at, None);
+    }
+
+    fn window(name: &str, used_pct: f32, resets_at: Option<u64>, observed_at: u64) -> LimitWindow {
+        LimitWindow {
+            name: name.into(),
+            used_pct,
+            resets_at,
+            observed_at,
+        }
+    }
+
+    #[test]
+    fn limit_readings_go_stale_with_age_or_a_reset() {
+        let w = window("5h", 50.0, Some(10_000), 1_000);
+        assert!(!w.stale(9_999));
+        assert!(w.stale(10_000), "window has reset");
+        let w = window("7d", 50.0, None, 1_000);
+        assert!(!w.stale(1_000 + LIMIT_STALE_MS));
+        assert!(w.stale(1_001 + LIMIT_STALE_MS), "too old");
+        assert!(!w.stale(0), "a clock behind the reading isn't stale");
+    }
+
+    #[test]
+    fn merge_keeps_the_latest_reading_per_window() {
+        let mut have = vec![window("5h", 10.0, None, 100), window("7d", 40.0, None, 100)];
+        merge_limits(
+            &mut have,
+            vec![
+                window("5h", 20.0, None, 200),
+                window("7d", 99.0, None, 50),
+                window("90m", 1.0, None, 200),
+            ],
+        );
+        let got: Vec<_> = have.iter().map(|w| (w.name.as_str(), w.used_pct)).collect();
+        assert_eq!(got, [("5h", 20.0), ("7d", 40.0), ("90m", 1.0)]);
     }
 
     fn task(status: TaskStatus, started_at: u64, activity: &str) -> TaskSummary {

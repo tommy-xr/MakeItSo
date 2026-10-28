@@ -1,7 +1,7 @@
 //! Claude Code backend: `claude -p <prompt> --output-format stream-json --verbose`.
 
 use anyhow::Context;
-use mis_types::{AgentEvent, TaskId, TASK_ENV};
+use mis_types::{AgentEvent, LimitWindow, TaskId, TASK_ENV};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -171,12 +171,15 @@ fn events(v: &Value, hidden: &mut HashSet<String>) -> Vec<AgentEvent> {
         // `allowed` / `allowed_warning` still run; anything else (e.g. `rejected`) is a hit limit.
         Some("rate_limit_event") => {
             let info = &v["rate_limit_info"];
-            match info["status"].as_str() {
-                Some(s) if !s.starts_with("allowed") => vec![AgentEvent::Limited {
+            let windows = windows(info);
+            let limits = (!windows.is_empty()).then_some(AgentEvent::Limits { windows });
+            let limited = match info["status"].as_str() {
+                Some(s) if !s.starts_with("allowed") => Some(AgentEvent::Limited {
                     resets_at: info["resetsAt"].as_u64(),
-                }],
-                _ => vec![],
-            }
+                }),
+                _ => None,
+            };
+            limits.into_iter().chain(limited).collect()
         }
         Some("result") => vec![AgentEvent::Finished {
             ok: v["is_error"] != true && v["subtype"].as_str().is_none_or(|s| s == "success"),
@@ -184,6 +187,23 @@ fn events(v: &Value, hidden: &mut HashSet<String>) -> Vec<AgentEvent> {
         }],
         _ => vec![],
     }
+}
+
+/// `unifiedWindows.{five_hour,seven_day}` of a `rate_limit_info`, skipping any
+/// without a utilization (0-1). `observed_at` is 0: the worker stamps it.
+fn windows(info: &Value) -> Vec<LimitWindow> {
+    [("five_hour", "5h"), ("seven_day", "7d")]
+        .into_iter()
+        .filter_map(|(key, name)| {
+            let w = &info["unifiedWindows"][key];
+            Some(LimitWindow {
+                name: name.into(),
+                used_pct: (w["utilization"].as_f64()? * 100.0).clamp(0.0, 100.0) as f32,
+                resets_at: w["resetsAt"].as_u64().map(|s| s * 1000),
+                observed_at: 0,
+            })
+        })
+        .collect()
 }
 
 fn blocks(v: &Value) -> impl Iterator<Item = &Value> {
@@ -370,6 +390,47 @@ mod tests {
             }]
         );
         assert!(parse_line("not json").is_empty());
+    }
+
+    /// From a live `claude -p` run (ids zeroed).
+    const RATE_LIMIT_LINE: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1793223000,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.43,"resetsAt":1793223000,"status":"allowed"},"seven_day":{"utilization":0.62,"resetsAt":1793444400,"status":"allowed"}}},"uuid":"00000000-0000-0000-0000-000000000000","session_id":"00000000-0000-0000-0000-000000000000"}"#;
+
+    #[test]
+    fn rate_limit_windows_are_reported() {
+        let w = |name: &str, used_pct, resets_at| LimitWindow {
+            name: name.into(),
+            used_pct,
+            resets_at,
+            observed_at: 0,
+        };
+        assert_eq!(
+            parse_line(RATE_LIMIT_LINE),
+            vec![AgentEvent::Limits {
+                windows: vec![
+                    w("5h", 43.0, Some(1_793_223_000_000)),
+                    w("7d", 62.0, Some(1_793_444_400_000))
+                ]
+            }]
+        );
+        // Rejected: the windows, then the hit limit.
+        let rejected =
+            RATE_LIMIT_LINE.replacen(r#""status":"allowed""#, r#""status":"rejected""#, 1);
+        let got = parse_line(&rejected);
+        assert!(matches!(got[0], AgentEvent::Limits { .. }));
+        assert_eq!(
+            got[1],
+            AgentEvent::Limited {
+                resets_at: Some(1793223000)
+            }
+        );
+        // A window without utilization is skipped; one without a reset keeps None.
+        let partial = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","unifiedWindows":{"five_hour":{"status":"allowed"},"seven_day":{"utilization":1.2}}}}"#;
+        assert_eq!(
+            parse_line(partial),
+            vec![AgentEvent::Limits {
+                windows: vec![w("7d", 100.0, None)]
+            }]
+        );
     }
 
     #[test]

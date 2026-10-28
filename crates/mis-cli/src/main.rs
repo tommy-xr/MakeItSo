@@ -348,6 +348,8 @@ fn print_event(task: TaskId, event: &AgentEvent) {
         AgentEvent::Status { text } => println!("[{short}] status: {text}"),
         AgentEvent::Evidence(l) => println!("[{short}] evidence: {}", l.line()),
         AgentEvent::Limited { .. } => println!("[{short}] usage limit hit"),
+        // Kept by the worker, never forwarded.
+        AgentEvent::Limits { .. } => {}
         // Running totals; `mis status` shows the latest.
         AgentEvent::Usage { .. } => {}
         AgentEvent::Finished { ok, summary } => {
@@ -789,6 +791,7 @@ mod tests {
             disk_used_pct: 38,
             cpu_pct: 64,
             mem_pct: 82,
+            ..Default::default()
         };
         assert_eq!(stats_text(Some(&s)), "disk 38% cpu 64% mem 82%");
     }

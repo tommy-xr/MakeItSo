@@ -9,7 +9,7 @@ mod stats;
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -104,6 +104,7 @@ async fn main() -> Result<()> {
     let ctx = Ctx {
         agents: Arc::new(agents),
         roots: Arc::new(roots),
+        limits: Default::default(),
     };
     // Events from in-flight tasks queue here while disconnected. Delivery is best
     // effort: an event already written to a socket that then dies is not resent.
@@ -143,11 +144,36 @@ fn advertised(
         .collect()
 }
 
-/// What a task needs from the worker: harnesses and allowed directories.
+/// What a task needs from the worker: harnesses and allowed directories, and
+/// where its runs leave usage-limit readings for the stats beat.
 #[derive(Clone)]
 struct Ctx {
     agents: Arc<Vec<Box<dyn Agent>>>,
     roots: Arc<Vec<PathBuf>>,
+    /// Latest limit windows per harness, from runs and polling.
+    limits: Arc<Mutex<BTreeMap<String, Vec<LimitWindow>>>>,
+}
+
+impl Ctx {
+    fn add_limits(&self, harness: &str, windows: Vec<LimitWindow>) {
+        let mut all = self.limits.lock().unwrap();
+        merge_limits(all.entry(harness.to_string()).or_default(), windows);
+    }
+
+    /// Poll the harnesses that keep their own readings, then every harness's windows.
+    fn poll_limits(&self) -> BTreeMap<String, Vec<LimitWindow>> {
+        for a in self.agents.iter() {
+            if let Some(w) = a.limits() {
+                self.add_limits(a.name(), w);
+            }
+        }
+        self.limits.lock().unwrap().clone()
+    }
+}
+
+fn unix_ms() -> u64 {
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+    since.map_or(0, |d| d.as_millis() as u64)
 }
 
 /// State that outlives a single connection.
@@ -202,7 +228,12 @@ async fn session(
                 }
                 _ = beat.tick() => {
                     let t = std::time::Instant::now();
-                    let s = c.sampler.sample();
+                    let mut s = c.sampler.sample();
+                    // File reads: off the runtime's threads.
+                    let poll = ctx.clone();
+                    s.limits = tokio::task::spawn_blocking(move || poll.poll_limits())
+                        .await
+                        .unwrap_or_default();
                     tracing::debug!(?s, took = ?t.elapsed(), "sending stats");
                     sink.send(text(&WorkerMsg::Stats(s))).await?;
                     continue;
@@ -299,6 +330,13 @@ async fn run_task(ctx: &Ctx, task: Task, tx: mpsc::Sender<(TaskId, AgentEvent)>)
     let (atx, mut arx) = mpsc::channel(64);
     let fwd = async {
         while let Some(ev) = arx.recv().await {
+            // Limit readings go into the stats beat, not the transcript.
+            if let AgentEvent::Limits { mut windows } = ev {
+                let now = unix_ms();
+                windows.iter_mut().for_each(|w| w.observed_at = now);
+                ctx.add_limits(agent.name(), windows);
+                continue;
+            }
             if tx.send((id, ev)).await.is_err() {
                 break;
             }
