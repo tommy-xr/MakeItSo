@@ -194,6 +194,8 @@ mod tests {
             tokens_in: None,
             tokens_out: None,
             activity: activity.into(),
+            parent: None,
+            links: vec![],
         }
     }
 
