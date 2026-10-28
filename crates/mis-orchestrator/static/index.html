@@ -98,7 +98,7 @@
   .mic[data-mic=live] { background: var(--warn); border-color: var(--warn); color: var(--bg); box-shadow: 0 0 12px var(--warn); }
   form.listening textarea { border-color: var(--accent); box-shadow: 0 0 10px var(--glow); }
   /* Recording bar in Submit's box, so nothing moves under the finger: ✕, a pulse running along a row of dots, the label. */
-  .row .recbar { flex: 1; display: flex; align-items: center; gap: .5rem; min-width: 0; box-sizing: border-box; height: 2.75rem; padding-right: .5rem; border: 1px solid var(--accent); }
+  .row .recbar { flex: 1; display: flex; align-items: center; gap: .5rem; min-width: 0; box-sizing: border-box; height: 2.75rem; padding-right: .5rem; border: 1px solid var(--accent); background: var(--field); }
   .row .recbar .x { flex: none; width: 2.75rem; height: 100%; min-height: 0; padding: 0; border: 0; color: var(--dim); font: 1.1rem/1 var(--mono); }
   .recbar .dots { flex: 1; min-width: 0; display: flex; justify-content: space-between; align-items: center; padding: 0 .25rem; overflow: hidden; }
   .recbar .dots i { width: .375rem; height: .375rem; border-radius: 50%; background: var(--accent); opacity: .25; animation: pulse 1.4s ease-in-out infinite; animation-delay: calc(var(--i) * 90ms); }
@@ -378,10 +378,10 @@ function micShow(s) {
   s.btn.setAttribute('aria-label', !on ? 'Start dictation' : s.live ? 'Send dictation' : 'Starting dictation');
   s.form.classList.toggle('listening', on && s.live);
   const bar = s.form.querySelector('.recbar');
+  s.form.querySelector('button:not([type=button])').hidden = on;
   if (on && bar.hidden) { bar.hidden = false; fillDots(bar); }
   bar.hidden = !on;
   bar.dataset.say = barSay(s);
-  s.form.querySelector('button:not([type=button])').hidden = on;
   renderStrip();
 }
 // One dot per ~14 px; each pulse starts a beat after its left neighbour's, so it travels left to right.
