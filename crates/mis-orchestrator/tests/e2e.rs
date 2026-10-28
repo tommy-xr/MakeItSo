@@ -1201,6 +1201,8 @@ async fn pr_link_in_agent_text_reaches_status_and_show() {
         kind: LinkKind::Pr,
         url: "https://github.com/o/r/pull/42".into(),
         label: "o/r#42".into(),
+        ok: None,
+        detail: None,
     }];
     send(&mut client, &ClientMsg::Status).await;
     let ServerMsg::Status { tasks, .. } = recv(&mut client).await else {
@@ -1212,6 +1214,53 @@ async fn pr_link_in_agent_text_reaches_status_and_show() {
         panic!()
     };
     assert_eq!(info.links, want);
+}
+
+#[tokio::test]
+async fn reported_evidence_reaches_status_and_show() {
+    let base = start().await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    send(&mut client, &ClientMsg::Subscribe).await;
+    let mut worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+    send(
+        &mut client,
+        &ClientMsg::Submit {
+            prompt: "run the tests".into(),
+            cwd: None,
+            harness: Some("claude".into()),
+            model: None,
+            reply_to: None,
+        },
+    )
+    .await;
+    let ServerMsg::Submitted { task } = recv(&mut client).await else {
+        panic!()
+    };
+    let OrchMsg::Assign { .. } = recv(&mut worker).await else {
+        panic!()
+    };
+    let test = Link {
+        kind: LinkKind::Test,
+        url: String::new(),
+        label: "cargo test".into(),
+        ok: Some(true),
+        detail: Some("78 passed".into()),
+    };
+    let event = AgentEvent::Evidence(test.clone());
+    send(&mut worker, &WorkerMsg::Event { task, event }).await;
+    let ServerMsg::Event { .. } = recv(&mut client).await else {
+        panic!()
+    };
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { tasks, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    assert_eq!(tasks[0].links, std::slice::from_ref(&test));
+    send(&mut client, &ClientMsg::Show { task }).await;
+    let ServerMsg::TaskDetail { task: info, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    assert_eq!(info.links, [test]);
 }
 
 /// POST a JSON-RPC body to `/mcp`; returns (status line, JSON body if any).

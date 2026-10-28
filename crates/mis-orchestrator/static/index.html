@@ -106,13 +106,16 @@
   .bad { color: var(--bad); }
   .back { display: inline-flex; align-items: center; min-height: 2.75rem; padding: 0 1rem; border: 1px solid var(--line); text-decoration: none; }
   #answer { margin: 1.5rem 0 1rem; }
-  /* Evidence: one row per link, kind column aligned, chevron opens it on GitHub. */
+  /* Evidence: one row per item; kind, text, verdict (tests), chevron (links) in aligned columns. */
   #evidence { margin: 0 0 1rem; }
   #evidence h3 { margin: 0 0 .25rem; }
   .evl li:last-child { border-bottom: 1px solid var(--rule); }
-  .evl a { display: grid; grid-template-columns: 4rem minmax(0, 1fr) 1rem; gap: .5rem; align-items: center; min-height: 2.75rem; padding: 0; }
+  .evl li > * { display: grid; grid-template-columns: 4rem minmax(0, 1fr) 1rem 1rem; gap: .5rem; align-items: center; min-height: 2.75rem; padding: 0; }
   .evl .k { font: 600 .6875rem/1 var(--display); letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
   .evl .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* A row that can't be opened shows all of its text. */
+  .evl div .t { white-space: normal; overflow-wrap: anywhere; padding: .5rem 0; }
+  .evl .v.ok { color: var(--ok); }
   .evl .go { color: var(--accent); text-align: right; }
   .meta { margin: .25rem 0; }
   dl { display: grid; grid-template-columns: auto 1fr; gap: .25rem 1rem; margin: 1rem 0; }
@@ -239,6 +242,7 @@ function eventLine(e) {
     case 'tool_use': return `> ${e.name} ${JSON.stringify(e.input)}`;
     case 'tool_result': return `< ${(e.content || '').split(/\r?\n/)[0]}`;
     case 'status': return `status: ${e.text}`;
+    case 'evidence': return `evidence: ${[`${e.label}${verdict(e.ok)}`, e.detail, e.url].filter(Boolean).join(' ')}`;
     case 'finished': return `${e.ok ? 'done' : 'FAILED'} ${e.summary || ''}`;
     default: return `[${e.type}] ${JSON.stringify(e)}`;
   }
@@ -449,32 +453,46 @@ function taskRows(ul, list) {
 
 function renderList() { taskRows($('tasks'), tasks); }
 
-const KIND = { pr: 'PR', commit: 'commit', ci_run: 'CI', issue: 'issue' };
-// Label split into repo and the part that names the item: `o/r#42` -> [`o/r`, `#42`],
-// `o/r@abc1234` -> [`o/r`, `abc1234`], `o/r run 123` -> [`o/r`, `run 123`].
-function labelParts(l) {
-  const m = l.label.match(/^(\S+?)([#@ ])(.*)$/);
-  return m ? [m[1], m[2] === '#' ? `#${m[3]}` : m[3]] : ['', l.label];
+const KIND = { pr: 'PR', commit: 'commit', ci_run: 'CI', issue: 'issue', url: 'link', test: 'test', note: 'note' };
+const GITHUB = ['pr', 'commit', 'ci_run', 'issue'];
+const verdict = (ok) => (ok === true ? ' ✓' : ok === false ? ' ✗' : '');
+// Only https URLs become anchors: GitHub ones, or any host for a link the agent reported. Notes never link.
+function safeUrl(l) {
+  if (l.kind === 'note') return null;
+  try { const u = new URL(l.url); return u.protocol === 'https:' && (u.host === 'github.com' || l.kind === 'url') ? u : null; } catch { return null; }
 }
-// `PR #42`, `commit abc1234`, `CI run 123`.
-const brief = (l) => `${KIND[l.kind] || l.kind} ${labelParts(l)[1]}`;
-// List rows name the latest PR (else the latest link), and how many more there are.
+// A row's text and its dim aside. GitHub labels put the item first, so a narrow row
+// cuts the repo, not the number: `o/r#42` -> [`#42`, `o/r`], `o/r@abc1234` ->
+// [`abc1234`, `o/r`], `o/r run 123` -> [`run 123`, `o/r`]. Links add their host, tests their detail.
+function parts(l) {
+  const m = GITHUB.includes(l.kind) && l.label.match(/^(\S+?)([#@ ])(.*)$/);
+  if (m) return [m[2] === '#' ? `#${m[3]}` : m[3], m[1]];
+  if (l.kind === 'url') return [l.label, safeUrl(l)?.host || ''];
+  return [l.label, l.kind === 'test' ? l.detail || '' : ''];
+}
+// `PR #42`, `commit abc1234`, `CI run 123`, `link example.com`.
+const brief = (l) => `${KIND[l.kind] || l.kind} ${l.kind === 'url' ? parts(l)[1] : parts(l)[0]}`;
+// List rows name the latest PR (else the latest link), and how many more items there are.
 function linksBrief(t) {
   const links = t.links || [];
   if (!links.length) return '';
-  const lead = links.findLast((l) => l.kind === 'pr') || links[links.length - 1];
+  const lead = links.findLast((l) => l.kind === 'pr') || links.findLast((l) => l.url);
+  if (!lead) return `${links.length} reported`;
   return links.length > 1 ? `${brief(lead)} +${links.length - 1}` : brief(lead);
 }
-// Only https GitHub URLs become anchors; anything else is dropped.
-function githubUrl(u) {
-  try { const url = new URL(u); return url.protocol === 'https:' && url.host === 'github.com' ? url.href : null; } catch { return null; }
-}
 function renderEvidence(t) {
-  const rows = ((t && t.links) || []).map((l) => [l, githubUrl(l.url)]).filter(([, href]) => href)
-    .map(([l, href]) => el('li', {}, el('a', { href, target: '_blank', rel: 'noopener' },
-      // The item first, so a narrow row cuts the repo, not the number.
-      el('span', { className: 'k' }, KIND[l.kind] || l.kind), el('span', { className: 't' }, labelParts(l)[1], ' ', el('span', { className: 'dim' }, labelParts(l)[0])),
-      el('span', { className: 'go' }, '›'))));
+  const rows = ((t && t.links) || []).flatMap((l) => {
+    const url = safeUrl(l);
+    // A link that can't be opened is dropped; tests and notes stand on their own.
+    if (!url && !['test', 'note'].includes(l.kind)) return [];
+    const [text, aside] = parts(l);
+    const v = verdict(l.ok).trim();
+    const cells = [el('span', { className: 'k' }, KIND[l.kind] || l.kind),
+      el('span', { className: 't' }, text, ' ', el('span', { className: 'dim' }, aside)),
+      el('span', { className: l.ok === true ? 'v ok' : l.ok === false ? 'v bad' : 'v' }, v),
+      el('span', { className: 'go' }, url ? '›' : '')];
+    return [el('li', {}, url ? el('a', { href: url.href, target: '_blank', rel: 'noopener' }, ...cells) : el('div', {}, ...cells))];
+  });
   $('evidence').querySelector('ul').replaceChildren(...rows);
   $('evidence').hidden = !rows.length;
 }

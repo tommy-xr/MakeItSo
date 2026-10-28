@@ -346,6 +346,7 @@ fn print_event(task: TaskId, event: &AgentEvent) {
             println!("[{short}] < {first}");
         }
         AgentEvent::Status { text } => println!("[{short}] status: {text}"),
+        AgentEvent::Evidence(l) => println!("[{short}] evidence: {}", l.line()),
         // Running totals; `mis status` shows the latest.
         AgentEvent::Usage { .. } => {}
         AgentEvent::Finished { ok, summary } => {

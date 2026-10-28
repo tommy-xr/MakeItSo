@@ -1,5 +1,6 @@
-//! GitHub links an agent mentions (PRs, commits, CI runs, issues), pulled out
-//! of free text so they outlive transcript eviction and summarization.
+//! Evidence of a task's work: GitHub links an agent mentions (PRs, commits, CI
+//! runs, issues), pulled out of free text so they outlive transcript eviction
+//! and summarization, and items it reports itself (links, test results, notes).
 
 use serde::{Deserialize, Serialize};
 
@@ -10,15 +11,48 @@ pub enum LinkKind {
     Commit,
     CiRun,
     Issue,
+    /// Any other https URL the agent reported, e.g. a deployed preview.
+    Url,
+    /// A check the agent reported running, e.g. `cargo test`.
+    Test,
+    /// Short free text the agent reported.
+    Note,
 }
 
+/// One evidence row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Link {
     pub kind: LinkKind,
-    /// Canonical: `https://github.com/o/r/pull/42`, whatever subpage was mentioned.
+    /// GitHub kinds are canonical: `https://github.com/o/r/pull/42`, whatever
+    /// subpage was mentioned. Empty for a note, or a test reported without one.
+    #[serde(default)]
     pub url: String,
-    /// `o/r#42`, `o/r@abc1234`, `o/r run 123`.
+    /// `o/r#42`, `o/r@abc1234`, `o/r run 123`; reported items: their title.
     pub label: String,
+    /// A test's verdict.
+    #[serde(default)]
+    pub ok: Option<bool>,
+    /// A test's result, e.g. `78 passed`.
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+impl Link {
+    /// One transcript line: `cargo test ✗ 3 failed`, `o/r#42 https://github.com/o/r/pull/42`.
+    pub fn line(&self) -> String {
+        let verdict = match self.ok {
+            Some(true) => " ✓",
+            Some(false) => " ✗",
+            None => "",
+        };
+        let label = format!("{}{verdict}", self.label);
+        let detail = self.detail.as_deref().unwrap_or("");
+        [label.as_str(), detail, &self.url]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
 }
 
 const PREFIX: &str = "https://github.com/";
@@ -48,28 +82,37 @@ pub fn github_links(text: &str) -> Vec<Link> {
     out
 }
 
+/// The GitHub PR, commit, CI run or issue `url` points into, canonicalized;
+/// None for any other URL.
+pub fn github_link(url: &str) -> Option<Link> {
+    url.strip_prefix(PREFIX).and_then(parse)
+}
+
 /// `owner/repo/<kind>/<id>…` right after `https://github.com/`.
 fn parse(rest: &str) -> Option<Link> {
     let mut seg = rest.split('/');
     let owner = seg.next().filter(|s| is_name(s, false))?;
     let repo = seg.next().filter(|s| is_name(s, true))?;
-    let (kind, id) = match seg.next()? {
-        "pull" => (LinkKind::Pr, number(seg.next()?)?),
-        "issues" => (LinkKind::Issue, number(seg.next()?)?),
-        "commit" => (LinkKind::Commit, sha(seg.next()?)?),
-        "actions" if seg.next()? == "runs" => (LinkKind::CiRun, number(seg.next()?)?),
+    let (kind, path, id) = match seg.next()? {
+        "pull" => (LinkKind::Pr, "pull", number(seg.next()?)?),
+        "issues" => (LinkKind::Issue, "issues", number(seg.next()?)?),
+        "commit" => (LinkKind::Commit, "commit", sha(seg.next()?)?),
+        "actions" if seg.next()? == "runs" => {
+            (LinkKind::CiRun, "actions/runs", number(seg.next()?)?)
+        }
         _ => return None,
     };
-    let (path, label) = match kind {
-        LinkKind::Pr => ("pull", format!("{owner}/{repo}#{id}")),
-        LinkKind::Issue => ("issues", format!("{owner}/{repo}#{id}")),
-        LinkKind::Commit => ("commit", format!("{owner}/{repo}@{}", &id[..7])),
-        LinkKind::CiRun => ("actions/runs", format!("{owner}/{repo} run {id}")),
+    let label = match kind {
+        LinkKind::Commit => format!("{owner}/{repo}@{}", &id[..7]),
+        LinkKind::CiRun => format!("{owner}/{repo} run {id}"),
+        _ => format!("{owner}/{repo}#{id}"),
     };
     Some(Link {
         kind,
         url: format!("{PREFIX}{owner}/{repo}/{path}/{id}"),
         label,
+        ok: None,
+        detail: None,
     })
 }
 
@@ -186,6 +229,37 @@ mod tests {
         ] {
             assert_eq!(urls(text), Vec::<String>::new(), "{text}");
         }
+    }
+
+    #[test]
+    fn github_link_classifies_only_github_urls() {
+        let pr = github_link("https://github.com/o/r/pull/42/files").unwrap();
+        assert_eq!((pr.kind, pr.label.as_str()), (LinkKind::Pr, "o/r#42"));
+        assert_eq!(pr.url, "https://github.com/o/r/pull/42");
+        for url in [
+            "https://github.com/o/r/tree/main",
+            "https://github.com.evil.io/o/r/pull/1",
+            "https://preview.example.com/pull/1",
+        ] {
+            assert_eq!(github_link(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn lines() {
+        let test = Link {
+            kind: LinkKind::Test,
+            url: String::new(),
+            label: "cargo test".into(),
+            ok: Some(false),
+            detail: Some("3 failed".into()),
+        };
+        assert_eq!(test.line(), "cargo test ✗ 3 failed");
+        let pr = github_link("https://github.com/o/r/pull/4").unwrap();
+        assert_eq!(pr.line(), "o/r#4 https://github.com/o/r/pull/4");
+        // Links stored before reported evidence existed still parse.
+        let old = r#"{"kind":"pr","url":"https://github.com/o/r/pull/4","label":"o/r#4"}"#;
+        assert_eq!(serde_json::from_str::<Link>(old).unwrap(), pr);
     }
 
     #[test]

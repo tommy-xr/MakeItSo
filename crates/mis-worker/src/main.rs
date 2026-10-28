@@ -287,7 +287,7 @@ async fn run_task(ctx: &Ctx, task: Task, tx: mpsc::Sender<(TaskId, AgentEvent)>)
             return;
         }
     };
-    // Without the server the task still runs, just without `report_status`.
+    // Without the server the task still runs, just without its reporting tools.
     let server = mcp::serve(id, tx.clone())
         .await
         .inspect_err(|e| tracing::warn!(%id, "no mcp server: {e}"))
