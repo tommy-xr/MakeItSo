@@ -525,6 +525,10 @@ impl Ledger {
                 t.tokens = Some((input, output));
                 vec![broadcast(AgentEvent::Usage { input, output })]
             }
+            AgentEvent::Limited { .. } => {
+                t.record(&event, now);
+                vec![broadcast(event)]
+            }
             _ => vec![],
         }
     }
@@ -1774,6 +1778,22 @@ mod tests {
         l.event(wid, 1, next, limited);
         finish(&mut l, wid, next, true);
         assert_eq!(attention_of(&l, next), Attention::Unread);
+    }
+
+    #[test]
+    fn planner_usage_limit_counts_too() {
+        let mut l = Ledger::default();
+        let (task, _) = l.submit("p".into(), None, None, None);
+        let limited = AgentEvent::Limited { resets_at: None };
+        assert_eq!(l.planning_event(task, limited.clone()).len(), 1);
+        assert_eq!(attention_of(&l, task), Attention::Limited);
+        let failed = AgentEvent::Finished {
+            ok: false,
+            summary: None,
+        };
+        l.planning_event(task, failed);
+        assert_eq!(attention_of(&l, task), Attention::Limited);
+        assert!(l.show(task).unwrap().1.contains(&limited));
     }
 
     #[test]
