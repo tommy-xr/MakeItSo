@@ -26,6 +26,7 @@ pub mod access;
 pub mod access_gate;
 pub mod ledger;
 pub mod plan;
+pub mod scope;
 pub mod summary;
 pub mod tools;
 
@@ -38,6 +39,7 @@ use access::Identity;
 use access_gate::{AccessGate, JWT_HEADER};
 use ledger::{ConnId, Effect, Ledger};
 use mis_agent::Agent;
+use scope::Scope;
 
 #[derive(Clone)]
 pub struct App {
@@ -46,6 +48,8 @@ pub struct App {
     next_conn: Arc<AtomicU64>,
     events: broadcast::Sender<ServerMsg>,
     token: Option<String>,
+    /// Tokens that may look (status, transcripts, MCP) but not act.
+    read_tokens: Vec<String>,
     /// Browser `Origin`s permitted to connect; requests without `Origin` are always let through.
     allowed_origins: Vec<String>,
     /// How long a disconnected worker may be gone before its tasks are failed.
@@ -80,6 +84,7 @@ impl App {
             next_conn: Default::default(),
             events: broadcast::channel(256).0,
             token,
+            read_tokens: Vec::new(),
             allowed_origins: Vec::new(),
             grace: Duration::from_secs(60),
             planner: None,
@@ -116,6 +121,12 @@ impl App {
     /// Override the client ping interval (tests use short values).
     pub fn with_ping_every(mut self, every: Duration) -> Self {
         self.ping_every = every;
+        self
+    }
+
+    /// Also accept these tokens, read-only. Only meaningful with a full token.
+    pub fn with_read_tokens(mut self, tokens: Vec<String>) -> Self {
+        self.read_tokens = tokens;
         self
     }
 
@@ -273,18 +284,28 @@ impl App {
         }
     }
 
-    /// Auth for a WebSocket upgrade; logs who Cloudflare Access let through.
-    async fn admit(&self, headers: &HeaderMap, peer: SocketAddr, path: &str) -> bool {
+    /// Auth for a request: None refuses it. Logs who Cloudflare Access let through.
+    async fn admit_scope(
+        &self,
+        headers: &HeaderMap,
+        peer: SocketAddr,
+        path: &str,
+    ) -> Option<Scope> {
         let access = self.access_check(headers).await;
-        let ok = self.authorized(headers, peer.ip(), &access);
-        if let (true, Access::Passed(id)) = (ok, &access) {
+        let scope = self.authorized(headers, peer.ip(), &access);
+        if let (Some(_), Access::Passed(id)) = (scope, &access) {
             tracing::info!(subject = %id.subject, "{path}: Cloudflare Access");
         }
-        ok
+        scope
     }
 
-    /// `peer` is the TCP peer.
-    fn authorized(&self, headers: &HeaderMap, peer: IpAddr, access: &Access) -> bool {
+    /// Admitted with any scope: enough for read-only routes (`/mcp`).
+    async fn admit(&self, headers: &HeaderMap, peer: SocketAddr, path: &str) -> bool {
+        self.admit_scope(headers, peer, path).await.is_some()
+    }
+
+    /// `peer` is the TCP peer. None: refused.
+    fn authorized(&self, headers: &HeaderMap, peer: IpAddr, access: &Access) -> Option<Scope> {
         let passed = matches!(access, Access::Passed(_));
         // Behind Access only direct local connections may skip it. cloudflared also
         // connects from loopback, but always adds Cloudflare's headers. (Any local
@@ -292,12 +313,12 @@ impl App {
         if matches!(access, Access::Failed)
             && (!peer.to_canonical().is_loopback() || via_cloudflare(headers))
         {
-            return false;
+            return None;
         }
         let origin = match headers.get("origin").map(|v| v.to_str()) {
             None => None,
             Some(Ok(o)) => Some(o),
-            Some(Err(_)) => return false,
+            Some(Err(_)) => return None,
         };
         let host = headers.get("host").and_then(|v| v.to_str().ok());
         let own_page = match (origin, host) {
@@ -309,11 +330,16 @@ impl App {
             _ => false,
         };
         if !own_page && !origin_allowed(origin, &self.allowed_origins) {
-            return false;
+            return None;
         }
+        let bearer = bearer_from(headers);
         match &self.token {
-            None => true,
-            Some(t) => passed || bearer_from(headers) == Some(t.as_str()),
+            None => Some(Scope::Full),
+            Some(t) if passed || bearer == Some(t.as_str()) => Some(Scope::Full),
+            Some(_) if bearer.is_some_and(|b| self.read_tokens.iter().any(|r| r == b)) => {
+                Some(Scope::Read)
+            }
+            Some(_) => None,
         }
     }
 }
@@ -482,12 +508,20 @@ async fn touch_icon() -> impl IntoResponse {
 }
 
 /// Lets the page decide whether to ask for a token (not when Access already let
-/// it in), and shows what is running.
-async fn info(State(app): State<App>, headers: HeaderMap) -> Json<serde_json::Value> {
-    let access = matches!(app.access_check(&headers).await, Access::Passed(_));
+/// it in) and whether to offer composers, and shows what is running. `scope`: what
+/// this request's bearer token, if any, would get (null: refused).
+async fn info(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Json<serde_json::Value> {
+    let access = app.access_check(&headers).await;
+    let scope = app.authorized(&headers, peer.ip(), &access);
+    let access = matches!(access, Access::Passed(_));
     Json(serde_json::json!({
         "auth": app.token.is_some() && !access,
         "access": access,
+        "scope": scope,
         "version": VERSION,
     }))
 }
@@ -521,7 +555,7 @@ async fn ws_worker(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if !app.admit(&headers, peer, "/ws/worker").await {
+    if app.admit_scope(&headers, peer, "/ws/worker").await != Some(Scope::Full) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     ws.on_upgrade(move |sock| worker_conn(sock, app))
@@ -534,12 +568,12 @@ async fn ws_client(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if !app.admit(&headers, peer, "/ws/client").await {
+    let Some(scope) = app.admit_scope(&headers, peer, "/ws/client").await else {
         return StatusCode::UNAUTHORIZED.into_response();
-    }
+    };
     // Browsers abort unless the server echoes a protocol they offered.
     ws.protocols(["bearer"])
-        .on_upgrade(move |sock| client_conn(sock, app))
+        .on_upgrade(move |sock| client_conn(sock, app, scope))
         .into_response()
 }
 
@@ -626,7 +660,7 @@ async fn next_event(sub: Option<&mut broadcast::Receiver<ServerMsg>>) -> ServerM
     }
 }
 
-async fn client_conn(mut sock: WebSocket, app: App) {
+async fn client_conn(mut sock: WebSocket, app: App, scope: Scope) {
     let mut sub: Option<broadcast::Receiver<ServerMsg>> = None;
     let start = tokio::time::Instant::now() + app.ping_every;
     let mut ping = tokio::time::interval_at(start, app.ping_every);
@@ -642,6 +676,10 @@ async fn client_conn(mut sock: WebSocket, app: App) {
                 if sock.send(Message::Ping(Bytes::new())).await.is_err() { break; }
             }
             incoming = recv_json::<ClientMsg>(&mut sock) => match incoming {
+                Some(msg) if !scope::allowed(scope, &msg) => {
+                    let refused = ServerMsg::Error { message: "read-only token".into() };
+                    send_json(&mut sock, &refused).await;
+                }
                 Some(ClientMsg::Status) => {
                     let status = app.ledger().status();
                     send_json(&mut sock, &status).await;
@@ -792,7 +830,7 @@ mod tests {
     fn authorized_combines_origin_and_token() {
         let lo: IpAddr = "127.0.0.1".parse().unwrap();
         let ok = |app: &App, pairs: &[(&'static str, &str)]| {
-            app.authorized(&headers(pairs), lo, &Access::Off)
+            app.authorized(&headers(pairs), lo, &Access::Off).is_some()
         };
         let open = App::new(None);
         // Same-origin page needs no allowlist entry.
@@ -836,7 +874,7 @@ mod tests {
         };
         let ok = |pairs: &[(&'static str, &str)], peer, passed: bool| {
             let access = if passed { pass() } else { Access::Failed };
-            t.authorized(&headers(pairs), peer, &access)
+            t.authorized(&headers(pairs), peer, &access).is_some()
         };
         // Valid JWT: no token needed, from anywhere.
         assert!(ok(&[], remote, true));
@@ -855,8 +893,36 @@ mod tests {
         assert!(!ok(&foreign, remote, true));
         let open = App::new(None);
         let page = [("origin", "https://m.example"), ("host", "m.example")];
-        assert!(open.authorized(&headers(&page), remote, &pass()));
-        assert!(!open.authorized(&headers(&page), lo, &Access::Failed));
+        assert!(open.authorized(&headers(&page), remote, &pass()).is_some());
+        assert!(open
+            .authorized(&headers(&page), lo, &Access::Failed)
+            .is_none());
+    }
+
+    #[test]
+    fn read_tokens_get_read_scope() {
+        let lo: IpAddr = "127.0.0.1".parse().unwrap();
+        let t = App::new(Some("s".into())).with_read_tokens(list(&["r1", "r2"]));
+        let scope = |bearer: &str, access: &Access| {
+            let auth = format!("Bearer {bearer}");
+            t.authorized(&headers(&[("authorization", &auth)]), lo, access)
+        };
+        assert_eq!(scope("s", &Access::Off), Some(Scope::Full));
+        assert_eq!(scope("r1", &Access::Off), Some(Scope::Read));
+        assert_eq!(scope("r2", &Access::Off), Some(Scope::Read));
+        assert_eq!(scope("r3", &Access::Off), None);
+        assert_eq!(scope("", &Access::Off), None);
+        // An Access login is full, whatever token rides along.
+        let passed = Access::Passed(Identity {
+            subject: "me".into(),
+        });
+        assert_eq!(scope("r1", &passed), Some(Scope::Full));
+        // Via the page's subprotocol too.
+        let page = [("sec-websocket-protocol", "bearer, r1")];
+        assert_eq!(
+            t.authorized(&headers(&page), lo, &Access::Off),
+            Some(Scope::Read)
+        );
     }
 
     #[test]
