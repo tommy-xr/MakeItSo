@@ -279,8 +279,33 @@ let everOpen = false, offline = false, offlineTimer = 0;
 let connMsg = 'connecting…'; // shown in the ticker until the first socket opens
 let skew = 0; // orchestrator clock minus ours, from the last Status; task times are on its clock
 let from = '#'; // last list view, so a task's back link returns to Workers when opened from there
-let replying = false; // a reply was sent; its Submitted opens the new task
+let replying = null; // thread a reply was sent in; its Submitted opens the new task
 const mine = new Set(); // tasks this page submitted; auto-read speaks only these
+
+// Composer text kept across reloads and drops until the server takes it: `draft:new`, and
+// `draft:reply:<task id>` per thread (the newest DRAFT_REPLIES), as { text, at }.
+const DRAFT_REPLIES = 20;
+const replyDraft = (id) => `draft:reply:${id}`;
+// Keys past the newest `max`, from [key, at] pairs.
+const overCap = (entries, max) => [...entries].sort((a, b) => b[1] - a[1]).slice(max).map(([k]) => k);
+const drafts = {
+  read(key) { try { const d = JSON.parse(localStorage.getItem(key)); return d && typeof d.text === 'string' ? d : null; } catch { return null; } },
+  get(key) { return (drafts.read(key) || {}).text || ''; },
+  set(key, text) {
+    try {
+      if (!text.trim()) { localStorage.removeItem(key); return; }
+      localStorage.setItem(key, JSON.stringify({ text, at: Date.now() }));
+      if (!key.startsWith('draft:reply:')) return;
+      const replies = Object.keys(localStorage).filter((k) => k.startsWith('draft:reply:')).map((k) => [k, (drafts.read(k) || {}).at || 0]);
+      for (const k of overCap(replies, DRAFT_REPLIES)) localStorage.removeItem(k);
+    } catch {}
+  },
+};
+// Saves a composer field under its view's key; typing and dictation both land here.
+function keepDraft(field) {
+  const key = field.id === 'prompt' ? 'draft:new' : detail && replyDraft(detail.id);
+  if (key) drafts.set(key, field.value);
+}
 
 // Text-only DOM builder: every string becomes a text node, never parsed as HTML.
 function el(tag, props, ...kids) {
@@ -423,6 +448,7 @@ function micStart(btn, held) {
     if (rec !== s) return;
     const said = [...e.results].map((x) => x[0].transcript).join('').trim();
     field.value = s.base && said ? `${s.base} ${said}` : s.base || said;
+    keepDraft(field);
   };
   // Live only once the browser hears, so the user knows when to speak.
   r.onstart = r.onaudiostart = () => { if (rec === s && !s.live) { s.live = true; clearTimeout(s.timer); micShow(s); } };
@@ -849,7 +875,8 @@ $('refresh-ev').onclick = () => {
 function renderDetail(id) {
   if (!detail || detail.id !== id) {
     // A draft belongs to the thread it was typed in.
-    if (detail) { $('reply-text').value = ''; $('reply-error').hidden = true; }
+    $('reply-text').value = drafts.get(replyDraft(id));
+    $('reply-error').hidden = true;
     detail = { id, task: null, lines: [], ready: false };
     send({ type: 'show', task: id });
   }
@@ -958,7 +985,9 @@ function onMessage(msg) {
     }
     case 'submitted':
       mine.add(msg.task);
-      if (replying) { replying = false; $('reply-text').value = ''; location.hash = `#task/${msg.task}`; } else $('prompt').value = '';
+      // The server took it; only now does its draft go.
+      drafts.set(replying ? replyDraft(replying) : 'draft:new', '');
+      if (replying) { replying = null; $('reply-text').value = ''; location.hash = `#task/${msg.task}`; } else $('prompt').value = '';
       refreshSoon();
       break;
     case 'task_detail':
@@ -982,7 +1011,7 @@ function onMessage(msg) {
     case 'error':
       // A refused reply (e.g. its worker is offline): say so by the form, keep the view.
       if (replying) {
-        replying = false;
+        replying = null;
         Object.assign($('reply-error'), { textContent: msg.message, hidden: false });
         break;
       }
@@ -1103,7 +1132,7 @@ $('reply').onsubmit = (e) => {
   if (!prompt || !detail) return;
   micOff();
   unlock();
-  replying = true;
+  replying = detail.id;
   $('reply-error').hidden = true;
   send({ type: 'submit', prompt, cwd: null, harness: null, model: null, reply_to: detail.id });
 };
@@ -1115,6 +1144,8 @@ $('clear').onclick = (e) => {
   connMsg = authNeeded ? 'token required' : 'disconnected';
   render();
 };
+for (const f of [$('prompt'), $('reply-text')]) f.addEventListener('input', () => keepDraft(f));
+$('prompt').value = drafts.get('draft:new');
 // Leaving a view stops dictation into it and any readback.
 // A press's click has landed once the view changes: nothing left to hold for.
 window.onhashchange = () => { micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; render(); };
