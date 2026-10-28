@@ -50,7 +50,7 @@
   .cycle { position: relative; height: 2px; margin: 0 calc(-1 * var(--pad)); background: var(--rule); overflow: hidden; }
   /* Idle: no ticker, so the tabs need room above the line. */
   #ticker[hidden] + .cycle { margin-top: 1rem; }
-  .cycle.run::after { content: ""; position: absolute; inset: 0 auto 0 0; width: 34%; background: linear-gradient(90deg, transparent, var(--accent)); box-shadow: 0 0 8px var(--glow); animation: ride 4s linear infinite; }
+  .cycle.run::after { content: ""; position: absolute; inset: 0 auto 0 0; width: 34%; background: linear-gradient(90deg, transparent, var(--accent)); animation: ride 4s linear infinite; }
   @keyframes ride { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
   @media (prefers-reduced-motion: reduce) { .cycle.run::after { display: none; } }
   /* Offline for a while: the last view stays, dimmed. */
@@ -62,7 +62,7 @@
   textarea, input[type=password] { display: block; width: 100%; padding: .625rem .75rem; }
   textarea { min-height: 6.5rem; resize: vertical; }
   ::placeholder { color: var(--dim); opacity: 1; }
-  textarea:focus, input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 10px var(--glow); }
+  textarea:focus, input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 10px var(--glow); }
   select, button { min-height: 2.75rem; padding: 0 1rem; }
   select { appearance: none; padding-right: 2.5rem; background: var(--field) var(--arrow) right .875rem center / .625rem .375rem no-repeat; }
   button { background: var(--accent); color: var(--bg); border-color: var(--accent); font: 600 .875rem var(--display); text-transform: uppercase; letter-spacing: .14em; cursor: pointer; }
