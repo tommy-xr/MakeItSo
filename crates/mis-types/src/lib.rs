@@ -311,6 +311,14 @@ pub fn resolve_task(tasks: &[TaskSummary], prefix: &str) -> Result<TaskId, Strin
     }
 }
 
+/// `ws://h` -> `http://h`, `wss://h` -> `https://h`; anything else unchanged.
+pub fn http_url(ws: &str) -> String {
+    match ws.strip_prefix("ws") {
+        Some(rest) => format!("http{rest}"),
+        None => ws.to_string(),
+    }
+}
+
 /// Orchestrator -> client.
 // Built and serialized at once, never stored in bulk; boxing would only add noise.
 #[allow(clippy::large_enum_variant)]
@@ -511,5 +519,13 @@ mod tests {
         assert_eq!(first_line("ab\ncd", 80), "ab");
         assert_eq!(first_line("\n  \nab", 80), "ab");
         assert_eq!(first_line("abcdef", 4), "abc…");
+    }
+
+    #[test]
+    fn elapsed_and_page_url() {
+        assert_eq!(fmt_elapsed(7_530_000), "2h05m");
+        assert_eq!(http_url("ws://127.0.0.1:7474"), "http://127.0.0.1:7474");
+        assert_eq!(http_url("wss://m.example"), "https://m.example");
+        assert_eq!(http_url("https://news.example"), "https://news.example");
     }
 }

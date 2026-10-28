@@ -15,6 +15,7 @@ mis (cli)  --ws-->  mis-orchestrator  <--ws--  mis-worker  --spawns-->  claude -
 - `mis-orchestrator` — worker ledger, task queue, event fan-out
 - `mis-worker` — runs assigned tasks via `mis-agent`
 - `mis-cli` — `mis status | task | show | tail`
+- `mis-tray` — macOS menu bar / Windows tray app
 
 ## Install
 
@@ -54,6 +55,15 @@ export MIS_TOKEN=secret                    # optional; omit on both sides to dis
 ./target/debug/mis-orchestrator            # 127.0.0.1:7474
 ./target/debug/mis-worker --skip-permissions
 ```
+
+## Menu bar app
+
+```sh
+cargo run -p mis-tray            # same --url/--token (MIS_URL/MIS_TOKEN) as `mis`
+```
+
+Shows the fleet and the 8 newest tasks; click one to open it in the browser. Without
+`MIS_URL`/`MIS_TOKEN` it uses `MIS_BIND`/`MIS_TOKEN` from `~/.config/mis/orchestrator.env`.
 
 ## Set up a worker
 

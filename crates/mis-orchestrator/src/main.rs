@@ -117,20 +117,12 @@ fn print_connect_hints(
         eprintln!("  MIS_URL={}{token} mis-worker", sh_quote(u));
     }
     if let Some(u) = urls.first() {
-        eprintln!("Open in a browser: {}/", http_url(u));
+        eprintln!("Open in a browser: {}/", mis_types::http_url(u));
     }
     if !origins.is_empty() {
         eprintln!("Browser origins allowed: {}", origins.join(", "));
     }
     eprintln!();
-}
-
-/// `ws://h` -> `http://h`, `wss://h` -> `https://h`; anything else unchanged.
-fn http_url(ws: &str) -> String {
-    match ws.strip_prefix("ws") {
-        Some(rest) => format!("http{rest}"),
-        None => ws.to_string(),
-    }
 }
 
 /// Single-quote for POSIX shells so tokens like `a$b` or `x y` paste intact.
@@ -194,18 +186,5 @@ mod tests {
         assert_eq!(super::sh_quote("abc"), "'abc'");
         assert_eq!(super::sh_quote("a$b c"), "'a$b c'");
         assert_eq!(super::sh_quote("it's"), "'it'\\''s'");
-    }
-
-    #[test]
-    fn page_url_from_ws_url() {
-        assert_eq!(
-            super::http_url("ws://127.0.0.1:7474"),
-            "http://127.0.0.1:7474"
-        );
-        assert_eq!(super::http_url("wss://m.example"), "https://m.example");
-        assert_eq!(
-            super::http_url("https://news.example"),
-            "https://news.example"
-        );
     }
 }
