@@ -1,7 +1,10 @@
 //! Codex CLI backend: `codex exec --json <prompt>`.
 
 use anyhow::Context;
-use mis_types::{AgentEvent, TaskId, TASK_ENV};
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+
+use mis_types::{AgentEvent, LimitWindow, TaskId, TASK_ENV};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -46,6 +49,75 @@ pub fn codex_models(cache_json: &str, config_toml: &str) -> Result<Vec<String>, 
         }
     }
     Ok(out)
+}
+
+/// Limit windows from the tail of a session rollout (JSONL): the last
+/// `token_count` event carrying `rate_limits`, its `primary` and `secondary`
+/// windows stamped `observed_at`. Unparsable lines (a cut first line) are skipped.
+pub fn rollout_limits(tail: &str, observed_at: u64) -> Option<Vec<LimitWindow>> {
+    let limits = tail.lines().rev().find_map(|line| {
+        let v: Value = serde_json::from_str(line).ok()?;
+        let p = &v["payload"];
+        (v["type"] == "event_msg" && p["type"] == "token_count" && p["rate_limits"].is_object())
+            .then(|| p["rate_limits"].clone())
+    })?;
+    let window = |w: &Value| {
+        let name = match w["window_minutes"].as_u64() {
+            Some(300) => "5h".to_string(),
+            Some(10080) => "7d".to_string(),
+            Some(n) => format!("{n}m"),
+            None => return None,
+        };
+        Some(LimitWindow {
+            name,
+            used_pct: w["used_percent"].as_f64()?.clamp(0.0, 100.0) as f32,
+            resets_at: w["resets_at"].as_u64().map(|s| s * 1000),
+            observed_at,
+        })
+    };
+    Some(
+        ["primary", "secondary"]
+            .iter()
+            .filter_map(|k| window(&limits[k]))
+            .collect(),
+    )
+}
+
+/// Bytes read from the end of a rollout; `token_count` lines come often and are short.
+const TAIL_BYTES: u64 = 64 * 1024;
+
+/// The most recently written `rollout-*.jsonl` under `sessions/YYYY/MM/DD`, from
+/// the newest two days (a session that crosses midnight stays in its first day's dir).
+fn newest_rollout(sessions: &Path) -> Option<PathBuf> {
+    let newest_first = |dir: &Path| {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| Some(e.ok()?.path()))
+            .collect();
+        v.sort_unstable_by(|a, b| b.cmp(a));
+        v
+    };
+    let days = newest_first(sessions)
+        .into_iter()
+        .filter(|p| p.is_dir())
+        .flat_map(|y| newest_first(&y).into_iter().filter(|p| p.is_dir()))
+        .flat_map(|m| newest_first(&m).into_iter().filter(|p| p.is_dir()))
+        .take(2);
+    days.flat_map(|d| newest_first(&d))
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            name.starts_with("rollout-") && name.ends_with(".jsonl")
+        })
+        .filter_map(|p| Some((p.metadata().ok()?.modified().ok()?, p)))
+        .max()
+        .map(|(_, p)| p)
+}
+
+/// `CODEX_HOME`, default `~/.codex`.
+fn codex_home() -> Result<PathBuf, String> {
+    std::env::var_os("CODEX_HOME")
+        .map_or_else(|| crate::home().map(|h| h.join(".codex")), |d| Ok(d.into()))
 }
 
 /// `-c` overrides offering `url` as MCP server `MCP_SERVER`, its bearer token read
@@ -149,9 +221,7 @@ impl Agent for CodexAgent {
     }
 
     fn models(&self) -> Vec<String> {
-        let dir = std::env::var_os("CODEX_HOME")
-            .map_or_else(|| crate::home().map(|h| h.join(".codex")), |d| Ok(d.into()));
-        let models = dir.and_then(|dir| {
+        let models = codex_home().and_then(|dir| {
             // No config just means no default to put first.
             let config = dir.join("config.toml");
             let config = match std::fs::read_to_string(&config) {
@@ -164,6 +234,24 @@ impl Agent for CodexAgent {
             tracing::warn!("{e}; codex will run its default model");
             vec![]
         })
+    }
+
+    /// From the newest session rollout, so interactive sessions on this account
+    /// count too. As of the file's last write.
+    fn limits(&self) -> Option<Vec<LimitWindow>> {
+        let path = newest_rollout(&codex_home().ok()?.join("sessions"))?;
+        let mut f = std::fs::File::open(&path).ok()?;
+        let meta = f.metadata().ok()?;
+        let at = meta
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        f.seek(SeekFrom::Start(meta.len().saturating_sub(TAIL_BYTES)))
+            .ok()?;
+        let mut tail = Vec::new();
+        f.read_to_end(&mut tail).ok()?;
+        rollout_limits(&String::from_utf8_lossy(&tail), at.as_millis() as u64)
     }
 
     fn run<'a>(
@@ -229,6 +317,72 @@ impl Agent for CodexAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Shaped like a live rollout tail: a cut first line, `token_count` with the
+    /// `rate_limits` seen on this account (credits and usage numbers zeroed),
+    /// then a later event.
+    const ROLLOUT_TAIL: &str = concat!(
+        r#"put":"cut mid-line"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-10-28T19:41:03.790Z","ordinal":41,"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":100.0,"window_minutes":300,"resets_at":1793219109},"secondary":{"used_percent":16.0,"window_minutes":10080,"resets_at":1793805909},"credits":{"has_credits":true,"unlimited":false,"balance":"0"},"individual_limit":null,"spend_control_reached":null,"plan_type":"plus","rate_limit_reached_type":null}}}"#,
+        "\n",
+        r#"{"timestamp":"2026-10-28T19:41:04.002Z","ordinal":42,"type":"event_msg","payload":{"type":"agent_message","message":"done"}}"#,
+        "\n",
+    );
+
+    #[test]
+    fn rollout_limits_take_the_last_token_count() {
+        let w = |name: &str, used_pct, resets_at| LimitWindow {
+            name: name.into(),
+            used_pct,
+            resets_at,
+            observed_at: 7,
+        };
+        assert_eq!(
+            rollout_limits(ROLLOUT_TAIL, 7),
+            Some(vec![
+                w("5h", 100.0, Some(1_793_219_109_000)),
+                w("7d", 16.0, Some(1_793_805_909_000))
+            ])
+        );
+        // A later reading wins; other window lengths are named in minutes; a window
+        // without a percentage is skipped.
+        let later = r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":3.5,"window_minutes":90},"secondary":{"window_minutes":10080}}}}"#;
+        assert_eq!(
+            rollout_limits(&format!("{ROLLOUT_TAIL}{later}\n"), 7),
+            Some(vec![w("90m", 3.5, None)])
+        );
+        // `rate_limits: null` is no reading; nothing at all is None.
+        let null = r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":null}}"#;
+        assert_eq!(
+            rollout_limits(&format!("{ROLLOUT_TAIL}{null}"), 7)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(rollout_limits(null, 7), None);
+        assert_eq!(rollout_limits("", 7), None);
+    }
+
+    #[test]
+    fn newest_rollout_is_the_latest_write_in_the_last_two_days() {
+        let root = std::env::temp_dir().join(format!("mis-rollouts-{}", std::process::id()));
+        let write = |rel: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "x").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            p
+        };
+        assert_eq!(newest_rollout(&root), None);
+        write("2026/10/26/rollout-old.jsonl");
+        write("2026/10/28/rollout-today.jsonl");
+        // Written last, but in yesterday's dir: a session still running past midnight.
+        let still = write("2026/10/27/rollout-yesterday.jsonl");
+        write("2026/10/28/notes.txt");
+        assert_eq!(newest_rollout(&root), Some(still));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn parses_probe_output() {

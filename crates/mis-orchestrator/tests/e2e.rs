@@ -1100,6 +1100,7 @@ async fn stats_reported_then_silent_worker_goes_offline() {
         disk_used_pct: 38,
         cpu_pct: 64,
         mem_pct: 82,
+        ..Default::default()
     };
     send(&mut worker, &WorkerMsg::Stats(stats.clone())).await;
 
@@ -1130,6 +1131,41 @@ async fn stats_reported_then_silent_worker_goes_offline() {
     // Reconnecting brings it back.
     let _worker = join(&base, wid, "claude", vec![]).await;
     assert!(only_worker(&mut client).await.online);
+}
+
+#[tokio::test]
+async fn limits_ride_worker_stats_into_status() {
+    use std::time::{Duration, Instant};
+    let base = start().await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    let mut worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+    // As a worker sends it: claude's windows from a run, codex's from its rollout.
+    let raw = r#"{"type":"stats","cpu_pct":5,"limits":{
+        "claude":[{"name":"5h","used_pct":43.0,"resets_at":1793223000000,"observed_at":1793200000000},
+                  {"name":"7d","used_pct":62.0,"resets_at":1793444400000,"observed_at":1793200000000}],
+        "codex":[{"name":"5h","used_pct":100.0,"observed_at":1793200000000}]}}"#;
+    worker
+        .send(tokio_tungstenite::tungstenite::Message::Text(raw.into()))
+        .await
+        .unwrap();
+    let start = Instant::now();
+    let limits = loop {
+        if let Some(s) = only_worker(&mut client).await.stats {
+            break s.limits;
+        }
+        assert!(start.elapsed() < Duration::from_secs(1), "no stats");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let names: Vec<_> = limits
+        .iter()
+        .flat_map(|(h, ws)| {
+            ws.iter()
+                .map(move |w| format!("{h} {} {}", w.name, w.used_pct))
+        })
+        .collect();
+    assert_eq!(names, ["claude 5h 43", "claude 7d 62", "codex 5h 100"]);
+    assert_eq!(limits["claude"][0].resets_at, Some(1_793_223_000_000));
+    assert_eq!(limits["codex"][0].resets_at, None);
 }
 
 /// Summarizer that counts its calls and replies with a fixed summary.

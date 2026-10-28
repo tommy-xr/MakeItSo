@@ -39,6 +39,7 @@ impl Sampler {
             disk_used_pct: pct(total.saturating_sub(free), total),
             cpu_pct: self.sys.global_cpu_usage().round().clamp(0.0, 100.0) as u8,
             mem_pct: pct(self.sys.used_memory(), self.sys.total_memory()),
+            limits: Default::default(),
         }
     }
 }

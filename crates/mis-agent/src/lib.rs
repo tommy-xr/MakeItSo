@@ -4,7 +4,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
-use mis_types::{AgentEvent, TaskId};
+use mis_types::{AgentEvent, LimitWindow, TaskId};
 use tokio::sync::mpsc;
 
 pub mod claude;
@@ -47,6 +47,11 @@ pub trait Agent: Send + Sync {
     /// Models the planner may pick for this harness, read from the harness's own
     /// files. Never fails: falls back (with a warning) when they can't be read.
     fn models(&self) -> Vec<String>;
+    /// Usage-limit windows read from the harness's own files, polled with each
+    /// stats beat; None when it keeps none (claude reports them during runs).
+    fn limits(&self) -> Option<Vec<LimitWindow>> {
+        None
+    }
     /// Run to completion. Must end with exactly one `AgentEvent::Finished`.
     /// The agent process sees `MIS_TASK=<task>` so nested `mis task` calls can be refused.
     fn run<'a>(
