@@ -46,6 +46,12 @@
   .row { display: flex; gap: .5rem; margin: .5rem 0 1.5rem; }
   .row button { flex: 1; }
   .row input { flex: 1; min-width: 0; min-height: 2.75rem; padding: 0 .75rem; }
+  .row.tight { margin-bottom: 0; }
+  .row .mic, #speak { flex: none; }
+  /* Listening / speaking: inverse of the normal button, with the hot dot. */
+  .mic[aria-pressed=true], #speak.on { background: var(--field); color: var(--hot); border-color: var(--hot); }
+  .toggle { display: flex; align-items: center; gap: .5rem; min-height: 2.75rem; margin: -1rem 0 1rem; }
+  .toggle input { width: 1.25rem; height: 1.25rem; margin: 0; accent-color: var(--answer); }
   .dim { color: var(--dim); }
   #fleet { padding-bottom: .75rem; }
   ul { list-style: none; margin: 0; padding: 0; }
@@ -119,11 +125,12 @@
 <main id="list" hidden>
   <form id="new">
     <textarea id="prompt" placeholder="New task…" required></textarea>
-    <div class="row">
+    <div class="row tight">
       <select id="harness" aria-label="harness"><option value="">auto</option></select>
       <input id="model" aria-label="model" placeholder="model (optional)" autocapitalize="off" autocorrect="off" spellcheck="false">
-      <button>Submit</button>
     </div>
+    <div class="row"><button type="button" class="mic" aria-pressed="false" hidden>mic</button><button>Submit</button></div>
+    <label class="toggle dim" hidden><input type="checkbox" id="autoread"> auto-read answers</label>
   </form>
   <ul id="tasks"></ul>
 </main>
@@ -131,12 +138,13 @@
 <main id="detail" hidden>
   <p><a href="#" class="back">← back</a></p>
   <pre id="answer" class="answer"></pre>
+  <div class="row" hidden><button type="button" id="speak">speak</button></div>
   <div id="meta" class="meta"></div>
   <div id="ask" class="meta dim"></div>
   <div id="thread" class="meta dim"></div>
   <form id="reply" hidden>
     <textarea id="reply-text" aria-label="reply" placeholder="Reply in this thread…" required></textarea>
-    <div class="row"><button>Reply</button></div>
+    <div class="row"><button type="button" class="mic" aria-pressed="false" hidden>mic</button><button>Reply</button></div>
     <p id="reply-error" class="bad" hidden></p>
   </form>
   <details><summary>transcript</summary><pre id="log"></pre></details>
@@ -166,6 +174,7 @@ let ws = null, authNeeded = false, tasks = [], workers = [], detail = null, retr
 let skew = 0; // orchestrator clock minus ours, from the last Status; task times are on its clock
 let from = '#'; // last list view, so a task's back link returns to Workers when opened from there
 let replying = false; // a reply was sent; its Submitted opens the new task
+const mine = new Set(); // tasks this page submitted; auto-read speaks only these
 
 // Text-only DOM builder: every string becomes a text node, never parsed as HTML.
 function el(tag, props, ...kids) {
@@ -203,6 +212,71 @@ function hostOf(wid) {
   const w = workers.find((x) => x.id === wid);
   return w ? w.info.hostname : short(wid);
 }
+
+// A passing message in the #conn line; the connection state returns after a few seconds.
+let flashTimer = 0, flashWas = '';
+function flash(text) {
+  const conn = $('conn');
+  if (flashTimer) clearTimeout(flashTimer); else flashWas = conn.textContent;
+  conn.textContent = text;
+  flashTimer = setTimeout(() => { flashTimer = 0; if (conn.textContent === text) conn.textContent = flashWas; }, 4000);
+}
+
+// Dictation: words stream into the field after its text; nothing is sent until Submit.
+// Absent API (e.g. some iOS home-screen apps): the buttons stay hidden; keyboard dictation still works.
+const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null; // the live recognizer, at most one
+// Abort drops pending results, so nothing lands in a sent or abandoned field.
+function micOff() { if (rec) { rec.abort(); rec = null; } }
+function listening(btn, on) { btn.textContent = on ? '● listening' : 'mic'; btn.setAttribute('aria-pressed', String(on)); }
+for (const btn of document.querySelectorAll('.mic')) {
+  const field = btn.closest('form').querySelector('textarea');
+  btn.hidden = !Recognition;
+  btn.onclick = () => {
+    if (rec) { rec.stop(); return; } // tap again: stop, keeping what was heard
+    hush(); // else the mic hears the readback
+    const r = rec = new Recognition(), base = field.value.trimEnd();
+    Object.assign(r, { lang: navigator.language, interimResults: true });
+    r.onresult = (e) => {
+      const said = [...e.results].map((x) => x[0].transcript).join('').trim();
+      field.value = base && said ? `${base} ${said}` : base || said;
+    };
+    // Some browsers (Chrome on iOS) expose the API, refuse it, and never fire onend: reset here too.
+    const done = () => { if (rec === r) rec = null; listening(btn, false); };
+    r.onerror = (e) => {
+      if (e.error === 'aborted') return;
+      flash(e.error === 'not-allowed' ? 'mic not allowed: use Safari or keyboard dictation' : `mic error: ${e.error}`);
+      done();
+    };
+    r.onend = done;
+    listening(btn, true);
+    r.start();
+  };
+}
+
+// Readback: one utterance at a time, from the speak button or auto-read.
+const synth = window.speechSynthesis;
+let utterance = null;
+function speakState() { $('speak').textContent = utterance ? '● stop' : 'speak'; $('speak').classList.toggle('on', !!utterance); }
+function say(text) {
+  synth.cancel();
+  const u = utterance = new SpeechSynthesisUtterance(text);
+  u.lang = navigator.language;
+  u.onend = u.onerror = () => { if (utterance === u) { utterance = null; speakState(); } };
+  synth.speak(u);
+  speakState();
+}
+function hush() { if (synth && utterance) { utterance = null; synth.cancel(); speakState(); } }
+$('speak').onclick = () => (utterance ? hush() : say($('answer').textContent));
+const autoread = {
+  on() { try { return localStorage.getItem('mis-autoread') === '1'; } catch { return false; } },
+  set(v) { try { v ? localStorage.setItem('mis-autoread', '1') : localStorage.removeItem('mis-autoread'); } catch {} },
+};
+// iOS speaks only after a speak() inside a user gesture; the toggle and Submit taps count.
+function unlock() { if (synth && autoread.on()) synth.speak(new SpeechSynthesisUtterance('')); }
+$('autoread').parentNode.hidden = !synth;
+$('autoread').checked = autoread.on();
+$('autoread').onchange = () => { autoread.set($('autoread').checked); unlock(); };
 
 function send(msg) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
 
@@ -316,6 +390,7 @@ function renderDetail(id) {
   const answer = t && t.summary ? t.summary : (t && t.status === 'running' ? 'working…' : '');
   $('answer').textContent = answer;
   $('answer').hidden = !answer;
+  $('speak').parentNode.hidden = !synth || !(t && t.summary);
   $('meta').replaceChildren(...(t ? [chip(t.status),
     [...placement(t), t.session && `session ${short(t.session)}`].filter(Boolean).join(' · ')] : []));
   $('ask').textContent = t ? t.prompt : '';
@@ -393,6 +468,7 @@ function onMessage(msg) {
       break;
     }
     case 'submitted':
+      mine.add(msg.task);
       if (replying) { replying = false; $('reply-text').value = ''; location.hash = `#task/${msg.task}`; } else $('prompt').value = '';
       refreshSoon();
       break;
@@ -406,6 +482,7 @@ function onMessage(msg) {
     case 'event': {
       // Rows show each task's latest activity and tokens.
       refreshSoon();
+      if (msg.event.type === 'finished' && msg.event.summary && mine.delete(msg.task) && synth && !rec && autoread.on()) say(msg.event.summary);
       // Only an open transcript shows events; re-rendering other views would drop focus.
       const line = eventLine(msg.event);
       if (!detail || !detail.ready || detail.id !== msg.task || line === null) return;
@@ -480,6 +557,8 @@ $('auth').onsubmit = (e) => {
 };
 $('new').onsubmit = (e) => {
   e.preventDefault();
+  micOff();
+  unlock();
   const prompt = $('prompt').value.trim();
   if (prompt) send({ type: 'submit', prompt, cwd: null, harness: $('harness').value || null, model: $('model').value.trim() || null });
 };
@@ -487,6 +566,8 @@ $('reply').onsubmit = (e) => {
   e.preventDefault();
   const prompt = $('reply-text').value.trim();
   if (!prompt || !detail) return;
+  micOff();
+  unlock();
   replying = true;
   $('reply-error').hidden = true;
   send({ type: 'submit', prompt, cwd: null, harness: null, model: null, reply_to: detail.id });
@@ -498,7 +579,8 @@ $('clear').onclick = (e) => {
   $('conn').textContent = authNeeded ? 'token required' : 'disconnected';
   render();
 };
-window.onhashchange = render;
+// Leaving a view stops dictation into it and any readback.
+window.onhashchange = () => { micOff(); hush(); render(); };
 setInterval(tick, 1000);
 
 fetch('/api/info').then((r) => r.json()).then((info) => { authNeeded = info.auth; $('ver').textContent = info.version || ''; connect(); })
