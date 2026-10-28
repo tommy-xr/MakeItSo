@@ -1151,6 +1151,7 @@ $('clear').onclick = (e) => {
   store.set('');
   disconnect();
   everOpen = false;
+  readOnly = false;
   connMsg = authNeeded ? 'token required' : 'disconnected';
   render();
 };
@@ -1164,7 +1165,9 @@ setInterval(tick, 1000);
 // What the stored token may do (scope), then connect.
 function start() {
   const token = store.get();
-  fetch('/api/info', { headers: token ? { authorization: `Bearer ${token}` } : {} }).then((r) => r.json()).then((info) => {
+  let headers = {};
+  try { if (token) headers = new Headers({ authorization: `Bearer ${token}` }); } catch {} // connect() says why it's invalid
+  fetch('/api/info', { headers }).then((r) => r.json()).then((info) => {
     authNeeded = info.auth;
     readOnly = info.scope === 'read';
     $('ver').textContent = [info.version, readOnly && 'read-only'].filter(Boolean).join(' · ');

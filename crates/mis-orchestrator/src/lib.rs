@@ -332,7 +332,7 @@ impl App {
         if !own_page && !origin_allowed(origin, &self.allowed_origins) {
             return None;
         }
-        let bearer = bearer_from(headers);
+        let bearer = bearer_from(headers).filter(|b| !b.is_empty());
         match &self.token {
             None => Some(Scope::Full),
             Some(t) if passed || bearer == Some(t.as_str()) => Some(Scope::Full),
@@ -912,6 +912,9 @@ mod tests {
         assert_eq!(scope("r2", &Access::Off), Some(Scope::Read));
         assert_eq!(scope("r3", &Access::Off), None);
         assert_eq!(scope("", &Access::Off), None);
+        let blank = App::new(Some("s".into())).with_read_tokens(list(&[""]));
+        let page = [("sec-websocket-protocol", "bearer,")];
+        assert_eq!(blank.authorized(&headers(&page), lo, &Access::Off), None);
         // An Access login is full, whatever token rides along.
         let passed = Access::Passed(Identity {
             subject: "me".into(),
