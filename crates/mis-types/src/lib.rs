@@ -97,6 +97,12 @@ pub enum AgentEvent {
     ToolResult {
         content: String,
     },
+    /// Tokens used so far this run: cumulative, so each replaces the last.
+    /// `input` includes cached prompt tokens. Sent before `Finished`.
+    Usage {
+        input: u64,
+        output: u64,
+    },
     Finished {
         ok: bool,
         summary: Option<String>,
@@ -179,6 +185,29 @@ pub struct TaskSummary {
     pub session: Option<String>,
     /// From the `Finished` event.
     pub summary: Option<String>,
+    /// Unix millis when submitted / when it finished.
+    #[serde(default)]
+    pub started_at: Option<u64>,
+    #[serde(default)]
+    pub finished_at: Option<u64>,
+    /// Latest `Usage`; None until one arrives.
+    #[serde(default)]
+    pub tokens_in: Option<u64>,
+    #[serde(default)]
+    pub tokens_out: Option<u64>,
+    /// What it is doing now, e.g. `> Bash ls`, `queued`, `done`.
+    #[serde(default)]
+    pub activity: String,
+}
+
+/// First non-blank line of `s`, cut to `max` chars with a trailing ellipsis.
+pub fn first_line(s: &str, max: usize) -> String {
+    let line = s.trim_start().lines().next().unwrap_or("");
+    if line.chars().count() <= max {
+        return line.to_string();
+    }
+    let cut: String = line.chars().take(max - 1).collect();
+    format!("{cut}…")
 }
 
 /// Orchestrator -> client.
@@ -188,6 +217,10 @@ pub enum ServerMsg {
     Status {
         workers: Vec<WorkerSummary>,
         tasks: Vec<TaskSummary>,
+        /// Orchestrator's Unix millis, so clients time running tasks on its
+        /// clock rather than their own.
+        #[serde(default)]
+        now_ms: Option<u64>,
     },
     Submitted {
         task: TaskId,
@@ -261,5 +294,20 @@ mod tests {
         );
         let s = serde_json::to_string(&ClientMsg::Status).unwrap();
         assert_eq!(s, r#"{"type":"status"}"#);
+        // Summaries from orchestrators predating timing/tokens/activity still parse.
+        let old: TaskSummary = serde_json::from_str(
+            r#"{"id":"00000000-0000-0000-0000-000000000000","prompt":"p","status":"done",
+                "worker":null,"harness":"claude","session":null,"summary":null}"#,
+        )
+        .unwrap();
+        assert_eq!((old.started_at, old.tokens_in), (None, None));
+        assert!(old.activity.is_empty());
+    }
+
+    #[test]
+    fn first_line_truncates() {
+        assert_eq!(first_line("ab\ncd", 80), "ab");
+        assert_eq!(first_line("\n  \nab", 80), "ab");
+        assert_eq!(first_line("abcdef", 4), "abc…");
     }
 }

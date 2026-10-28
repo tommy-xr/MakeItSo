@@ -79,10 +79,21 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
         (Some("item.completed"), Some("command_execution")) => vec![AgentEvent::ToolResult {
             content: item["aggregated_output"].as_str().unwrap_or("").to_string(),
         }],
-        (Some("turn.completed"), _) => vec![AgentEvent::Finished {
-            ok: true,
-            summary: None,
-        }],
+        // One turn per `exec`, so its usage is the run's total. `input_tokens`
+        // already includes `cached_input_tokens`.
+        (Some("turn.completed"), _) => {
+            let n = |k: &str| v["usage"][k].as_u64().unwrap_or(0);
+            vec![
+                AgentEvent::Usage {
+                    input: n("input_tokens"),
+                    output: n("output_tokens"),
+                },
+                AgentEvent::Finished {
+                    ok: true,
+                    summary: None,
+                },
+            ]
+        }
         (Some("turn.failed"), _) => vec![AgentEvent::Finished {
             ok: false,
             summary: v["error"]["message"].as_str().map(String::from),
@@ -219,11 +230,19 @@ mod tests {
             }]
         );
         assert_eq!(
-            parse_line(r#"{"type":"turn.completed","usage":{"input_tokens":1}}"#),
-            vec![AgentEvent::Finished {
-                ok: true,
-                summary: None
-            }]
+            parse_line(
+                r#"{"type":"turn.completed","usage":{"input_tokens":21015,"cached_input_tokens":12160,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}"#
+            ),
+            vec![
+                AgentEvent::Usage {
+                    input: 21015,
+                    output: 5
+                },
+                AgentEvent::Finished {
+                    ok: true,
+                    summary: None
+                }
+            ]
         );
         assert_eq!(
             parse_line(r#"{"type":"turn.failed","error":{"message":"boom"}}"#),

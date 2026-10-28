@@ -102,9 +102,16 @@ impl App {
         self
     }
 
+    /// The locked ledger, told the wall-clock time for whatever happens next.
+    fn ledger(&self) -> std::sync::MutexGuard<'_, Ledger> {
+        let mut l = self.ledger.lock().unwrap();
+        l.now_ms = unix_ms();
+        l
+    }
+
     /// Run a ledger transition under the lock, then perform its effects outside it.
     fn transition<R>(&self, f: impl FnOnce(&mut Ledger) -> (R, Vec<Effect>)) -> R {
-        let (r, effects) = f(&mut self.ledger.lock().unwrap());
+        let (r, effects) = f(&mut self.ledger());
         self.apply(effects);
         r
     }
@@ -124,7 +131,7 @@ impl App {
                     let app = self.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(app.grace).await;
-                        let effects = app.ledger.lock().unwrap().expire(wid, generation);
+                        let effects = app.ledger().expire(wid, generation);
                         app.apply(effects);
                     });
                 }
@@ -152,14 +159,14 @@ impl App {
         );
         let feed = async {
             while let Some(ev) = rx.recv().await {
-                let effects = self.ledger.lock().unwrap().planning_event(task, ev);
+                let effects = self.ledger().planning_event(task, ev);
                 self.apply(effects);
             }
         };
         let (timed_out, _) = tokio::join!(run, feed);
         if timed_out.is_err() {
             // Dropping `run` killed the process (kill_on_drop) without a Finished.
-            let effects = self.ledger.lock().unwrap().planning_event(
+            let effects = self.ledger().planning_event(
                 task,
                 AgentEvent::Finished {
                     ok: false,
@@ -276,9 +283,14 @@ pub fn router(app: App) -> Router {
 
 /// Wall-clock seconds, only for display (`stats_at`).
 fn unix_secs() -> u64 {
+    unix_ms() / 1000
+}
+
+/// Wall-clock millis, only for display (task timing).
+fn unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 pub async fn serve(listener: TcpListener, app: App) -> anyhow::Result<()> {
@@ -373,7 +385,7 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
                     }
                     Some(WorkerMsg::Stats(stats)) => {
                         let now = app.now();
-                        app.ledger.lock().unwrap().worker_stats(wid, conn, stats, now, unix_secs());
+                        app.ledger().worker_stats(wid, conn, stats, now, unix_secs());
                     }
                     Some(WorkerMsg::Hello { .. }) => {}
                     None => break,
@@ -415,7 +427,7 @@ async fn client_conn(mut sock: WebSocket, app: App) {
             }
             incoming = recv_json::<ClientMsg>(&mut sock) => match incoming {
                 Some(ClientMsg::Status) => {
-                    let status = app.ledger.lock().unwrap().status();
+                    let status = app.ledger().status();
                     send_json(&mut sock, &status).await;
                 }
                 Some(ClientMsg::Submit { prompt, cwd, harness, model }) => {
@@ -429,7 +441,7 @@ async fn client_conn(mut sock: WebSocket, app: App) {
                 }
                 Some(ClientMsg::Subscribe) => sub = Some(app.events.subscribe()),
                 Some(ClientMsg::Show { task }) => {
-                    let reply = match app.ledger.lock().unwrap().show(task) {
+                    let reply = match app.ledger().show(task) {
                         Some((task, events, truncated)) => ServerMsg::TaskDetail {
                             task,
                             events: events.to_vec(),

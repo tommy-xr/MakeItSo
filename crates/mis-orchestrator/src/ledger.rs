@@ -70,10 +70,35 @@ struct TaskEntry {
     /// Serialized size of `events`.
     bytes: usize,
     truncated: bool,
+    /// Unix millis: submitted, finished.
+    started_at: u64,
+    finished_at: Option<u64>,
+    /// Latest `Usage` (input, output).
+    tokens: Option<(u64, u64)>,
+    /// Latest tool call or text, rendered short (see `step`).
+    step: Option<String>,
+}
+
+/// Activity text for an event worth showing: `> Bash ls`, or the first line of text.
+fn step(event: &AgentEvent) -> Option<String> {
+    let line = match event {
+        AgentEvent::ToolUse { name, input } => {
+            // The argument that says what the call is about, else the first string one.
+            let arg = ["command", "file_path", "pattern", "path", "url", "query"]
+                .iter()
+                .find_map(|k| input[*k].as_str())
+                .or_else(|| input.as_object()?.values().find_map(|v| v.as_str()))
+                .unwrap_or("");
+            format!("> {name} {arg}")
+        }
+        AgentEvent::Text { text } if !text.trim().is_empty() => text.clone(),
+        _ => return None,
+    };
+    Some(first_line(line.trim_end(), 80))
 }
 
 impl TaskEntry {
-    fn new(task: Task) -> Self {
+    fn new(task: Task, now_ms: u64) -> Self {
         Self {
             task,
             status: TaskStatus::Queued,
@@ -85,6 +110,21 @@ impl TaskEntry {
             events: vec![],
             bytes: 0,
             truncated: false,
+            started_at: now_ms,
+            finished_at: None,
+            tokens: None,
+            step: None,
+        }
+    }
+
+    /// What the task is doing now, for one-line displays.
+    fn activity(&self) -> String {
+        match self.status {
+            TaskStatus::Planning => "planning…".into(),
+            TaskStatus::Queued => "queued".into(),
+            TaskStatus::Running => self.step.clone().unwrap_or_else(|| "started".into()),
+            TaskStatus::Done => "done".into(),
+            TaskStatus::Failed => "FAILED".into(),
         }
     }
 
@@ -98,19 +138,35 @@ impl TaskEntry {
             model: self.task.model.clone().or(self.reported_model.clone()),
             session: self.session.clone(),
             summary: self.summary.clone(),
+            started_at: Some(self.started_at),
+            finished_at: self.finished_at,
+            tokens_in: self.tokens.map(|t| t.0),
+            tokens_out: self.tokens.map(|t| t.1),
+            activity: self.activity(),
         }
     }
 
     /// Append to the transcript, evicting oldest events past `MAX_TRANSCRIPT_BYTES`.
-    fn record(&mut self, event: &AgentEvent) {
+    /// `Usage` only updates the counts; it isn't kept.
+    fn record(&mut self, event: &AgentEvent, now_ms: u64) {
+        if let Some(s) = step(event) {
+            self.step = Some(s);
+        }
         match event {
+            AgentEvent::Usage { input, output } => {
+                self.tokens = Some((*input, *output));
+                return;
+            }
             AgentEvent::Started { session, model } => {
                 if session.is_some() {
                     self.session = session.clone();
                 }
                 self.reported_model = model.clone();
             }
-            AgentEvent::Finished { summary, .. } => self.summary = summary.clone(),
+            AgentEvent::Finished { summary, .. } => {
+                self.summary = summary.clone();
+                self.finished_at = Some(now_ms);
+            }
             _ => {}
         }
         let event = match event {
@@ -145,6 +201,9 @@ fn size(e: &AgentEvent) -> usize {
 
 #[derive(Default)]
 pub struct Ledger {
+    /// Unix millis of the transition in progress, set by the shell before each
+    /// one; only stamped on tasks for display.
+    pub now_ms: u64,
     workers: HashMap<WorkerId, Worker>,
     tasks: Vec<TaskEntry>, // insertion order = submission order
     queue: VecDeque<TaskId>,
@@ -166,6 +225,7 @@ impl Ledger {
                 })
                 .collect(),
             tasks: self.tasks.iter().map(TaskEntry::summary).collect(),
+            now_ms: Some(self.now_ms),
         }
     }
 
@@ -193,14 +253,17 @@ impl Ledger {
         let id = Uuid::new_v4();
         let planning = harness.is_none();
         let plan_prompt = planning.then(|| plan::prompt(&prompt, &self.fleet()));
-        let mut entry = TaskEntry::new(Task {
-            id,
-            prompt,
-            cwd,
-            // Empty until planned; Planning tasks are never queued or assigned.
-            harness: harness.unwrap_or_default(),
-            model,
-        });
+        let mut entry = TaskEntry::new(
+            Task {
+                id,
+                prompt,
+                cwd,
+                // Empty until planned; Planning tasks are never queued or assigned.
+                harness: harness.unwrap_or_default(),
+                model,
+            },
+            self.now_ms,
+        );
         if planning {
             entry.status = TaskStatus::Planning;
         }
@@ -244,6 +307,7 @@ impl Ledger {
     /// answers, queues, or fails the task.
     pub fn planning_event(&mut self, task: TaskId, event: AgentEvent) -> Vec<Effect> {
         let fleet = self.fleet();
+        let now = self.now_ms;
         let Some(t) = self.tasks.iter_mut().find(|t| t.task.id == task) else {
             return vec![];
         };
@@ -281,10 +345,12 @@ impl Ledger {
                                 summary: Some(answer),
                             },
                         ];
-                        events.iter().for_each(|e| t.record(e));
+                        events.iter().for_each(|e| t.record(e, now));
                         events.into_iter().map(broadcast).collect()
                     }
                     Ok(p) => {
+                        // The worker reports its own; the planner's would mislead.
+                        t.tokens = None;
                         t.task.harness = p.harness.clone();
                         t.task.prompt = p.prompt.clone();
                         t.task.model = p.model.clone();
@@ -299,7 +365,9 @@ impl Ledger {
                             prompt: p.prompt,
                             model: p.model,
                         });
-                        events.iter().for_each(|e| t.record(e));
+                        events.iter().for_each(|e| t.record(e, now));
+                        // Not the planner's reason: the worker hasn't started yet.
+                        t.step = None;
                         let mut effects: Vec<_> = events.into_iter().map(broadcast).collect();
                         effects.extend(self.schedule());
                         effects
@@ -310,7 +378,7 @@ impl Ledger {
                             ok: false,
                             summary: Some(why),
                         };
-                        t.record(&event);
+                        t.record(&event, now);
                         vec![broadcast(event)]
                     }
                 }
@@ -318,6 +386,10 @@ impl Ledger {
             AgentEvent::Started { model, .. } => {
                 t.planner_model = model;
                 vec![]
+            }
+            AgentEvent::Usage { input, output } => {
+                t.tokens = Some((input, output));
+                vec![broadcast(AgentEvent::Usage { input, output })]
             }
             _ => vec![],
         }
@@ -429,13 +501,14 @@ impl Ledger {
         if !self.workers.get(&wid).is_some_and(|w| w.conn == Some(conn)) {
             return vec![];
         }
+        let now = self.now_ms;
         let Some(t) = self.tasks.iter_mut().find(|t| t.task.id == task) else {
             return vec![];
         };
         if t.worker != Some(wid) || t.status != TaskStatus::Running {
             return vec![];
         }
-        t.record(&event);
+        t.record(&event, now);
         if let AgentEvent::Finished { ok, .. } = &event {
             t.status = if *ok {
                 TaskStatus::Done
@@ -488,6 +561,7 @@ impl Ledger {
 
     /// Fail every Running task on `wid` not in `keep`, telling followers why.
     fn fail_running(&mut self, wid: WorkerId, keep: &[TaskId], why: &str) -> Vec<Effect> {
+        let now = self.now_ms;
         self.tasks
             .iter_mut()
             .filter(|t| {
@@ -501,7 +575,7 @@ impl Ledger {
                     ok: false,
                     summary: Some(why.into()),
                 };
-                t.record(&event);
+                t.record(&event, now);
                 Effect::Broadcast(ServerMsg::Event {
                     task: t.task.id,
                     worker: Some(wid),
@@ -1061,6 +1135,138 @@ mod tests {
             },
         );
         assert_eq!(l.show(task).unwrap().0.model, None);
+    }
+
+    #[test]
+    fn step_renders_tool_calls_and_text_short() {
+        let tool = |name: &str, input| AgentEvent::ToolUse {
+            name: name.into(),
+            input,
+        };
+        use serde_json::json;
+        let cases = [
+            (
+                tool("Bash", json!({"description": "list", "command": "ls -la"})),
+                Some("> Bash ls -la"),
+            ),
+            (
+                tool("Grep", json!({"glob": "*.rs", "pattern": "fn main"})),
+                Some("> Grep fn main"),
+            ),
+            (
+                tool("Custom", json!({"n": 1, "x": "y"})),
+                Some("> Custom y"),
+            ),
+            (tool("TodoWrite", json!({"todos": []})), Some("> TodoWrite")),
+            (text("\n  first line\nsecond"), Some("first line")),
+            (text(" \n"), None),
+            (
+                AgentEvent::ToolResult {
+                    content: "out".into(),
+                },
+                None,
+            ),
+        ];
+        for (event, want) in cases {
+            assert_eq!(step(&event).as_deref(), want, "{event:?}");
+        }
+        let long = step(&text(&"x".repeat(200))).unwrap();
+        assert_eq!(long.chars().count(), 80);
+        assert!(long.ends_with('…'));
+    }
+
+    #[test]
+    fn activity_timing_and_tokens_follow_the_task() {
+        let summary = |l: &Ledger, t| l.show(t).unwrap().0;
+        let mut l = Ledger {
+            now_ms: 1_000,
+            ..Default::default()
+        };
+        let (planned, _) = l.submit("p".into(), None, None, None);
+        assert_eq!(summary(&l, planned).activity, "planning…");
+        let (queued, _) = l.submit("q".into(), None, Some("claude".into()), None);
+        assert_eq!(summary(&l, queued).activity, "queued");
+
+        let wid = Uuid::new_v4();
+        l.connect(wid, info(), &[], 1, T0);
+        assert_eq!(summary(&l, queued).activity, "started");
+        l.event(wid, 1, queued, text("Looking around.\nMore."));
+        assert_eq!(summary(&l, queued).activity, "Looking around.");
+        let tool = AgentEvent::ToolUse {
+            name: "Bash".into(),
+            input: serde_json::json!({"command": "ls"}),
+        };
+        l.event(wid, 1, queued, tool);
+        // Results and usage keep the last step; usage replaces, and isn't kept.
+        l.event(
+            wid,
+            1,
+            queued,
+            AgentEvent::ToolResult {
+                content: "a".into(),
+            },
+        );
+        for (input, output) in [(100, 5), (250, 9)] {
+            let eff = l.event(wid, 1, queued, AgentEvent::Usage { input, output });
+            assert_eq!(eff.len(), 1, "broadcast");
+        }
+        let s = summary(&l, queued);
+        assert_eq!(s.activity, "> Bash ls");
+        assert_eq!((s.tokens_in, s.tokens_out), (Some(250), Some(9)));
+        assert_eq!((s.started_at, s.finished_at), (Some(1_000), None));
+        assert!(!l
+            .show(queued)
+            .unwrap()
+            .1
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Usage { .. })));
+
+        l.now_ms = 5_000;
+        l.event(
+            wid,
+            1,
+            queued,
+            AgentEvent::Finished {
+                ok: false,
+                summary: None,
+            },
+        );
+        let s = summary(&l, queued);
+        assert_eq!(
+            (s.activity.as_str(), s.finished_at),
+            ("FAILED", Some(5_000))
+        );
+
+        // Planner tokens show on a task it answers, not on one it dispatches.
+        let usage = AgentEvent::Usage {
+            input: 4_000,
+            output: 20,
+        };
+        // Broadcast so followers refresh.
+        assert_eq!(l.planning_event(planned, usage.clone()).len(), 1);
+        l.planning_event(
+            planned,
+            AgentEvent::Finished {
+                ok: true,
+                summary: Some(r#"{"harness":"claude","reason":"r"}"#.into()),
+            },
+        );
+        let s = summary(&l, planned);
+        assert_eq!((s.tokens_in, s.activity.as_str()), (None, "started"));
+        let (answered, _) = l.submit("2+2".into(), None, None, None);
+        l.planning_event(answered, usage);
+        l.planning_event(
+            answered,
+            AgentEvent::Finished {
+                ok: true,
+                summary: Some(r#"{"answer":"4"}"#.into()),
+            },
+        );
+        let s = summary(&l, answered);
+        assert_eq!(
+            (s.tokens_in, s.activity.as_str(), s.finished_at),
+            (Some(4_000), "done", Some(5_000))
+        );
     }
 
     #[test]
