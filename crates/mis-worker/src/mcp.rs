@@ -1,49 +1,121 @@
-//! Loopback MCP server for one task: the agent calls `report_status` and the
-//! worker forwards it as `AgentEvent::Status`. Streamable HTTP, JSON replies
-//! only (no SSE): POST `/mcp` with `Authorization: Bearer <token>`.
+//! Loopback MCP server for one task: the agent calls `report_status` and
+//! `report_evidence`, and the worker forwards them as `AgentEvent::Status` and
+//! `AgentEvent::Evidence`. Streamable HTTP, JSON replies only (no SSE): POST
+//! `/mcp` with `Authorization: Bearer <token>`.
 
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use mis_types::{first_line, mcp, AgentEvent, TaskId};
+use mis_types::{first_line, github_link, mcp, AgentEvent, Link, LinkKind, TaskId};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-/// Longest status kept; it is meant to be one line.
+/// Longest status, evidence title or test detail kept; each is one line.
 const MAX_STATUS_CHARS: usize = 200;
+/// Longest evidence URL accepted.
+const MAX_URL_BYTES: usize = 2048;
 
-/// Tell the agent the tool exists.
+/// Tell the agent the tools exist.
 pub fn with_hint(prompt: &str) -> String {
     format!(
         "(You have a `report_status` tool: call it with a one-line status at each major \
-         step so the user can follow along.)\n\n{prompt}"
+         step so the user can follow along. After you push, open a PR, run tests or CI, or \
+         capture screenshots, call `report_evidence` once for each.)\n\n{prompt}"
     )
 }
 
-/// One JSON-RPC message in; the reply (None for a notification) and the status
-/// text to post, if it was a valid `report_status` call.
-pub fn handle(req: &Value) -> (Option<Value>, Option<String>) {
-    let tool = json!({
-        "name": "report_status",
-        "description": "Show the user a one-line status of what you are doing now.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"text": {"type": "string", "description": "e.g. \"Running the tests\""}},
-            "required": ["text"],
-        },
-    });
-    let mut status = None;
-    let reply = mcp::handle(req, mis_agent::MCP_SERVER, &[tool], |_, args| {
-        let text = first_line(args["text"].as_str().unwrap_or(""), MAX_STATUS_CHARS);
-        if text.is_empty() {
-            return Err("text must be a non-empty string".into());
-        }
-        status = Some(text);
+/// One JSON-RPC message in; the reply (None for a notification) and the event
+/// to post, if it was a valid tool call.
+pub fn handle(req: &Value) -> (Option<Value>, Option<AgentEvent>) {
+    let tools = [
+        json!({
+            "name": "report_status",
+            "description": "Show the user a one-line status of what you are doing now.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"text": {"type": "string", "description": "e.g. \"Running the tests\""}},
+                "required": ["text"],
+            },
+        }),
+        json!({
+            "name": "report_evidence",
+            "description": "Show the user proof of your work: a link (pushed commit, PR, CI run, \
+                deployed preview, screenshot), a test or check result, or a short note.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["link", "test", "note"]},
+                    "title": {"type": "string", "description": "e.g. \"cargo test\", \"Preview\""},
+                    "url": {"type": "string", "description": "https; required for a link"},
+                    "ok": {"type": "boolean", "description": "a test's verdict"},
+                    "detail": {"type": "string", "description": "a test's result, e.g. \"78 passed\""},
+                },
+                "required": ["kind", "title"],
+            },
+        }),
+    ];
+    let mut event = None;
+    let reply = mcp::handle(req, mis_agent::MCP_SERVER, &tools, |name, args| {
+        event = Some(match name {
+            "report_evidence" => AgentEvent::Evidence(evidence(args)?),
+            _ => {
+                let text = first_line(args["text"].as_str().unwrap_or(""), MAX_STATUS_CHARS);
+                if text.is_empty() {
+                    return Err("text must be a non-empty string".into());
+                }
+                AgentEvent::Status { text }
+            }
+        });
         Ok("ok".into())
     });
-    (reply, status)
+    (reply, event)
+}
+
+/// `report_evidence` arguments as an evidence row, text cut to one line. A
+/// GitHub link becomes its PR/commit/CI/issue row, so it dedupes with the same
+/// link found in the agent's output.
+fn evidence(args: &Value) -> Result<Link, String> {
+    let line = |k: &str| first_line(args[k].as_str().unwrap_or(""), MAX_STATUS_CHARS);
+    let label = line("title");
+    if label.is_empty() {
+        return Err("title must be a non-empty string".into());
+    }
+    let url = match args["url"].as_str() {
+        Some(u) if !is_https_url(u) => return Err("url must be an https URL".into()),
+        u => u.unwrap_or("").to_string(),
+    };
+    let row = |kind, url: String, ok, detail| Link {
+        kind,
+        url,
+        label: label.clone(),
+        ok,
+        detail,
+    };
+    match args["kind"].as_str() {
+        Some("link") if url.is_empty() => Err("a link needs a url".into()),
+        Some("link") => {
+            Ok(github_link(&url).unwrap_or_else(|| row(LinkKind::Url, url, None, None)))
+        }
+        Some("test") => {
+            let detail = Some(line("detail")).filter(|d| !d.is_empty());
+            Ok(row(LinkKind::Test, url, args["ok"].as_bool(), detail))
+        }
+        Some("note") => Ok(row(LinkKind::Note, String::new(), None, None)),
+        _ => Err("kind must be link, test or note".into()),
+    }
+}
+
+/// `https://<host>…`, no whitespace or control chars, at most `MAX_URL_BYTES`.
+fn is_https_url(u: &str) -> bool {
+    let host = u
+        .strip_prefix("https://")
+        .and_then(|r| r.split(['/', '?', '#']).next())
+        .unwrap_or("");
+    !host.is_empty()
+        && u.len() <= MAX_URL_BYTES
+        && !u.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// A running server; dropping it stops listening.
@@ -101,9 +173,9 @@ async fn post(State(ctx): State<Ctx>, headers: HeaderMap, body: Bytes) -> Respon
     let Ok(req) = serde_json::from_slice::<Value>(&body) else {
         return (StatusCode::BAD_REQUEST, Json(mcp::parse_error())).into_response();
     };
-    let (reply, status) = handle(&req);
-    if let Some(text) = status {
-        let _ = ctx.tx.send((ctx.task, AgentEvent::Status { text })).await;
+    let (reply, event) = handle(&req);
+    if let Some(event) = event {
+        let _ = ctx.tx.send((ctx.task, event)).await;
     }
     match reply {
         Some(r) => Json(r).into_response(),
@@ -115,32 +187,93 @@ async fn post(State(ctx): State<Ctx>, headers: HeaderMap, body: Bytes) -> Respon
 mod tests {
     use super::*;
 
-    fn call(method: &str, params: Value) -> (Option<Value>, Option<String>) {
+    fn call(method: &str, params: Value) -> (Option<Value>, Option<AgentEvent>) {
         handle(&json!({"jsonrpc": "2.0", "id": 7, "method": method, "params": params}))
+    }
+
+    fn tool(name: &str, args: Value) -> (Option<Value>, Option<AgentEvent>) {
+        call("tools/call", json!({"name": name, "arguments": args}))
     }
 
     #[test]
     fn report_status_posts_one_line() {
-        let (r, s) = call(
-            "tools/call",
-            json!({"name": "report_status", "arguments": {"text": " Running tests\nmore"}}),
-        );
+        let (r, s) = tool("report_status", json!({"text": " Running tests\nmore"}));
         assert_eq!(r.unwrap()["result"]["content"][0]["text"], "ok");
-        assert_eq!(s.as_deref(), Some("Running tests"));
+        let want = AgentEvent::Status {
+            text: "Running tests".into(),
+        };
+        assert_eq!(s, Some(want));
         for args in [json!({"text": " "}), json!({}), json!({"text": 3})] {
-            let (r, s) = call(
-                "tools/call",
-                json!({"name": "report_status", "arguments": args}),
-            );
+            let (r, s) = tool("report_status", args);
             assert_eq!(r.unwrap()["result"]["isError"], true);
             assert_eq!(s, None);
         }
     }
 
+    fn reported(args: Value) -> Link {
+        let (r, e) = tool("report_evidence", args);
+        assert_eq!(r.unwrap()["result"]["content"][0]["text"], "ok");
+        let Some(AgentEvent::Evidence(link)) = e else {
+            panic!("{e:?}")
+        };
+        link
+    }
+
     #[test]
-    fn lists_only_report_status() {
+    fn report_evidence_posts_links_tests_and_notes() {
+        let pr = reported(
+            json!({"kind": "link", "title": "my PR", "url": "https://github.com/o/r/pull/42/files"}),
+        );
+        assert_eq!(pr, github_link("https://github.com/o/r/pull/42").unwrap());
+        let url = "https://preview.example.com/a?b=1#c";
+        let preview = reported(json!({"kind": "link", "title": "Preview", "url": url}));
+        assert_eq!((preview.kind, preview.url.as_str()), (LinkKind::Url, url));
+        let test = reported(json!({
+            "kind": "test", "title": "cargo test", "ok": true, "detail": format!("78 passed\n{}", "x".repeat(300)),
+        }));
+        assert_eq!(
+            (test.kind, test.label.as_str(), test.ok),
+            (LinkKind::Test, "cargo test", Some(true))
+        );
+        assert_eq!(test.detail.as_deref(), Some("78 passed"));
+        let long = "y".repeat(300);
+        let note = reported(json!({"kind": "note", "title": long, "url": "https://x.io"}));
+        assert_eq!((note.kind, note.url.as_str()), (LinkKind::Note, ""));
+        assert_eq!(note.label.chars().count(), MAX_STATUS_CHARS);
+    }
+
+    #[test]
+    fn report_evidence_rejects_bad_args() {
+        for args in [
+            json!({"kind": "link", "title": "t"}),
+            json!({"kind": "link", "title": "t", "url": "http://x.io"}),
+            json!({"kind": "link", "title": "t", "url": "javascript:alert(1)"}),
+            json!({"kind": "link", "title": "t", "url": "https://"}),
+            json!({"kind": "link", "title": "t", "url": "https:///x"}),
+            json!({"kind": "link", "title": "t", "url": "https://x.io/a b"}),
+            json!({"kind": "link", "title": "t", "url": format!("https://x.io/{}", "a".repeat(MAX_URL_BYTES))}),
+            json!({"kind": "test", "title": "t", "url": "ftp://x.io"}),
+            json!({"kind": "link", "title": " ", "url": "https://x.io"}),
+            json!({"kind": "note"}),
+            json!({"kind": "image", "title": "t"}),
+            json!({"title": "t"}),
+        ] {
+            let (r, e) = tool("report_evidence", args.clone());
+            assert_eq!(r.unwrap()["result"]["isError"], true, "{args}");
+            assert_eq!(e, None);
+        }
+    }
+
+    #[test]
+    fn lists_both_tools() {
         let (r, _) = call("tools/list", json!({}));
-        assert_eq!(r.unwrap()["result"]["tools"][0]["name"], "report_status");
+        let names: Vec<_> = r.unwrap()["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].clone())
+            .collect();
+        assert_eq!(names, [json!("report_status"), json!("report_evidence")]);
         let (r, s) = call("tools/call", json!({"name": "rm"}));
         assert_eq!(
             (r.unwrap()["error"]["code"].clone(), s),

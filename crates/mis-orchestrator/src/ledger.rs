@@ -60,7 +60,7 @@ pub const MAX_TRANSCRIPT_BYTES: usize = 256 * 1024;
 /// A single stored `ToolResult` keeps at most this many bytes of content.
 pub const MAX_TOOL_RESULT_BYTES: usize = 16 * 1024;
 const TRUNCATED: &str = "…[truncated]";
-/// Links kept per task; the least recently mentioned go first.
+/// Evidence rows kept per task; the least recently mentioned go first.
 pub const MAX_LINKS: usize = 32;
 /// A fresh reply's context keeps at most this much of the parent's prompt and answer.
 const MAX_CONTEXT_CHARS: usize = 4_000;
@@ -90,8 +90,9 @@ struct TaskEntry {
     parent: Option<TaskId>,
     /// Only this worker may run it: it holds the session being resumed.
     pin: Option<WorkerId>,
-    /// GitHub links in the agent's output, most recently mentioned last. Kept
-    /// apart from `events`, so transcript eviction never drops them.
+    /// Evidence: GitHub links in the agent's output and items it reported, most
+    /// recently mentioned last. Kept apart from `events`, so transcript eviction
+    /// never drops them.
     links: Vec<Link>,
 }
 
@@ -183,8 +184,12 @@ impl TaskEntry {
             AgentEvent::Finished { summary, .. } => summary.as_ref(),
             _ => None,
         };
-        for link in text.map(|t| github_links(t)).unwrap_or_default() {
-            self.links.retain(|l| l.url != link.url);
+        let mut links = text.map(|t| github_links(t)).unwrap_or_default();
+        if let AgentEvent::Evidence(link) = event {
+            links.push(link.clone());
+        }
+        for link in links {
+            self.links.retain(|l| key(l) != key(&link));
             if self.links.len() == MAX_LINKS {
                 self.links.remove(0);
             }
@@ -230,6 +235,15 @@ impl TaskEntry {
             self.events.drain(..evict);
             self.truncated = true;
         }
+    }
+}
+
+/// Evidence rows that replace each other: tests and notes by title (a re-run
+/// updates its verdict), links by URL (a reported PR and a mentioned one match).
+fn key(l: &Link) -> (Option<LinkKind>, &str) {
+    match l.kind {
+        LinkKind::Test | LinkKind::Note => (Some(l.kind), &l.label),
+        _ => (None, &l.url),
     }
 }
 
@@ -1865,5 +1879,68 @@ mod tests {
         assert_eq!(got.len(), MAX_LINKS);
         assert_eq!(got[..MAX_LINKS - 1], many[6..]);
         assert_eq!(got.last(), Some(&many[0]));
+    }
+
+    fn reported(kind: LinkKind, url: &str, label: &str, ok: Option<bool>) -> AgentEvent {
+        AgentEvent::Evidence(Link {
+            kind,
+            url: url.into(),
+            label: label.into(),
+            ok,
+            detail: None,
+        })
+    }
+
+    #[test]
+    fn reported_evidence_merges_with_mentioned_links() {
+        let (mut l, wid, task) = running_setup();
+        let pr = "https://github.com/o/r/pull/42";
+        let preview = "https://preview.example.com/";
+        l.event(wid, 1, task, text(&format!("Opened {pr}")));
+        let test = |ok| reported(LinkKind::Test, "", "cargo test", Some(ok));
+        for e in [
+            test(false),
+            reported(LinkKind::Note, "", "cargo test", None),
+            reported(LinkKind::Url, preview, "preview", None),
+            // As the worker sends a reported GitHub URL: classified, canonical.
+            AgentEvent::Evidence(github_link(pr).unwrap()),
+            test(true),
+        ] {
+            l.event(wid, 1, task, e);
+        }
+        // One PR row, moved last when reported; the re-run test replaced the failed one.
+        let links = l.show(task).unwrap().0.links;
+        let got: Vec<_> = links
+            .iter()
+            .map(|l| (l.kind, l.url.as_str(), l.ok))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (LinkKind::Note, "", None),
+                (LinkKind::Url, preview, None),
+                (LinkKind::Pr, pr, None),
+                (LinkKind::Test, "", Some(true)),
+            ]
+        );
+        // Kept in the transcript too.
+        let (_, events, _) = l.show(task).unwrap();
+        assert!(matches!(events.last(), Some(AgentEvent::Evidence(_))));
+    }
+
+    #[test]
+    fn reported_evidence_shares_the_bound() {
+        let (mut l, wid, task) = running_setup();
+        for i in 0..MAX_LINKS + 1 {
+            l.event(
+                wid,
+                1,
+                task,
+                reported(LinkKind::Note, "", &i.to_string(), None),
+            );
+        }
+        let links = l.show(task).unwrap().0.links;
+        assert_eq!(links.len(), MAX_LINKS);
+        assert_eq!(links[0].label, "1");
     }
 }

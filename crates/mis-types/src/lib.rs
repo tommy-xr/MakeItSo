@@ -12,7 +12,7 @@ use uuid::Uuid;
 mod access;
 pub use access::access_headers;
 mod links;
-pub use links::{github_links, Link, LinkKind};
+pub use links::{github_link, github_links, Link, LinkKind};
 pub mod mcp;
 
 pub type WorkerId = Uuid;
@@ -107,6 +107,8 @@ pub enum AgentEvent {
     Status {
         text: String,
     },
+    /// Proof of work the agent posted via the worker's `report_evidence` tool.
+    Evidence(Link),
     /// Tokens used so far this run: cumulative, so each replaces the last.
     /// `input` includes cached prompt tokens. Sent before `Finished`.
     Usage {
@@ -215,8 +217,9 @@ pub struct TaskSummary {
     /// The task this one replies to.
     #[serde(default)]
     pub parent: Option<TaskId>,
-    /// GitHub links the agent mentioned, most recent last; kept apart from the
-    /// transcript and summary so neither eviction nor summarizing loses them.
+    /// Evidence: GitHub links the agent mentioned and items it reported, most
+    /// recent last; kept apart from the transcript and summary so neither
+    /// eviction nor summarizing loses them.
     #[serde(default)]
     pub links: Vec<Link>,
 }
@@ -371,6 +374,16 @@ mod tests {
             WorkerMsg::Event {
                 task: Uuid::nil(),
                 event: AgentEvent::Status { text: "s".into() },
+            },
+            WorkerMsg::Event {
+                task: Uuid::nil(),
+                event: AgentEvent::Evidence(Link {
+                    kind: LinkKind::Test,
+                    url: String::new(),
+                    label: "cargo test".into(),
+                    ok: Some(true),
+                    detail: Some("78 passed".into()),
+                }),
             },
             WorkerMsg::Stats(WorkerStats {
                 disk_free_gb: 12.5,

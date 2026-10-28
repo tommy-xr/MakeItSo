@@ -119,14 +119,16 @@ fn usage(u: &Value) -> Option<(u64, u64)> {
     })
 }
 
-/// Calls to the worker's own `report_status` tool, including claude's lookup of
-/// it: the worker already reports them as `Status`, so the echo is noise (and
-/// would make every task look like it used tools).
+/// Calls to the worker's own tools (`report_status`, `report_evidence`),
+/// including claude's lookup of them: the worker already reports them as
+/// events, so the echo is noise (and would make every task look like it used tools).
 fn is_own_tool(block: &Value) -> bool {
-    let tool = format!("mcp__{MCP_SERVER}__report_status");
-    block["name"] == tool.as_str()
-        || (block["name"] == "ToolSearch"
-            && block["input"]["query"] == format!("select:{tool}").as_str())
+    let own = |name: &str| name.starts_with(&format!("mcp__{MCP_SERVER}__"));
+    let name = block["name"].as_str().unwrap_or("");
+    let lookup = block["input"]["query"]
+        .as_str()
+        .and_then(|q| q.strip_prefix("select:"));
+    own(name) || (name == "ToolSearch" && lookup.is_some_and(|q| q.split(',').all(own)))
 }
 
 /// Events for one line. Tool calls hidden by `is_own_tool` go into `hidden`,
@@ -399,6 +401,14 @@ mod tests {
             result("t1"),
             call("t2", "mcp__mis__report_status", r#"{"text":"x"}"#),
             result("t2"),
+            call(
+                "t4",
+                "ToolSearch",
+                r#"{"query":"select:mcp__mis__report_status,mcp__mis__report_evidence"}"#,
+            ),
+            result("t4"),
+            call("t5", "mcp__mis__report_evidence", r#"{"kind":"note"}"#),
+            result("t5"),
         ];
         for line in own {
             assert!(p.line(&line).is_empty(), "{line}");
@@ -409,6 +419,8 @@ mod tests {
                 .len(),
             1
         );
+        let mixed = r#"{"query":"select:mcp__mis__report_status,Bash"}"#;
+        assert_eq!(p.line(&call("t6", "ToolSearch", mixed)).len(), 1);
         assert_eq!(p.line(&result("t3")).len(), 1);
         assert!(p.hidden.is_empty());
     }
