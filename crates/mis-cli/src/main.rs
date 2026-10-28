@@ -41,7 +41,7 @@ enum Cmd {
         /// Stream this task's events until it finishes.
         #[arg(long, short)]
         follow: bool,
-        /// Wait quietly for the task to finish, then print its summary. Exit 0 if it succeeded,
+        /// Wait quietly for the task to finish, then print the agent's summary. Exit 0 if it succeeded,
         /// 1 if it failed, 2 if there's no result (connection or usage error).
         #[arg(long, conflicts_with = "follow")]
         wait: bool,
@@ -60,7 +60,7 @@ enum Cmd {
         /// Return once submitted instead of streaming the reply's events.
         #[arg(long)]
         no_follow: bool,
-        /// Wait quietly for the task to finish, then print its summary. Exit 0 if it succeeded,
+        /// Wait quietly for the task to finish, then print the agent's summary. Exit 0 if it succeeded,
         /// 1 if it failed, 2 if there's no result (connection or usage error).
         #[arg(long, conflicts_with = "no_follow")]
         wait: bool,
@@ -489,7 +489,8 @@ fn wait_step(task: TaskId, msg: ServerMsg) -> Wait {
     }
 }
 
-/// Follow `task` quietly until it finishes; its final summary.
+/// Follow `task` quietly until it finishes; the task as it was then (a summarizer
+/// may still replace its summary later).
 async fn wait_task(ws: &mut Ws, task: TaskId) -> Result<TaskSummary> {
     loop {
         match wait_step(task, recv(ws).await?) {
