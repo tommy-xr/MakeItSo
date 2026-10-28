@@ -12,7 +12,7 @@ use uuid::Uuid;
 mod access;
 pub use access::access_headers;
 mod links;
-pub use links::{github_link, github_links, Link, LinkKind};
+pub use links::{github_link, github_links, Checks, Link, LinkKind, PrState, PrStatus};
 pub mod mcp;
 
 pub type WorkerId = Uuid;
@@ -191,14 +191,36 @@ pub enum WorkerMsg {
     },
     /// Sent after Hello and every `STATS_INTERVAL`; doubles as the heartbeat.
     Stats(WorkerStats),
+    /// A PR link's live state, read for a task this worker ran. Not an
+    /// `AgentEvent`: it arrives after the task finished and stays off the transcript.
+    PrStatus {
+        task: TaskId,
+        url: String,
+        status: PrStatus,
+    },
+    /// This worker can't read PR state (`gh` missing or signed out).
+    PrUnavailable {
+        task: TaskId,
+        why: String,
+    },
 }
 
 /// Orchestrator -> worker.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OrchMsg {
-    Welcome { id: WorkerId },
-    Assign { task: Task },
+    Welcome {
+        id: WorkerId,
+    },
+    Assign {
+        task: Task,
+    },
+    /// Read these PR links of a task this worker ran now, then again while
+    /// their checks are pending. Replaces any earlier watch of that task.
+    CheckPrs {
+        task: TaskId,
+        urls: Vec<String>,
+    },
 }
 
 /// Client (CLI / voice app) -> orchestrator.
@@ -227,6 +249,10 @@ pub enum ClientMsg {
     },
     /// The user opened this finished task: it no longer needs attention.
     Seen {
+        task: TaskId,
+    },
+    /// Have the task's worker re-read its PR links now.
+    RefreshEvidence {
         task: TaskId,
     },
 }
@@ -468,7 +494,25 @@ mod tests {
                     label: "cargo test".into(),
                     ok: Some(true),
                     detail: Some("78 passed".into()),
+                    pr: None,
                 }),
+            },
+            WorkerMsg::PrStatus {
+                task: Uuid::nil(),
+                url: "https://github.com/o/r/pull/4".into(),
+                status: PrStatus {
+                    state: PrState::Open,
+                    checks: Checks::Failing,
+                    failing: vec!["check (ubuntu-latest)".into()],
+                    mergeable: Some(true),
+                    review: None,
+                    head: "abc".into(),
+                    observed_at: 9,
+                },
+            },
+            WorkerMsg::PrUnavailable {
+                task: Uuid::nil(),
+                why: "gh not found".into(),
             },
             WorkerMsg::Stats(WorkerStats {
                 disk_free_gb: 12.5,
@@ -505,6 +549,17 @@ mod tests {
                 ..Default::default()
             })
         );
+        let s = serde_json::to_string(&ClientMsg::RefreshEvidence { task: Uuid::nil() }).unwrap();
+        assert_eq!(
+            s,
+            r#"{"type":"refresh_evidence","task":"00000000-0000-0000-0000-000000000000"}"#
+        );
+        let check = OrchMsg::CheckPrs {
+            task: Uuid::nil(),
+            urls: vec!["u".into()],
+        };
+        let s = serde_json::to_string(&check).unwrap();
+        assert_eq!(serde_json::from_str::<OrchMsg>(&s).unwrap(), check);
         let s = serde_json::to_string(&ClientMsg::Status).unwrap();
         assert_eq!(s, r#"{"type":"status"}"#);
         // Summaries from orchestrators predating timing/tokens/activity still parse.

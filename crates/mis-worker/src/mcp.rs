@@ -94,6 +94,7 @@ fn evidence(args: &Value) -> Result<Link, String> {
         label: label.clone(),
         ok,
         detail,
+        pr: None,
     };
     match args["kind"].as_str() {
         Some("link") => match url()? {

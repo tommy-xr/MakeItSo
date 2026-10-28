@@ -3,11 +3,12 @@
 
 mod config;
 mod mcp;
+mod pr;
 mod roots;
 mod setup;
 mod stats;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -101,9 +102,12 @@ async fn main() -> Result<()> {
         models: advertised(&agents, &cfg.models),
     };
     tracing::info!(?info.harnesses, ?info.models, ?info.roots, "connecting to {}", cfg.url);
+    // PR status reads, sent as they come; dropped if the socket dies mid-send.
+    let (pr_tx, pr_rx) = mpsc::channel::<WorkerMsg>(64);
     let ctx = Ctx {
         agents: Arc::new(agents),
         roots: Arc::new(roots),
+        pr_tx,
         limits: Default::default(),
     };
     // Events from in-flight tasks queue here while disconnected. Delivery is best
@@ -113,6 +117,8 @@ async fn main() -> Result<()> {
         ev_rx,
         pending: None,
         running: HashSet::new(),
+        pr_rx,
+        watches: HashMap::new(),
         backoff: Duration::from_secs(1),
         sampler: stats::Sampler::new(ctx.roots.first().cloned().unwrap_or_else(|| "/".into())),
     };
@@ -144,14 +150,15 @@ fn advertised(
         .collect()
 }
 
-/// What a task needs from the worker: harnesses and allowed directories, and
-/// where its runs leave usage-limit readings for the stats beat.
+/// What a task needs from the worker: harnesses, allowed directories, where its
+/// runs leave usage-limit readings for the stats beat, and where PR watches send.
 #[derive(Clone)]
 struct Ctx {
     agents: Arc<Vec<Box<dyn Agent>>>,
     roots: Arc<Vec<PathBuf>>,
     /// Latest limit windows per harness, from runs and polling.
     limits: Arc<Mutex<BTreeMap<String, Vec<LimitWindow>>>>,
+    pr_tx: mpsc::Sender<WorkerMsg>,
 }
 
 impl Ctx {
@@ -183,6 +190,9 @@ struct Conn {
     pending: Option<(TaskId, AgentEvent)>,
     /// Tasks assigned and not yet reported Finished; sent in Hello on reconnect.
     running: HashSet<TaskId>,
+    pr_rx: mpsc::Receiver<WorkerMsg>,
+    /// One PR watch per task; a new `CheckPrs` replaces it.
+    watches: HashMap<TaskId, tokio::task::AbortHandle>,
     backoff: Duration,
     sampler: stats::Sampler,
 }
@@ -223,7 +233,11 @@ async fn session(
             None => tokio::select! {
                 ev = c.ev_rx.recv() => ev,
                 msg = stream.next() => {
-                    handle_incoming(msg, ctx, ev_tx, &mut c.running, &mut c.backoff)?;
+                    handle_incoming(msg, ctx, ev_tx, c)?;
+                    continue;
+                }
+                Some(msg) = c.pr_rx.recv() => {
+                    sink.send(text(&msg)).await?;
                     continue;
                 }
                 _ = beat.tick() => {
@@ -267,17 +281,16 @@ fn handle_incoming(
     msg: Incoming,
     ctx: &Ctx,
     ev_tx: &mpsc::Sender<(TaskId, AgentEvent)>,
-    running: &mut HashSet<TaskId>,
-    backoff: &mut Duration,
+    c: &mut Conn,
 ) -> Result<()> {
     match msg {
         Some(Ok(Message::Text(t))) => match serde_json::from_str::<OrchMsg>(&t) {
             Ok(OrchMsg::Welcome { id }) => {
                 tracing::info!(%id, "registered");
-                *backoff = Duration::from_secs(1);
+                c.backoff = Duration::from_secs(1);
             }
             Ok(OrchMsg::Assign { task }) => {
-                if !running.insert(task.id) {
+                if !c.running.insert(task.id) {
                     tracing::warn!(id = %task.id, "already running; ignoring duplicate assign");
                     return Ok(());
                 }
@@ -285,6 +298,17 @@ fn handle_incoming(
                 let ctx = ctx.clone();
                 let tx = ev_tx.clone();
                 tokio::spawn(async move { run_task(&ctx, task, tx).await });
+            }
+            Ok(OrchMsg::CheckPrs { task, urls }) => {
+                c.watches.retain(|_, h| !h.is_finished());
+                if let Some(old) = c.watches.remove(&task) {
+                    old.abort();
+                }
+                let tx = ctx.pr_tx.clone();
+                let watch = tokio::spawn(async move {
+                    pr::watch(std::ffi::OsStr::new("gh"), task, &urls, tx).await
+                });
+                c.watches.insert(task, watch.abort_handle());
             }
             Err(e) => tracing::warn!("bad message from orchestrator: {e}"),
         },

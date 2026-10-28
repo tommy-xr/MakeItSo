@@ -1,0 +1,53 @@
+{
+ "headRefOid": "86a2184b36bee166d6cdc47d51964c726a19ae6d",
+ "isDraft": false,
+ "mergeable": "MERGEABLE",
+ "number": 45,
+ "reviewDecision": "",
+ "state": "OPEN",
+ "statusCheckRollup": [
+  {
+   "__typename": "CheckRun",
+   "conclusion": "SUCCESS",
+   "name": "check (ubuntu-latest)",
+   "status": "COMPLETED"
+  },
+  {
+   "__typename": "CheckRun",
+   "conclusion": "SUCCESS",
+   "name": "check (windows-latest)",
+   "status": "COMPLETED"
+  },
+  {
+   "__typename": "CheckRun",
+   "conclusion": "",
+   "name": "build (macos-latest, aarch64-apple-darwin)",
+   "status": "QUEUED"
+  },
+  {
+   "__typename": "CheckRun",
+   "conclusion": "SUCCESS",
+   "name": "build (macos-latest, x86_64-apple-darwin)",
+   "status": "COMPLETED"
+  },
+  {
+   "__typename": "CheckRun",
+   "conclusion": "SUCCESS",
+   "name": "build (ubuntu-latest, x86_64-unknown-linux-gnu)",
+   "status": "COMPLETED"
+  },
+  {
+   "__typename": "CheckRun",
+   "conclusion": "SUCCESS",
+   "name": "build (ubuntu-24.04-arm, aarch64-unknown-linux-gnu)",
+   "status": "COMPLETED"
+  },
+  {
+   "__typename": "CheckRun",
+   "conclusion": "SUCCESS",
+   "name": "build (windows-latest, x86_64-pc-windows-msvc, .exe)",
+   "status": "COMPLETED"
+  }
+ ],
+ "title": "fix: mcp route goes through the access check"
+}

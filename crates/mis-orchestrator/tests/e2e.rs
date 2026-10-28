@@ -1418,6 +1418,7 @@ async fn pr_link_in_agent_text_reaches_status_and_show() {
         label: "o/r#42".into(),
         ok: None,
         detail: None,
+        pr: None,
     }];
     send(&mut client, &ClientMsg::Status).await;
     let ServerMsg::Status { tasks, .. } = recv(&mut client).await else {
@@ -1460,6 +1461,7 @@ async fn reported_evidence_reaches_status_and_show() {
         label: "cargo test".into(),
         ok: Some(true),
         detail: Some("78 passed".into()),
+        pr: None,
     };
     let event = AgentEvent::Evidence(test.clone());
     send(&mut worker, &WorkerMsg::Event { task, event }).await;
@@ -1765,6 +1767,72 @@ async fn reply_to_a_planner_answer_is_planned_with_context() {
     assert!(sent
         .prompt
         .ends_with("Earlier request:\nwhat is 2+2?\n\nEarlier answer:\n4"));
+}
+
+#[tokio::test]
+async fn pr_status_reaches_status_and_show_and_refresh_reaches_the_worker() {
+    let base = start().await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    send(&mut client, &ClientMsg::Subscribe).await;
+    let mut worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+    send(
+        &mut client,
+        &ClientMsg::Submit {
+            prompt: "open a PR".into(),
+            cwd: None,
+            harness: Some("claude".into()),
+            model: None,
+            reply_to: None,
+        },
+    )
+    .await;
+    let ServerMsg::Submitted { task } = recv(&mut client).await else {
+        panic!()
+    };
+    let OrchMsg::Assign { .. } = recv(&mut worker).await else {
+        panic!()
+    };
+    let url = "https://github.com/o/r/pull/42".to_string();
+    let event = AgentEvent::Finished {
+        ok: true,
+        summary: Some(format!("Opened {url}")),
+    };
+    send(&mut worker, &WorkerMsg::Event { task, event }).await;
+    let ServerMsg::Event { .. } = recv(&mut client).await else {
+        panic!()
+    };
+    // Finishing with a PR link asks the worker to read it.
+    let want = OrchMsg::CheckPrs {
+        task,
+        urls: vec![url.clone()],
+    };
+    assert_eq!(recv::<OrchMsg>(&mut worker).await, want);
+    let status = PrStatus {
+        state: PrState::Open,
+        checks: Checks::Pending,
+        failing: vec![],
+        mergeable: Some(true),
+        review: None,
+        head: "abc".into(),
+        observed_at: 1,
+    };
+    let msg = WorkerMsg::PrStatus {
+        task,
+        url: url.clone(),
+        status: status.clone(),
+    };
+    send(&mut worker, &msg).await;
+    let ServerMsg::Status { tasks, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    assert_eq!(tasks[0].links[0].pr.as_ref(), Some(&status));
+    send(&mut client, &ClientMsg::Show { task }).await;
+    let ServerMsg::TaskDetail { task: info, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    assert_eq!(info.links[0].pr, Some(status));
+    send(&mut client, &ClientMsg::RefreshEvidence { task }).await;
+    assert_eq!(recv::<OrchMsg>(&mut worker).await, want);
 }
 
 #[tokio::test]

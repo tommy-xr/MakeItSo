@@ -1,0 +1,35 @@
+{
+ "headRefOid": "35a2bdf9ab69a5a4981425f12a2b6f8fe821fa0b",
+ "isDraft": false,
+ "mergeable": "MERGEABLE",
+ "number": 46,
+ "reviewDecision": "",
+ "state": "OPEN",
+ "statusCheckRollup": [
+  {
+   "__typename": "CheckRun",
+   "conclusion": "CANCELLED",
+   "name": "check (ubuntu-latest)",
+   "status": "COMPLETED"
+  },
+  {
+   "__typename": "CheckRun",
+   "conclusion": "FAILURE",
+   "name": "check (windows-latest)",
+   "status": "COMPLETED"
+  },
+  {
+   "__typename": "CheckRun",
+   "conclusion": "SKIPPED",
+   "name": "build",
+   "status": "COMPLETED"
+  },
+  {
+   "__typename": "CheckRun",
+   "conclusion": "SKIPPED",
+   "name": "release",
+   "status": "COMPLETED"
+  }
+ ],
+ "title": "feat: tasks that need you rise to the top"
+}

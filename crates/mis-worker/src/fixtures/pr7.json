@@ -1,0 +1,10 @@
+{
+ "headRefOid": "ff8930bc89b6caa32f00553972603f043fe30eda",
+ "isDraft": false,
+ "mergeable": "UNKNOWN",
+ "number": 7,
+ "reviewDecision": "",
+ "state": "MERGED",
+ "statusCheckRollup": [],
+ "title": "docs: add AGENTS.md with functional core / imperative shell principle"
+}
