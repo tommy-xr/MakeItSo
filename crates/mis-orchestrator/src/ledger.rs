@@ -105,7 +105,7 @@ fn attention(status: TaskStatus, limited: bool, seen: bool) -> Attention {
     match status {
         _ if seen => Attention::None,
         TaskStatus::Done => Attention::Unread,
-        _ if limited => Attention::Limited,
+        TaskStatus::Failed if limited => Attention::Limited,
         TaskStatus::Failed => Attention::Failed,
         _ => Attention::None,
     }
@@ -1753,13 +1753,13 @@ mod tests {
     }
 
     #[test]
-    fn usage_limit_shows_until_it_finishes_ok_or_is_seen() {
+    fn usage_limit_shows_once_it_fails_until_seen() {
         let limited = AgentEvent::Limited {
             resets_at: Some(1_800_000_000),
         };
         let (mut l, wid, task) = running_setup();
         l.event(wid, 1, task, limited.clone());
-        assert_eq!(attention_of(&l, task), Attention::Limited, "while running");
+        assert_eq!(attention_of(&l, task), Attention::None, "still running");
         finish(&mut l, wid, task, false);
         assert_eq!(
             attention_of(&l, task),
@@ -1786,7 +1786,6 @@ mod tests {
         let (task, _) = l.submit("p".into(), None, None, None);
         let limited = AgentEvent::Limited { resets_at: None };
         assert_eq!(l.planning_event(task, limited.clone()).len(), 1);
-        assert_eq!(attention_of(&l, task), Attention::Limited);
         let failed = AgentEvent::Finished {
             ok: false,
             summary: None,

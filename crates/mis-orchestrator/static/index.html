@@ -505,8 +505,9 @@ function ticker() {
   }
   if (queued && !workers.some((w) => w.online)) return { parts: ['queued · no workers'], cls: 'bad' };
   if (queued || planning) return { parts: dots([planning && `${planning} planning`, queued && `${queued} queued`]), cls: 'run' };
-  const need = tasks.filter((t) => ATTENTION[t.attention]).length;
-  if (need) return { parts: [`${need} need${need === 1 ? 's' : ''} you`], cls: 'need' };
+  // A tap opens the most urgent, newest first; opening it settles it, so the next tap opens the next.
+  const need = tasks.filter((t) => ATTENTION[t.attention]).reverse().sort((a, b) => rank(a) - rank(b));
+  if (need.length) return { parts: [`${need.length} need${need.length === 1 ? 's' : ''} you`], cls: 'need', open: need[0].id };
   return { parts: [], cls: '' };
 }
 
@@ -566,7 +567,7 @@ function render() {
 const placement = (t) => [t.harness, t.model, t.worker && hostOf(t.worker)].filter(Boolean);
 
 // Why a task needs the user, most urgent first: [rank, label].
-const ATTENTION = { failed: [0, 'failed: needs you'], limited: [1, 'hit a usage limit'], unread: [2, 'unread result'] };
+const ATTENTION = { failed: [0, 'needs you'], limited: [1, 'needs you: usage limit'], unread: [2, 'needs you: unread'] };
 // Needs you, then working, then the rest.
 const rank = (t) => ATTENTION[t.attention]?.[0] ?? (['planning', 'queued', 'running'].includes(t.status) ? 3 : 4);
 // Threads, each followed by its replies (oldest first), nested: [depth, task]. A thread ranks as its
