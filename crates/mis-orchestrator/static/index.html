@@ -44,7 +44,7 @@
   /* One line while work runs; the activity is the part the ellipsis cuts. */
   #ticker.run { white-space: pre; overflow: hidden; color: var(--run); }
   #ticker .act { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  #ticker.warn { color: var(--warn); } #ticker.bad { color: var(--bad); } #ticker.note { color: var(--fg); }
+  #ticker.warn, #ticker.mic { color: var(--warn); } #ticker.bad { color: var(--bad); } #ticker.note { color: var(--fg); }
   #ticker[href]::after { content: " ›"; white-space: pre; }
   /* Light cycle: a short bright segment rides the line while work runs; still when idle or offline. */
   .cycle { position: relative; height: 2px; margin: 0 calc(-1 * var(--pad)); background: var(--rule); overflow: hidden; }
@@ -73,11 +73,17 @@
   .row input { flex: 1; min-width: 0; min-height: 2.75rem; padding: 0 .75rem; }
   .row.tight { margin-bottom: 0; }
   .row .mic, #speak { flex: none; }
-  .mic { display: grid; place-items: center; width: 2.75rem; padding: 0; }
+  /* No scroll, selection or callout under a held finger. */
+  .mic { display: grid; place-items: center; width: 2.75rem; padding: 0; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
   .mic svg { width: 1.25rem; height: 1.25rem; }
   button:disabled { opacity: .5; cursor: default; }
   /* Listening / speaking: lit edge. */
   .mic[aria-pressed=true], #speak.on { color: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--glow), 0 0 12px var(--glow); }
+  /* Recording: warn fill with a stop square. A finger hides it, so the field glows and the ticker says so too. */
+  .mic[data-mic=live] { background: var(--warn); border-color: var(--warn); color: var(--bg); box-shadow: 0 0 12px var(--warn); }
+  .mic[data-mic=live] svg { display: none; }
+  .mic[data-mic=live]::before { content: ""; width: .875rem; height: .875rem; background: currentColor; }
+  form.listening textarea { border-color: var(--accent); box-shadow: 0 0 10px var(--glow); }
   .toggle { display: flex; align-items: center; gap: .5rem; min-height: 2.75rem; margin: -1rem 0 1rem; }
   .toggle input { width: 1.25rem; height: 1.25rem; margin: 0; accent-color: var(--accent); }
   .dim { color: var(--dim); }
@@ -272,35 +278,117 @@ function flash(text) {
   renderStrip();
 }
 
-// Dictation: words stream into the field after its text; nothing is sent until Submit.
-// Absent API (e.g. some iOS home-screen apps): the buttons stay hidden; keyboard dictation still works.
+// Dictation into a composer's field. Tap the mic: words stream in until a second tap; nothing is sent.
+// Hold it: release sends, sliding off cancels (text kept). Absent API (e.g. some iOS home-screen apps):
+// the buttons stay hidden; keyboard dictation still works.
 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-let rec = null; // the live recognizer, at most one
+const HOLD_MS = 300, SLIDE_PX = 24, START_MS = 3000, STOP_MS = 2000;
+// A press that started dictation, by how it ended: slid off or interrupted, short (keep listening), or held.
+const pressOutcome = (end, heldMs) => (end !== 'up' ? 'cancel' : heldMs < HOLD_MS ? 'tap' : 'send');
+// The finger is more than SLIDE_PX outside the button.
+const slidOff = (r, x, y) => x < r.left - SLIDE_PX || x > r.right + SLIDE_PX || y < r.top - SLIDE_PX || y > r.bottom + SLIDE_PX;
+// A held release sends only when dictation added words.
+const hasNewText = (base, text) => text.trim() !== '' && text.trim() !== base.trim();
+// Ticker line for a session: nothing once stopping; `starting` until the browser says it hears.
+const micLine = (s) => (s.stopping ? '' : !s.live ? 'starting mic…' : s.held ? 'listening · release to send · slide away to cancel' : 'listening · tap mic to stop');
+
+// The dictation session, at most one: { r, btn, form, field, base, live, held, send, stopping, dead, timer }.
+let rec = null;
+function micShow(s) {
+  const on = rec === s && !s.stopping, state = on ? (s.live ? 'live' : 'starting') : '';
+  if (state) s.btn.dataset.mic = state; else delete s.btn.dataset.mic;
+  s.btn.setAttribute('aria-pressed', String(on));
+  s.btn.setAttribute('aria-label', !on ? 'Start dictation' : s.live ? 'Stop dictation' : 'Starting dictation');
+  s.form.classList.toggle('listening', on && s.live);
+  renderStrip();
+}
+// Sends the field when the composer can; offline, the text stays for later.
+function deliver(s) {
+  if (!hasNewText(s.base, s.field.value)) return;
+  if (s.form.querySelector('button:not([type=button])').disabled) flash('offline · text kept');
+  else s.form.requestSubmit();
+}
+// Settles a session once: on onend, an error, the watchdogs, or micOff. A held release sends here.
+function micEnd(s) {
+  if (rec !== s) return;
+  rec = null;
+  clearTimeout(s.timer);
+  micShow(s);
+  if (s.send && !s.dead) deliver(s);
+}
+function micStart(btn, held) {
+  hush(); // else the mic hears the readback
+  const form = btn.closest('form'), field = form.querySelector('textarea'), r = new Recognition();
+  const s = rec = { r, btn, form, field, base: field.value.trimEnd(), live: false, held, send: false, stopping: false, dead: false, timer: 0 };
+  Object.assign(r, { lang: navigator.language, interimResults: true });
+  r.onresult = (e) => {
+    if (rec !== s) return;
+    const said = [...e.results].map((x) => x[0].transcript).join('').trim();
+    field.value = s.base && said ? `${s.base} ${said}` : s.base || said;
+  };
+  // Live only once the browser hears, so the user knows when to speak.
+  r.onstart = r.onaudiostart = () => { if (rec === s && !s.live) { s.live = true; clearTimeout(s.timer); micShow(s); } };
+  // Some browsers (Chrome on iOS) expose the API, refuse it, and never fire onend: settle here too.
+  r.onerror = (e) => {
+    if (e.error === 'aborted' || rec !== s) return;
+    s.dead = true;
+    flash(e.error === 'not-allowed' ? 'mic not allowed: use Safari or keyboard dictation' : `mic error: ${e.error}`);
+    micEnd(s);
+  };
+  r.onend = () => micEnd(s);
+  // A recognizer that never starts (seen in the iOS home-screen app) would leave the button stuck: give up.
+  s.timer = setTimeout(() => { s.dead = true; r.abort(); micEnd(s); flash("mic didn't start: try again"); }, START_MS);
+  micShow(s);
+  try { r.start(); } catch (e) { s.dead = true; flash(`mic error: ${e.message}`); micEnd(s); }
+  return s;
+}
+// Stop listening, keeping what was heard; `send` submits once the final words land.
+function micStop(s, send) {
+  if (rec !== s || s.stopping) return;
+  s.send = send;
+  if (!s.live) { s.dead = true; s.r.abort(); micEnd(s); return; } // nothing heard yet
+  s.stopping = true;
+  micShow(s);
+  s.r.stop();
+  clearTimeout(s.timer);
+  s.timer = setTimeout(() => { s.r.abort(); micEnd(s); }, STOP_MS); // onend never came
+}
 // Abort drops pending results, so nothing lands in a sent or abandoned field.
-function micOff() { if (rec) { rec.abort(); rec = null; } }
-function listening(btn, on) { btn.setAttribute('aria-pressed', String(on)); btn.setAttribute('aria-label', on ? 'Stop dictation' : 'Start dictation'); }
+function micOff() { const s = rec; if (s) { s.dead = true; s.r.abort(); micEnd(s); } }
+
+// One finger on a mic at a time. `stops`: it pressed a mic that was already on, so it only turns it off.
+let press = null, pressedAt = 0;
+function pressEnd(end, e) {
+  const p = press;
+  if (!p || e.pointerId !== p.id) return;
+  press = null;
+  pressedAt = performance.now();
+  if (p.btn.hasPointerCapture(e.pointerId)) p.btn.releasePointerCapture(e.pointerId);
+  if (p.stops) { if (rec) micStop(rec, false); return; }
+  const s = p.session, out = pressOutcome(end, e.timeStamp - p.t0);
+  if (out === 'cancel') { micStop(s, false); flash('cancelled · text kept'); return; }
+  if (out === 'tap') { s.held = false; micShow(s); return; }
+  // Held: send. If recognition already ended on its own, the words are in the field.
+  s.send = true;
+  if (rec === s) micStop(s, true); else if (!s.dead) deliver(s);
+}
 for (const btn of document.querySelectorAll('.mic')) {
-  const field = btn.closest('form').querySelector('textarea');
   btn.hidden = !Recognition;
+  btn.oncontextmenu = (e) => e.preventDefault();
+  btn.onpointerdown = (e) => {
+    if (press || !e.isPrimary || e.button !== 0) return;
+    btn.setPointerCapture(e.pointerId);
+    const stops = !!rec && rec.btn === btn;
+    if (!stops) micOff();
+    press = { id: e.pointerId, btn, t0: e.timeStamp, stops, session: stops ? null : micStart(btn, true) };
+  };
+  btn.onpointermove = (e) => { if (press && press.btn === btn && slidOff(btn.getBoundingClientRect(), e.clientX, e.clientY)) pressEnd('cancel', e); };
+  btn.onpointerup = (e) => pressEnd('up', e);
+  btn.onpointercancel = btn.onlostpointercapture = (e) => pressEnd('cancel', e);
+  // Keyboard and assistive activation; a pointer press already acted, so skip the click that follows it.
   btn.onclick = () => {
-    if (rec) { rec.stop(); return; } // tap again: stop, keeping what was heard
-    hush(); // else the mic hears the readback
-    const r = rec = new Recognition(), base = field.value.trimEnd();
-    Object.assign(r, { lang: navigator.language, interimResults: true });
-    r.onresult = (e) => {
-      const said = [...e.results].map((x) => x[0].transcript).join('').trim();
-      field.value = base && said ? `${base} ${said}` : base || said;
-    };
-    // Some browsers (Chrome on iOS) expose the API, refuse it, and never fire onend: reset here too.
-    const done = () => { if (rec === r) rec = null; listening(btn, false); };
-    r.onerror = (e) => {
-      if (e.error === 'aborted') return;
-      flash(e.error === 'not-allowed' ? 'mic not allowed: use Safari or keyboard dictation' : `mic error: ${e.error}`);
-      done();
-    };
-    r.onend = done;
-    listening(btn, true);
-    r.start();
+    if (performance.now() - pressedAt < 1000) return;
+    if (rec && rec.btn === btn) micStop(rec, false); else { micOff(); micStart(btn, false); }
   };
 }
 
@@ -386,7 +474,9 @@ function renderStrip() {
   $('dot').className = `dot ${cls}`;
   $('dot').setAttribute('aria-label', label);
   $('dot').title = label;
+  const m = rec && micLine(rec);
   const t = flashText ? { parts: [flashText], cls: 'note' }
+    : m ? { parts: [m], cls: 'mic' }
     : !everOpen ? { parts: [connMsg], cls: '' }
     : offline ? { parts: [`offline · retrying${authNeeded ? ' (wrong token?)' : ''}`], cls: 'warn' }
     : work;
