@@ -17,6 +17,9 @@ use mis_types::*;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 
+/// `0.1.0+abc1234`, with `-dirty` when built from uncommitted changes.
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("MIS_GIT_REV"));
+
 pub mod ledger;
 pub mod plan;
 
@@ -292,9 +295,9 @@ async fn page() -> impl IntoResponse {
     )
 }
 
-/// Lets the page decide whether to ask for a token.
+/// Lets the page decide whether to ask for a token, and shows what is running.
 async fn info(State(app): State<App>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "auth": app.token.is_some() }))
+    Json(serde_json::json!({ "auth": app.token.is_some(), "version": VERSION }))
 }
 
 async fn ws_worker(

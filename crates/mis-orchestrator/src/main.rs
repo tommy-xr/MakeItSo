@@ -2,7 +2,7 @@ use clap::Parser;
 use mis_orchestrator::{normalize_origins, App};
 
 #[derive(Parser)]
-#[command(about = "Make It So orchestrator")]
+#[command(about = "Make It So orchestrator", version = mis_orchestrator::VERSION)]
 struct Args {
     #[arg(long, default_value = "127.0.0.1:7474")]
     bind: String,
@@ -51,7 +51,8 @@ fn print_connect_hints(
     let token = token
         .map(|t| format!(" MIS_TOKEN={}", sh_quote(t)))
         .unwrap_or_default();
-    eprintln!("\nConnect workers with one of (same MIS_URL/MIS_TOKEN work for `mis`):");
+    eprintln!("\nmis-orchestrator {}", mis_orchestrator::VERSION);
+    eprintln!("Connect workers with one of (same MIS_URL/MIS_TOKEN work for `mis`):");
     for u in &urls {
         eprintln!("  MIS_URL={}{token} mis-worker", sh_quote(u));
     }

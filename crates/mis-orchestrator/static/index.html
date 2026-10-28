@@ -139,7 +139,7 @@
   <div id="wbody"></div>
 </main>
 
-<p class="dim"><a href="#" id="clear" hidden>disconnect / clear token</a></p>
+<p class="dim"><a href="#" id="clear" hidden>disconnect / clear token</a> <span id="ver"></span></p>
 
 <script>
 'use strict';
@@ -398,7 +398,7 @@ $('clear').onclick = (e) => {
 };
 window.onhashchange = render;
 
-fetch('/api/info').then((r) => r.json()).then((info) => { authNeeded = info.auth; connect(); })
+fetch('/api/info').then((r) => r.json()).then((info) => { authNeeded = info.auth; $('ver').textContent = info.version || ''; connect(); })
   .catch((e) => { $('conn').textContent = `cannot reach server: ${e.message}`; });
 </script>
 </body>
