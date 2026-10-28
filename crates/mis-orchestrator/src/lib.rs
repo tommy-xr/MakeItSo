@@ -58,6 +58,8 @@ pub struct App {
     stale_after: Duration,
     /// How often to check for silent workers.
     tick_every: Duration,
+    /// How often to ping each client socket, so proxies don't close it as idle.
+    ping_every: Duration,
     /// Origin of the ledger's monotonic `now`.
     started: Instant,
 }
@@ -80,6 +82,8 @@ impl App {
             // Two missed beats plus slack for network jitter.
             stale_after: 2 * STATS_INTERVAL + Duration::from_secs(5),
             tick_every: Duration::from_secs(5),
+            // Cloudflare closes sockets idle for ~100s.
+            ping_every: Duration::from_secs(25),
             started: Instant::now(),
         }
     }
@@ -98,6 +102,12 @@ impl App {
     pub fn with_liveness(mut self, stale_after: Duration, tick_every: Duration) -> Self {
         self.stale_after = stale_after;
         self.tick_every = tick_every;
+        self
+    }
+
+    /// Override the client ping interval (tests use short values).
+    pub fn with_ping_every(mut self, every: Duration) -> Self {
+        self.ping_every = every;
         self
     }
 
@@ -502,6 +512,8 @@ async fn next_event(sub: Option<&mut broadcast::Receiver<ServerMsg>>) -> ServerM
 
 async fn client_conn(mut sock: WebSocket, app: App) {
     let mut sub: Option<broadcast::Receiver<ServerMsg>> = None;
+    let start = tokio::time::Instant::now() + app.ping_every;
+    let mut ping = tokio::time::interval_at(start, app.ping_every);
     loop {
         // Drain queued events before handling a request, so a `Show` snapshot is not
         // followed by stale copies of events it already contains.
@@ -509,6 +521,9 @@ async fn client_conn(mut sock: WebSocket, app: App) {
             biased;
             ev = next_event(sub.as_mut()) => {
                 if !send_json(&mut sock, &ev).await { break; }
+            }
+            _ = ping.tick() => {
+                if sock.send(Message::Ping(Bytes::new())).await.is_err() { break; }
             }
             incoming = recv_json::<ClientMsg>(&mut sock) => match incoming {
                 Some(ClientMsg::Status) => {

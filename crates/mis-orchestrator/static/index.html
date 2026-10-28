@@ -19,19 +19,31 @@
   html { background: var(--page); padding: .375rem; min-height: 100%; box-sizing: border-box; }
   body { --pad: 1.25rem; box-sizing: border-box; margin: 0 auto; max-width: 46rem; min-height: calc(100vh - .75rem); padding: 1.5rem var(--pad) 3rem; background: var(--screen); box-shadow: 0 0 0 .375rem var(--frame); color: var(--fg); font: 1rem/1.55 var(--mono); }
   @media (min-width: 64rem) { html { padding: 3rem; } body { --pad: 2.5rem; min-height: calc(100vh - 6rem); padding-top: 2.25rem; } }
-  /* Boot banner, then the synthwave stripe (five stacked lines) across the screen. */
-  h1 { margin: 0 calc(-1 * var(--pad)); padding: 0 var(--pad) 1.5rem; font-size: 1rem; font-weight: 500; text-align: center; text-transform: uppercase; letter-spacing: .08em; color: var(--dim);
-    background: linear-gradient(var(--synth)) bottom / 100% .625rem no-repeat; }
-  h1::before { content: "**** "; }
-  h1::after { content: " ****"; }
-  #conn { margin: 1.25rem 0 .5rem; text-transform: uppercase; overflow-wrap: anywhere; }
-  #conn::after { content: ""; display: inline-block; width: .6em; height: 1.1em; margin-left: .2em; vertical-align: -.2em; background: var(--fg); animation: blink 1.1s steps(1) infinite; }
-  @keyframes blink { 50% { opacity: 0; } }
-  @media (prefers-reduced-motion: reduce) { #conn::after { animation: none; } }
-  #headline { margin: 0 0 1rem; overflow-wrap: anywhere; }
-  #tabs { display: flex; gap: 1.5rem; margin: 0 0 1.25rem; border-bottom: 1px solid var(--rule); }
-  [role=tab] { display: inline-flex; align-items: center; justify-content: center; min-height: 2.75rem; min-width: 2.75rem; color: var(--dim); text-decoration: none; }
-  [role=tab][aria-selected=true] { color: var(--fg); box-shadow: inset 0 -2px var(--answer); }
+  /* Title strip: dot, wordmark and tabs; then the ticker of live work; then the synthwave stripe (five stacked lines). */
+  .strip { margin: 0 calc(-1 * var(--pad)) 1.25rem; padding: 0 var(--pad) .5rem; background: linear-gradient(var(--synth)) bottom / 100% .625rem no-repeat; }
+  /* Idle: no ticker, so the tabs need room above the stripe. */
+  .strip:has(> #ticker[hidden]) { padding-bottom: 1.125rem; }
+  .top { display: flex; flex-wrap: wrap; align-items: center; gap: .625rem; }
+  .title { font-weight: 700; text-transform: uppercase; letter-spacing: .08em; white-space: nowrap; }
+  /* Connection and work: dim = idle, bright with glow = working, hollow = reconnecting, warn = offline or no workers. */
+  .dot { flex: none; box-sizing: border-box; width: .625rem; height: .625rem; border-radius: 50%; background: var(--answer); }
+  .dot.rest { background: color-mix(in srgb, var(--answer) 45%, var(--screen)); }
+  /* Light: dim enough to read as idle, dark enough for 3:1 on the screen. */
+  @media (prefers-color-scheme: light) { .dot.rest { background: color-mix(in srgb, var(--answer) 70%, var(--screen)); } }
+  .dot.work { box-shadow: 0 0 .375rem .0625rem var(--answer); }
+  .dot.hollow { background: none; border: 2px solid var(--dim); }
+  .dot.down { background: var(--run); }
+  #tabs { display: flex; margin-left: auto; border: 1px solid var(--rule); }
+  [role=tab] { display: inline-flex; align-items: center; justify-content: center; min-height: 2.75rem; min-width: 2.75rem; padding: 0 .75rem; color: var(--dim); text-decoration: none; text-transform: uppercase; letter-spacing: .08em; font-size: .875rem; }
+  [role=tab][aria-selected=true] { color: var(--screen); background: var(--answer); }
+  #ticker { display: flex; align-items: center; min-height: 2.75rem; color: var(--dim); text-decoration: none; overflow-wrap: anywhere; }
+  /* One line while work runs; the activity is the part the ellipsis cuts. */
+  #ticker.run { white-space: pre; overflow: hidden; color: var(--run); }
+  #ticker .act { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  #ticker.warn { color: var(--run); } #ticker.bad { color: var(--bad); } #ticker.note { color: var(--fg); }
+  #ticker[href]::after { content: " ›"; white-space: pre; }
+  /* Offline for a while: the last view stays, dimmed. */
+  body.stale main { opacity: .6; }
   p { margin: 0 0 .75rem; }
   a { color: inherit; }
   :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
@@ -48,6 +60,9 @@
   .row input { flex: 1; min-width: 0; min-height: 2.75rem; padding: 0 .75rem; }
   .row.tight { margin-bottom: 0; }
   .row .mic, #speak { flex: none; }
+  .mic { display: grid; place-items: center; width: 2.75rem; padding: 0; }
+  .mic svg { width: 1.25rem; height: 1.25rem; }
+  button:disabled { opacity: .5; cursor: default; }
   /* Listening / speaking: inverse of the normal button, with the hot dot. */
   .mic[aria-pressed=true], #speak.on { background: var(--field); color: var(--hot); border-color: var(--hot); }
   .toggle { display: flex; align-items: center; gap: .5rem; min-height: 2.75rem; margin: -1rem 0 1rem; }
@@ -107,14 +122,17 @@
 </style>
 </head>
 <body>
-<h1>Make It So</h1>
-<div id="conn" class="dim">connecting…</div>
-<div id="headline" hidden></div>
-
-<nav id="tabs" role="tablist" aria-label="View" hidden>
-  <a href="#" id="tab-tasks" role="tab" aria-selected="true">Tasks</a>
-  <a href="#workers" id="tab-workers" role="tab" aria-selected="false">Workers</a>
-</nav>
+<header class="strip">
+  <div class="top">
+    <span id="dot" class="dot hollow" role="img" aria-label="connecting" title="connecting"></span>
+    <span class="title">Make It So</span>
+    <nav id="tabs" role="tablist" aria-label="View" hidden>
+      <a href="#" id="tab-tasks" role="tab" aria-selected="true">Tasks</a>
+      <a href="#workers" id="tab-workers" role="tab" aria-selected="false">Workers</a>
+    </nav>
+  </div>
+  <a id="ticker">connecting…</a>
+</header>
 
 <form id="auth" hidden>
   <p>This orchestrator needs its token (MIS_TOKEN).</p>
@@ -129,7 +147,7 @@
       <select id="harness" aria-label="harness"><option value="">auto</option></select>
       <input id="model" aria-label="model" placeholder="model (optional)" autocapitalize="off" autocorrect="off" spellcheck="false">
     </div>
-    <div class="row"><button type="button" class="mic" aria-pressed="false" hidden>mic</button><button>Submit</button></div>
+    <div class="row"><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><button id="send">Submit</button></div>
     <label class="toggle dim" hidden><input type="checkbox" id="autoread"> auto-read answers</label>
   </form>
   <ul id="tasks"></ul>
@@ -144,7 +162,7 @@
   <div id="thread" class="meta dim"></div>
   <form id="reply" hidden>
     <textarea id="reply-text" aria-label="reply" placeholder="Reply in this thread…" required></textarea>
-    <div class="row"><button type="button" class="mic" aria-pressed="false" hidden>mic</button><button>Reply</button></div>
+    <div class="row"><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><button id="send-reply">Reply</button></div>
     <p id="reply-error" class="bad" hidden></p>
   </form>
   <details><summary>transcript</summary><pre id="log"></pre></details>
@@ -171,6 +189,11 @@ const store = {
   set(v) { try { v ? localStorage.setItem('mis-token', v) : localStorage.removeItem('mis-token'); } catch {} },
 };
 let ws = null, authNeeded = false, tasks = [], workers = [], detail = null, retries = 0, retryTimer = 0, statusTimer = 0;
+// Connection, shown calmly: once a socket has opened, views stay up through drops and only the dot
+// changes, until OFFLINE_MS without a socket marks the page offline.
+const OFFLINE_MS = 8000;
+let everOpen = false, offline = false, offlineTimer = 0;
+let connMsg = 'connecting…'; // shown in the ticker until the first socket opens
 let skew = 0; // orchestrator clock minus ours, from the last Status; task times are on its clock
 let from = '#'; // last list view, so a task's back link returns to Workers when opened from there
 let replying = false; // a reply was sent; its Submitted opens the new task
@@ -213,13 +236,13 @@ function hostOf(wid) {
   return w ? w.info.hostname : short(wid);
 }
 
-// A passing message in the #conn line; the connection state returns after a few seconds.
-let flashTimer = 0, flashWas = '';
+// A passing message in the ticker, for a few seconds.
+let flashText = '', flashTimer = 0;
 function flash(text) {
-  const conn = $('conn');
-  if (flashTimer) clearTimeout(flashTimer); else flashWas = conn.textContent;
-  conn.textContent = text;
-  flashTimer = setTimeout(() => { flashTimer = 0; if (conn.textContent === text) conn.textContent = flashWas; }, 4000);
+  clearTimeout(flashTimer);
+  flashText = text;
+  flashTimer = setTimeout(() => { flashText = ''; renderStrip(); }, 4000);
+  renderStrip();
 }
 
 // Dictation: words stream into the field after its text; nothing is sent until Submit.
@@ -228,7 +251,7 @@ const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 let rec = null; // the live recognizer, at most one
 // Abort drops pending results, so nothing lands in a sent or abandoned field.
 function micOff() { if (rec) { rec.abort(); rec = null; } }
-function listening(btn, on) { btn.textContent = on ? '● listening' : 'mic'; btn.setAttribute('aria-pressed', String(on)); }
+function listening(btn, on) { btn.setAttribute('aria-pressed', String(on)); btn.setAttribute('aria-label', on ? 'Stop dictation' : 'Start dictation'); }
 for (const btn of document.querySelectorAll('.mic')) {
   const field = btn.closest('form').querySelector('textarea');
   btn.hidden = !Recognition;
@@ -310,19 +333,41 @@ function tick() {
 // Known parts joined with ` · ` (or `sep`).
 const dots = (parts, sep = ' · ') => parts.filter(Boolean).flatMap((p, i) => (i ? [sep, p] : [p]));
 
-// Fleet in one line, as `mis status` prints it first; the running task's time ticks.
-function headline() {
-  const n = workers.filter((w) => w.online).length, count = (s) => tasks.filter((t) => t.status === s).length;
-  const parts = [n ? `${n} worker${n === 1 ? '' : 's'}` : 'no workers'];
-  const running = tasks.filter((t) => t.status === 'running');
-  const newest = running.reduce((a, t) => (!a || (t.started_at || 0) >= (a.started_at || 0) ? t : a), null);
-  if (newest) {
-    const detail = dots([(newest.activity || '').replace(/^status: /, ''), clock(newest)], ', ');
-    parts.push(el('span', {}, `${running.length} running`, ...(detail.length ? [' (', ...detail, ')'] : [])));
+// Whether work is happening, in one line: `● 2 running · <newest's activity> · +1 queued`,
+// or `queued · no workers`; no parts when idle. `open` is the task a tap opens.
+function ticker() {
+  const count = (s) => tasks.filter((t) => t.status === s).length;
+  const running = tasks.filter((t) => t.status === 'running'), queued = count('queued'), planning = count('planning');
+  if (running.length) {
+    const newest = running.reduce((a, t) => ((t.started_at || 0) >= (a.started_at || 0) ? t : a));
+    const act = (newest.activity || '').replace(/^status: /, '');
+    const parts = dots([`● ${running.length} running`, act && el('span', { className: 'act' }, act),
+      planning && `+${planning} planning`, queued && `+${queued} queued`]);
+    return { parts, cls: 'run', open: newest.id };
   }
-  if (!['planning', 'queued', 'running'].some(count)) parts.push('idle');
-  for (const s of ['done', 'failed', 'planning', 'queued']) if (count(s)) parts.push(`${count(s)} ${s}`);
-  return dots(parts);
+  if (queued && !workers.some((w) => w.online)) return { parts: ['queued · no workers'], cls: 'bad' };
+  if (queued || planning) return { parts: dots([planning && `${planning} planning`, queued && `${queued} queued`]), cls: 'run' };
+  return { parts: [], cls: '' };
+}
+
+// Dot, then the ticker: a flash wins, then the connection until a socket has opened, then offline, then work.
+// The dot alone says idle; an idle ticker collapses.
+function renderStrip() {
+  const live = ws && ws.readyState === WebSocket.OPEN, trying = ws || retryTimer, work = ticker();
+  const [cls, label] = !live ? (offline || !trying ? ['down', 'offline'] : ['hollow', everOpen ? 'reconnecting' : 'connecting'])
+    : work.cls === 'bad' ? ['down', 'no workers'] : work.parts.length ? ['work', 'working'] : ['rest', 'idle'];
+  $('dot').className = `dot ${cls}`;
+  $('dot').setAttribute('aria-label', label);
+  $('dot').title = label;
+  const t = flashText ? { parts: [flashText], cls: 'note' }
+    : !everOpen ? { parts: [connMsg], cls: '' }
+    : offline ? { parts: [`offline · retrying${authNeeded ? ' (wrong token?)' : ''}`], cls: 'warn' }
+    : work;
+  const tk = $('ticker');
+  tk.replaceChildren(...t.parts);
+  tk.hidden = !t.parts.length;
+  tk.className = t.cls;
+  if (t.open) tk.href = `#task/${t.open}`; else tk.removeAttribute('href');
 }
 
 // `#` tasks, `#task/<id>`, `#workers`, `#worker/<id>`.
@@ -337,10 +382,12 @@ function render() {
   const live = ws && ws.readyState === WebSocket.OPEN;
   const views = { list: renderList, detail: renderDetail, workers: renderWorkers, machine: renderMachine };
   $('auth').hidden = live || !authNeeded || !!store.get();
-  $('tabs').hidden = !live;
-  $('headline').hidden = !live;
-  $('headline').replaceChildren(...headline());
-  for (const v in views) $(v).hidden = !live || v !== r.view;
+  $('tabs').hidden = !everOpen;
+  renderStrip();
+  document.body.classList.toggle('stale', everOpen && offline);
+  // Sending needs a socket; drafts stay in their fields meanwhile.
+  $('send').disabled = $('send-reply').disabled = !live;
+  for (const v in views) $(v).hidden = !everOpen || v !== r.view;
   if (r.view === 'detail') $('detail').querySelector('.back').href = from;
   else from = location.hash || '#';
   const onWorkers = r.view === 'workers' || r.view === 'machine';
@@ -477,6 +524,7 @@ function onMessage(msg) {
         detail.task = msg.task;
         detail.lines = (msg.truncated ? ['(earlier events dropped)'] : []).concat(msg.events.map(eventLine));
         detail.ready = true;
+        detail.refetch = false;
       }
       break;
     case 'event': {
@@ -496,9 +544,9 @@ function onMessage(msg) {
         Object.assign($('reply-error'), { textContent: msg.message, hidden: false });
         break;
       }
-      $('conn').textContent = `error: ${msg.message}`;
+      flash(`error: ${msg.message}`);
       // A pending Show failed (unknown task): say so. Otherwise events were dropped: re-fetch.
-      if (detail && !detail.ready) Object.assign(detail, { ready: true, lines: [msg.message] });
+      if (detail && (!detail.ready || detail.refetch)) Object.assign(detail, { ready: true, refetch: false, lines: [msg.message] });
       else detail = null;
       refreshSoon();
       break;
@@ -506,10 +554,17 @@ function onMessage(msg) {
   render();
 }
 
+// Without a socket for OFFLINE_MS, the page is offline. Armed while there is no socket.
+function armOffline() {
+  if (!offlineTimer && !offline) offlineTimer = setTimeout(() => { offline = true; render(); }, OFFLINE_MS);
+}
+
 function connect() {
   clearTimeout(retryTimer);
+  retryTimer = 0;
   const token = store.get();
-  if (authNeeded && !token) { $('conn').textContent = 'token required'; render(); return; }
+  if (authNeeded && !token) { connMsg = 'token required'; render(); return; }
+  armOffline();
   const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/client`;
   let sock;
   try {
@@ -518,26 +573,31 @@ function connect() {
   } catch (e) {
     // Browsers reject tokens that are not valid subprotocol names; let the user enter another.
     store.set('');
-    $('conn').textContent = `cannot connect: ${e.message} (token must be letters, digits, -._)`;
+    connMsg = `cannot connect: ${e.message} (token must be letters, digits, -._)`;
     render();
     return;
   }
   ws = sock;
   sock.onopen = () => {
     retries = 0;
-    $('conn').textContent = 'ready.';
+    everOpen = true;
+    offline = false;
+    clearTimeout(offlineTimer);
+    offlineTimer = 0;
     send({ type: 'subscribe' });
     send({ type: 'status' });
-    detail = null; // re-fetch the open transcript after any reconnect
+    // Re-fetch the open transcript; the old one stays up until the new one replaces it.
+    if (detail && route().view === 'detail') { detail.refetch = true; send({ type: 'show', task: detail.id }); } else detail = null;
     render();
   };
-  sock.onmessage = (ev) => { try { onMessage(JSON.parse(ev.data)); } catch (e) { console.error(e); } };
+  sock.onmessage = (ev) => { clearTimeout(aliveTimer); try { onMessage(JSON.parse(ev.data)); } catch (e) { console.error(e); } };
   sock.onclose = () => {
     if (ws !== sock) return; // replaced by a deliberate reconnect / disconnect
     ws = null;
     const delay = Math.min(30, 2 ** retries++);
-    $('conn').textContent = `disconnected${authNeeded ? ' (wrong token?)' : ''}; reconnecting in ${delay}s…`;
+    connMsg = `disconnected${authNeeded ? ' (wrong token?)' : ''}; reconnecting in ${delay}s…`;
     retryTimer = setTimeout(connect, delay * 1000);
+    armOffline();
     render();
   };
 }
@@ -546,8 +606,35 @@ function disconnect() {
   const s = ws;
   ws = null;
   clearTimeout(retryTimer);
+  retryTimer = 0;
   if (s) s.close();
 }
+
+// Back in the foreground or back online: retry now instead of waiting out the backoff.
+function reconnectNow() {
+  if (ws && ws.readyState === WebSocket.OPEN) { checkAlive(); return; }
+  if (ws || !retryTimer) return; // connecting, or not retrying (no token, cleared)
+  retries = 0;
+  connect();
+}
+
+// After sleep a socket can read OPEN yet be dead: no reply to a Status within 3s drops it and reconnects.
+let aliveTimer = 0;
+function checkAlive() {
+  const s = ws;
+  send({ type: 'status' });
+  clearTimeout(aliveTimer);
+  aliveTimer = setTimeout(() => {
+    if (ws !== s) return;
+    ws = null;
+    s.close();
+    retries = 0;
+    connect();
+    render();
+  }, 3000);
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reconnectNow(); });
+window.addEventListener('online', reconnectNow);
 
 $('auth').onsubmit = (e) => {
   e.preventDefault();
@@ -576,7 +663,8 @@ $('clear').onclick = (e) => {
   e.preventDefault();
   store.set('');
   disconnect();
-  $('conn').textContent = authNeeded ? 'token required' : 'disconnected';
+  everOpen = false;
+  connMsg = authNeeded ? 'token required' : 'disconnected';
   render();
 };
 // Leaving a view stops dictation into it and any readback.
@@ -584,7 +672,7 @@ window.onhashchange = () => { micOff(); hush(); render(); };
 setInterval(tick, 1000);
 
 fetch('/api/info').then((r) => r.json()).then((info) => { authNeeded = info.auth; $('ver').textContent = info.version || ''; connect(); })
-  .catch((e) => { $('conn').textContent = `cannot reach server: ${e.message}`; });
+  .catch((e) => { connMsg = `cannot reach server: ${e.message}`; render(); });
 </script>
 </body>
 </html>

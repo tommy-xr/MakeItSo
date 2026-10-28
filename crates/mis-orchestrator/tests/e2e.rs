@@ -452,6 +452,19 @@ async fn serves_page_and_info_without_token() {
 }
 
 #[tokio::test]
+async fn client_socket_is_pinged() {
+    let app = App::new(None).with_ping_every(std::time::Duration::from_millis(50));
+    let base = start_app(app).await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), client.next())
+        .await
+        .expect("timeout")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(msg, Message::Ping(_)), "{msg:?}");
+}
+
+#[tokio::test]
 async fn reconnect_keeps_reported_task_and_fails_unreported() {
     let base = start().await;
     let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
