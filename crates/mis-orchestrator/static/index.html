@@ -214,22 +214,27 @@ function hostOf(wid) {
 }
 
 // A passing message in the #conn line; the connection state returns after a few seconds.
+let flashTimer = 0, flashWas = '';
 function flash(text) {
-  const conn = $('conn'), was = conn.textContent;
+  const conn = $('conn');
+  if (flashTimer) clearTimeout(flashTimer); else flashWas = conn.textContent;
   conn.textContent = text;
-  setTimeout(() => { if (conn.textContent === text) conn.textContent = was; }, 4000);
+  flashTimer = setTimeout(() => { flashTimer = 0; if (conn.textContent === text) conn.textContent = flashWas; }, 4000);
 }
 
 // Dictation: words stream into the field after its text; nothing is sent until Submit.
 // Absent API (e.g. some iOS home-screen apps): the buttons stay hidden; keyboard dictation still works.
 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 let rec = null; // the live recognizer, at most one
+// Abort drops pending results, so nothing lands in a sent or abandoned field.
+function micOff() { if (rec) { rec.abort(); rec = null; } }
 function listening(btn, on) { btn.textContent = on ? '● listening' : 'mic'; btn.setAttribute('aria-pressed', String(on)); }
 for (const btn of document.querySelectorAll('.mic')) {
   const field = btn.closest('form').querySelector('textarea');
   btn.hidden = !Recognition;
   btn.onclick = () => {
     if (rec) { rec.stop(); return; } // tap again: stop, keeping what was heard
+    hush(); // else the mic hears the readback
     const r = rec = new Recognition(), base = field.value.trimEnd();
     Object.assign(r, { lang: navigator.language, interimResults: true });
     r.onresult = (e) => {
@@ -471,7 +476,7 @@ function onMessage(msg) {
     case 'event': {
       // Rows show each task's latest activity and tokens.
       refreshSoon();
-      if (msg.event.type === 'finished' && msg.event.summary && mine.delete(msg.task) && autoread.on()) say(msg.event.summary);
+      if (msg.event.type === 'finished' && msg.event.summary && mine.delete(msg.task) && synth && !rec && autoread.on()) say(msg.event.summary);
       // Only an open transcript shows events; re-rendering other views would drop focus.
       const line = eventLine(msg.event);
       if (!detail || !detail.ready || detail.id !== msg.task || line === null) return;
@@ -546,6 +551,7 @@ $('auth').onsubmit = (e) => {
 };
 $('new').onsubmit = (e) => {
   e.preventDefault();
+  micOff();
   unlock();
   const prompt = $('prompt').value.trim();
   if (prompt) send({ type: 'submit', prompt, cwd: null, harness: $('harness').value || null, model: $('model').value.trim() || null });
@@ -554,6 +560,7 @@ $('reply').onsubmit = (e) => {
   e.preventDefault();
   const prompt = $('reply-text').value.trim();
   if (!prompt || !detail) return;
+  micOff();
   unlock();
   replying = true;
   $('reply-error').hidden = true;
@@ -567,7 +574,7 @@ $('clear').onclick = (e) => {
   render();
 };
 // Leaving a view stops dictation into it and any readback.
-window.onhashchange = () => { if (rec) rec.abort(); hush(); render(); };
+window.onhashchange = () => { micOff(); hush(); render(); };
 setInterval(tick, 1000);
 
 fetch('/api/info').then((r) => r.json()).then((info) => { authNeeded = info.auth; $('ver').textContent = info.version || ''; connect(); })
