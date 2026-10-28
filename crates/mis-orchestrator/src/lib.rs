@@ -270,7 +270,7 @@ async fn run_oneshot(
     let (tx, mut rx) = mpsc::channel(64);
     let run = tokio::time::timeout(
         timeout,
-        mis_agent::run_guarded(agent, task, prompt, None, None, tx),
+        mis_agent::run_guarded(agent, task, prompt, None, None, None, tx),
     );
     let feed = async {
         while let Some(ev) = rx.recv().await {

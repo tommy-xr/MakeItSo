@@ -97,6 +97,10 @@ pub enum AgentEvent {
     ToolResult {
         content: String,
     },
+    /// One-line progress note the agent posted via the worker's `report_status` tool.
+    Status {
+        text: String,
+    },
     /// Tokens used so far this run: cumulative, so each replaces the last.
     /// `input` includes cached prompt tokens. Sent before `Finished`.
     Usage {
@@ -267,6 +271,10 @@ mod tests {
                     name: "Bash".into(),
                     input: serde_json::json!({"command": "ls"}),
                 },
+            },
+            WorkerMsg::Event {
+                task: Uuid::nil(),
+                event: AgentEvent::Status { text: "s".into() },
             },
             WorkerMsg::Stats(WorkerStats {
                 disk_free_gb: 12.5,

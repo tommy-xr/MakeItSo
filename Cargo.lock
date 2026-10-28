@@ -667,6 +667,7 @@ name = "mis-worker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
  "futures-util",
  "mis-agent",

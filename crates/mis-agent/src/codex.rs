@@ -7,7 +7,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use crate::{Agent, BoxFut};
+use crate::{Agent, BoxFut, Mcp, MCP_SERVER, MCP_TOKEN_ENV};
 
 #[derive(Default)]
 pub struct CodexAgent {
@@ -46,6 +46,20 @@ pub fn codex_models(cache_json: &str, config_toml: &str) -> Result<Vec<String>, 
         }
     }
     Ok(out)
+}
+
+/// `-c` overrides offering `url` as MCP server `MCP_SERVER`, its bearer token read
+/// from `MCP_TOKEN_ENV`, its tools approved (else `exec` refuses to call them).
+pub fn mcp_args(url: &str) -> Vec<String> {
+    let key = format!("mcp_servers.{MCP_SERVER}");
+    [
+        format!("{key}.url=\"{url}\""),
+        format!("{key}.bearer_token_env_var=\"{MCP_TOKEN_ENV}\""),
+        format!("{key}.default_tools_approval_mode=\"approve\""),
+    ]
+    .into_iter()
+    .flat_map(|kv| ["-c".to_string(), kv])
+    .collect()
 }
 
 /// Map one `--json` line to zero or more events.
@@ -131,6 +145,7 @@ impl Agent for CodexAgent {
         prompt: &'a str,
         cwd: Option<&'a str>,
         model: Option<&'a str>,
+        mcp: Option<&'a Mcp>,
         tx: mpsc::Sender<AgentEvent>,
     ) -> BoxFut<'a> {
         Box::pin(async move {
@@ -142,6 +157,9 @@ impl Agent for CodexAgent {
             // One `=` token, so a model starting with '-' can't be read as a flag.
             if let Some(m) = model {
                 cmd.arg(format!("--model={m}"));
+            }
+            if let Some(m) = mcp {
+                cmd.args(mcp_args(&m.url)).env(MCP_TOKEN_ENV, &m.token);
             }
             cmd.arg("--").arg(prompt);
             if let Some(d) = cwd {
@@ -252,6 +270,21 @@ mod tests {
             }]
         );
         assert!(parse_line(r#"{"type":"turn.started"}"#).is_empty());
+    }
+
+    #[test]
+    fn mcp_overrides_url_token_env_and_approval() {
+        assert_eq!(
+            mcp_args("http://127.0.0.1:9/mcp"),
+            [
+                "-c",
+                r#"mcp_servers.mis.url="http://127.0.0.1:9/mcp""#,
+                "-c",
+                r#"mcp_servers.mis.bearer_token_env_var="MIS_MCP_TOKEN""#,
+                "-c",
+                r#"mcp_servers.mis.default_tools_approval_mode="approve""#,
+            ]
+        );
     }
 
     #[test]

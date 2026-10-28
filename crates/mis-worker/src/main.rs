@@ -2,6 +2,7 @@
 //! assigned tasks through `mis_agent` and streams events back.
 
 mod config;
+mod mcp;
 mod roots;
 mod setup;
 mod stats;
@@ -286,6 +287,15 @@ async fn run_task(ctx: &Ctx, task: Task, tx: mpsc::Sender<(TaskId, AgentEvent)>)
             return;
         }
     };
+    // Without the server the task still runs, just without `report_status`.
+    let server = mcp::serve(id, tx.clone())
+        .await
+        .inspect_err(|e| tracing::warn!(%id, "no mcp server: {e}"))
+        .ok();
+    let prompt = match &server {
+        Some(_) => mcp::with_hint(&task.prompt),
+        None => task.prompt.clone(),
+    };
     let (atx, mut arx) = mpsc::channel(64);
     let fwd = async {
         while let Some(ev) = arx.recv().await {
@@ -297,9 +307,10 @@ async fn run_task(ctx: &Ctx, task: Task, tx: mpsc::Sender<(TaskId, AgentEvent)>)
     let run = mis_agent::run_guarded(
         agent.as_ref(),
         id,
-        &task.prompt,
+        &prompt,
         Some(&cwd),
         task.model.as_deref(),
+        server.as_ref().map(|s| &s.mcp),
         atx,
     );
     tokio::join!(run, fwd);
@@ -411,6 +422,7 @@ mod tests {
             _: &'a str,
             _: Option<&'a str>,
             _: Option<&'a str>,
+            _: Option<&'a mis_agent::Mcp>,
             _: mpsc::Sender<AgentEvent>,
         ) -> mis_agent::BoxFut<'a> {
             unreachable!()
