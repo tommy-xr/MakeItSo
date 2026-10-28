@@ -106,6 +106,14 @@
   .bad { color: var(--bad); }
   .back { display: inline-flex; align-items: center; min-height: 2.75rem; padding: 0 1rem; border: 1px solid var(--line); text-decoration: none; }
   #answer { margin: 1.5rem 0 1rem; }
+  /* Evidence: one row per link, kind column aligned, chevron opens it on GitHub. */
+  #evidence { margin: 0 0 1rem; }
+  #evidence h3 { margin: 0 0 .25rem; }
+  .evl li:last-child { border-bottom: 1px solid var(--rule); }
+  .evl a { display: grid; grid-template-columns: 4rem minmax(0, 1fr) 1rem; gap: .5rem; align-items: center; min-height: 2.75rem; padding: 0; }
+  .evl .k { font: 600 .6875rem/1 var(--display); letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
+  .evl .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .evl .go { color: var(--accent); text-align: right; }
   .meta { margin: .25rem 0; }
   dl { display: grid; grid-template-columns: auto 1fr; gap: .25rem 1rem; margin: 1rem 0; }
   dt { color: var(--dim); }
@@ -171,6 +179,7 @@
   <p><a href="#" class="back">← back</a></p>
   <pre id="answer" class="answer"></pre>
   <div class="row" hidden><button type="button" id="speak">speak</button></div>
+  <section id="evidence" hidden><h3>evidence</h3><ul class="evl"></ul></section>
   <div id="meta" class="meta"></div>
   <div id="ask" class="meta dim"></div>
   <div id="thread" class="meta dim"></div>
@@ -432,13 +441,35 @@ function taskRows(ul, list) {
   ul.replaceChildren(...threaded(list).map(([depth, t]) => el('li', depth ? { className: 'reply', style: `--depth: ${depth}` } : {},
     el('a', { href: `#task/${t.id}` },
       el('div', { className: 'head clamp2' }, depth ? '↳ ' : '', chip(t.status), t.prompt),
-      el('div', { className: 'sub dim' }, ...dots([...placement(t), clock(t), tokensOf(t)])),
+      el('div', { className: 'sub dim' }, ...dots([...placement(t), clock(t), tokensOf(t), linksBrief(t)])),
       t.status === 'running' && t.activity ? el('div', { className: 'activity' }, t.activity) : '',
       t.summary ? el('pre', { className: 'answer clamp3' }, t.summary) : ''))));
   if (!list.length) ul.append(el('li', { className: 'dim' }, 'no tasks yet'));
 }
 
 function renderList() { taskRows($('tasks'), tasks); }
+
+const KIND = { pr: 'PR', commit: 'commit', ci_run: 'CI', issue: 'issue' };
+// `PR #42`, `commit abc1234`, `CI run 123`: kind plus the label without its repo.
+const brief = (l) => `${KIND[l.kind] || l.kind} ${l.label.replace(/^\S+?([#@ ])/, (_, c) => (c === '#' ? '#' : ''))}`;
+// List rows name the first PR (else the first link), and how many more there are.
+function linksBrief(t) {
+  const links = t.links || [];
+  if (!links.length) return '';
+  const lead = links.find((l) => l.kind === 'pr') || links[0];
+  return links.length > 1 ? `${brief(lead)} +${links.length - 1}` : brief(lead);
+}
+// Only https GitHub URLs become anchors; anything else is dropped.
+function githubUrl(u) {
+  try { const url = new URL(u); return url.protocol === 'https:' && url.host === 'github.com' ? url.href : null; } catch { return null; }
+}
+function renderEvidence(t) {
+  const rows = ((t && t.links) || []).map((l) => [l, githubUrl(l.url)]).filter(([, href]) => href)
+    .map(([l, href]) => el('li', {}, el('a', { href, target: '_blank', rel: 'noopener' },
+      el('span', { className: 'k' }, KIND[l.kind] || l.kind), el('span', { className: 't' }, l.label), el('span', { className: 'go' }, '›'))));
+  $('evidence').querySelector('ul').replaceChildren(...rows);
+  $('evidence').hidden = !rows.length;
+}
 
 function renderDetail(id) {
   if (!detail || detail.id !== id) {
@@ -453,6 +484,7 @@ function renderDetail(id) {
   $('answer').textContent = answer;
   $('answer').hidden = !answer;
   $('speak').parentNode.hidden = !synth || !(t && t.summary);
+  renderEvidence(t);
   $('meta').replaceChildren(...(t ? [chip(t.status),
     [...placement(t), t.session && `session ${short(t.session)}`].filter(Boolean).join(' · ')] : []));
   $('ask').textContent = t ? t.prompt : '';
