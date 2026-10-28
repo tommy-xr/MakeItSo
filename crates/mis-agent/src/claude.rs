@@ -40,14 +40,19 @@ pub fn claude_models(claude_json: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Flags offering `url` as MCP server `MCP_SERVER` and nothing else. The bearer
-/// token is read from `MCP_TOKEN_ENV` (claude expands `${VAR}` in the config).
-/// Its tools are pre-approved so they work without `--dangerously-skip-permissions`.
-pub fn mcp_args(url: &str) -> Vec<String> {
+/// Flags offering `url` as MCP server `MCP_SERVER` and nothing else, sending
+/// `headers` (values may name env vars as `${VAR}`, which claude expands, so
+/// secrets stay out of argv). Its tools are pre-approved so they work without
+/// `--dangerously-skip-permissions`.
+pub fn mcp_args(url: &str, headers: &[(&str, String)]) -> Vec<String> {
+    let headers: serde_json::Map<_, _> = headers
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone().into()))
+        .collect();
     let config = serde_json::json!({"mcpServers": {MCP_SERVER: {
         "type": "http",
         "url": url,
-        "headers": {"Authorization": format!("Bearer ${{{MCP_TOKEN_ENV}}}")},
+        "headers": headers,
     }}});
     vec![
         "--mcp-config".into(),
@@ -217,7 +222,9 @@ impl Agent for ClaudeAgent {
             }
             cmd.args(&self.extra_args);
             if let Some(m) = mcp {
-                cmd.args(mcp_args(&m.url)).env(MCP_TOKEN_ENV, &m.token);
+                let auth = format!("Bearer ${{{MCP_TOKEN_ENV}}}");
+                cmd.args(mcp_args(&m.url, &[("Authorization", auth)]))
+                    .env(MCP_TOKEN_ENV, &m.token);
             }
             // One `=` token, so a model starting with '-' can't be read as a flag.
             if let Some(m) = model {
@@ -394,7 +401,8 @@ mod tests {
 
     #[test]
     fn mcp_config_names_url_and_token_env_only() {
-        let args = mcp_args("http://127.0.0.1:9/mcp");
+        let auth = ("Authorization", "Bearer ${MIS_MCP_TOKEN}".to_string());
+        let args = mcp_args("http://127.0.0.1:9/mcp", &[auth]);
         assert_eq!(args[0], "--mcp-config");
         let config: Value = serde_json::from_str(&args[1]).unwrap();
         let mis = &config["mcpServers"]["mis"];

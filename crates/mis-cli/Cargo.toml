@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 mis-types.workspace = true
+mis-agent.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 futures-util.workspace = true

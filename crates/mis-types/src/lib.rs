@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 mod access;
 pub use access::access_headers;
+pub mod mcp;
 
 pub type WorkerId = Uuid;
 pub type TaskId = Uuid;
@@ -277,6 +278,20 @@ pub fn headline(workers: &[WorkerSummary], tasks: &[TaskSummary], now_ms: u64) -
     parts.join(" · ")
 }
 
+/// The one task whose id starts with `prefix` (any case).
+pub fn resolve_task(tasks: &[TaskSummary], prefix: &str) -> Result<TaskId, String> {
+    let prefix = prefix.trim().to_ascii_lowercase();
+    let hits: Vec<_> = tasks
+        .iter()
+        .filter(|t| !prefix.is_empty() && t.id.to_string().starts_with(&prefix))
+        .collect();
+    match hits[..] {
+        [t] => Ok(t.id),
+        [] => Err(format!("no task matches {prefix:?}")),
+        _ => Err(format!("{prefix:?} matches {} tasks", hits.len())),
+    }
+}
+
 /// Orchestrator -> client.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -442,6 +457,20 @@ mod tests {
         bare.started_at = None;
         assert_eq!(headline(&w[..1], &[bare], 0), "1 worker · 1 running");
         assert_eq!(fmt_elapsed(7_530_000), "2h05m");
+    }
+
+    #[test]
+    fn resolve_task_needs_one_match() {
+        let mut tasks = [task(TaskStatus::Done, 0, ""), task(TaskStatus::Done, 0, "")];
+        tasks[0].id = "aaaa0000-0000-0000-0000-000000000000".parse().unwrap();
+        tasks[1].id = "aaab0000-0000-0000-0000-000000000000".parse().unwrap();
+        assert_eq!(resolve_task(&tasks, "AAAB"), Ok(tasks[1].id));
+        assert!(resolve_task(&tasks, "aaa").unwrap_err().contains("2 tasks"));
+        assert!(resolve_task(&tasks, "b").is_err());
+        assert!(
+            resolve_task(&tasks[..1], " ").is_err(),
+            "empty matches nothing"
+        );
     }
 
     #[test]

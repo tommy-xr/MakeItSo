@@ -7,12 +7,10 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use mis_types::{first_line, AgentEvent, TaskId};
+use mis_types::{first_line, mcp, AgentEvent, TaskId};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-/// Protocol versions we can answer as; a client asking for another gets the first.
-const VERSIONS: [&str; 4] = ["2025-06-18", "2025-11-25", "2025-03-26", "2024-11-05"];
 /// Longest status kept; it is meant to be one line.
 const MAX_STATUS_CHARS: usize = 200;
 
@@ -27,52 +25,25 @@ pub fn with_hint(prompt: &str) -> String {
 /// One JSON-RPC message in; the reply (None for a notification) and the status
 /// text to post, if it was a valid `report_status` call.
 pub fn handle(req: &Value) -> (Option<Value>, Option<String>) {
-    // Batches (arrays) and other non-2.0 messages are rejected outright.
-    if req["jsonrpc"] != "2.0" {
-        let e = json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": "invalid request"}});
-        return (Some(e), None);
-    }
-    let Some(id) = req.get("id").cloned() else {
-        return (None, None); // notifications (e.g. notifications/initialized) need no reply
-    };
-    let ok = |result: Value| json!({"jsonrpc": "2.0", "id": id, "result": result});
-    let err = |code: i64, message: &str| json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}});
-    let params = &req["params"];
-    let reply = match req["method"].as_str() {
-        Some("initialize") => {
-            let asked = params["protocolVersion"].as_str();
-            let version = VERSIONS.into_iter().find(|v| Some(*v) == asked);
-            ok(json!({
-                "protocolVersion": version.unwrap_or(VERSIONS[0]),
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": mis_agent::MCP_SERVER, "version": env!("CARGO_PKG_VERSION")},
-            }))
+    let tool = json!({
+        "name": "report_status",
+        "description": "Show the user a one-line status of what you are doing now.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"text": {"type": "string", "description": "e.g. \"Running the tests\""}},
+            "required": ["text"],
+        },
+    });
+    let mut status = None;
+    let reply = mcp::handle(req, mis_agent::MCP_SERVER, &[tool], |_, args| {
+        let text = first_line(args["text"].as_str().unwrap_or(""), MAX_STATUS_CHARS);
+        if text.is_empty() {
+            return Err("text must be a non-empty string".into());
         }
-        Some("ping") => ok(json!({})),
-        Some("tools/list") => ok(json!({"tools": [{
-            "name": "report_status",
-            "description": "Show the user a one-line status of what you are doing now.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {"text": {"type": "string", "description": "e.g. \"Running the tests\""}},
-                "required": ["text"],
-            },
-        }]})),
-        Some("tools/call") if params["name"] == "report_status" => {
-            let text = params["arguments"]["text"].as_str().unwrap_or("");
-            let text = first_line(text, MAX_STATUS_CHARS);
-            if text.is_empty() {
-                let content = json!([{"type": "text", "text": "text must be a non-empty string"}]);
-                return (Some(ok(json!({"content": content, "isError": true}))), None);
-            }
-            let content = json!([{"type": "text", "text": "ok"}]);
-            return (Some(ok(json!({"content": content}))), Some(text));
-        }
-        Some("tools/call") => err(-32602, "unknown tool"),
-        Some(_) => err(-32601, "method not found"),
-        None => err(-32600, "invalid request"),
-    };
-    (Some(reply), None)
+        status = Some(text);
+        Ok("ok".into())
+    });
+    (reply, status)
 }
 
 /// A running server; dropping it stops listening.
@@ -128,8 +99,7 @@ async fn post(State(ctx): State<Ctx>, headers: HeaderMap, body: Bytes) -> Respon
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let Ok(req) = serde_json::from_slice::<Value>(&body) else {
-        let e = json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "parse error"}});
-        return (StatusCode::BAD_REQUEST, Json(e)).into_response();
+        return (StatusCode::BAD_REQUEST, Json(mcp::parse_error())).into_response();
     };
     let (reply, status) = handle(&req);
     if let Some(text) = status {
@@ -147,22 +117,6 @@ mod tests {
 
     fn call(method: &str, params: Value) -> (Option<Value>, Option<String>) {
         handle(&json!({"jsonrpc": "2.0", "id": 7, "method": method, "params": params}))
-    }
-
-    #[test]
-    fn handshake_and_listing() {
-        let (r, _) = call("initialize", json!({"protocolVersion": "2025-11-25"}));
-        let r = r.unwrap();
-        assert_eq!(r["id"], 7);
-        assert_eq!(r["result"]["protocolVersion"], "2025-11-25");
-        assert!(r["result"]["capabilities"]["tools"].is_object());
-        let (r, _) = call("initialize", json!({"protocolVersion": "1999-01-01"}));
-        assert_eq!(r.unwrap()["result"]["protocolVersion"], VERSIONS[0]);
-        let note = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
-        assert_eq!(handle(&note), (None, None));
-        assert_eq!(call("ping", json!(null)).0.unwrap()["result"], json!({}));
-        let (r, _) = call("tools/list", json!({}));
-        assert_eq!(r.unwrap()["result"]["tools"][0]["name"], "report_status");
     }
 
     #[test]
@@ -184,19 +138,14 @@ mod tests {
     }
 
     #[test]
-    fn errors() {
-        let code = |(r, _): (Option<Value>, _)| r.unwrap()["error"]["code"].clone();
-        assert_eq!(code(call("tools/call", json!({"name": "rm"}))), -32602);
-        assert_eq!(code(call("server/discover", json!({}))), -32601);
-        assert_eq!(code(handle(&json!({"jsonrpc": "2.0", "id": 1}))), -32600);
-        for bad in [
-            json!({}),
-            json!([]),
-            json!(42),
-            json!({"id": 1, "method": "ping"}),
-        ] {
-            assert_eq!(code(handle(&bad)), -32600, "{bad}");
-        }
+    fn lists_only_report_status() {
+        let (r, _) = call("tools/list", json!({}));
+        assert_eq!(r.unwrap()["result"]["tools"][0]["name"], "report_status");
+        let (r, s) = call("tools/call", json!({"name": "rm"}));
+        assert_eq!(
+            (r.unwrap()["error"]["code"].clone(), s),
+            (json!(-32602), None)
+        );
     }
 
     /// Raw HTTP/1.1 POST to the server; returns the response text.

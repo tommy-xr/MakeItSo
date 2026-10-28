@@ -1130,3 +1130,111 @@ async fn status_event_sets_activity_and_is_kept() {
     };
     assert_eq!(events, [status]);
 }
+
+/// POST a JSON-RPC body to `/mcp`; returns (status line, JSON body if any).
+async fn mcp_post(
+    base: &str,
+    token: Option<&str>,
+    body: serde_json::Value,
+) -> (String, Option<serde_json::Value>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let addr = base.trim_start_matches("ws://");
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let auth = token
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    let body = body.to_string();
+    let req = format!(
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\n{auth}Content-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    let (head, body) = out.split_once("\r\n\r\n").unwrap();
+    let status = head.lines().next().unwrap().to_string();
+    (status, serde_json::from_str(body).ok())
+}
+
+fn rpc(method: &str, params: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+}
+
+#[tokio::test]
+async fn mcp_lists_tools_and_shows_a_finished_task() {
+    let base = start().await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    send(&mut client, &ClientMsg::Subscribe).await;
+    let mut worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+    send(
+        &mut client,
+        &ClientMsg::Submit {
+            prompt: "count files".into(),
+            cwd: None,
+            harness: Some("claude".into()),
+            model: None,
+        },
+    )
+    .await;
+    let ServerMsg::Submitted { task } = recv(&mut client).await else {
+        panic!()
+    };
+    let OrchMsg::Assign { .. } = recv(&mut worker).await else {
+        panic!()
+    };
+    for event in [
+        AgentEvent::Text {
+            text: "Three.".into(),
+        },
+        AgentEvent::Finished {
+            ok: true,
+            summary: Some("Three files.".into()),
+        },
+    ] {
+        send(&mut worker, &WorkerMsg::Event { task, event }).await;
+    }
+    // The ledger has the task done once its Finished is broadcast.
+    while !matches!(
+        recv(&mut client).await,
+        ServerMsg::Event {
+            event: AgentEvent::Finished { .. },
+            ..
+        }
+    ) {}
+
+    let (status, list) = mcp_post(&base, None, rpc("tools/list", serde_json::json!({}))).await;
+    assert!(status.contains("200"), "{status}");
+    let names: Vec<_> = list.unwrap()["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, ["list_workers", "list_tasks", "show_task"]);
+
+    let args =
+        serde_json::json!({"name": "show_task", "arguments": {"id": &task.to_string()[..8]}});
+    let (_, reply) = mcp_post(&base, None, rpc("tools/call", args)).await;
+    let text = reply.unwrap()["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let shown: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(shown["status"], "done");
+    assert_eq!(shown["summary"], "Three files.");
+    assert_eq!(shown["transcript"], "Three.\ndone");
+}
+
+#[tokio::test]
+async fn mcp_needs_the_token() {
+    let base = start_app(App::new(Some("s".into()))).await;
+    let list = || rpc("tools/list", serde_json::json!({}));
+    assert!(mcp_post(&base, None, list()).await.0.contains("401"));
+    assert!(mcp_post(&base, Some("x"), list()).await.0.contains("401"));
+    let (status, reply) = mcp_post(&base, Some("s"), list()).await;
+    assert!(status.contains("200"), "{status}");
+    assert!(reply.unwrap()["result"]["tools"].is_array());
+    // GET (SSE stream) is not offered.
+    assert!(http_get(&base, "/mcp").await.starts_with("HTTP/1.1 405"));
+}
