@@ -17,7 +17,10 @@ pub enum Scope {
 pub fn allowed(scope: Scope, msg: &ClientMsg) -> bool {
     match msg {
         ClientMsg::Status | ClientMsg::Subscribe | ClientMsg::Show { .. } => true,
-        ClientMsg::Submit { .. } => scope == Scope::Full,
+        // Seen clears attention for everyone; RefreshEvidence sets a worker running `gh`.
+        ClientMsg::Submit { .. } | ClientMsg::Seen { .. } | ClientMsg::RefreshEvidence { .. } => {
+            scope == Scope::Full
+        }
     }
 }
 
@@ -45,7 +48,14 @@ mod tests {
             assert!(allowed(Scope::Read, m), "{m:?}");
             assert!(allowed(Scope::Full, m), "{m:?}");
         }
-        for m in [submit(None), submit(Some(uuid::Uuid::nil()))] {
+        let task = uuid::Uuid::nil();
+        let acts = [
+            submit(None),
+            submit(Some(task)),
+            ClientMsg::Seen { task },
+            ClientMsg::RefreshEvidence { task },
+        ];
+        for m in acts {
             assert!(!allowed(Scope::Read, &m), "{m:?}");
             assert!(allowed(Scope::Full, &m), "{m:?}");
         }

@@ -857,7 +857,7 @@ function renderEvidence(t) {
   });
   $('evidence').querySelector('ul').replaceChildren(...rows);
   $('evidence').hidden = !rows.length;
-  $('refresh-ev').hidden = !((t && t.links) || []).some((l) => l.kind === 'pr');
+  $('refresh-ev').hidden = readOnly || !((t && t.links) || []).some((l) => l.kind === 'pr');
   if (refreshing && (!t || t.id !== refreshing.id || JSON.stringify(t.links) !== refreshing.links)) refreshDone();
   $('refresh-ev').disabled = !!refreshing;
 }
@@ -882,7 +882,7 @@ function renderDetail(id) {
   }
   const t = tasks.find((x) => x.id === id) || detail.task;
   // Looking at a finished task that needs the user settles it; repeats until the Status says so are harmless.
-  if (t && ATTENTION[t.attention] && ['done', 'failed'].includes(t.status) && !document.hidden) send({ type: 'seen', task: id });
+  if (!readOnly && t && ATTENTION[t.attention] && ['done', 'failed'].includes(t.status) && !document.hidden) send({ type: 'seen', task: id });
   // The answer is what a question-style task is for; everything else is secondary.
   const answer = t && t.summary ? t.summary : (t && t.status === 'running' ? 'working…' : '');
   $('answer').textContent = answer;
