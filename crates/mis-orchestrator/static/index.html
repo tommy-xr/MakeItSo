@@ -221,18 +221,18 @@ function clock(t) {
 function tick() {
   for (const s of document.querySelectorAll('[data-start]')) s.textContent = fmtElapsed(Date.now() + skew - Number(s.dataset.start));
 }
-// Known parts joined with ` · `.
-const dots = (parts) => parts.filter(Boolean).flatMap((p, i) => (i ? [' · ', p] : [p]));
+// Known parts joined with ` · ` (or `sep`).
+const dots = (parts, sep = ' · ') => parts.filter(Boolean).flatMap((p, i) => (i ? [sep, p] : [p]));
 
 // Fleet in one line, as `mis status` prints it first; the running task's time ticks.
 function headline() {
-  const n = workers.length, count = (s) => tasks.filter((t) => t.status === s).length;
+  const n = workers.filter((w) => w.online).length, count = (s) => tasks.filter((t) => t.status === s).length;
   const parts = [n ? `${n} worker${n === 1 ? '' : 's'}` : 'no workers'];
   const running = tasks.filter((t) => t.status === 'running');
-  const newest = running.reduce((a, t) => (!a || (t.started_at || 0) > (a.started_at || 0) ? t : a), null);
+  const newest = running.reduce((a, t) => (!a || (t.started_at || 0) >= (a.started_at || 0) ? t : a), null);
   if (newest) {
-    const what = (newest.activity || '').replace(/^status: /, ''), since = clock(newest);
-    parts.push(el('span', {}, `${running.length} running (`, ...[what, since].filter(Boolean).flatMap((p, i) => (i ? [', ', p] : [p])), ')'));
+    const detail = dots([(newest.activity || '').replace(/^status: /, ''), clock(newest)], ', ');
+    parts.push(el('span', {}, `${running.length} running`, ...(detail.length ? [' (', ...detail, ')'] : [])));
   }
   if (!['planning', 'queued', 'running'].some(count)) parts.push('idle');
   for (const s of ['done', 'failed', 'planning', 'queued']) if (count(s)) parts.push(`${count(s)} ${s}`);

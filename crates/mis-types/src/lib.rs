@@ -227,9 +227,9 @@ pub fn fmt_elapsed(ms: u64) -> String {
 /// One-line fleet summary, zero buckets left out:
 /// `2 workers · 1 running (counting tests, 3m12s) · 4 done · 1 failed · 2 queued`.
 /// The running clause is the most recently started running task's activity;
-/// `idle` when nothing is planning, queued or running.
+/// `idle` when nothing is planning, queued or running. Offline workers don't count.
 pub fn headline(workers: &[WorkerSummary], tasks: &[TaskSummary], now_ms: u64) -> String {
-    let mut parts = vec![match workers.len() {
+    let mut parts = vec![match workers.iter().filter(|w| w.online).count() {
         0 => "no workers".to_string(),
         1 => "1 worker".to_string(),
         n => format!("{n} workers"),
@@ -247,11 +247,11 @@ pub fn headline(workers: &[WorkerSummary], tasks: &[TaskSummary], now_ms: u64) -
             .flatten()
             .filter(|s| !s.is_empty())
             .collect();
-        parts.push(format!(
-            "{} running ({})",
-            count(TaskStatus::Running),
-            detail.join(", ")
-        ));
+        let detail = match detail.is_empty() {
+            true => String::new(),
+            false => format!(" ({})", detail.join(", ")),
+        };
+        parts.push(format!("{} running{detail}", count(TaskStatus::Running)));
     }
     let idle = [
         TaskStatus::Planning,
@@ -433,8 +433,14 @@ mod tests {
             headline(&w, &tasks, 200_000),
             "2 workers · 2 running (counting tests, 3m12s) · 2 done · 1 failed · 1 planning · 1 queued"
         );
-        // Queued with no workers: not idle.
-        assert_eq!(headline(&[], &tasks[5..6], 0), "no workers · 1 queued");
+        // Queued with only an offline worker: not idle.
+        let mut off = worker();
+        off.online = false;
+        assert_eq!(headline(&[off], &tasks[5..6], 0), "no workers · 1 queued");
+        // Running with nothing known about it.
+        let mut bare = task(Running, 0, "");
+        bare.started_at = None;
+        assert_eq!(headline(&w[..1], &[bare], 0), "1 worker · 1 running");
         assert_eq!(fmt_elapsed(7_530_000), "2h05m");
     }
 
