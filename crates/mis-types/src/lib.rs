@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 mod access;
 pub use access::access_headers;
+mod links;
+pub use links::{github_links, Link, LinkKind};
 pub mod mcp;
 
 pub type WorkerId = Uuid;
@@ -213,6 +215,10 @@ pub struct TaskSummary {
     /// The task this one replies to.
     #[serde(default)]
     pub parent: Option<TaskId>,
+    /// GitHub links the agent mentioned, first seen first; kept apart from the
+    /// transcript and summary so neither eviction nor summarizing loses them.
+    #[serde(default)]
+    pub links: Vec<Link>,
 }
 
 /// First non-blank line of `s`, cut to `max` chars with a trailing ellipsis.
@@ -303,6 +309,8 @@ pub fn resolve_task(tasks: &[TaskSummary], prefix: &str) -> Result<TaskId, Strin
 }
 
 /// Orchestrator -> client.
+// Built and serialized at once, never stored in bulk; boxing would only add noise.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMsg {
@@ -397,7 +405,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!((old.started_at, old.tokens_in), (None, None));
-        assert!(old.activity.is_empty());
+        assert!(old.activity.is_empty() && old.links.is_empty());
     }
 
     fn task(status: TaskStatus, started_at: u64, activity: &str) -> TaskSummary {
@@ -416,6 +424,7 @@ mod tests {
             tokens_out: None,
             activity: activity.into(),
             parent: None,
+            links: vec![],
         }
     }
 
