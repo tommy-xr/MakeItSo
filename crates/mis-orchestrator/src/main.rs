@@ -10,6 +10,15 @@ struct Args {
     /// Shared secret clients and workers must send as a bearer token.
     #[arg(long, env = "MIS_TOKEN")]
     token: Option<String>,
+    /// Read-only token: sees tasks, workers and transcripts but cannot submit (repeatable, or
+    /// comma-separated `MIS_READ_TOKENS`, preferred: argv is visible to other users). Needs --token.
+    #[arg(
+        long = "read-token",
+        env = "MIS_READ_TOKENS",
+        value_delimiter = ',',
+        hide_env_values = true
+    )]
+    read_tokens: Vec<String>,
     /// Externally reachable URL (e.g. a tunnel hostname), shown in connection hints.
     #[arg(long, env = "MIS_PUBLIC_URL")]
     public_url: Option<String>,
@@ -139,6 +148,12 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let mut args = Args::parse();
     args.token = args.token.filter(|t| !t.is_empty()); // `MIS_TOKEN=` means no token
+    args.read_tokens = (args.read_tokens.iter().map(|t| t.trim().to_string()))
+        .filter(|t| !t.is_empty())
+        .collect();
+    if !args.read_tokens.is_empty() && args.token.is_none() {
+        anyhow::bail!("--read-token / MIS_READ_TOKENS needs --token / MIS_TOKEN");
+    }
     let addr: std::net::SocketAddr = args.bind.parse()?;
     if !addr.ip().is_loopback() && args.token.is_none() {
         anyhow::bail!("refusing to bind {addr} without --token / MIS_TOKEN");
@@ -157,7 +172,9 @@ async fn main() -> anyhow::Result<()> {
         args.public_url.as_deref(),
         &origins,
     );
-    let mut app = App::new(args.token).with_allowed_origins(origins);
+    let mut app = App::new(args.token)
+        .with_read_tokens(args.read_tokens)
+        .with_allowed_origins(origins);
     if let Some(gate) = gate {
         app = app.with_access(gate);
     }

@@ -271,7 +271,7 @@ const store = {
   get() { try { return localStorage.getItem('mis-token') || ''; } catch { return ''; } },
   set(v) { try { v ? localStorage.setItem('mis-token', v) : localStorage.removeItem('mis-token'); } catch {} },
 };
-let ws = null, authNeeded = false, tasks = [], workers = [], detail = null, retries = 0, retryTimer = 0, statusTimer = 0, refreshing = null;
+let ws = null, authNeeded = false, readOnly = false, tasks = [], workers = [], detail = null, retries = 0, retryTimer = 0, statusTimer = 0, refreshing = null;
 // Connection, shown calmly: once a socket has opened, views stay up through drops and only the dot
 // changes, until OFFLINE_MS without a socket marks the page offline.
 const OFFLINE_MS = 8000;
@@ -679,6 +679,7 @@ function render() {
   const live = ws && ws.readyState === WebSocket.OPEN;
   const views = { list: renderList, detail: renderDetail, workers: renderWorkers, machine: renderMachine };
   $('auth').hidden = live || !authNeeded || !!store.get();
+  $('new').hidden = readOnly; // a read-only token can't submit
   $('tabs').hidden = !everOpen;
   renderStrip();
   document.body.classList.toggle('stale', everOpen && offline);
@@ -856,7 +857,7 @@ function renderEvidence(t) {
   });
   $('evidence').querySelector('ul').replaceChildren(...rows);
   $('evidence').hidden = !rows.length;
-  $('refresh-ev').hidden = !((t && t.links) || []).some((l) => l.kind === 'pr');
+  $('refresh-ev').hidden = readOnly || !((t && t.links) || []).some((l) => l.kind === 'pr');
   if (refreshing && (!t || t.id !== refreshing.id || JSON.stringify(t.links) !== refreshing.links)) refreshDone();
   $('refresh-ev').disabled = !!refreshing;
 }
@@ -881,7 +882,7 @@ function renderDetail(id) {
   }
   const t = tasks.find((x) => x.id === id) || detail.task;
   // Looking at a finished task that needs the user settles it; repeats until the Status says so are harmless.
-  if (t && ATTENTION[t.attention] && ['done', 'failed'].includes(t.status) && !document.hidden) send({ type: 'seen', task: id });
+  if (!readOnly && t && ATTENTION[t.attention] && ['done', 'failed'].includes(t.status) && !document.hidden) send({ type: 'seen', task: id });
   // The answer is what a question-style task is for; everything else is secondary.
   const answer = t && t.summary ? t.summary : (t && t.status === 'running' ? 'working…' : '');
   $('answer').textContent = answer;
@@ -895,7 +896,7 @@ function renderDetail(id) {
   const replies = tasks.filter((x) => x.parent === id);
   $('thread').replaceChildren(...(t && t.parent ? [el('a', { href: `#task/${t.parent}`, className: 'thread' }, `↑ reply to ${short(t.parent)}`)] : []),
     ...replies.map((r) => el('a', { href: `#task/${r.id}`, className: 'thread' }, `↳ ${short(r.id)} ${r.prompt.split('\n')[0]}`)));
-  $('reply').hidden = !t || !['done', 'failed'].includes(t.status);
+  $('reply').hidden = readOnly || !t || !['done', 'failed'].includes(t.status);
   $('ids').replaceChildren(...(t ? [['task', t.id], ['session', t.session]] : [])
     .filter(([, v]) => v).flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]));
   $('log').textContent = detail.ready ? detail.lines.join('\n') : 'loading…';
@@ -1122,7 +1123,7 @@ $('auth').onsubmit = (e) => {
   e.preventDefault();
   store.set($('token').value.trim());
   $('token').value = '';
-  connect();
+  start();
 };
 $('new').onsubmit = (e) => {
   e.preventDefault();
@@ -1150,6 +1151,7 @@ $('clear').onclick = (e) => {
   store.set('');
   disconnect();
   everOpen = false;
+  readOnly = false;
   connMsg = authNeeded ? 'token required' : 'disconnected';
   render();
 };
@@ -1160,8 +1162,19 @@ $('prompt').value = drafts.get('draft:new');
 window.onhashchange = () => { micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; render(); };
 setInterval(tick, 1000);
 
-fetch('/api/info').then((r) => r.json()).then((info) => { authNeeded = info.auth; $('ver').textContent = info.version || ''; connect(); })
-  .catch((e) => { connMsg = `cannot reach server: ${e.message}`; render(); });
+// What the stored token may do (scope), then connect.
+function start() {
+  const token = store.get();
+  let headers = {};
+  try { if (token) headers = new Headers({ authorization: `Bearer ${token}` }); } catch {} // connect() says why it's invalid
+  fetch('/api/info', { headers }).then((r) => r.json()).then((info) => {
+    authNeeded = info.auth;
+    readOnly = info.scope === 'read';
+    $('ver').textContent = [info.version, readOnly && 'read-only'].filter(Boolean).join(' · ');
+    connect();
+  }).catch((e) => { connMsg = `cannot reach server: ${e.message}`; render(); });
+}
+start();
 </script>
 </body>
 </html>

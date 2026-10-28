@@ -3,6 +3,7 @@
 use futures_util::{SinkExt, StreamExt};
 use mis_orchestrator::App;
 use mis_types::*;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
@@ -429,6 +430,67 @@ async fn same_origin_page_connects_with_subprotocol_token() {
     assert_eq!(resp.status(), 401);
 }
 
+fn with_read_token() -> App {
+    App::new(Some("s".into())).with_read_tokens(vec!["r".into()])
+}
+
+#[tokio::test]
+async fn read_token_sees_but_cannot_submit() {
+    let base = start_app(with_read_token()).await;
+    let (mut client, _) = connect_async(client_req(&base, &[("authorization", "Bearer r")]))
+        .await
+        .unwrap();
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { .. } = recv(&mut client).await else {
+        panic!()
+    };
+    let submit = ClientMsg::Submit {
+        prompt: "rm -rf".into(),
+        cwd: None,
+        harness: None,
+        model: None,
+        reply_to: None,
+    };
+    send(&mut client, &submit).await;
+    let reply: ServerMsg = recv(&mut client).await;
+    assert_eq!(
+        reply,
+        ServerMsg::Error {
+            message: "read-only token".into()
+        }
+    );
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { tasks, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    assert!(tasks.is_empty());
+    // The page learns its scope from /api/info.
+    let info = |auth: &'static str| http_get_with(&base, "/api/info", auth);
+    assert!(info("Authorization: Bearer r\r\n")
+        .await
+        .contains(r#""scope":"read""#));
+    assert!(info("Authorization: Bearer s\r\n")
+        .await
+        .contains(r#""scope":"full""#));
+}
+
+#[tokio::test]
+async fn worker_needs_the_full_token() {
+    let base = start_app(with_read_token()).await;
+    let worker = |token: &str| {
+        let mut req = format!("{base}/ws/worker").into_client_request().unwrap();
+        let auth = format!("Bearer {token}").parse().unwrap();
+        req.headers_mut().insert("authorization", auth);
+        req
+    };
+    let err = connect_async(worker("r")).await.unwrap_err();
+    let tokio_tungstenite::tungstenite::Error::Http(resp) = err else {
+        panic!("{err}")
+    };
+    assert_eq!(resp.status(), 401);
+    assert!(connect_async(worker("s")).await.is_ok());
+}
+
 /// Minimal HTTP/1.1 GET; returns the raw response.
 async fn http_get(base: &str, path: &str) -> String {
     http_get_with(base, path, "").await
@@ -465,7 +527,7 @@ async fn serves_page_and_info_without_token() {
     assert!(page.contains(r#"id="speak""#));
     let info = http_get(&base, "/api/info").await;
     assert!(
-        info.contains(r#"{"access":false,"auth":true,"version":"#),
+        info.contains(r#"{"access":false,"auth":true,"scope":null,"version":"#),
         "{info}"
     );
     // Home-screen install assets.
@@ -562,12 +624,12 @@ async fn info_reports_access_so_page_skips_token() {
     let jwt = format!("cf-access-jwt-assertion: {}\r\n", access_jwt(ACCESS_AUD));
     let info = http_get_with(&base, "/api/info", &jwt).await;
     assert!(
-        info.contains(r#"{"access":true,"auth":false,"version":"#),
+        info.contains(r#"{"access":true,"auth":false,"scope":"full","version":"#),
         "{info}"
     );
     let info = http_get(&base, "/api/info").await;
     assert!(
-        info.contains(r#"{"access":false,"auth":true,"version":"#),
+        info.contains(r#"{"access":false,"auth":true,"scope":null,"version":"#),
         "{info}"
     );
 }

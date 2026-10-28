@@ -106,6 +106,11 @@ via `--allowed-origin https://mis.example.com` (repeatable, or comma-separated `
 Browsers send the token as WebSocket subprotocols `bearer, <token>`, so keep it to letters, digits
 and `-._` (e.g. `openssl rand -hex 24`).
 
+For read-only access (a dashboard, a teammate) add tokens in `MIS_READ_TOKENS` (comma-separated; or
+`--read-token`, though argv is visible to other local users). They load the page, status, transcripts
+and `/mcp`, but submitting or replying is refused and workers can't connect with them; the page hides
+its composers. They need `MIS_TOKEN` set too. A Cloudflare Access login is always full access.
+
 ## Behind Cloudflare Access
 
 With a Cloudflare Tunnel (`cloudflared`, ingress -> `http://localhost:7474`), put an Access app in front
