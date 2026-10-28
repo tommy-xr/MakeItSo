@@ -70,7 +70,7 @@ fn line(e: &AgentEvent) -> Option<String> {
 
 /// `s` cut to `max` chars, keeping the head and the tail (where results and
 /// test verdicts tend to be): `abc…xyz`.
-fn cut(s: &str, max: usize) -> String {
+pub(crate) fn cut(s: &str, max: usize) -> String {
     let n = s.chars().count();
     if n <= max {
         return s.to_string();

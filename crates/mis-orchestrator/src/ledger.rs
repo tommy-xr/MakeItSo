@@ -60,6 +60,8 @@ pub const MAX_TRANSCRIPT_BYTES: usize = 256 * 1024;
 /// A single stored `ToolResult` keeps at most this many bytes of content.
 pub const MAX_TOOL_RESULT_BYTES: usize = 16 * 1024;
 const TRUNCATED: &str = "…[truncated]";
+/// A fresh reply's context keeps at most this much of the parent's prompt and answer.
+const MAX_CONTEXT_CHARS: usize = 4_000;
 
 struct TaskEntry {
     task: Task,
@@ -82,6 +84,10 @@ struct TaskEntry {
     tokens: Option<(u64, u64)>,
     /// Latest tool call or text, rendered short (see `step`).
     step: Option<String>,
+    /// The task this one replies to.
+    parent: Option<TaskId>,
+    /// Only this worker may run it: it holds the session being resumed.
+    pin: Option<WorkerId>,
 }
 
 /// Activity text for an event worth showing: `> Bash ls`, `status: <text>`, or
@@ -121,6 +127,8 @@ impl TaskEntry {
             finished_at: None,
             tokens: None,
             step: None,
+            parent: None,
+            pin: None,
         }
     }
 
@@ -150,6 +158,7 @@ impl TaskEntry {
             tokens_in: self.tokens.map(|t| t.0),
             tokens_out: self.tokens.map(|t| t.1),
             activity: self.activity(),
+            parent: self.parent,
         }
     }
 
@@ -268,6 +277,7 @@ impl Ledger {
                 // Empty until planned; Planning tasks are never queued or assigned.
                 harness: harness.unwrap_or_default(),
                 model,
+                resume: None,
             },
             self.now_ms,
         );
@@ -280,6 +290,66 @@ impl Ledger {
         }
         self.queue.push_back(id);
         (id, self.schedule())
+    }
+
+    /// Reply `text` in `parent`'s finished thread. A parent run on a worker with
+    /// a session is resumed there: same harness, model and cwd, queued until that
+    /// worker is idle; Err if it is offline. Otherwise (answered by the planner,
+    /// or no session) the reply is a fresh task carrying the exchange as context,
+    /// planned like any other; `planner` false defaults it to claude instead.
+    pub fn reply(
+        &mut self,
+        parent: TaskId,
+        text: String,
+        planner: bool,
+    ) -> Result<(TaskId, Vec<Effect>), String> {
+        let p = self
+            .tasks
+            .iter()
+            .find(|t| t.task.id == parent)
+            .ok_or_else(|| format!("unknown task {parent}"))?;
+        let short = &parent.to_string()[..8];
+        if !matches!(p.status, TaskStatus::Done | TaskStatus::Failed) {
+            return Err(format!("task {short} hasn't finished; reply once it has"));
+        }
+        let by_planner = p.task.harness == "planner" || p.task.harness.is_empty();
+        let (id, effects) = match (&p.session, p.worker) {
+            (Some(session), Some(wid)) if !by_planner => {
+                let host = &wid.to_string()[..8];
+                let Some(w) = self.workers.get(&wid).filter(|w| w.conn.is_some()) else {
+                    return Err(format!(
+                        "worker {host} is offline; task {short}'s session lives there"
+                    ));
+                };
+                if !w.info.harnesses.contains(&p.task.harness) {
+                    return Err(format!("worker {host} no longer runs {}", p.task.harness));
+                }
+                let task = Task {
+                    id: Uuid::new_v4(),
+                    prompt: text,
+                    resume: Some(session.clone()),
+                    ..p.task.clone()
+                };
+                let mut entry = TaskEntry::new(task, self.now_ms);
+                entry.pin = Some(wid);
+                let id = entry.task.id;
+                self.tasks.push(entry);
+                self.queue.push_back(id);
+                (id, self.schedule())
+            }
+            _ => {
+                let prompt = reply_context(&p.task.prompt, p.summary.as_deref(), &text);
+                let (harness, model) = match by_planner {
+                    true => (None, None),
+                    false => (Some(p.task.harness.clone()), p.task.model.clone()),
+                };
+                let harness = harness.or_else(|| (!planner).then(|| "claude".into()));
+                self.submit(prompt, p.task.cwd.clone(), harness, model)
+            }
+        };
+        let t = self.tasks.iter_mut().find(|t| t.task.id == id);
+        t.expect("just added").parent = Some(parent);
+        Ok((id, effects))
     }
 
     /// Every harness a known worker offers, with the models every such worker
@@ -429,6 +499,13 @@ impl Ledger {
             .filter(|id| !self.tasks.iter().any(|t| t.task.id == *id))
             .collect();
         let mut effects = self.fail_running(wid, running, "worker restarted");
+        // Replies waiting for this worker can't run if it dropped their harness.
+        let harnesses = self.workers[&wid].info.harnesses.clone();
+        effects.extend(
+            self.fail_pinned(wid, "worker no longer runs this harness", |t| {
+                !harnesses.contains(&t.task.harness)
+            }),
+        );
         effects.extend(self.schedule());
         (unknown, effects)
     }
@@ -493,7 +570,10 @@ impl Ledger {
             return vec![];
         }
         self.workers.remove(&wid);
-        self.fail_running(wid, &[], "worker disconnected")
+        let mut effects = self.fail_running(wid, &[], "worker disconnected");
+        // Replies waiting for this worker's session can never run now.
+        effects.extend(self.fail_pinned(wid, "worker left; its session is gone", |_| true));
+        effects
     }
 
     /// Event from `conn` about `task`. Dropped unless `conn` is the worker's live
@@ -565,9 +645,11 @@ impl Ledger {
                 continue;
             };
             let harness = &self.tasks[ti].task.harness;
+            let pin = self.tasks[ti].pin;
             let picked = self
                 .workers
                 .iter()
+                .filter(|(wid, _)| pin.is_none_or(|p| p == **wid))
                 .filter(|(wid, w)| w.conn.is_some() && !self.is_busy(**wid))
                 .find(|(_, w)| w.info.harnesses.contains(harness))
                 .map(|(wid, w)| (*wid, w.conn.unwrap()));
@@ -592,14 +674,41 @@ impl Ledger {
 
     /// Fail every Running task on `wid` not in `keep`, telling followers why.
     fn fail_running(&mut self, wid: WorkerId, keep: &[TaskId], why: &str) -> Vec<Effect> {
+        self.fail_where(wid, why, |t| {
+            t.worker == Some(wid) && t.status == TaskStatus::Running && !keep.contains(&t.task.id)
+        })
+    }
+
+    /// Fail queued replies pinned to `wid` that match `pred`, and unqueue them.
+    fn fail_pinned(
+        &mut self,
+        wid: WorkerId,
+        why: &str,
+        pred: impl Fn(&TaskEntry) -> bool,
+    ) -> Vec<Effect> {
+        let effects = self.fail_where(wid, why, |t| {
+            t.pin == Some(wid) && t.status == TaskStatus::Queued && pred(t)
+        });
+        let tasks = &self.tasks;
+        self.queue.retain(|id| {
+            tasks
+                .iter()
+                .any(|t| t.task.id == *id && t.status == TaskStatus::Queued)
+        });
+        effects
+    }
+
+    /// Fail every task matching `pred`, telling followers why (as from `wid`).
+    fn fail_where(
+        &mut self,
+        wid: WorkerId,
+        why: &str,
+        pred: impl Fn(&TaskEntry) -> bool,
+    ) -> Vec<Effect> {
         let now = self.now_ms;
         self.tasks
             .iter_mut()
-            .filter(|t| {
-                t.worker == Some(wid)
-                    && t.status == TaskStatus::Running
-                    && !keep.contains(&t.task.id)
-            })
+            .filter(|t| pred(t))
             .map(|t| {
                 t.status = TaskStatus::Failed;
                 let event = AgentEvent::Finished {
@@ -615,6 +724,18 @@ impl Ledger {
             })
             .collect()
     }
+}
+
+/// Prompt for a reply that can't resume a session: the follow-up first (so
+/// lists show it), then the earlier exchange it follows.
+fn reply_context(prompt: &str, answer: Option<&str>, text: &str) -> String {
+    let cut = |s: &str| summary::cut(s.trim(), MAX_CONTEXT_CHARS);
+    format!(
+        "{text}\n\n---\nThis follows up an earlier request.\nEarlier request:\n{}\n\n\
+         Earlier answer:\n{}",
+        cut(prompt),
+        cut(answer.unwrap_or("(none)"))
+    )
 }
 
 #[cfg(test)]
@@ -1484,5 +1605,185 @@ mod tests {
         codex.harnesses = vec!["codex".into()];
         let (_, eff) = l.connect(Uuid::new_v4(), codex, &[], 3, T0);
         assert_eq!(assigned(&eff), vec![(3, task)]);
+    }
+
+    /// `running_setup` with the task finished under session `s1`.
+    fn finished_setup() -> (Ledger, WorkerId, TaskId) {
+        let (mut l, wid, task) = running_setup();
+        for e in [
+            AgentEvent::Started {
+                session: Some("s1".into()),
+                model: None,
+            },
+            AgentEvent::Finished {
+                ok: true,
+                summary: Some("three".into()),
+            },
+        ] {
+            l.event(wid, 1, task, e);
+        }
+        (l, wid, task)
+    }
+
+    fn sent(effects: &[Effect]) -> Vec<Task> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Send {
+                    msg: OrchMsg::Assign { task },
+                    ..
+                } => Some(task.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reply_resumes_on_the_parents_worker_once_idle() {
+        let (mut l, wid, parent) = finished_setup();
+        // Busy the parent's worker; an idle second worker must not take the reply.
+        let (busy, _) = l.submit("other".into(), None, Some("claude".into()), None);
+        l.connect(Uuid::new_v4(), info(), &[], 2, T0);
+        let (reply, eff) = l.reply(parent, "and tests?".into(), true).unwrap();
+        assert!(assigned(&eff).is_empty());
+        assert_eq!(l.show(reply).unwrap().0.parent, Some(parent));
+        let eff = l.event(
+            wid,
+            1,
+            busy,
+            AgentEvent::Finished {
+                ok: true,
+                summary: None,
+            },
+        );
+        let [t] = &sent(&eff)[..] else {
+            panic!("{eff:?}")
+        };
+        assert_eq!(assigned(&eff), vec![(1, reply)]);
+        assert_eq!(
+            (t.prompt.as_str(), t.harness.as_str(), t.resume.as_deref()),
+            ("and tests?", "claude", Some("s1"))
+        );
+    }
+
+    #[test]
+    fn reply_needs_a_finished_parent_and_its_worker_online() {
+        let (mut l, wid, task) = running_setup();
+        assert!(l
+            .reply(task, "x".into(), true)
+            .unwrap_err()
+            .contains("hasn't finished"));
+        assert!(l.reply(Uuid::nil(), "x".into(), true).is_err());
+        let (mut l, _, parent) = {
+            l.event(
+                wid,
+                1,
+                task,
+                AgentEvent::Started {
+                    session: Some("s1".into()),
+                    model: None,
+                },
+            );
+            l.event(
+                wid,
+                1,
+                task,
+                AgentEvent::Finished {
+                    ok: false,
+                    summary: None,
+                },
+            );
+            (l, wid, task)
+        };
+        l.disconnect(wid, 1);
+        let why = l.reply(parent, "x".into(), true).unwrap_err();
+        assert!(why.contains("offline"), "{why}");
+    }
+
+    #[test]
+    fn queued_reply_fails_when_its_worker_leaves() {
+        let (mut l, wid, parent) = finished_setup();
+        l.submit("busy".into(), None, Some("claude".into()), None);
+        let (reply, _) = l.reply(parent, "x".into(), true).unwrap();
+        l.disconnect(wid, 1);
+        let eff = l.expire(wid, 1);
+        assert_eq!(finished(&eff, reply), Some(false));
+        assert_eq!(task_status(&l, reply), TaskStatus::Failed);
+        // Gone from the queue: a new worker doesn't pick it up.
+        let (_, eff) = l.connect(Uuid::new_v4(), info(), &[], 3, T0);
+        assert!(assigned(&eff).is_empty());
+    }
+
+    #[test]
+    fn queued_reply_fails_when_its_worker_drops_the_harness() {
+        let (mut l, wid, parent) = finished_setup();
+        let (busy, _) = l.submit("busy".into(), None, Some("claude".into()), None);
+        let (reply, _) = l.reply(parent, "x".into(), true).unwrap();
+        let mut codex = info();
+        codex.harnesses = vec!["codex".into()];
+        let (_, eff) = l.connect(wid, codex, &[busy], 2, T0);
+        assert_eq!(finished(&eff, reply), Some(false));
+        assert!(!l.queue.contains(&reply));
+        let why = l.reply(parent, "y".into(), true).unwrap_err();
+        assert!(why.contains("no longer runs claude"), "{why}");
+    }
+
+    #[test]
+    fn reply_to_planner_answer_is_planned_with_context() {
+        let mut l = Ledger::default();
+        l.connect(Uuid::new_v4(), info(), &[], 1, T0);
+        let (parent, _) = l.submit("what is 2+2?".into(), None, None, None);
+        l.planning_event(
+            parent,
+            AgentEvent::Finished {
+                ok: true,
+                summary: Some(r#"{"answer":"4"}"#.into()),
+            },
+        );
+        let (reply, eff) = l.reply(parent, "and 3+3?".into(), true).unwrap();
+        let [Effect::Plan { task, prompt }] = &eff[..] else {
+            panic!("{eff:?}")
+        };
+        assert_eq!(*task, reply);
+        let t = l.show(reply).unwrap().0;
+        assert_eq!((t.parent, t.status), (Some(parent), TaskStatus::Planning));
+        assert!(t.prompt.starts_with("and 3+3?\n\n---\n"), "{}", t.prompt);
+        assert!(t
+            .prompt
+            .ends_with("Earlier request:\nwhat is 2+2?\n\nEarlier answer:\n4"));
+        assert!(prompt.contains("and 3+3?"));
+        // No planner: straight to a claude worker, still with the context.
+        let (reply, eff) = l.reply(parent, "and 4+4?".into(), false).unwrap();
+        let [t] = &sent(&eff)[..] else {
+            panic!("{eff:?}")
+        };
+        assert_eq!(
+            (t.id, t.harness.as_str(), t.resume.as_deref()),
+            (reply, "claude", None)
+        );
+        assert!(t.prompt.starts_with("and 4+4?\n"));
+    }
+
+    #[test]
+    fn reply_without_a_session_reruns_with_context_on_any_worker() {
+        let (mut l, wid, parent) = running_setup();
+        l.event(
+            wid,
+            1,
+            parent,
+            AgentEvent::Finished {
+                ok: false,
+                summary: Some("boom".into()),
+            },
+        );
+        let (reply, eff) = l.reply(parent, "retry".into(), true).unwrap();
+        let [t] = &sent(&eff)[..] else {
+            panic!("{eff:?}")
+        };
+        assert_eq!(
+            (t.id, t.harness.as_str(), t.resume.as_deref()),
+            (reply, "claude", None)
+        );
+        assert!(t.prompt.ends_with("Earlier answer:\nboom"));
     }
 }

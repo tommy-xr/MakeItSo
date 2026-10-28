@@ -272,7 +272,7 @@ async fn run_oneshot(
     let (tx, mut rx) = mpsc::channel(64);
     let run = tokio::time::timeout(
         timeout,
-        mis_agent::run_guarded(agent, task, prompt, None, None, None, tx),
+        mis_agent::run_guarded(agent, task, prompt, Default::default(), tx),
     );
     let feed = async {
         while let Some(ev) = rx.recv().await {
@@ -515,7 +515,19 @@ async fn client_conn(mut sock: WebSocket, app: App) {
                     let status = app.ledger().status();
                     send_json(&mut sock, &status).await;
                 }
-                Some(ClientMsg::Submit { prompt, cwd, harness, model }) => {
+                Some(ClientMsg::Submit { prompt, reply_to: Some(parent), .. }) => {
+                    let planner = app.planner.is_some();
+                    let task = app.transition(|l| match l.reply(parent, prompt, planner) {
+                        Ok((task, effects)) => (Ok(task), effects),
+                        Err(why) => (Err(why), vec![]),
+                    });
+                    let reply = match task {
+                        Ok(task) => ServerMsg::Submitted { task },
+                        Err(message) => ServerMsg::Error { message },
+                    };
+                    send_json(&mut sock, &reply).await;
+                }
+                Some(ClientMsg::Submit { prompt, cwd, harness, model, reply_to: None }) => {
                     let model = model.filter(|m| !m.trim().is_empty());
                     // A chosen model pins the default harness: the planner could pick
                     // one that doesn't know that model.

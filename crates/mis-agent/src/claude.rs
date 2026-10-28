@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 
 use std::collections::HashSet;
 
-use crate::{Agent, BoxFut, Mcp, MCP_SERVER, MCP_TOKEN_ENV};
+use crate::{Agent, BoxFut, RunOpts, MCP_SERVER, MCP_TOKEN_ENV};
 
 #[derive(Default)]
 pub struct ClaudeAgent {
@@ -190,6 +190,33 @@ fn tool_result_text(c: &Value) -> String {
     }
 }
 
+impl ClaudeAgent {
+    /// `claude` argv for one run; the MCP token goes in the env (see `mcp_args`).
+    pub fn argv(&self, prompt: &str, o: &RunOpts) -> Vec<String> {
+        let mut a: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose"]
+            .map(String::from)
+            .to_vec();
+        if self.skip_permissions {
+            a.push("--dangerously-skip-permissions".into());
+        }
+        a.extend(self.extra_args.iter().cloned());
+        if let Some(m) = o.mcp {
+            let auth = format!("Bearer ${{{MCP_TOKEN_ENV}}}");
+            a.extend(mcp_args(&m.url, &[("Authorization", auth)]));
+        }
+        // One `=` token each, so a value starting with '-' can't be read as a flag.
+        if let Some(m) = o.model {
+            a.push(format!("--model={m}"));
+        }
+        // Forked, so two replies to one task don't see each other's turns.
+        if let Some(s) = o.resume {
+            a.extend([format!("--resume={s}"), "--fork-session".into()]);
+        }
+        a.extend(["--".into(), prompt.into()]); // prompt may start with '-'
+        a
+    }
+}
+
 impl Agent for ClaudeAgent {
     fn name(&self) -> &'static str {
         "claude"
@@ -209,29 +236,16 @@ impl Agent for ClaudeAgent {
         &'a self,
         task: TaskId,
         prompt: &'a str,
-        cwd: Option<&'a str>,
-        model: Option<&'a str>,
-        mcp: Option<&'a Mcp>,
+        opts: RunOpts<'a>,
         tx: mpsc::Sender<AgentEvent>,
     ) -> BoxFut<'a> {
         Box::pin(async move {
             let mut cmd = Command::new("claude");
-            cmd.args(["-p", "--output-format", "stream-json", "--verbose"]);
-            if self.skip_permissions {
-                cmd.arg("--dangerously-skip-permissions");
+            cmd.args(self.argv(prompt, &opts));
+            if let Some(m) = opts.mcp {
+                cmd.env(MCP_TOKEN_ENV, &m.token);
             }
-            cmd.args(&self.extra_args);
-            if let Some(m) = mcp {
-                let auth = format!("Bearer ${{{MCP_TOKEN_ENV}}}");
-                cmd.args(mcp_args(&m.url, &[("Authorization", auth)]))
-                    .env(MCP_TOKEN_ENV, &m.token);
-            }
-            // One `=` token, so a model starting with '-' can't be read as a flag.
-            if let Some(m) = model {
-                cmd.arg(format!("--model={m}"));
-            }
-            cmd.arg("--").arg(prompt); // prompt may start with '-'
-            if let Some(d) = cwd {
+            if let Some(d) = opts.cwd {
                 cmd.current_dir(d);
             }
             cmd.env(TASK_ENV, task.to_string());
@@ -415,6 +429,38 @@ mod tests {
             args[2..],
             ["--strict-mcp-config", "--allowedTools", "mcp__mis"]
         );
+    }
+
+    #[test]
+    fn argv_resumes_and_keeps_prompt_last() {
+        let agent = ClaudeAgent {
+            skip_permissions: true,
+            extra_args: vec!["--max-turns".into(), "1".into()],
+        };
+        let o = RunOpts {
+            model: Some("haiku"),
+            resume: Some("s-1"),
+            ..Default::default()
+        };
+        assert_eq!(
+            agent.argv("-hi", &o),
+            [
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--dangerously-skip-permissions",
+                "--max-turns",
+                "1",
+                "--model=haiku",
+                "--resume=s-1",
+                "--fork-session",
+                "--",
+                "-hi"
+            ]
+        );
+        let plain = ClaudeAgent::default().argv("hi", &RunOpts::default());
+        assert!(!plain.iter().any(|a| a.starts_with("--resume")));
     }
 
     #[test]

@@ -98,6 +98,7 @@ async fn submit_assign_finish() {
             cwd: None,
             harness: None,
             model: None,
+            reply_to: None,
         },
     )
     .await;
@@ -191,6 +192,7 @@ async fn model_reaches_worker_and_status() {
                 cwd: None,
                 harness: harness.map(String::from),
                 model: model.map(String::from),
+                reply_to: None,
             },
         )
         .await;
@@ -250,6 +252,7 @@ async fn harness_mismatch_stays_queued() {
             cwd: None,
             harness: Some("claude".into()),
             model: None,
+            reply_to: None,
         },
     )
     .await;
@@ -277,6 +280,7 @@ async fn worker_disconnect_fails_task_and_notifies() {
             cwd: None,
             harness: None,
             model: None,
+            reply_to: None,
         },
     )
     .await;
@@ -319,6 +323,7 @@ async fn events_from_wrong_worker_are_ignored() {
             cwd: None,
             harness: None,
             model: None,
+            reply_to: None,
         },
     )
     .await;
@@ -452,6 +457,7 @@ async fn reconnect_keeps_reported_task_and_fails_unreported() {
             cwd: None,
             harness: None,
             model: None,
+            reply_to: None,
         },
     )
     .await;
@@ -546,6 +552,7 @@ async fn disconnect_then_reconnect_within_grace_keeps_task() {
             cwd: None,
             harness: None,
             model: None,
+            reply_to: None,
         },
     )
     .await;
@@ -588,6 +595,7 @@ async fn disconnect_then_reconnect_within_grace_keeps_task() {
             cwd: None,
             harness: None,
             model: None,
+            reply_to: None,
         },
     )
     .await;
@@ -613,6 +621,7 @@ async fn show_returns_transcript() {
             cwd: None,
             harness: None,
             model: None,
+            reply_to: None,
         },
     )
     .await;
@@ -695,6 +704,7 @@ async fn status_shows_activity_tokens_and_timing() {
             cwd: None,
             harness: Some("claude".into()),
             model: None,
+            reply_to: None,
         },
     )
     .await;
@@ -749,9 +759,7 @@ impl mis_agent::Agent for FakePlanner {
         &'a self,
         _task: TaskId,
         prompt: &'a str,
-        _cwd: Option<&'a str>,
-        _model: Option<&'a str>,
-        _mcp: Option<&'a mis_agent::Mcp>,
+        _opts: mis_agent::RunOpts<'a>,
         tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> mis_agent::BoxFut<'a> {
         Box::pin(async move {
@@ -795,6 +803,7 @@ async fn planner_routes_to_codex_and_streams_its_output() {
             cwd: None,
             harness: None,
             model: None,
+            reply_to: None,
         },
     )
     .await;
@@ -866,6 +875,7 @@ async fn planner_answers_trivial_question_without_a_worker() {
             cwd: None,
             harness: None,
             model: None,
+            reply_to: None,
         },
     )
     .await;
@@ -993,9 +1003,7 @@ impl mis_agent::Agent for FakeSummarizer {
         &'a self,
         _task: TaskId,
         prompt: &'a str,
-        _cwd: Option<&'a str>,
-        _model: Option<&'a str>,
-        _mcp: Option<&'a mis_agent::Mcp>,
+        _opts: mis_agent::RunOpts<'a>,
         tx: tokio::sync::mpsc::Sender<AgentEvent>,
     ) -> mis_agent::BoxFut<'a> {
         Box::pin(async move {
@@ -1031,6 +1039,7 @@ async fn finished_task_gets_summary_but_planner_answer_does_not() {
         cwd: None,
         harness: harness.map(String::from),
         model: None,
+        reply_to: None,
     };
     send(&mut client, &submit(None)).await;
     let ServerMsg::Submitted { task: answered } = recv(&mut client).await else {
@@ -1095,6 +1104,7 @@ async fn status_event_sets_activity_and_is_kept() {
             cwd: None,
             harness: Some("claude".into()),
             model: None,
+            reply_to: None,
         },
     )
     .await;
@@ -1174,6 +1184,7 @@ async fn mcp_lists_tools_and_shows_a_finished_task() {
             cwd: None,
             harness: Some("claude".into()),
             model: None,
+            reply_to: None,
         },
     )
     .await;
@@ -1237,4 +1248,180 @@ async fn mcp_needs_the_token() {
     assert!(reply.unwrap()["result"]["tools"].is_array());
     // GET (SSE stream) is not offered.
     assert!(http_get(&base, "/mcp").await.starts_with("HTTP/1.1 405"));
+}
+
+/// Submit a reply to `parent`; returns the new task id.
+async fn reply(client: &mut Ws, parent: TaskId, text: &str) -> TaskId {
+    send(
+        client,
+        &ClientMsg::Submit {
+            prompt: text.into(),
+            cwd: None,
+            harness: None,
+            model: None,
+            reply_to: Some(parent),
+        },
+    )
+    .await;
+    loop {
+        match recv(client).await {
+            ServerMsg::Submitted { task } => return task,
+            ServerMsg::Error { message } => panic!("{message}"),
+            _ => continue,
+        }
+    }
+}
+
+#[tokio::test]
+async fn reply_resumes_the_session_on_the_same_worker() {
+    let base = start().await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    let mut a = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+    send(
+        &mut client,
+        &ClientMsg::Submit {
+            prompt: "what files?".into(),
+            cwd: Some("/code/x".into()),
+            harness: Some("claude".into()),
+            model: Some("haiku".into()),
+            reply_to: None,
+        },
+    )
+    .await;
+    let ServerMsg::Submitted { task: parent } = recv(&mut client).await else {
+        panic!()
+    };
+    let OrchMsg::Assign { .. } = recv(&mut a).await else {
+        panic!()
+    };
+    // A second idle worker joins; the reply must still go to `a`, which has the session.
+    let mut b = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+    send(&mut client, &ClientMsg::Subscribe).await;
+    for event in [
+        AgentEvent::Started {
+            session: Some("sess-1".into()),
+            model: None,
+        },
+        AgentEvent::Finished {
+            ok: true,
+            summary: Some("two".into()),
+        },
+    ] {
+        send(
+            &mut a,
+            &WorkerMsg::Event {
+                task: parent,
+                event,
+            },
+        )
+        .await;
+        let _: ServerMsg = recv(&mut client).await;
+    }
+
+    let task = reply(&mut client, parent, "which have tests?").await;
+    let OrchMsg::Assign { task: sent } = recv(&mut a).await else {
+        panic!()
+    };
+    assert_eq!(sent.id, task);
+    assert_eq!(
+        (
+            sent.prompt.as_str(),
+            sent.resume.as_deref(),
+            sent.cwd.as_deref(),
+            sent.model.as_deref()
+        ),
+        (
+            "which have tests?",
+            Some("sess-1"),
+            Some("/code/x"),
+            Some("haiku")
+        )
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), b.next())
+            .await
+            .is_err(),
+        "other worker got the reply"
+    );
+    send(&mut client, &ClientMsg::Status).await;
+    let tasks = loop {
+        if let ServerMsg::Status { tasks, .. } = recv(&mut client).await {
+            break tasks;
+        }
+    };
+    assert_eq!(
+        tasks.iter().find(|t| t.id == task).unwrap().parent,
+        Some(parent)
+    );
+}
+
+/// Answers a fresh request itself; routes a follow-up (one carrying context) to claude.
+struct ThreadPlanner;
+impl mis_agent::Agent for ThreadPlanner {
+    fn name(&self) -> &'static str {
+        "fake"
+    }
+    fn models(&self) -> Vec<String> {
+        vec![]
+    }
+    fn run<'a>(
+        &'a self,
+        _task: TaskId,
+        prompt: &'a str,
+        _opts: mis_agent::RunOpts<'a>,
+        tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> mis_agent::BoxFut<'a> {
+        Box::pin(async move {
+            let plan = match prompt.contains("This follows up an earlier request.") {
+                true => r#"{"harness":"claude","reason":"needs a worker"}"#,
+                false => r#"{"answer":"4","reason":"arithmetic"}"#,
+            };
+            tx.send(AgentEvent::Finished {
+                ok: true,
+                summary: Some(plan.into()),
+            })
+            .await?;
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn reply_to_a_planner_answer_is_planned_with_context() {
+    let base = start_app(App::new(None).with_planner(std::sync::Arc::new(ThreadPlanner))).await;
+    let mut worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    send(&mut client, &ClientMsg::Subscribe).await;
+    send(
+        &mut client,
+        &ClientMsg::Submit {
+            prompt: "what is 2+2?".into(),
+            cwd: None,
+            harness: None,
+            model: None,
+            reply_to: None,
+        },
+    )
+    .await;
+    let ServerMsg::Submitted { task: parent } = recv(&mut client).await else {
+        panic!()
+    };
+    // Answered: Text then Finished, no worker involved.
+    while !matches!(
+        recv(&mut client).await,
+        ServerMsg::Event {
+            event: AgentEvent::Finished { ok: true, .. },
+            ..
+        }
+    ) {}
+
+    let task = reply(&mut client, parent, "now show it in a file").await;
+    let OrchMsg::Assign { task: sent } = recv(&mut worker).await else {
+        panic!()
+    };
+    assert_eq!((sent.id, sent.resume.as_deref()), (task, None));
+    assert!(sent.prompt.starts_with("now show it in a file\n"));
+    assert!(sent
+        .prompt
+        .ends_with("Earlier request:\nwhat is 2+2?\n\nEarlier answer:\n4"));
 }

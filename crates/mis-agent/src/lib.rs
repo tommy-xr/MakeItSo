@@ -28,6 +28,19 @@ pub struct Mcp {
     pub token: String,
 }
 
+/// How to run one prompt; `Default` is the harness's defaults, nothing extra.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunOpts<'a> {
+    /// Working directory; None = this process's.
+    pub cwd: Option<&'a str>,
+    /// None leaves the harness's default model.
+    pub model: Option<&'a str>,
+    /// Offered to the agent as server `MCP_SERVER`.
+    pub mcp: Option<&'a Mcp>,
+    /// Session to continue (claude `--resume`, codex `exec resume`).
+    pub resume: Option<&'a str>,
+}
+
 pub trait Agent: Send + Sync {
     /// Harness name as advertised to the orchestrator, e.g. "claude".
     fn name(&self) -> &'static str;
@@ -36,15 +49,11 @@ pub trait Agent: Send + Sync {
     fn models(&self) -> Vec<String>;
     /// Run to completion. Must end with exactly one `AgentEvent::Finished`.
     /// The agent process sees `MIS_TASK=<task>` so nested `mis task` calls can be refused.
-    /// `model` None leaves the harness's default. `mcp`, if set, is offered to
-    /// the agent as server `MCP_SERVER`.
     fn run<'a>(
         &'a self,
         task: TaskId,
         prompt: &'a str,
-        cwd: Option<&'a str>,
-        model: Option<&'a str>,
-        mcp: Option<&'a Mcp>,
+        opts: RunOpts<'a>,
         tx: mpsc::Sender<AgentEvent>,
     ) -> BoxFut<'a>;
 }
@@ -58,12 +67,10 @@ pub async fn run_guarded(
     agent: &dyn Agent,
     task: TaskId,
     prompt: &str,
-    cwd: Option<&str>,
-    model: Option<&str>,
-    mcp: Option<&Mcp>,
+    opts: RunOpts<'_>,
     tx: mpsc::Sender<AgentEvent>,
 ) {
-    let run = agent.run(task, prompt, cwd, model, mcp, tx.clone());
+    let run = agent.run(task, prompt, opts, tx.clone());
     let res = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(run)).await;
     let why = match res {
         Ok(Ok(())) => return,

@@ -45,6 +45,15 @@ enum Cmd {
         #[arg(long)]
         nested: bool,
     },
+    /// Reply in a task's thread: resumes its agent session on the same worker.
+    Reply {
+        /// Task id or unambiguous prefix.
+        id: String,
+        text: String,
+        /// Return once submitted instead of streaming the reply's events.
+        #[arg(long)]
+        no_follow: bool,
+    },
     /// Show one task's details and transcript.
     Show {
         /// Task id or unambiguous prefix (as `mis status` prints).
@@ -268,9 +277,13 @@ async fn ask(args: &Args, words: &[String], model: &str) -> Result<()> {
 /// agents do what error messages say.
 fn check_nested(cmd: &Cmd, task_env: Option<&str>) -> Result<()> {
     match (cmd, task_env) {
-        (Cmd::Task { nested: false, .. }, Some(parent)) if !parent.is_empty() => bail!(
+        (Cmd::Task { nested: false, .. } | Cmd::Reply { .. }, Some(parent))
+            if !parent.is_empty() =>
+        {
+            bail!(
             "refusing to submit from inside task {parent}: with one worker it can never start while this task runs. Do the work here."
-        ),
+        )
+        }
         _ => Ok(()),
     }
 }
@@ -400,6 +413,60 @@ fn task_line(t: &TaskSummary, workers: &[WorkerSummary], now_ms: u64) -> String 
     parts.join(" · ")
 }
 
+/// The id from the reply to a Submit. Broadcasts may interleave once
+/// subscribed; skip them until Submitted.
+async fn submitted(ws: &mut Ws) -> Result<TaskId> {
+    loop {
+        match recv(ws).await? {
+            ServerMsg::Submitted { task } => return Ok(task),
+            ServerMsg::Error { message } => bail!(message),
+            ServerMsg::Event { .. } | ServerMsg::Status { .. } => continue,
+            other => bail!("unexpected reply: {other:?}"),
+        }
+    }
+}
+
+/// Print `task`'s events until it finishes; exit 1 if it failed.
+async fn follow_task(ws: &mut Ws, task: TaskId) -> Result<()> {
+    loop {
+        match recv(ws).await? {
+            ServerMsg::Event { task: t, event, .. } if t == task => {
+                print_event(t, &event);
+                if let AgentEvent::Finished { ok, .. } = event {
+                    if !ok {
+                        std::process::exit(1);
+                    }
+                    return Ok(());
+                }
+            }
+            ServerMsg::Error { message } => eprintln!("warning: {message}"),
+            _ => {}
+        }
+    }
+}
+
+/// Tasks in order with each one's replies right after it, nested: (depth, task).
+/// A reply whose parent isn't listed shows at the top level.
+fn threaded(tasks: &[TaskSummary]) -> Vec<(usize, &TaskSummary)> {
+    fn add<'a>(
+        out: &mut Vec<(usize, &'a TaskSummary)>,
+        tasks: &'a [TaskSummary],
+        t: &'a TaskSummary,
+        depth: usize,
+    ) {
+        out.push((depth, t));
+        for r in tasks.iter().filter(|r| r.parent == Some(t.id)) {
+            add(out, tasks, r, depth + 1);
+        }
+    }
+    let mut out = vec![];
+    let listed = |id: TaskId| tasks.iter().any(|t| t.id == id);
+    for t in tasks.iter().filter(|t| !t.parent.is_some_and(listed)) {
+        add(&mut out, tasks, t, 0);
+    }
+    out
+}
+
 fn unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -456,15 +523,18 @@ async fn main() -> Result<()> {
                 );
             }
             println!("tasks ({}):", tasks.len());
-            for t in tasks {
+            for (depth, t) in threaded(&tasks) {
+                let pad = "    ".repeat(depth);
+                let mark = if depth > 0 { "↳ " } else { "" };
                 println!(
-                    "  {} {:<8} {}\n      {}{}",
+                    "  {pad}{mark}{} {:<8} {}\n      {pad}{}{}",
                     &t.id.to_string()[..8],
                     format!("{:?}", t.status).to_lowercase(),
-                    task_line(&t, &workers, now),
-                    t.prompt,
+                    task_line(t, &workers, now),
+                    first_line(&t.prompt, 100),
                     t.summary
-                        .map(|s| format!(" -> {}", first_line(&s, 80)))
+                        .as_ref()
+                        .map(|s| format!(" -> {}", first_line(s, 80)))
                         .unwrap_or_default()
                 );
             }
@@ -491,6 +561,15 @@ async fn main() -> Result<()> {
             println!("harness: {}", placement(&t, &workers));
             println!("worker:  {}", opt(t.worker.map(|w| w.to_string())));
             println!("session: {}", opt(t.session));
+            println!("parent:  {}", opt(t.parent.map(|p| p.to_string())));
+            let replies: Vec<String> = tasks
+                .iter()
+                .filter(|r| r.parent == Some(t.id))
+                .map(|r| format!("{} {}", &r.id.to_string()[..8], first_line(&r.prompt, 60)))
+                .collect();
+            if !replies.is_empty() {
+                println!("replies: {}", replies.join("\n         "));
+            }
             println!("prompt:  {}", t.prompt);
             println!("summary: {}", opt(t.summary));
             println!();
@@ -519,34 +598,44 @@ async fn main() -> Result<()> {
                     cwd: cwd.clone(),
                     harness: harness.clone(),
                     model: model.clone(),
+                    reply_to: None,
                 },
             )
             .await?;
-            // Broadcasts may interleave once subscribed; skip them until Submitted.
-            let task = loop {
-                match recv(&mut ws).await? {
-                    ServerMsg::Submitted { task } => break task,
-                    ServerMsg::Event { .. } | ServerMsg::Status { .. } => continue,
-                    other => bail!("unexpected reply: {other:?}"),
-                }
-            };
+            let task = submitted(&mut ws).await?;
             println!("submitted {task}");
             if *follow {
-                loop {
-                    match recv(&mut ws).await? {
-                        ServerMsg::Event { task: t, event, .. } if t == task => {
-                            print_event(t, &event);
-                            if let AgentEvent::Finished { ok, .. } = event {
-                                if !ok {
-                                    std::process::exit(1);
-                                }
-                                break;
-                            }
-                        }
-                        ServerMsg::Error { message } => eprintln!("warning: {message}"),
-                        _ => {}
-                    }
-                }
+                follow_task(&mut ws, task).await?;
+            }
+        }
+        Cmd::Reply {
+            id,
+            text,
+            no_follow,
+        } => {
+            send(&mut ws, &ClientMsg::Status).await?;
+            let ServerMsg::Status { tasks, .. } = recv(&mut ws).await? else {
+                bail!("unexpected reply")
+            };
+            let parent = resolve_task(&tasks, id).map_err(anyhow::Error::msg)?;
+            if !no_follow {
+                send(&mut ws, &ClientMsg::Subscribe).await?;
+            }
+            send(
+                &mut ws,
+                &ClientMsg::Submit {
+                    prompt: text.clone(),
+                    cwd: None,
+                    harness: None,
+                    model: None,
+                    reply_to: Some(parent),
+                },
+            )
+            .await?;
+            let task = submitted(&mut ws).await?;
+            println!("submitted {task} (reply to {})", &parent.to_string()[..8]);
+            if !no_follow {
+                follow_task(&mut ws, task).await?;
             }
         }
         Cmd::Tail => {
@@ -594,6 +683,7 @@ mod tests {
             tokens_in: None,
             tokens_out: None,
             activity: String::new(),
+            parent: None,
         }
     }
 
@@ -604,6 +694,12 @@ mod tests {
         assert!(check_nested(&task(false), None).is_ok());
         assert!(check_nested(&task(false), Some("")).is_ok());
         assert!(check_nested(&Cmd::Status, Some("abc")).is_ok());
+        let reply = Cmd::Reply {
+            id: "a".into(),
+            text: "t".into(),
+            no_follow: false,
+        };
+        assert!(check_nested(&reply, Some("abc")).is_err());
     }
 
     #[test]
@@ -655,6 +751,30 @@ mod tests {
         assert!(argv.contains(&"--model=haiku".to_string()));
         // Question last, after `--`, so a leading '-' isn't a flag.
         assert_eq!(argv[argv.len() - 2..], ["--", "-q"]);
+    }
+
+    #[test]
+    fn replies_nest_under_their_parent() {
+        let id = |n: u8| format!("{n:08x}-0000-0000-0000-000000000000");
+        let mut tasks: Vec<_> = (1..=4).map(|n| summary(&id(n))).collect();
+        tasks[2].parent = Some(tasks[0].id); // 3 replies to 1
+        tasks[3].parent = Some(tasks[2].id); // 4 replies to 3
+        let order: Vec<_> = threaded(&tasks)
+            .iter()
+            .map(|(d, t)| (*d, t.id.to_string()[..8].to_string()))
+            .collect();
+        assert_eq!(
+            order,
+            [(0, id(1)), (1, id(3)), (2, id(4)), (0, id(2))].map(|(d, s)| (d, s[..8].to_string()))
+        );
+        // Parent not listed: shown at the top.
+        assert_eq!(
+            threaded(&tasks[2..])
+                .iter()
+                .map(|(d, _)| *d)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
     }
 
     #[test]
