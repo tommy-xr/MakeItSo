@@ -52,6 +52,29 @@ struct Worker {
     stats: Option<(WorkerStats, u64)>,
     /// Last Hello or Stats; `tick` drops the worker when this gets too old.
     last_seen: Duration,
+    /// Harness -> Unix millis until which a run here reported a hit usage limit.
+    /// Kept across reconnects.
+    limited: HashMap<String, u64>,
+}
+
+/// A usage limit hit with no reset time keeps its harness off a worker this long.
+const LIMITED_FOR_MS: u64 = 3600 * 1000;
+/// Usage at or above this is out.
+const EXHAUSTED_PCT: f32 = 99.0;
+
+impl Worker {
+    /// Unix millis until which `harness` here is out of usage, if it is now: a
+    /// fresh window at `EXHAUSTED_PCT` (until it resets or goes stale), or a
+    /// reported limit hit.
+    fn exhausted_until(&self, harness: &str, now_ms: u64) -> Option<u64> {
+        let windows = self.stats.iter().filter_map(|(s, _)| s.limits.get(harness));
+        let full = windows
+            .flatten()
+            .filter(|w| w.used_pct >= EXHAUSTED_PCT && !w.stale(now_ms))
+            .map(|w| w.resets_at.unwrap_or(w.observed_at + LIMIT_STALE_MS));
+        let hit = self.limited.get(harness).copied();
+        full.chain(hit).filter(|until| *until > now_ms).max()
+    }
 }
 
 /// Per-task transcript cap: sum of each event's serialized JSON size. Oldest
@@ -185,6 +208,8 @@ impl TaskEntry {
             parent: self.parent,
             links: self.links.clone(),
             attention: attention(self.status, self.limited, self.seen),
+            // Needs the fleet; see `Ledger::status`.
+            blocked_until: None,
         }
     }
 
@@ -297,8 +322,39 @@ impl Ledger {
                     stats_at: w.stats.as_ref().map(|(_, at)| *at),
                 })
                 .collect(),
-            tasks: self.tasks.iter().map(TaskEntry::summary).collect(),
+            tasks: self
+                .tasks
+                .iter()
+                .map(|t| {
+                    let mut s = t.summary();
+                    s.blocked_until = self.blocked_until(t);
+                    if let Some(until) = s.blocked_until {
+                        let wait = fmt_elapsed(until.saturating_sub(self.now_ms));
+                        s.activity = format!("queued · {} resets {wait}", t.task.harness);
+                    }
+                    s
+                })
+                .collect(),
             now_ms: Some(self.now_ms),
+        }
+    }
+
+    /// For a queued task that only usage limits hold back: when the first
+    /// online worker that could run it frees up.
+    fn blocked_until(&self, t: &TaskEntry) -> Option<u64> {
+        if t.status != TaskStatus::Queued {
+            return None;
+        }
+        let candidates: Vec<_> = self
+            .workers
+            .iter()
+            .filter(|(wid, w)| t.pin.is_none_or(|p| p == **wid) && w.conn.is_some())
+            .filter(|(_, w)| w.info.harnesses.contains(&t.task.harness))
+            .map(|(_, w)| w.exhausted_until(&t.task.harness, self.now_ms))
+            .collect();
+        match candidates.iter().all(Option::is_some) {
+            true => candidates.into_iter().flatten().min(),
+            false => None,
         }
     }
 
@@ -409,11 +465,34 @@ impl Ledger {
         Ok((id, effects))
     }
 
+    /// What the planner may choose from: `known_fleet` less the harnesses out of
+    /// usage on every worker offering them, unless that leaves nothing (the task
+    /// then waits on whichever it picks).
+    pub fn fleet(&self) -> plan::Fleet {
+        let all = self.known_fleet();
+        let usable: plan::Fleet = all
+            .clone()
+            .into_iter()
+            .filter(|(h, _)| {
+                let mut offering = self
+                    .workers
+                    .values()
+                    .filter(|w| w.info.harnesses.contains(h));
+                !offering.all(|w| w.exhausted_until(h, self.now_ms).is_some())
+            })
+            .collect();
+        if usable.is_empty() {
+            all
+        } else {
+            usable
+        }
+    }
+
     /// Every harness a known worker offers, with the models every such worker
     /// advertises (scheduling ignores the model, so any of them may get the task);
     /// with no workers, every harness that exists and no models, so a plan made
     /// before the fleet connects still queues (on the harness default).
-    pub fn fleet(&self) -> plan::Fleet {
+    fn known_fleet(&self) -> plan::Fleet {
         let mut fleet = plan::Fleet::new();
         // By id, so the surviving order (first = preferred) doesn't follow hash order.
         let mut workers: Vec<_> = self.workers.iter().collect();
@@ -440,7 +519,8 @@ impl Ledger {
     /// in case it answers; Finished carries the plan (the reply's JSON), which
     /// answers, queues, or fails the task.
     pub fn planning_event(&mut self, task: TaskId, event: AgentEvent) -> Vec<Effect> {
-        let fleet = self.fleet();
+        // Any known harness is valid: one the planner wasn't offered may still be the user's explicit pick.
+        let fleet = self.known_fleet();
         let now = self.now_ms;
         let Some(t) = self.tasks.iter_mut().find(|t| t.task.id == task) else {
             return vec![];
@@ -543,7 +623,8 @@ impl Ledger {
         conn: ConnId,
         now: Duration,
     ) -> (Vec<TaskId>, Vec<Effect>) {
-        let generation = self.workers.get(&wid).map_or(0, |w| w.generation) + 1;
+        let old = self.workers.remove(&wid);
+        let generation = old.as_ref().map_or(0, |w| w.generation) + 1;
         self.workers.insert(
             wid,
             Worker {
@@ -552,6 +633,7 @@ impl Ledger {
                 generation,
                 stats: None,
                 last_seen: now,
+                limited: old.map(|w| w.limited).unwrap_or_default(),
             },
         );
         let unknown = running
@@ -588,7 +670,8 @@ impl Ledger {
 
     /// Heartbeat from `conn`: store the stats, stamped `unix_secs` for clients.
     /// Ignored unless `conn` is live. New usage-limit readings go out in a
-    /// Status at once; load figures wait for the next one.
+    /// Status at once; load figures wait for the next one. Each beat retries
+    /// the queue, since a limit may have reset.
     pub fn worker_stats(
         &mut self,
         wid: WorkerId,
@@ -603,11 +686,11 @@ impl Ledger {
         let changed = w.stats.take().map(|(s, _)| s.limits).unwrap_or_default() != stats.limits;
         w.stats = Some((stats, unix_secs));
         w.last_seen = now;
+        let mut effects = self.schedule();
         if changed {
-            vec![Effect::Broadcast(self.status())]
-        } else {
-            vec![]
+            effects.push(Effect::Broadcast(self.status()));
         }
+        effects
     }
 
     /// Disconnect every online worker not heard from within `stale_after`, and
@@ -665,6 +748,11 @@ impl Ledger {
             return vec![];
         }
         t.record(&event, now);
+        if let AgentEvent::Limited { resets_at } = &event {
+            let until = resets_at.map_or(now + LIMITED_FOR_MS, |s| s * 1000);
+            let w = self.workers.get_mut(&wid).expect("checked above");
+            w.limited.insert(t.task.harness.clone(), until);
+        }
         let mut summarize = None;
         if let AgentEvent::Finished { ok, .. } = &event {
             t.status = if *ok {
@@ -728,11 +816,13 @@ impl Ledger {
             };
             let harness = &self.tasks[ti].task.harness;
             let pin = self.tasks[ti].pin;
+            // Out-of-usage workers are skipped; a pinned reply waits for its own.
             let picked = self
                 .workers
                 .iter()
                 .filter(|(wid, _)| pin.is_none_or(|p| p == **wid))
                 .filter(|(wid, w)| w.conn.is_some() && !self.is_busy(**wid))
+                .filter(|(_, w)| w.exhausted_until(harness, self.now_ms).is_none())
                 .find(|(_, w)| w.info.harnesses.contains(harness))
                 .map(|(wid, w)| (*wid, w.conn.unwrap()));
             match picked {
@@ -1834,6 +1924,8 @@ mod tests {
         assert_eq!(attention_of(&l, task), Attention::None);
 
         // Limited, then carried on and finished ok: just a result to read.
+        // (After the reset: until then the worker gets no claude work.)
+        l.now_ms = 1_800_000_000_000;
         let (next, _) = l.submit("q".into(), None, Some("claude".into()), None);
         l.event(wid, 1, next, limited);
         finish(&mut l, wid, next, true);
@@ -2138,5 +2230,182 @@ mod tests {
         let links = l.show(task).unwrap().0.links;
         assert_eq!(links.len(), MAX_LINKS);
         assert_eq!((links[0].url.as_str(), links[1].label.as_str()), (pr, "2"));
+    }
+
+    const NOW: u64 = 1_800_000_000_000;
+    const HOUR: u64 = 3_600_000;
+
+    /// Claude's 5h window at `used_pct`, read `age` ms before `NOW`.
+    fn claude_5h(used_pct: f32, resets_at: Option<u64>, age: u64) -> WorkerStats {
+        let w = LimitWindow {
+            name: "5h".into(),
+            used_pct,
+            resets_at,
+            observed_at: NOW - age,
+        };
+        WorkerStats {
+            limits: [("claude".to_string(), vec![w])].into(),
+            ..Default::default()
+        }
+    }
+
+    fn harnesses(hs: &[&str]) -> WorkerInfo {
+        WorkerInfo {
+            harnesses: hs.iter().map(|h| h.to_string()).collect(),
+            ..info()
+        }
+    }
+
+    fn status_of(l: &Ledger, task: TaskId) -> TaskSummary {
+        let ServerMsg::Status { tasks, .. } = l.status() else {
+            unreachable!()
+        };
+        tasks.into_iter().find(|t| t.id == task).unwrap()
+    }
+
+    /// Two claude workers on one account: `a` reads it out of usage; `b`'s same
+    /// reading is 7 h old, so `b` may still run (it will report a hit limit if so).
+    #[test]
+    fn exhausted_worker_is_skipped_a_stale_reading_is_not() {
+        let mut l = Ledger {
+            now_ms: NOW,
+            ..Default::default()
+        };
+        let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        l.connect(a, info(), &[], 1, T0);
+        l.connect(b, info(), &[], 2, T0);
+        l.worker_stats(
+            a,
+            1,
+            claude_5h(100.0, Some(NOW + 3 * HOUR), 60_000),
+            secs(1),
+            0,
+        );
+        l.worker_stats(
+            b,
+            2,
+            claude_5h(100.0, Some(NOW + 3 * HOUR), 7 * HOUR),
+            secs(1),
+            0,
+        );
+        let (task, eff) = l.submit("p".into(), None, Some("claude".into()), None);
+        assert_eq!(assigned(&eff), vec![(2, task)]);
+        assert_eq!(status_of(&l, task).blocked_until, None);
+    }
+
+    #[test]
+    fn all_exhausted_waits_for_the_soonest_reset_then_runs() {
+        let mut l = Ledger {
+            now_ms: NOW,
+            ..Default::default()
+        };
+        let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        l.connect(a, info(), &[], 1, T0);
+        l.connect(b, info(), &[], 2, T0);
+        let a_stats = claude_5h(100.0, Some(NOW + 3 * HOUR), 60_000);
+        l.worker_stats(a, 1, a_stats.clone(), secs(1), 0);
+        l.worker_stats(
+            b,
+            2,
+            claude_5h(99.5, Some(NOW + 5 * HOUR), 60_000),
+            secs(1),
+            0,
+        );
+        // No reset time: out until the reading goes stale.
+        assert_eq!(
+            l.workers[&a].exhausted_until("claude", NOW),
+            Some(NOW + 3 * HOUR)
+        );
+        let (task, eff) = l.submit("p".into(), None, Some("claude".into()), None);
+        assert!(assigned(&eff).is_empty());
+        let s = status_of(&l, task);
+        assert_eq!(s.blocked_until, Some(NOW + 3 * HOUR));
+        assert_eq!(s.activity, "queued · claude resets 3h00m");
+
+        // The planner isn't offered claude once a codex worker joins; it still accepts claude.
+        assert!(l.fleet().contains_key("claude"), "nothing else: keep it");
+        l.connect(Uuid::from_u128(3), harnesses(&["codex"]), &[], 3, T0);
+        assert_eq!(l.fleet().keys().collect::<Vec<_>>(), ["codex"]);
+        assert!(l.known_fleet().contains_key("claude"));
+        assert_eq!(status_of(&l, task).blocked_until, Some(NOW + 3 * HOUR));
+
+        // `a`'s window resets: its next beat hands it the task.
+        l.now_ms = NOW + 3 * HOUR;
+        let eff = l.worker_stats(a, 1, a_stats, secs(16), 0);
+        assert_eq!(assigned(&eff), vec![(1, task)]);
+        assert_eq!(status_of(&l, task).blocked_until, None);
+    }
+
+    #[test]
+    fn a_reading_without_reset_holds_until_stale() {
+        let mut l = Ledger {
+            now_ms: NOW,
+            ..Default::default()
+        };
+        let a = Uuid::from_u128(1);
+        l.connect(a, info(), &[], 1, T0);
+        l.worker_stats(a, 1, claude_5h(99.0, None, HOUR), secs(1), 0);
+        let until = NOW - HOUR + LIMIT_STALE_MS;
+        assert_eq!(l.workers[&a].exhausted_until("claude", NOW), Some(until));
+        assert_eq!(l.workers[&a].exhausted_until("claude", until), None);
+        assert_eq!(l.workers[&a].exhausted_until("codex", NOW), None);
+        l.worker_stats(a, 1, claude_5h(98.9, None, 0), secs(2), 0);
+        assert_eq!(l.workers[&a].exhausted_until("claude", NOW), None);
+    }
+
+    /// A hit limit keeps that harness off the worker until it resets, across a
+    /// reconnect. A reply pinned there waits for it; new work goes elsewhere.
+    #[test]
+    fn hit_limit_holds_the_worker_and_its_pinned_reply_waits() {
+        let (mut l, wid, task) = running_setup();
+        l.now_ms = NOW;
+        let resets = NOW / 1000 + 2 * 3600;
+        for e in [
+            AgentEvent::Started {
+                session: Some("s1".into()),
+                model: None,
+            },
+            AgentEvent::Limited {
+                resets_at: Some(resets),
+            },
+            AgentEvent::Finished {
+                ok: false,
+                summary: Some("usage limit".into()),
+            },
+        ] {
+            l.event(wid, 1, task, e);
+        }
+        assert_eq!(
+            l.workers[&wid].exhausted_until("claude", NOW),
+            Some(resets * 1000)
+        );
+        l.disconnect(wid, 1);
+        l.connect(wid, info(), &[], 5, T0);
+        let other = Uuid::from_u128(9);
+        l.connect(other, info(), &[], 6, T0);
+
+        let (reply, eff) = l.reply(task, "go on".into(), true).unwrap();
+        assert!(
+            assigned(&eff).is_empty(),
+            "pinned: not moved to the other worker"
+        );
+        assert_eq!(status_of(&l, reply).blocked_until, Some(resets * 1000));
+        let (fresh, eff) = l.submit("p".into(), None, Some("claude".into()), None);
+        assert_eq!(assigned(&eff), vec![(6, fresh)]);
+
+        l.now_ms = resets * 1000;
+        let eff = l.worker_stats(wid, 5, stats(1), secs(20), 0);
+        assert_eq!(assigned(&eff), vec![(5, reply)]);
+    }
+
+    #[test]
+    fn hit_limit_without_reset_holds_an_hour() {
+        let (mut l, wid, task) = running_setup();
+        l.now_ms = NOW;
+        l.event(wid, 1, task, AgentEvent::Limited { resets_at: None });
+        assert_eq!(
+            l.workers[&wid].exhausted_until("claude", NOW),
+            Some(NOW + LIMITED_FOR_MS)
+        );
     }
 }

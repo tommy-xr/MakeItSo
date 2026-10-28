@@ -294,8 +294,8 @@ const level = (v) => (v === null ? '' : v >= 90 ? 'crit' : v >= 75 ? 'warn' : ''
 const LIMIT_STALE_MS = 6 * 3600e3;
 const staleLimit = (x, now) => now - x.observed_at > LIMIT_STALE_MS || (num(x.resets_at) !== null && x.resets_at <= now);
 const limitsOf = (w) => Object.entries((w.stats && w.stats.limits) || {});
-// `now`, `4m`, `3h`, `2d`.
-function ago(ms) {
+// A rough span: `now`, `4m`, `3h`, `2d`.
+function span(ms) {
   const m = Math.floor(ms / 60e3);
   return m < 1 ? 'now' : m < 60 ? `${m}m` : m < 1440 ? `${Math.floor(m / 60)}h` : `${Math.floor(m / 1440)}d`;
 }
@@ -534,10 +534,10 @@ function clock(t) {
   return s;
 }
 let ticks = 0;
-// Readings age without new messages: gauges drop stale ones each second, Workers redraws its "as of" each 30 s.
+// Readings age without new messages: the strip (gauges, reset countdown) redraws each second, Workers its "as of" each 30 s.
 function tick() {
   for (const s of document.querySelectorAll('[data-start]')) s.textContent = fmtElapsed(Date.now() + skew - Number(s.dataset.start));
-  renderGauges();
+  renderStrip();
   if (++ticks % 30 === 0 && everOpen && route().view === 'workers') renderWorkers();
 }
 // Known parts joined with ` · ` (or `sep`).
@@ -556,6 +556,13 @@ function ticker() {
     return { parts, cls: 'run', open: newest.id };
   }
   if (queued && !workers.some((w) => w.online)) return { parts: ['queued · no workers'], cls: 'bad' };
+  // Held back only by usage limits: say which harness and when it frees up; a tap opens that task.
+  const blocked = tasks.filter((t) => t.status === 'queued' && num(t.blocked_until) !== null)
+    .sort((a, b) => a.blocked_until - b.blocked_until)[0];
+  if (blocked) {
+    const wait = `${queued > 1 ? `${queued} ` : ''}queued · ${blocked.harness} resets ${span(blocked.blocked_until - Date.now() - skew)}`;
+    return { parts: dots([planning && `${planning} planning`, wait]), cls: 'warn', open: blocked.id };
+  }
   if (queued || planning) return { parts: dots([planning && `${planning} planning`, queued && `${queued} queued`]), cls: 'run' };
   // A tap opens the most urgent, newest first; opening it settles it, so the next tap opens the next.
   const need = tasks.filter((t) => ATTENTION[t.attention]).reverse().sort((a, b) => rank(a) - rank(b));
@@ -802,7 +809,7 @@ function limitRows(w) {
       rows.push(el('div', { className: `lim ${staleLimit(x, now) ? 'stale' : level(x.used_pct)}` },
         `${h} ${x.name}`, bar, el('span', { className: 'v' }, pct(x.used_pct)), num(x.resets_at) === null ? '' : resetLabel(x.resets_at, now)));
     }
-    if (read.length) ages.push(`${h} as of ${ago(now - Math.max(...read.map((x) => x.observed_at)))}`);
+    if (read.length) ages.push(`${h} as of ${span(now - Math.max(...read.map((x) => x.observed_at)))}`);
   }
   return rows.length ? el('div', { className: 'lims' }, ...rows, el('div', { className: 'dim' }, ages.join(' · '))) : '';
 }

@@ -690,6 +690,7 @@ mod tests {
             parent: None,
             links: vec![],
             attention: Attention::None,
+            blocked_until: None,
         }
     }
 

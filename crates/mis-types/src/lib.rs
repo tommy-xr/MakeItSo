@@ -291,6 +291,10 @@ pub struct TaskSummary {
     pub links: Vec<Link>,
     #[serde(default)]
     pub attention: Attention,
+    /// Queued only because every online worker that could run it is out of
+    /// usage: Unix millis when the first of them frees up.
+    #[serde(default)]
+    pub blocked_until: Option<u64>,
 }
 
 /// First non-blank line of `s`, cut to `max` chars with a trailing ellipsis.
@@ -568,6 +572,7 @@ mod tests {
             parent: None,
             links: vec![],
             attention: Attention::None,
+            blocked_until: None,
         }
     }
 
