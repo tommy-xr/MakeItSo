@@ -21,7 +21,7 @@
   @media (min-width: 64rem) { html { padding: 3rem; } body { --pad: 2.5rem; min-height: calc(100vh - 6rem); padding-top: 2.25rem; } }
   /* Title strip: dot, wordmark and tabs; then the ticker of live work; then the synthwave stripe (five stacked lines). */
   .strip { margin: 0 calc(-1 * var(--pad)) 1.25rem; padding: 0 var(--pad) .5rem; background: linear-gradient(var(--synth)) bottom / 100% .625rem no-repeat; }
-  .top { display: flex; align-items: center; gap: .625rem; }
+  .top { display: flex; flex-wrap: wrap; align-items: center; gap: .625rem; }
   .title { font-weight: 700; text-transform: uppercase; letter-spacing: .08em; white-space: nowrap; }
   /* Connection: solid = live, hollow = reconnecting, warn ring = offline. */
   .dot { flex: none; box-sizing: border-box; width: .625rem; height: .625rem; border-radius: 50%; background: var(--answer); }
@@ -32,12 +32,12 @@
   [role=tab][aria-selected=true] { color: var(--screen); background: var(--answer); }
   #ticker { display: flex; align-items: center; min-height: 2.75rem; color: var(--dim); text-decoration: none; overflow-wrap: anywhere; }
   /* One line while work runs; the activity is the part the ellipsis cuts. */
-  #ticker.run { white-space: pre; overflow: hidden; }
+  #ticker.run { white-space: pre; overflow: hidden; color: var(--run); }
   #ticker .act { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  #ticker.run { color: var(--run); } #ticker.warn { color: var(--run); } #ticker.bad { color: var(--bad); } #ticker.note { color: var(--fg); }
+  #ticker.warn { color: var(--run); } #ticker.bad { color: var(--bad); } #ticker.note { color: var(--fg); }
   #ticker[href]::after { content: " ›"; white-space: pre; }
   /* Offline for a while: the last view stays, dimmed. */
-  body.offline main { opacity: .6; }
+  body.stale main { opacity: .6; }
   p { margin: 0 0 .75rem; }
   a { color: inherit; }
   :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
@@ -235,8 +235,8 @@ let flashText = '', flashTimer = 0;
 function flash(text) {
   clearTimeout(flashTimer);
   flashText = text;
-  flashTimer = setTimeout(() => { flashText = ''; render(); }, 4000);
-  render();
+  flashTimer = setTimeout(() => { flashText = ''; renderStrip(); }, 4000);
+  renderStrip();
 }
 
 // Dictation: words stream into the field after its text; nothing is sent until Submit.
@@ -345,13 +345,14 @@ function ticker() {
 }
 
 // Dot, then the ticker: a flash wins, then the connection until a socket has opened, then offline, then work.
-function renderStrip(live) {
-  const [cls, label] = live ? ['', 'live'] : offline ? ['down', 'offline'] : ['hollow', 'reconnecting'];
+function renderStrip() {
+  const live = ws && ws.readyState === WebSocket.OPEN, trying = ws || retryTimer;
+  const [cls, label] = live ? ['', 'live'] : offline || !trying ? ['down', 'offline'] : ['hollow', 'reconnecting'];
   $('dot').className = `dot ${cls}`;
   $('dot').setAttribute('aria-label', label);
   const t = flashText ? { parts: [flashText], cls: 'note' }
     : !everOpen ? { parts: [connMsg], cls: '' }
-    : offline ? { parts: ['offline · retrying'], cls: 'warn' }
+    : offline ? { parts: [`offline · retrying${authNeeded ? ' (wrong token?)' : ''}`], cls: 'warn' }
     : ticker();
   const tk = $('ticker');
   tk.replaceChildren(...t.parts);
@@ -372,8 +373,8 @@ function render() {
   const views = { list: renderList, detail: renderDetail, workers: renderWorkers, machine: renderMachine };
   $('auth').hidden = live || !authNeeded || !!store.get();
   $('tabs').hidden = !everOpen;
-  renderStrip(live);
-  document.body.classList.toggle('offline', everOpen && offline);
+  renderStrip();
+  document.body.classList.toggle('stale', everOpen && offline);
   // Sending needs a socket; drafts stay in their fields meanwhile.
   $('send').disabled = $('send-reply').disabled = !live;
   for (const v in views) $(v).hidden = !everOpen || v !== r.view;
@@ -513,6 +514,7 @@ function onMessage(msg) {
         detail.task = msg.task;
         detail.lines = (msg.truncated ? ['(earlier events dropped)'] : []).concat(msg.events.map(eventLine));
         detail.ready = true;
+        detail.refetch = false;
       }
       break;
     case 'event': {
@@ -534,7 +536,7 @@ function onMessage(msg) {
       }
       flash(`error: ${msg.message}`);
       // A pending Show failed (unknown task): say so. Otherwise events were dropped: re-fetch.
-      if (detail && !detail.ready) Object.assign(detail, { ready: true, lines: [msg.message] });
+      if (detail && (!detail.ready || detail.refetch)) Object.assign(detail, { ready: true, refetch: false, lines: [msg.message] });
       else detail = null;
       refreshSoon();
       break;
@@ -550,9 +552,9 @@ function armOffline() {
 function connect() {
   clearTimeout(retryTimer);
   retryTimer = 0;
-  armOffline();
   const token = store.get();
   if (authNeeded && !token) { connMsg = 'token required'; render(); return; }
+  armOffline();
   const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/client`;
   let sock;
   try {
@@ -575,10 +577,10 @@ function connect() {
     send({ type: 'subscribe' });
     send({ type: 'status' });
     // Re-fetch the open transcript; the old one stays up until the new one replaces it.
-    if (detail) send({ type: 'show', task: detail.id });
+    if (detail && route().view === 'detail') { detail.refetch = true; send({ type: 'show', task: detail.id }); } else detail = null;
     render();
   };
-  sock.onmessage = (ev) => { try { onMessage(JSON.parse(ev.data)); } catch (e) { console.error(e); } };
+  sock.onmessage = (ev) => { clearTimeout(aliveTimer); try { onMessage(JSON.parse(ev.data)); } catch (e) { console.error(e); } };
   sock.onclose = () => {
     if (ws !== sock) return; // replaced by a deliberate reconnect / disconnect
     ws = null;
@@ -600,9 +602,26 @@ function disconnect() {
 
 // Back in the foreground or back online: retry now instead of waiting out the backoff.
 function reconnectNow() {
-  if (ws || !retryTimer) return; // connected or connecting, or not retrying (no token, cleared)
+  if (ws && ws.readyState === WebSocket.OPEN) { checkAlive(); return; }
+  if (ws || !retryTimer) return; // connecting, or not retrying (no token, cleared)
   retries = 0;
   connect();
+}
+
+// After sleep a socket can read OPEN yet be dead: no reply to a Status within 3s drops it and reconnects.
+let aliveTimer = 0;
+function checkAlive() {
+  const s = ws;
+  send({ type: 'status' });
+  clearTimeout(aliveTimer);
+  aliveTimer = setTimeout(() => {
+    if (ws !== s) return;
+    ws = null;
+    s.close();
+    retries = 0;
+    connect();
+    render();
+  }, 3000);
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reconnectNow(); });
 window.addEventListener('online', reconnectNow);
