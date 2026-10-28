@@ -241,8 +241,14 @@ for (const btn of document.querySelectorAll('.mic')) {
       const said = [...e.results].map((x) => x[0].transcript).join('').trim();
       field.value = base && said ? `${base} ${said}` : base || said;
     };
-    r.onerror = (e) => { if (e.error !== 'aborted') flash(`mic error: ${e.error}`); };
-    r.onend = () => { if (rec === r) rec = null; listening(btn, false); };
+    // Some browsers (Chrome on iOS) expose the API, refuse it, and never fire onend: reset here too.
+    const done = () => { if (rec === r) rec = null; listening(btn, false); };
+    r.onerror = (e) => {
+      if (e.error === 'aborted') return;
+      flash(e.error === 'not-allowed' ? 'mic not allowed: use Safari or keyboard dictation' : `mic error: ${e.error}`);
+      done();
+    };
+    r.onend = done;
     listening(btn, true);
     r.start();
   };
