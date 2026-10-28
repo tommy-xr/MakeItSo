@@ -94,13 +94,26 @@
   button:disabled { opacity: .5; cursor: default; }
   /* Listening / speaking: lit edge. */
   .mic[aria-pressed=true], #speak.on { color: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--glow), 0 0 12px var(--glow); }
-  /* Recording: warn fill with a stop square. A finger hides it, so the field glows, the dot turns warn and Submit shows the hint. */
+  /* Recording: warn fill. A finger hides it, so the field glows, the dot turns warn and the recording bar replaces Submit. */
   .mic[data-mic=live] { background: var(--warn); border-color: var(--warn); color: var(--bg); box-shadow: 0 0 12px var(--warn); }
-  .mic[data-mic=live] svg { display: none; }
-  .mic[data-mic=live]::before { content: ""; width: .875rem; height: .875rem; background: currentColor; }
   form.listening textarea { border-color: var(--accent); box-shadow: 0 0 10px var(--glow); }
-  /* The mic's hint stands in for Submit in the same box, so nothing moves under the finger. Two lines fit. */
-  .row .hint { flex: 1; display: flex; align-items: center; justify-content: center; box-sizing: border-box; height: 2.75rem; overflow: hidden; padding: 0 .5rem; border: 1px solid var(--warn); color: var(--warn); font-size: .8125rem; line-height: 1.25; text-align: center; }
+  /* Recording bar in Submit's box, so nothing moves under the finger: ✕, a pulse running along a row of dots, the label. */
+  .row .recbar { flex: 1; display: flex; align-items: center; gap: .5rem; min-width: 0; box-sizing: border-box; height: 2.75rem; padding-right: .5rem; border: 1px solid var(--accent); }
+  .row .recbar .x { flex: none; width: 2.75rem; height: 100%; min-height: 0; padding: 0; border: 0; color: var(--dim); font: 1.1rem/1 var(--mono); }
+  .recbar .dots { flex: 1; min-width: 0; display: flex; justify-content: space-between; align-items: center; padding: 0 .25rem; overflow: hidden; }
+  .recbar .dots i { width: .375rem; height: .375rem; border-radius: 50%; background: var(--accent); opacity: .25; animation: pulse 1.4s ease-in-out infinite; animation-delay: calc(var(--i) * 90ms); }
+  @keyframes pulse { 0%, 60%, 100% { opacity: .25; transform: scale(1); } 30% { opacity: 1; transform: scale(1.35); box-shadow: 0 0 6px var(--glow); } }
+  /* The labels share one grid cell, so the box is as wide as the longest and the dots never resize. */
+  .recbar .label { flex: none; display: grid; font: 600 .72rem/1.1 var(--display); letter-spacing: .1em; text-transform: uppercase; color: var(--accent); text-align: right; white-space: nowrap; }
+  .recbar .label span { grid-area: 1 / 1; visibility: hidden; }
+  .recbar[data-say=start] .start, .recbar[data-say=send] .send, .recbar[data-say=tap] .tap, .recbar[data-say=cancel] .cancel { visibility: visible; }
+  /* Not hearing yet: the dots wait. Cancel armed: red ✕, edge, label and dots; the pulse stops. */
+  .recbar[data-say=start] .dots i { animation-play-state: paused; }
+  .row .recbar[data-say=cancel] { border-color: var(--bad); }
+  .row .recbar[data-say=cancel] .x { color: var(--bg); background: var(--bad); }
+  .recbar[data-say=cancel] .label { color: var(--bad); }
+  .recbar[data-say=cancel] .dots i { background: var(--bad); animation-play-state: paused; opacity: .35; }
+  @media (prefers-reduced-motion: reduce) { .recbar .dots i { animation: none; opacity: .6; } }
   .toggle { display: flex; align-items: center; gap: .5rem; min-height: 2.75rem; margin: -1rem 0 1rem; }
   .toggle input { width: 1.25rem; height: 1.25rem; margin: 0; accent-color: var(--accent); }
   .dim { color: var(--dim); }
@@ -206,7 +219,7 @@
       <select id="harness" aria-label="harness"><option value="">auto</option></select>
       <input id="model" aria-label="model" placeholder="model (optional)" autocapitalize="off" autocorrect="off" spellcheck="false">
     </div>
-    <div class="row"><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><span class="hint" hidden></span><button id="send">Submit</button></div>
+    <div class="row"><button id="send">Submit</button><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button></div>
     <label class="toggle dim" hidden><input type="checkbox" id="autoread"> auto-read answers</label>
   </form>
   <ul id="tasks"></ul>
@@ -222,7 +235,7 @@
   <div id="thread" class="meta dim"></div>
   <form id="reply" hidden>
     <textarea id="reply-text" aria-label="reply" placeholder="Reply in this thread…" required></textarea>
-    <div class="row"><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><span class="hint" hidden></span><button id="send-reply">Reply</button></div>
+    <div class="row"><button id="send-reply">Reply</button><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button></div>
     <p id="reply-error" class="bad" hidden></p>
   </form>
   <details><summary>transcript</summary><pre id="log"></pre></details>
@@ -340,34 +353,41 @@ function flash(text) {
   renderStrip();
 }
 
-// Dictation into a composer's field. Tap the mic: words stream in until a second tap; nothing is sent.
-// Hold it: release sends, sliding off cancels (text kept). Absent API (e.g. some iOS home-screen apps):
-// the buttons stay hidden; keyboard dictation still works.
+// Dictation into a composer's field; a recording bar stands in for Submit. Hold the mic: release sends; slide
+// left toward ✕ and release to discard. Tap it: hands-free until a second tap sends or ✕ discards.
+// Absent API (e.g. some iOS home-screen apps): the buttons stay hidden; keyboard dictation still works.
 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-const HOLD_MS = 300, SLIDE_PX = 24, START_MS = 3000, STOP_MS = 2000;
-// A press that started dictation, by how it ended: slid off or interrupted, short (keep listening), or held.
-const pressOutcome = (end, heldMs) => (end !== 'up' ? 'cancel' : heldMs < HOLD_MS ? 'tap' : 'send');
-// The finger is more than SLIDE_PX outside the button.
-const slidOff = (r, x, y) => x < r.left - SLIDE_PX || x > r.right + SLIDE_PX || y < r.top - SLIDE_PX || y > r.bottom + SLIDE_PX;
-// A held release sends only when dictation added words.
+const HOLD_MS = 300, START_MS = 3000, STOP_MS = 2000;
+// How a press ends: interrupted (stop, keep the text), released with cancel armed (discard),
+// a short first press (hands-free), else send. `stops`: it pressed a mic already on.
+const pressOutcome = (end, heldMs, armed, stops) => (end !== 'up' ? 'cancel' : armed ? 'discard' : stops || heldMs >= HOLD_MS ? 'send' : 'tap');
+// Cancel arms once the finger slides left past half the way from where it landed (x0) to the ✕ centre (xc).
+const cancelArmed = (x0, x, xc) => xc < x0 && (x0 - x) * 2 > x0 - xc;
+// A send goes out only when dictation added words.
 const hasNewText = (base, text) => text.trim() !== '' && text.trim() !== base.trim();
-// Hint for a session, shown in Submit's place: nothing once stopping; `starting` until the browser says it hears.
-const micLine = (s) => (s.stopping ? '' : !s.live ? 'starting…' : s.held ? 'release to send · slide away to cancel' : 'tap mic to stop');
+// The recording bar's label: cancel armed wins; `start` until the browser says it hears.
+const barSay = (s) => (s.armed ? 'cancel' : !s.live ? 'start' : s.held ? 'send' : 'tap');
 
-// The dictation session, at most one: { r, btn, form, field, base, live, held, send, stopping, dead, timer, tickerH }.
+// The dictation session, at most one: { r, btn, form, field, base, live, held, armed, send, stopping, dead, timer, tickerH }.
 // `tickerH`: the ticker's height when it began (0 = hidden), kept while dictating.
 let rec = null;
 function micShow(s) {
   const on = rec === s && !s.stopping, state = on ? (s.live ? 'live' : 'starting') : '';
   if (state) s.btn.dataset.mic = state; else delete s.btn.dataset.mic;
   s.btn.setAttribute('aria-pressed', String(on));
-  s.btn.setAttribute('aria-label', !on ? 'Start dictation' : s.live ? 'Stop dictation' : 'Starting dictation');
+  s.btn.setAttribute('aria-label', !on ? 'Start dictation' : s.live ? 'Send dictation' : 'Starting dictation');
   s.form.classList.toggle('listening', on && s.live);
-  const hint = rec === s ? micLine(s) : '', box = s.form.querySelector('.hint');
-  box.textContent = hint;
-  box.hidden = !hint;
-  s.form.querySelector('button:not([type=button])').hidden = !!hint;
+  const bar = s.form.querySelector('.recbar');
+  if (on && bar.hidden) { bar.hidden = false; fillDots(bar); }
+  bar.hidden = !on;
+  bar.dataset.say = barSay(s);
+  s.form.querySelector('button:not([type=button])').hidden = on;
   renderStrip();
+}
+// One dot per ~14 px; each pulse starts a beat after its left neighbour's, so it travels left to right.
+function fillDots(bar) {
+  const d = bar.querySelector('.dots'), n = Math.max(6, Math.floor(d.clientWidth / 14));
+  d.replaceChildren(...Array.from({ length: n }, (_, i) => { const e = document.createElement('i'); e.style.setProperty('--i', i); return e; }));
 }
 // Sends the field when the composer can; offline, the text stays for later.
 function deliver(s) {
@@ -387,7 +407,7 @@ function micStart(btn, held) {
   hush(); // else the mic hears the readback
   const form = btn.closest('form'), field = form.querySelector('textarea'), r = new Recognition();
   const tk = $('ticker'), tickerH = tk.hidden ? 0 : tk.offsetHeight;
-  const s = rec = { r, btn, form, field, base: field.value.trimEnd(), live: false, held, send: false, stopping: false, dead: false, timer: 0, tickerH };
+  const s = rec = { r, btn, form, field, base: field.value.trimEnd(), live: false, held, armed: false, send: false, stopping: false, dead: false, timer: 0, tickerH };
   Object.assign(r, { lang: navigator.language, interimResults: true });
   r.onresult = (e) => {
     if (rec !== s) return;
@@ -434,9 +454,17 @@ function micOff() {
   const s = rec;
   if (s) { s.dead = true; s.r.abort(); micEnd(s); }
 }
+// Discard: the field goes back to its text from before dictating. A session micOff ended (e.g. sent) stays as it is.
+function micDrop(s) {
+  if (s.dead) return;
+  s.send = false;
+  s.field.value = s.base;
+  if (rec === s) { s.dead = true; s.r.abort(); micEnd(s); }
+  flash('cancelled');
+}
 
-// One finger on a mic at a time. `stops`: it pressed a mic that was already on, so it only turns it off.
-// `rect` is the button where the finger landed: the ticker showing up can move the button under it.
+// One finger on a mic at a time. `stops`: it pressed a mic that was already on. `session`: the one it acts on.
+// `x0`: where the finger landed; `xc`: the ✕ centre, null when no bar shows. Vertical slides are ignored.
 // `touched`: the touch behind the current press, whose trailing click is dropped.
 let press = null, pressedAt = -Infinity, touched = false;
 function pressEnd(end, e) {
@@ -445,16 +473,14 @@ function pressEnd(end, e) {
   press = null;
   pressedAt = performance.now();
   if (p.btn.hasPointerCapture(e.pointerId)) p.btn.releasePointerCapture(e.pointerId);
-  if (p.stops) {
-    if (rec && end === 'cancel') rec.send = false; // sliding off also calls off a send still waiting for onend
-    if (rec) micStop(rec, false);
-    return;
-  }
-  const s = p.session, out = pressOutcome(end, e.timeStamp - p.t0);
-  if (out === 'cancel') { micStop(s, false); if (!s.dead) flash('cancelled · text kept'); return; }
+  const s = p.session, out = pressOutcome(end, e.timeStamp - p.t0, s.armed, p.stops);
+  s.armed = false;
+  if (out === 'discard') { micDrop(s); return; }
+  // Interrupted (e.g. an iOS gesture): also calls off a send still waiting for onend.
+  if (out === 'cancel') { s.send = false; micStop(s, false); if (!s.dead) flash('cancelled · text kept'); return; }
   // A tap whose start was refused (e.g. needing a gesture a touch pointerdown isn't) retries inside this pointerup.
   if (out === 'tap') { if (s.dead && !s.live) micStart(p.btn, false); else { s.held = false; micShow(s); } return; }
-  // Held: send. If recognition already ended on its own, the words are in the field.
+  // Held, or a second tap: send. If recognition already ended on its own, the words are in the field.
   unlock(); // a pointerup is a gesture, so auto-read can speak the answer later
   s.send = true;
   if (rec === s) micStop(s, true); else if (!s.dead) deliver(s);
@@ -471,16 +497,23 @@ for (const btn of document.querySelectorAll('.mic')) {
     btn.setPointerCapture(e.pointerId);
     const stops = !!rec && rec.btn === btn;
     if (!stops) micOff();
-    press = { id: e.pointerId, btn, rect: btn.getBoundingClientRect(), t0: e.timeStamp, stops, session: stops ? null : micStart(btn, true) };
+    const s = stops ? rec : micStart(btn, true), x = btn.form.querySelector('.recbar .x').getBoundingClientRect();
+    press = { id: e.pointerId, btn, x0: e.clientX, xc: rec === s && !s.stopping ? x.left + x.width / 2 : null, t0: e.timeStamp, stops, session: s };
   };
-  btn.onpointermove = (e) => { if (press && press.btn === btn && slidOff(press.rect, e.clientX, e.clientY)) pressEnd('cancel', e); };
+  btn.onpointermove = (e) => {
+    const p = press;
+    if (!p || p.btn !== btn || e.pointerId !== p.id || p.xc === null) return;
+    const armed = cancelArmed(p.x0, e.clientX, p.xc);
+    if (armed !== p.session.armed) { p.session.armed = armed; if (rec === p.session) micShow(p.session); }
+  };
   btn.onpointerup = (e) => { pressEnd('up', e); pressedAt = performance.now(); };
   btn.onpointercancel = btn.onlostpointercapture = (e) => pressEnd('cancel', e);
   // Keyboard and assistive activation (detail 0) always act; a pointer press already acted, so skip its click.
   btn.onclick = (e) => {
     if (e.detail !== 0 && performance.now() - pressedAt < 1000) return;
-    if (rec && rec.btn === btn) micStop(rec, false); else { micOff(); micStart(btn, false); }
+    if (rec && rec.btn === btn) { unlock(); micStop(rec, true); } else { micOff(); micStart(btn, false); }
   };
+  btn.form.querySelector('.recbar .x').onclick = () => { if (rec && rec.form === btn.form) micDrop(rec); };
 }
 
 // Readback: one utterance at a time, from the speak button or auto-read.
