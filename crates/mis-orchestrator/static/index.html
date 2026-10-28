@@ -98,8 +98,8 @@
   .mic[data-mic=live] { background: var(--warn); border-color: var(--warn); color: var(--bg); box-shadow: 0 0 12px var(--warn); }
   form.listening textarea { border-color: var(--accent); box-shadow: 0 0 10px var(--glow); }
   /* Recording bar in Submit's box, so nothing moves under the finger: ✕, a pulse running along a row of dots, the label. */
-  .row .recbar { flex: 1; display: flex; align-items: center; gap: .5rem; min-width: 0; box-sizing: border-box; height: 2.75rem; padding-right: .5rem; border: 1px solid var(--accent); background: var(--field); }
-  .row .recbar .x { flex: none; width: 2.75rem; height: 100%; min-height: 0; padding: 0; border: 0; color: var(--dim); font: 1.1rem/1 var(--mono); }
+  .recbar { flex: 1; display: flex; align-items: center; gap: .5rem; min-width: 0; box-sizing: border-box; height: 2.75rem; padding-right: .5rem; border: 1px solid var(--accent); background: var(--field); }
+  .recbar .x { flex: none; width: 2.75rem; height: 100%; min-height: 0; padding: 0; border: 0; color: var(--dim); font: 1.1rem/1 var(--mono); }
   .recbar .dots { flex: 1; min-width: 0; display: flex; justify-content: space-between; align-items: center; padding: 0 .25rem; overflow: hidden; }
   .recbar .dots i { width: .375rem; height: .375rem; border-radius: 50%; background: var(--accent); opacity: .25; animation: pulse 1.4s ease-in-out infinite; animation-delay: calc(var(--i) * 90ms); }
   @keyframes pulse { 0%, 60%, 100% { opacity: .25; transform: scale(1); } 30% { opacity: 1; transform: scale(1.35); box-shadow: 0 0 6px var(--glow); } }
@@ -109,8 +109,8 @@
   .recbar[data-say=start] .start, .recbar[data-say=send] .send, .recbar[data-say=tap] .tap, .recbar[data-say=cancel] .cancel { visibility: visible; }
   /* Not hearing yet: the dots wait. Cancel armed: red ✕, edge, label and dots; the pulse stops. */
   .recbar[data-say=start] .dots i { animation-play-state: paused; }
-  .row .recbar[data-say=cancel] { border-color: var(--bad); }
-  .row .recbar[data-say=cancel] .x { color: var(--bg); background: var(--bad); }
+  .recbar[data-say=cancel] { border-color: var(--bad); }
+  .recbar[data-say=cancel] .x { color: var(--bg); background: var(--bad); }
   .recbar[data-say=cancel] .label { color: var(--bad); }
   .recbar[data-say=cancel] .dots i { background: var(--bad); animation-play-state: paused; opacity: .35; }
   @media (prefers-reduced-motion: reduce) { .recbar .dots i { animation: none; opacity: .6; } }
@@ -368,7 +368,7 @@ const hasNewText = (base, text) => text.trim() !== '' && text.trim() !== base.tr
 // The recording bar's label: cancel armed wins; `start` until the browser says it hears.
 const barSay = (s) => (s.armed ? 'cancel' : !s.live ? 'start' : s.held ? 'send' : 'tap');
 
-// The dictation session, at most one: { r, btn, form, field, base, live, held, armed, send, stopping, dead, timer, tickerH }.
+// The dictation session, at most one: { r, btn, form, field, draft, base, live, held, armed, send, stopping, dead, timer, tickerH }.
 // `tickerH`: the ticker's height when it began (0 = hidden), kept while dictating.
 let rec = null;
 function micShow(s) {
@@ -407,7 +407,7 @@ function micStart(btn, held) {
   hush(); // else the mic hears the readback
   const form = btn.closest('form'), field = form.querySelector('textarea'), r = new Recognition();
   const tk = $('ticker'), tickerH = tk.hidden ? 0 : tk.offsetHeight;
-  const s = rec = { r, btn, form, field, base: field.value.trimEnd(), live: false, held, armed: false, send: false, stopping: false, dead: false, timer: 0, tickerH };
+  const s = rec = { r, btn, form, field, draft: field.value, base: field.value.trimEnd(), live: false, held, armed: false, send: false, stopping: false, dead: false, timer: 0, tickerH };
   Object.assign(r, { lang: navigator.language, interimResults: true });
   r.onresult = (e) => {
     if (rec !== s) return;
@@ -448,23 +448,22 @@ function micStop(s, send) {
   s.timer = setTimeout(() => { s.r.abort(); micEnd(s); }, STOP_MS); // onend never came
 }
 // Abort drops pending results, so nothing lands in a sent or abandoned field.
-// A finger still down on a session that already ended must not send it either.
+// A finger still down must not send or discard either, so its press is dropped.
 function micOff() {
-  if (press && press.session) press.session.dead = true;
+  press = null;
   const s = rec;
   if (s) { s.dead = true; s.r.abort(); micEnd(s); }
 }
-// Discard: the field goes back to its text from before dictating. A session micOff ended (e.g. sent) stays as it is.
+// Discard: the field goes back to its text from before dictating.
 function micDrop(s) {
-  if (s.dead) return;
   s.send = false;
-  s.field.value = s.base;
+  s.field.value = s.draft;
   if (rec === s) { s.dead = true; s.r.abort(); micEnd(s); }
   flash('cancelled');
 }
 
 // One finger on a mic at a time. `stops`: it pressed a mic that was already on. `session`: the one it acts on.
-// `x0`: where the finger landed; `xc`: the ✕ centre, null when no bar shows. Vertical slides are ignored.
+// `x0`: where the finger landed; `xc`: the ✕ centre. Vertical slides are ignored.
 // `touched`: the touch behind the current press, whose trailing click is dropped.
 let press = null, pressedAt = -Infinity, touched = false;
 function pressEnd(end, e) {
@@ -492,19 +491,21 @@ for (const btn of document.querySelectorAll('.mic')) {
   btn.addEventListener('touchend', (e) => { if (touched) { touched = false; e.preventDefault(); } });
   btn.onpointerdown = (e) => {
     if (press && !press.btn.hasPointerCapture(press.id)) press = null; // its up/cancel never came
-    if (press || !e.isPrimary || e.button !== 0) return;
+    if (press || !e.isPrimary || e.button !== 0 || (rec && rec.btn === btn && rec.stopping)) return; // a stop is settling
     touched = e.pointerType === 'touch';
     btn.setPointerCapture(e.pointerId);
     const stops = !!rec && rec.btn === btn;
     if (!stops) micOff();
     const s = stops ? rec : micStart(btn, true), x = btn.form.querySelector('.recbar .x').getBoundingClientRect();
-    press = { id: e.pointerId, btn, x0: e.clientX, xc: rec === s && !s.stopping ? x.left + x.width / 2 : null, t0: e.timeStamp, stops, session: s };
+    s.armed = false;
+    press = { id: e.pointerId, btn, x0: e.clientX, xc: x.left + x.width / 2, t0: e.timeStamp, stops, session: s };
   };
+  // Arming follows the finger only while the bar shows.
   btn.onpointermove = (e) => {
     const p = press;
-    if (!p || p.btn !== btn || e.pointerId !== p.id || p.xc === null) return;
+    if (!p || e.pointerId !== p.id || rec !== p.session || p.session.stopping) return;
     const armed = cancelArmed(p.x0, e.clientX, p.xc);
-    if (armed !== p.session.armed) { p.session.armed = armed; if (rec === p.session) micShow(p.session); }
+    if (armed !== p.session.armed) { p.session.armed = armed; micShow(p.session); }
   };
   btn.onpointerup = (e) => { pressEnd('up', e); pressedAt = performance.now(); };
   btn.onpointercancel = btn.onlostpointercapture = (e) => pressEnd('cancel', e);
@@ -513,7 +514,7 @@ for (const btn of document.querySelectorAll('.mic')) {
     if (e.detail !== 0 && performance.now() - pressedAt < 1000) return;
     if (rec && rec.btn === btn) { unlock(); micStop(rec, true); } else { micOff(); micStart(btn, false); }
   };
-  btn.form.querySelector('.recbar .x').onclick = () => { if (rec && rec.form === btn.form) micDrop(rec); };
+  btn.form.querySelector('.recbar .x').onclick = () => { if (rec && rec.form === btn.form) { micDrop(rec); btn.focus(); } };
 }
 
 // Readback: one utterance at a time, from the speak button or auto-read.
