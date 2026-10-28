@@ -105,11 +105,14 @@ pub fn run(conn: Conn, page: String) -> ! {
             // macOS needs the loop running before the status item is created.
             Event::NewEvents(StartCause::Init) => {
                 let t = TrayIconBuilder::new()
-                    .with_icon_templated(icon())
                     .with_tooltip("Make It So")
-                    .with_menu(Box::new(menu.clone()))
-                    .build()
-                    .expect("tray icon");
+                    .with_menu(Box::new(menu.clone()));
+                // A template image follows the macOS menu bar's light/dark tint.
+                #[cfg(target_os = "macos")]
+                let t = t.with_icon_templated(icon());
+                #[cfg(windows)]
+                let t = t.with_icon(icon());
+                let t = t.build().expect("tray icon");
                 render(&t, &menu, None, &model);
                 tray = Some(t);
             }
