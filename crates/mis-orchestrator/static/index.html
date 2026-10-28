@@ -7,54 +7,67 @@
 <!-- Quest browser: VR panels are read at arm's length, so `html.vr` enlarges type. In head to avoid a 16px first paint. -->
 <script>if (/OculusBrowser|Quest/.test(navigator.userAgent)) document.documentElement.classList.add('vr');</script>
 <style>
-  :root { color-scheme: dark; --page: #141320; --frame: #4F4D66; --screen: #232236; --field: #1C1B2C; --fg: #ECEAF5; --dim: #A9A6C6; --line: #7B7898; --rule: #38364E; --answer: #9DE6F2; --ok: #86E3B4; --bad: #FF9CC2; --run: #EED384; --focus: #5FDDF2; --hot: #FF3D9A; --crit: #FF6B6B;
-    --synth: #FF3D9A 0 20%, #D244CC 0 40%, #B04DFF 0 60%, #5F9BFF 0 80%, #2FD8F2 0;
-    --arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M0 0h10L5 6z' fill='%23ECEAF5'/%3E%3C/svg%3E");
-    --mono: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace; }
+  /* Theme: every colour and face is a token here; a new theme redefines this block. Grid: near-black blue ground,
+     thin cyan edges that glow, orange for warnings and limits, red for failures. Daylight grid for light schemes. */
+  :root { color-scheme: dark; --bg: #050A12; --field: #0B1826; --fg: #D9F6FF; --dim: #7C9AAE; --line: #3A6A88; --rule: #17324A;
+    --accent: #6FF3FF; --glow: rgba(111, 243, 255, .4); --grid: rgba(111, 243, 255, .045); --run: #6FF3FF; --ok: #7DFFB6; --warn: #FF9A3C; --bad: #FF5A4E;
+    /* Idle dot: dim accent, still 3:1 on the ground. */
+    --idle: color-mix(in srgb, var(--accent) 45%, var(--bg));
+    --arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M0 0h10L5 6z' fill='%23D9F6FF'/%3E%3C/svg%3E");
+    --mono: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace;
+    /* Labels: a squared geometric face where the system has one; no web fonts, so the page works offline. */
+    --display: "Eurostile", "DIN Alternate", "Bahnschrift", ui-sans-serif, system-ui, sans-serif; }
   @media (prefers-color-scheme: light) {
-    :root { color-scheme: light; --page: #D3D2DC; --frame: #A3A1B5; --screen: #E8E7EF; --field: #F6F5FA; --fg: #29273D; --dim: #56536E; --line: #7E7B94; --rule: #CFCDDB; --answer: #005F70; --ok: #1F6B45; --bad: #A5285E; --run: #735400; --focus: #8A2BD0; --crit: #B3261E;
-      --arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M0 0h10L5 6z' fill='%2329273D'/%3E%3C/svg%3E"); }
+    :root { color-scheme: light; --bg: #EAF3F7; --field: #FFFFFF; --fg: #0B2233; --dim: #4A6577; --line: #6A889B; --rule: #C3D6E0;
+      --accent: #00687A; --glow: rgba(0, 104, 122, .18); --grid: rgba(0, 104, 122, .06); --run: #00687A; --ok: #1F6B45; --warn: #9A4800; --bad: #B3261E;
+      --idle: color-mix(in srgb, var(--accent) 70%, var(--bg));
+      --arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M0 0h10L5 6z' fill='%230B2233'/%3E%3C/svg%3E"); }
   }
-  /* Slate screen in a thin grey bezel; on a phone the bezel fills the edge. */
-  html { background: var(--page); padding: .375rem; min-height: 100%; box-sizing: border-box; }
-  body { --pad: 1.25rem; box-sizing: border-box; margin: 0 auto; max-width: 46rem; min-height: calc(100vh - .75rem); padding: 1.5rem var(--pad) 3rem; background: var(--screen); box-shadow: 0 0 0 .375rem var(--frame); color: var(--fg); font: 1rem/1.55 var(--mono); }
-  @media (min-width: 64rem) { html { padding: 3rem; } body { --pad: 2.5rem; min-height: calc(100vh - 6rem); padding-top: 2.25rem; } }
-  /* Title strip: dot, wordmark and tabs; then the ticker of live work; then the synthwave stripe (five stacked lines). */
-  .strip { margin: 0 calc(-1 * var(--pad)) 1.25rem; padding: 0 var(--pad) .5rem; background: linear-gradient(var(--synth)) bottom / 100% .625rem no-repeat; }
-  /* Idle: no ticker, so the tabs need room above the stripe. */
-  .strip:has(> #ticker[hidden]) { padding-bottom: 1.125rem; }
+  /* Faint grid lines behind everything. */
+  html { min-height: 100%; background: linear-gradient(90deg, var(--grid) 1px, transparent 0) 0 0 / 3rem 3rem, linear-gradient(var(--grid) 1px, transparent 0) 0 0 / 3rem 3rem, var(--bg); }
+  body { --pad: 1.25rem; box-sizing: border-box; margin: 0 auto; max-width: 46rem; min-height: 100vh; padding: 0 var(--pad) 3rem; color: var(--fg); font: 1rem/1.55 var(--mono); }
+  @media (min-width: 64rem) { body { --pad: 2.5rem; border-inline: 1px solid var(--rule); } }
+  /* Title strip: dot, wordmark and tabs; then the ticker of live work; then the light-cycle line. */
+  .strip { margin: 0 calc(-1 * var(--pad)) 1.25rem; padding: 1rem var(--pad) 0; background: linear-gradient(var(--field), transparent); }
   .top { display: flex; flex-wrap: wrap; align-items: center; gap: .625rem; }
-  .title { font-weight: 700; text-transform: uppercase; letter-spacing: .08em; white-space: nowrap; }
+  .title { font: 700 1rem/1 var(--display); text-transform: uppercase; letter-spacing: .16em; white-space: nowrap; color: var(--accent); text-shadow: 0 0 10px var(--glow); }
   /* Connection and work: dim = idle, bright with glow = working, hollow = reconnecting, warn = offline or no workers. */
-  .dot { flex: none; box-sizing: border-box; width: .625rem; height: .625rem; border-radius: 50%; background: var(--answer); }
-  .dot.rest { background: color-mix(in srgb, var(--answer) 45%, var(--screen)); }
-  /* Light: dim enough to read as idle, dark enough for 3:1 on the screen. */
-  @media (prefers-color-scheme: light) { .dot.rest { background: color-mix(in srgb, var(--answer) 70%, var(--screen)); } }
-  .dot.work { box-shadow: 0 0 .375rem .0625rem var(--answer); }
+  .dot { flex: none; box-sizing: border-box; width: .625rem; height: .625rem; border-radius: 50%; background: var(--accent); }
+  .dot.rest { background: var(--idle); }
+  .dot.work { box-shadow: 0 0 3px 1px var(--glow), 0 0 10px var(--glow); }
   .dot.hollow { background: none; border: 2px solid var(--dim); }
-  .dot.down { background: var(--run); }
+  .dot.down { background: var(--warn); }
   #tabs { display: flex; margin-left: auto; border: 1px solid var(--rule); }
-  [role=tab] { display: inline-flex; align-items: center; justify-content: center; min-height: 2.75rem; min-width: 2.75rem; padding: 0 .75rem; color: var(--dim); text-decoration: none; text-transform: uppercase; letter-spacing: .08em; font-size: .875rem; }
-  [role=tab][aria-selected=true] { color: var(--screen); background: var(--answer); }
+  [role=tab] { display: inline-flex; align-items: center; justify-content: center; min-height: 2.75rem; min-width: 2.75rem; padding: 0 .75rem; color: var(--dim); text-decoration: none; text-transform: uppercase; letter-spacing: .14em; font: 600 .8125rem var(--display); }
+  [role=tab][aria-selected=true] { color: var(--bg); background: var(--accent); box-shadow: 0 0 10px var(--glow); }
   #ticker { display: flex; align-items: center; min-height: 2.75rem; color: var(--dim); text-decoration: none; overflow-wrap: anywhere; }
   /* One line while work runs; the activity is the part the ellipsis cuts. */
   #ticker.run { white-space: pre; overflow: hidden; color: var(--run); }
   #ticker .act { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  #ticker.warn { color: var(--run); } #ticker.bad { color: var(--bad); } #ticker.note { color: var(--fg); }
+  #ticker.warn { color: var(--warn); } #ticker.bad { color: var(--bad); } #ticker.note { color: var(--fg); }
   #ticker[href]::after { content: " ›"; white-space: pre; }
+  /* Light cycle: a short bright segment rides the line while work runs; still when idle or offline. */
+  .cycle { position: relative; height: 2px; margin: 0 calc(-1 * var(--pad)); background: var(--rule); overflow: hidden; }
+  /* Idle: no ticker, so the tabs need room above the line. */
+  #ticker[hidden] + .cycle { margin-top: 1rem; }
+  .cycle.run::after { content: ""; position: absolute; inset: 0 auto 0 0; width: 34%; background: linear-gradient(90deg, transparent, var(--accent)); box-shadow: 0 0 8px var(--glow); animation: ride 4s linear infinite; }
+  @keyframes ride { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
+  @media (prefers-reduced-motion: reduce) { .cycle.run::after { display: none; } }
   /* Offline for a while: the last view stays, dimmed. */
   body.stale main { opacity: .6; }
   p { margin: 0 0 .75rem; }
   a { color: inherit; }
-  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   textarea, input, select, button { font: inherit; color: var(--fg); background: var(--field); border: 1px solid var(--line); border-radius: 0; box-sizing: border-box; }
   textarea, input[type=password] { display: block; width: 100%; padding: .625rem .75rem; }
   textarea { min-height: 6.5rem; resize: vertical; }
   ::placeholder { color: var(--dim); opacity: 1; }
+  textarea:focus, input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 10px var(--glow); }
   select, button { min-height: 2.75rem; padding: 0 1rem; }
   select { appearance: none; padding-right: 2.5rem; background: var(--field) var(--arrow) right .875rem center / .625rem .375rem no-repeat; }
-  button { background: var(--fg); color: var(--screen); border-color: var(--fg); font-weight: 600; cursor: pointer; }
-  button:active { background: var(--hot); border-color: var(--hot); color: #1B0F24; }
+  button { background: var(--accent); color: var(--bg); border-color: var(--accent); font: 600 .875rem var(--display); text-transform: uppercase; letter-spacing: .14em; cursor: pointer; }
+  button:active { box-shadow: 0 0 0 3px var(--glow), 0 0 12px var(--glow); }
+  button[type=button] { background: none; color: var(--fg); border-color: var(--line); }
   .row { display: flex; gap: .5rem; margin: .5rem 0 1.5rem; }
   .row button { flex: 1; }
   .row input { flex: 1; min-width: 0; min-height: 2.75rem; padding: 0 .75rem; }
@@ -63,10 +76,10 @@
   .mic { display: grid; place-items: center; width: 2.75rem; padding: 0; }
   .mic svg { width: 1.25rem; height: 1.25rem; }
   button:disabled { opacity: .5; cursor: default; }
-  /* Listening / speaking: inverse of the normal button, with the hot dot. */
-  .mic[aria-pressed=true], #speak.on { background: var(--field); color: var(--hot); border-color: var(--hot); }
+  /* Listening / speaking: lit edge. */
+  .mic[aria-pressed=true], #speak.on { color: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--glow), 0 0 12px var(--glow); }
   .toggle { display: flex; align-items: center; gap: .5rem; min-height: 2.75rem; margin: -1rem 0 1rem; }
-  .toggle input { width: 1.25rem; height: 1.25rem; margin: 0; accent-color: var(--answer); }
+  .toggle input { width: 1.25rem; height: 1.25rem; margin: 0; accent-color: var(--accent); }
   .dim { color: var(--dim); }
   #fleet { padding-bottom: .75rem; }
   ul { list-style: none; margin: 0; padding: 0; }
@@ -75,12 +88,12 @@
   li > a { display: block; padding: 1rem 0; text-decoration: none; }
   .queued { --s: var(--dim); } .running { --s: var(--run); } .done { --s: var(--ok); } .failed { --s: var(--bad); }
   .busy { --s: var(--run); } .idle { --s: var(--ok); } .offline { --s: var(--dim); }
-  /* Status in reverse video, like C64 inverse characters. */
+  /* Status outlined in its colour. */
   /* Inline, not inline-block: WebKit adds a stray ellipsis to line-clamped text holding an inline-block. */
-  .chip { margin-right: .5em; padding: .125em .375em; background: var(--s); color: var(--screen); }
+  .chip { margin-right: .5em; padding: .0625em .375em; border: 1px solid; color: var(--s); font: 600 .75em var(--display); text-transform: uppercase; letter-spacing: .1em; }
   pre { margin: 0; font: inherit; white-space: pre-wrap; word-break: break-word; }
   .head, .meta, dd { overflow-wrap: anywhere; }
-  .answer { margin: .5rem 0 0; padding-left: .875rem; border-left: 2px solid var(--answer); color: var(--answer); }
+  .answer { margin: .5rem 0 0; padding-left: .875rem; border-left: 2px solid var(--accent); box-shadow: -6px 0 8px -6px var(--glow); color: var(--accent); }
   /* List rows: prompt to 2 lines, answer preview to 3; tap for the rest. */
   .clamp2, .clamp3 { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
   .clamp2 { -webkit-line-clamp: 2; } .clamp3 { -webkit-line-clamp: 3; }
@@ -99,7 +112,7 @@
   dd { margin: 0; white-space: pre-line; }
   details { margin-top: 1.5rem; border-top: 1px solid var(--rule); }
   details + details { margin-top: 0; }
-  summary { padding: .625rem 0; color: var(--dim); cursor: pointer; }
+  summary { padding: .625rem 0; color: var(--dim); cursor: pointer; font: 600 .8125rem var(--display); text-transform: uppercase; letter-spacing: .14em; }
   #log { color: var(--dim); }
   /* Workers: the whole row opens the worker; the busy task's id is its own link on top. */
   li.worker { position: relative; padding: 1rem 0; }
@@ -107,18 +120,18 @@
   .worker .open::after { content: ""; position: absolute; inset: 0; }
   .worker .task { position: relative; display: inline-block; padding: .625rem .25rem; margin: -.625rem 0; }
   #machine h2 { margin: 1.5rem 0 0; font-size: 1rem; }
-  h3 { margin: 2rem 0 .5rem; font-size: 1rem; font-weight: 400; color: var(--dim); }
-  /* Meters: grey when fine or unknown, yellow from 75%, red from 90%. */
-  .warn { color: var(--run); } .crit { color: var(--crit); }
+  h3 { margin: 2rem 0 .5rem; font: 600 .8125rem var(--display); text-transform: uppercase; letter-spacing: .14em; color: var(--dim); }
+  /* Meters: grey when fine or unknown, orange from 75%, red from 90%. */
+  .warn { color: var(--warn); } .crit { color: var(--bad); }
   .meter { margin-top: .375rem; --b: var(--line); }
-  .meter.warn { --b: var(--run); } .meter.crit { --b: var(--crit); }
+  .meter.warn { --b: var(--warn); } .meter.crit { --b: var(--bad); }
   .bar { display: block; height: .1875rem; margin-top: .25rem; background: linear-gradient(var(--b), var(--b)) 0 0 / var(--v, 0%) 100% no-repeat, var(--rule); }
   .off .meter, .off .meters span { color: var(--dim); --b: var(--dim); }
   body > p.dim { margin-top: 1.5rem; }
   #clear { display: inline-block; padding: .625rem 0; }
   [hidden] { display: none !important; }
   /* VR panels: bigger type, secondary text pulled toward the foreground. */
-  html.vr { font-size: 22px; --dim: color-mix(in srgb, var(--fg) 85%, var(--screen)); }
+  html.vr { font-size: 22px; --dim: color-mix(in srgb, var(--fg) 85%, var(--bg)); }
 </style>
 </head>
 <body>
@@ -132,6 +145,7 @@
     </nav>
   </div>
   <a id="ticker">connecting…</a>
+  <div id="cycle" class="cycle" aria-hidden="true"></div>
 </header>
 
 <form id="auth" hidden>
@@ -368,6 +382,7 @@ function renderStrip() {
   tk.hidden = !t.parts.length;
   tk.className = t.cls;
   if (t.open) tk.href = `#task/${t.open}`; else tk.removeAttribute('href');
+  $('cycle').classList.toggle('run', everOpen && !offline && tasks.some((x) => x.status === 'running'));
 }
 
 // `#` tasks, `#task/<id>`, `#workers`, `#worker/<id>`.
