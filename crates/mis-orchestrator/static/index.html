@@ -44,7 +44,7 @@
   /* One line while work runs; the activity is the part the ellipsis cuts. */
   #ticker.run { white-space: pre; overflow: hidden; color: var(--run); }
   #ticker .act { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  #ticker.warn, #ticker.mic { color: var(--warn); } #ticker.bad { color: var(--bad); } #ticker.note { color: var(--fg); }
+  #ticker.warn, #ticker.listen { color: var(--warn); } #ticker.bad { color: var(--bad); } #ticker.note { color: var(--fg); }
   #ticker[href]::after { content: " ›"; white-space: pre; }
   /* Light cycle: a short bright segment rides the line while work runs; still when idle or offline. */
   .cycle { position: relative; height: 2px; margin: 0 calc(-1 * var(--pad)); background: var(--rule); overflow: hidden; }
@@ -357,6 +357,7 @@ function micStop(s, send) {
 function micOff() { const s = rec; if (s) { s.dead = true; s.r.abort(); micEnd(s); } }
 
 // One finger on a mic at a time. `stops`: it pressed a mic that was already on, so it only turns it off.
+// `rect` is the button where the finger landed: the ticker showing up can move the button under it.
 let press = null, pressedAt = 0;
 function pressEnd(end, e) {
   const p = press;
@@ -375,14 +376,16 @@ function pressEnd(end, e) {
 for (const btn of document.querySelectorAll('.mic')) {
   btn.hidden = !Recognition;
   btn.oncontextmenu = (e) => e.preventDefault();
+  // No click after a touch: the strip can change height mid-press, so it would land on whatever moved under the finger.
+  btn.addEventListener('touchend', (e) => e.preventDefault());
   btn.onpointerdown = (e) => {
     if (press || !e.isPrimary || e.button !== 0) return;
     btn.setPointerCapture(e.pointerId);
     const stops = !!rec && rec.btn === btn;
     if (!stops) micOff();
-    press = { id: e.pointerId, btn, t0: e.timeStamp, stops, session: stops ? null : micStart(btn, true) };
+    press = { id: e.pointerId, btn, rect: btn.getBoundingClientRect(), t0: e.timeStamp, stops, session: stops ? null : micStart(btn, true) };
   };
-  btn.onpointermove = (e) => { if (press && press.btn === btn && slidOff(btn.getBoundingClientRect(), e.clientX, e.clientY)) pressEnd('cancel', e); };
+  btn.onpointermove = (e) => { if (press && press.btn === btn && slidOff(press.rect, e.clientX, e.clientY)) pressEnd('cancel', e); };
   btn.onpointerup = (e) => pressEnd('up', e);
   btn.onpointercancel = btn.onlostpointercapture = (e) => pressEnd('cancel', e);
   // Keyboard and assistive activation; a pointer press already acted, so skip the click that follows it.
@@ -474,9 +477,10 @@ function renderStrip() {
   $('dot').className = `dot ${cls}`;
   $('dot').setAttribute('aria-label', label);
   $('dot').title = label;
+  // A listening mic outranks a flash: the line tells the user when to speak.
   const m = rec && micLine(rec);
-  const t = flashText ? { parts: [flashText], cls: 'note' }
-    : m ? { parts: [m], cls: 'mic' }
+  const t = m ? { parts: [m], cls: 'listen' }
+    : flashText ? { parts: [flashText], cls: 'note' }
     : !everOpen ? { parts: [connMsg], cls: '' }
     : offline ? { parts: [`offline · retrying${authNeeded ? ' (wrong token?)' : ''}`], cls: 'warn' }
     : work;
