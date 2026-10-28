@@ -83,12 +83,14 @@ fn open(url: &str) {
 }
 
 pub fn run(conn: Conn, page: String) -> ! {
-    let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     #[cfg(target_os = "macos")]
-    {
+    let event_loop = {
         use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
-        event_loop.set_activation_policy(ActivationPolicy::Accessory); // no Dock icon
-    }
+        let mut e = event_loop;
+        e.set_activation_policy(ActivationPolicy::Accessory); // no Dock icon
+        e
+    };
     let proxy = event_loop.create_proxy();
     MenuEvent::set_event_handler(Some(move |e| {
         let _ = proxy.send_event(UserEvent::Menu(e));
