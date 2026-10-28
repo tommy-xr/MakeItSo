@@ -340,12 +340,17 @@ mod tests {
             rx.recv().await,
             Some((task, AgentEvent::Status { text: "hi".into() }))
         );
+        // Dropping the server closes its port; the listener task may need a moment to unwind.
         drop(server);
-        tokio::task::yield_now().await;
-        assert!(tokio::net::TcpStream::connect(
-            url.trim_start_matches("http://").trim_end_matches("/mcp")
-        )
-        .await
-        .is_err());
+        let addr = url.trim_start_matches("http://").trim_end_matches("/mcp");
+        let mut closed = false;
+        for _ in 0..50 {
+            if tokio::net::TcpStream::connect(addr).await.is_err() {
+                closed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(closed, "port still open after drop");
     }
 }
