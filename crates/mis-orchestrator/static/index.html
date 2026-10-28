@@ -271,7 +271,7 @@ const store = {
   get() { try { return localStorage.getItem('mis-token') || ''; } catch { return ''; } },
   set(v) { try { v ? localStorage.setItem('mis-token', v) : localStorage.removeItem('mis-token'); } catch {} },
 };
-let ws = null, authNeeded = false, tasks = [], workers = [], detail = null, retries = 0, retryTimer = 0, statusTimer = 0;
+let ws = null, authNeeded = false, tasks = [], workers = [], detail = null, retries = 0, retryTimer = 0, statusTimer = 0, refreshing = null;
 // Connection, shown calmly: once a socket has opened, views stay up through drops and only the dot
 // changes, until OFFLINE_MS without a socket marks the page offline.
 const OFFLINE_MS = 8000;
@@ -789,7 +789,7 @@ function linksBrief(t) {
   if (!lead) return `${links.length} reported`;
   const text = links.length > 1 ? `${brief(lead)} +${links.length - 1}` : brief(lead);
   const p = lead.pr;
-  const mark = p && ['open', 'draft'].includes(p.state) && CHECK_MARK[p.checks];
+  const mark = p && p.state === 'open' && CHECK_MARK[p.checks];
   return mark ? el('span', {}, `${text} `, el('span', { className: mark[1] }, mark[0])) : text;
 }
 const CHECK_MARK = { passing: ['✓', 'ok'], pending: ['●', 'run'], failing: ['✗', 'bad'] };
@@ -798,7 +798,8 @@ function prVerdict(p) {
   if (p.state !== 'open') return [p.state, p.state === 'merged' ? 'v merged' : 'v dim'];
   if (p.checks === 'passing') return ['✓ checks', 'v ok'];
   if (p.checks === 'pending') return ['● checks', 'v run'];
-  if (p.checks === 'failing') return [`✗ ${p.failing.length} failing`, 'v bad'];
+  // The worker sends at most 5 names.
+  if (p.checks === 'failing') return [`✗ ${p.failing.length < 5 ? p.failing.length : '5+'} failing`, 'v bad'];
   return ['', 'v'];
 }
 // `12s`, `4m`, `3h` since `ms` (orchestrator clock).
@@ -830,13 +831,19 @@ function renderEvidence(t) {
   $('evidence').querySelector('ul').replaceChildren(...rows);
   $('evidence').hidden = !rows.length;
   $('refresh-ev').hidden = !((t && t.links) || []).some((l) => l.kind === 'pr');
+  if (refreshing && (!t || t.id !== refreshing.id || JSON.stringify(t.links) !== refreshing.links)) refreshDone();
+  $('refresh-ev').disabled = !!refreshing;
 }
-// Ask the task's worker to re-read its PRs; spins until the next status, at most 10s.
+// Ask the task's worker to re-read its PRs. Spins until the task's evidence changes
+// (each read moves its "as of") or the request is refused, at most 10s.
+function refreshDone() { if (refreshing) { clearTimeout(refreshing.timer); refreshing = null; } }
 $('refresh-ev').onclick = () => {
   if (!detail) return;
+  const t = tasks.find((x) => x.id === detail.id);
+  refreshDone();
+  refreshing = { id: detail.id, links: JSON.stringify(t && t.links), timer: setTimeout(() => { refreshing = null; render(); }, 10000) };
   send({ type: 'refresh_evidence', task: detail.id });
-  $('refresh-ev').disabled = true;
-  setTimeout(() => { $('refresh-ev').disabled = false; }, 10000);
+  render();
 };
 
 function renderDetail(id) {
@@ -940,7 +947,6 @@ function onMessage(msg) {
   switch (msg.type) {
     case 'status': {
       tasks = msg.tasks;
-      $('refresh-ev').disabled = false;
       if (num(msg.now_ms) !== null) skew = msg.now_ms - Date.now();
       // The server's order is unstable; sort so rows don't jump on refresh.
       workers = [...msg.workers].sort((a, b) => a.info.hostname.localeCompare(b.info.hostname) || a.id.localeCompare(b.id));
@@ -978,6 +984,12 @@ function onMessage(msg) {
       if (replying) {
         replying = false;
         Object.assign($('reply-error'), { textContent: msg.message, hidden: false });
+        break;
+      }
+      // A refused refresh (worker offline): say so, keep the view.
+      if (refreshing) {
+        refreshDone();
+        flash(`error: ${msg.message}`);
         break;
       }
       flash(`error: ${msg.message}`);

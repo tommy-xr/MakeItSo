@@ -2,6 +2,7 @@
 //! so the orchestrator needs no GitHub credentials. Parsing and the poll
 //! schedule are pure; `gh` runs behind `gh_view`.
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::time::Duration;
 
@@ -16,10 +17,14 @@ const FIELDS: &str =
 const MAX_PRS: usize = 5;
 const MAX_FAILING: usize = 5;
 const GH_TIMEOUT: Duration = Duration::from_secs(30);
-/// Pending checks are re-read every minute for half an hour, then every five
+/// Unsettled PRs are re-read every minute for half an hour, then every five
 /// minutes for six hours.
 const FAST: (Duration, Duration) = (Duration::from_secs(60), Duration::from_secs(30 * 60));
 const SLOW: (Duration, Duration) = (Duration::from_secs(5 * 60), Duration::from_secs(6 * 3600));
+/// An open PR without checks may just not have had CI register yet.
+const NO_CHECKS_GRACE: Duration = Duration::from_secs(5 * 60);
+/// A PR that can't be read this many times running (gone, no access) is dropped.
+const MAX_FAILS: u32 = 3;
 
 /// `gh` arguments for one PR.
 fn args(url: &str) -> [&str; 5] {
@@ -34,8 +39,9 @@ fn pr_urls(urls: &[String]) -> Vec<String> {
     prs.take(MAX_PRS).map(|l| l.url).collect()
 }
 
-/// `gh pr view --json FIELDS` output as a `PrStatus` read at `observed_at`.
-fn parse(json: &str, observed_at: u64) -> Result<PrStatus, String> {
+/// `gh pr view --json FIELDS` output as a `PrStatus` (the orchestrator stamps
+/// `observed_at`), and whether any check is unfinished.
+fn parse(json: &str) -> Result<(PrStatus, bool), String> {
     let v: Value = serde_json::from_str(json).map_err(|e| format!("bad gh output: {e}"))?;
     let state = match (v["state"].as_str(), v["isDraft"].as_bool()) {
         (Some("MERGED"), _) => PrState::Merged,
@@ -44,8 +50,9 @@ fn parse(json: &str, observed_at: u64) -> Result<PrStatus, String> {
         (Some("OPEN"), _) => PrState::Open,
         (s, _) => return Err(format!("unknown PR state {s:?}")),
     };
-    let (checks, failing) = rollup(v["statusCheckRollup"].as_array().map_or(&[], |a| a));
-    Ok(PrStatus {
+    let (checks, failing, unfinished) =
+        rollup(v["statusCheckRollup"].as_array().map_or(&[], |a| a));
+    let status = PrStatus {
         state,
         checks,
         failing,
@@ -59,16 +66,35 @@ fn parse(json: &str, observed_at: u64) -> Result<PrStatus, String> {
             .filter(|s| !s.is_empty())
             .map(str::to_ascii_lowercase),
         head: v["headRefOid"].as_str().unwrap_or("").into(),
-        observed_at,
-    })
+        observed_at: 0,
+    };
+    Ok((status, unfinished))
 }
 
 /// Any failed check fails the PR; else any unfinished one keeps it pending;
-/// else it passes (skipped and neutral count). Returns the failed check names.
-fn rollup(items: &[Value]) -> (Checks, Vec<String>) {
+/// else it passes (skipped and neutral count). A re-run check counts only its
+/// newest run. Returns the failed check names and whether any check is unfinished.
+fn rollup(items: &[Value]) -> (Checks, Vec<String>, bool) {
+    fn name(c: &Value) -> &str {
+        c["name"].as_str().or(c["context"].as_str()).unwrap_or("?")
+    }
+    fn started(c: &Value) -> &str {
+        c["startedAt"].as_str().unwrap_or("")
+    }
+    let mut newest: BTreeMap<(&str, &str), &Value> = BTreeMap::new();
+    for c in items {
+        let key = (c["workflowName"].as_str().unwrap_or(""), name(c));
+        // ISO 8601 timestamps sort as strings.
+        if newest
+            .get(&key)
+            .is_none_or(|old| started(old) <= started(c))
+        {
+            newest.insert(key, c);
+        }
+    }
     let mut failing = vec![];
     let mut pending = false;
-    for c in items {
+    for c in newest.into_values() {
         // A CheckRun has status + conclusion; a StatusContext has state.
         let verdict = match c["status"].as_str() {
             Some(s) if s != "COMPLETED" => "PENDING",
@@ -78,9 +104,8 @@ fn rollup(items: &[Value]) -> (Checks, Vec<String>) {
         match verdict {
             "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED"
             | "STARTUP_FAILURE" => {
-                let name = c["name"].as_str().or(c["context"].as_str()).unwrap_or("?");
-                if failing.len() < MAX_FAILING && !failing.iter().any(|f| f == name) {
-                    failing.push(name.to_string());
+                if failing.len() < MAX_FAILING && !failing.iter().any(|f| f == name(c)) {
+                    failing.push(name(c).to_string());
                 }
             }
             "PENDING" | "EXPECTED" | "QUEUED" | "IN_PROGRESS" | "WAITING" | "REQUESTED" | "" => {
@@ -95,18 +120,19 @@ fn rollup(items: &[Value]) -> (Checks, Vec<String>) {
         _ if items.is_empty() => Checks::None,
         _ => Checks::Passing,
     };
-    (checks, failing)
+    (checks, failing, pending)
 }
 
-/// How long until the next read, None to stop. Keeps going while any PR is
-/// open with pending checks, or couldn't be read (None).
-fn next_poll(elapsed: Duration, last: &[Option<PrStatus>]) -> Option<Duration> {
-    let waiting = last.iter().any(|s| match s {
-        None => true,
-        Some(s) => matches!(s.state, PrState::Open | PrState::Draft) && s.checks == Checks::Pending,
-    });
+/// Whether to read this PR again: it's open and a check is unfinished, or it
+/// has no checks yet and CI may still register.
+fn unsettled(elapsed: Duration, s: &PrStatus, unfinished: bool) -> bool {
+    let open = matches!(s.state, PrState::Open | PrState::Draft);
+    open && (unfinished || (s.checks == Checks::None && elapsed < NO_CHECKS_GRACE))
+}
+
+/// How long until the next read of unsettled PRs, None to give up.
+fn next_poll(elapsed: Duration) -> Option<Duration> {
     match () {
-        _ if !waiting => None,
         _ if elapsed < FAST.1 => Some(FAST.0),
         _ if elapsed < SLOW.1 => Some(SLOW.0),
         _ => None,
@@ -149,28 +175,32 @@ async fn gh_view(program: &OsStr, url: &str) -> Result<String, GhError> {
     }
 }
 
-fn unix_ms() -> u64 {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
-    now.map_or(0, |d| d.as_millis() as u64)
-}
-
-/// Read each PR now and then on `next_poll`'s schedule, sending each read.
-/// Stops for good, after one `PrUnavailable`, if `gh` can't be used.
+/// Read each PR now, then re-read the unsettled ones on `next_poll`'s
+/// schedule, sending each read. Stops for good, after one `PrUnavailable`, if
+/// `gh` can't be used.
 pub async fn watch(program: &OsStr, task: TaskId, urls: &[String], tx: mpsc::Sender<WorkerMsg>) {
-    let urls = pr_urls(urls);
+    // Each PR with its count of failed reads in a row.
+    let mut prs: Vec<(String, u32)> = pr_urls(urls).into_iter().map(|u| (u, 0)).collect();
     let start = tokio::time::Instant::now();
     loop {
-        let mut last = vec![];
-        for url in &urls {
-            let status = match gh_view(program, url).await {
-                Ok(json) => parse(&json, unix_ms()).map_err(GhError::Failed),
+        let mut again = vec![];
+        for (url, fails) in prs {
+            let read = match gh_view(program, &url).await {
+                Ok(json) => parse(&json).map_err(GhError::Failed),
                 Err(e) => Err(e),
             };
-            let msg = match status {
-                Ok(status) => {
-                    last.push(Some(status.clone()));
-                    let url = url.clone();
-                    WorkerMsg::PrStatus { task, url, status }
+            match read {
+                Ok((status, unfinished)) => {
+                    if unsettled(start.elapsed(), &status, unfinished) {
+                        again.push((url.clone(), 0));
+                    }
+                    if tx
+                        .send(WorkerMsg::PrStatus { task, url, status })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
                 Err(GhError::Unavailable(why)) => {
                     tracing::warn!(%task, "can't read PR status: {why}");
@@ -179,18 +209,17 @@ pub async fn watch(program: &OsStr, task: TaskId, urls: &[String], tx: mpsc::Sen
                 }
                 Err(GhError::Failed(why)) => {
                     tracing::debug!(%task, url, "PR status: {why}");
-                    last.push(None);
-                    continue;
+                    if fails + 1 < MAX_FAILS {
+                        again.push((url, fails + 1));
+                    }
                 }
-            };
-            if tx.send(msg).await.is_err() {
-                return;
             }
         }
-        let Some(wait) = next_poll(start.elapsed(), &last) else {
-            return;
-        };
-        tokio::time::sleep(wait).await;
+        prs = again;
+        match next_poll(start.elapsed()) {
+            Some(wait) if !prs.is_empty() => tokio::time::sleep(wait).await,
+            _ => return,
+        }
     }
 }
 
@@ -206,35 +235,35 @@ mod tests {
 
     #[test]
     fn parses_recorded_prs() {
-        let s = parse(PENDING, 7).unwrap();
+        let (s, unfinished) = parse(PENDING).unwrap();
         assert_eq!(
             (
                 s.state,
                 s.checks,
                 s.mergeable,
                 s.review.as_deref(),
-                s.observed_at
+                unfinished
             ),
-            (PrState::Open, Checks::Pending, Some(true), None, 7)
+            (PrState::Open, Checks::Pending, Some(true), None, true)
         );
         assert_eq!(s.head, "86a2184b36bee166d6cdc47d51964c726a19ae6d");
-        let s = parse(FAILING, 0).unwrap();
-        assert_eq!(s.checks, Checks::Failing);
+        let (s, unfinished) = parse(FAILING).unwrap();
+        assert_eq!((s.checks, unfinished), (Checks::Failing, false));
         // Cancelled counts as failed; skipped doesn't.
         assert_eq!(
             s.failing,
             ["check (ubuntu-latest)", "check (windows-latest)"]
         );
-        let s = parse(PASSING, 0).unwrap();
+        let (s, _) = parse(PASSING).unwrap();
         assert_eq!(
             (s.state, s.checks, s.mergeable),
             (PrState::Merged, Checks::Passing, None)
         );
         assert!(s.failing.is_empty());
-        let s = parse(NO_CHECKS, 0).unwrap();
+        let (s, _) = parse(NO_CHECKS).unwrap();
         assert_eq!((s.state, s.checks), (PrState::Merged, Checks::None));
-        assert!(parse("not json", 0).is_err());
-        assert!(parse(r#"{"state":"WEIRD"}"#, 0).is_err());
+        assert!(parse("not json").is_err());
+        assert!(parse(r#"{"state":"WEIRD"}"#).is_err());
     }
 
     #[test]
@@ -243,7 +272,7 @@ mod tests {
             "reviewDecision":"CHANGES_REQUESTED","headRefOid":"abc","statusCheckRollup":[
             {"__typename":"StatusContext","context":"ci/legacy","state":"PENDING"},
             {"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"NEUTRAL"}]}"#;
-        let s = parse(json, 0).unwrap();
+        let (s, _) = parse(json).unwrap();
         assert_eq!(
             (s.state, s.checks, s.mergeable, s.review.as_deref()),
             (
@@ -256,34 +285,64 @@ mod tests {
         let ctx = |state: &str| serde_json::json!({"context": "ci", "state": state});
         assert_eq!(rollup(&[ctx("SUCCESS")]).0, Checks::Passing);
         assert_eq!(rollup(&[ctx("EXPECTED")]).0, Checks::Pending);
-        assert_eq!(
-            rollup(&[ctx("ERROR"), ctx("PENDING")]),
-            (Checks::Failing, vec!["ci".into()])
-        );
-        let many: Vec<Value> = (0..9)
-            .map(|i| serde_json::json!({"name": format!("c{i}"), "status": "COMPLETED", "conclusion": "TIMED_OUT"}))
-            .collect();
+        let ci = |name: &str, conclusion: &str| serde_json::json!({"name": name, "status": "COMPLETED", "conclusion": conclusion});
+        let many: Vec<Value> = (0..9).map(|i| ci(&format!("c{i}"), "TIMED_OUT")).collect();
         assert_eq!(rollup(&many).1.len(), MAX_FAILING);
     }
 
     #[test]
-    fn polls_while_pending_then_slower_then_stops() {
-        let pending = parse(PENDING, 0).unwrap();
-        let failing = parse(FAILING, 0).unwrap();
+    fn a_failure_with_checks_still_running_stays_unfinished() {
+        let run = |name: &str, status: &str, conclusion: &str| serde_json::json!({"name": name, "status": status, "conclusion": conclusion});
+        let got = rollup(&[
+            run("a", "COMPLETED", "FAILURE"),
+            run("b", "IN_PROGRESS", ""),
+        ]);
+        assert_eq!(got, (Checks::Failing, vec!["a".into()], true));
+    }
+
+    #[test]
+    fn a_rerun_check_counts_only_its_newest_run() {
+        let run = |at: &str, conclusion: &str| {
+            serde_json::json!({"name": "check", "workflowName": "CI", "startedAt": at,
+                "status": "COMPLETED", "conclusion": conclusion})
+        };
+        let rerun = [
+            run("2026-10-28T19:50:00Z", "FAILURE"),
+            run("2026-10-28T20:10:00Z", "SUCCESS"),
+        ];
+        assert_eq!(rollup(&rerun), (Checks::Passing, vec![], false));
+        let reversed = [rerun[1].clone(), rerun[0].clone()];
+        assert_eq!(rollup(&reversed).0, Checks::Passing);
+        // Same name in another workflow is another check.
+        let mut other = run("2026-10-28T19:00:00Z", "FAILURE");
+        other["workflowName"] = "Release".into();
+        assert_eq!(rollup(&[rerun[1].clone(), other]).0, Checks::Failing);
+    }
+
+    #[test]
+    fn rereads_unsettled_prs_on_a_slowing_schedule() {
+        let (pending, unfinished) = parse(PENDING).unwrap();
+        let (failing, _) = parse(FAILING).unwrap();
+        let min = |m: u64| Duration::from_secs(m * 60);
+        assert!(unsettled(min(0), &pending, unfinished));
+        assert!(!unsettled(min(0), &failing, false));
+        // Failing with a check still running: keep reading.
+        assert!(unsettled(min(0), &failing, true));
         let merged = PrStatus {
             state: PrState::Merged,
             ..pending.clone()
         };
-        let min = |m: u64| Duration::from_secs(m * 60);
-        assert_eq!(next_poll(min(0), &[Some(failing.clone())]), None);
-        assert_eq!(next_poll(min(0), &[Some(merged)]), None);
-        let mixed = [Some(failing), Some(pending.clone())];
-        assert_eq!(next_poll(min(29), &mixed), Some(min(1)));
-        assert_eq!(next_poll(min(31), &mixed), Some(min(5)));
-        assert_eq!(next_poll(min(6 * 60), &mixed), None);
-        // An unread PR is retried.
-        assert_eq!(next_poll(min(0), &[None]), Some(min(1)));
-        assert_eq!(next_poll(min(0), &[]), None);
+        assert!(!unsettled(min(0), &merged, true));
+        // No checks yet: CI gets a few minutes to show up.
+        let bare = PrStatus {
+            checks: Checks::None,
+            ..pending
+        };
+        assert!(unsettled(min(4), &bare, false));
+        assert!(!unsettled(min(5), &bare, false));
+        assert_eq!(next_poll(min(29)), Some(min(1)));
+        assert_eq!(next_poll(min(31)), Some(min(5)));
+        assert_eq!(next_poll(min(6 * 60)), None);
     }
 
     #[test]
@@ -312,6 +371,7 @@ mod tests {
     }
 
     /// Writes an executable `gh` stub printing `body` and exiting `code`.
+    #[cfg(unix)]
     fn stub(dir: &std::path::Path, body: &str, code: i32) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let out = dir.join("out.json");
@@ -327,6 +387,7 @@ mod tests {
         gh
     }
 
+    #[cfg(unix)]
     fn tempdir(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("mis-pr-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -353,7 +414,6 @@ mod tests {
             (url.as_str(), status.checks),
             ("https://github.com/o/r/pull/46", Checks::Failing)
         );
-        assert!(status.observed_at > 0);
         assert!(
             rx.recv().await.is_none(),
             "failing checks: no further polls"

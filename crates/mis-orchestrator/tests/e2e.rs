@@ -1825,12 +1825,21 @@ async fn pr_status_reaches_status_and_show_and_refresh_reaches_the_worker() {
     let ServerMsg::Status { tasks, .. } = recv(&mut client).await else {
         panic!()
     };
-    assert_eq!(tasks[0].links[0].pr.as_ref(), Some(&status));
+    // Stamped with the orchestrator's clock.
+    let got = tasks[0].links[0].pr.clone().unwrap();
+    assert!(got.observed_at > 1);
+    assert_eq!(
+        got,
+        PrStatus {
+            observed_at: got.observed_at,
+            ..status
+        }
+    );
     send(&mut client, &ClientMsg::Show { task }).await;
     let ServerMsg::TaskDetail { task: info, .. } = recv(&mut client).await else {
         panic!()
     };
-    assert_eq!(info.links[0].pr, Some(status));
+    assert_eq!(info.links[0].pr, Some(got));
     send(&mut client, &ClientMsg::RefreshEvidence { task }).await;
     assert_eq!(recv::<OrchMsg>(&mut worker).await, want);
 }

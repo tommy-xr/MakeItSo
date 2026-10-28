@@ -77,19 +77,9 @@ pub struct PrStatus {
     /// Head commit sha.
     #[serde(default)]
     pub head: String,
-    /// Unix millis when the worker read it.
+    /// Unix millis when the orchestrator received it.
     #[serde(default)]
     pub observed_at: u64,
-}
-
-impl PrStatus {
-    /// Same state, whenever it was read.
-    pub fn same(&self, other: &PrStatus) -> bool {
-        PrStatus {
-            observed_at: other.observed_at,
-            ..self.clone()
-        } == *other
-    }
 }
 
 impl Link {

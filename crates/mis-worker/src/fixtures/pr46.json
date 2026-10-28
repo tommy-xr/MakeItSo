@@ -10,25 +10,33 @@
    "__typename": "CheckRun",
    "conclusion": "CANCELLED",
    "name": "check (ubuntu-latest)",
-   "status": "COMPLETED"
+   "startedAt": "2026-10-28T19:50:12Z",
+   "status": "COMPLETED",
+   "workflowName": "CI"
   },
   {
    "__typename": "CheckRun",
    "conclusion": "FAILURE",
    "name": "check (windows-latest)",
-   "status": "COMPLETED"
+   "startedAt": "2026-10-28T19:54:45Z",
+   "status": "COMPLETED",
+   "workflowName": "CI"
   },
   {
    "__typename": "CheckRun",
    "conclusion": "SKIPPED",
    "name": "build",
-   "status": "COMPLETED"
+   "startedAt": "2026-10-28T19:56:29Z",
+   "status": "COMPLETED",
+   "workflowName": "CI"
   },
   {
    "__typename": "CheckRun",
    "conclusion": "SKIPPED",
    "name": "release",
-   "status": "COMPLETED"
+   "startedAt": "2026-10-28T19:56:29Z",
+   "status": "COMPLETED",
+   "workflowName": "CI"
   }
  ],
  "title": "feat: tasks that need you rise to the top"

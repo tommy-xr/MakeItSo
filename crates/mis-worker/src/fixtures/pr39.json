@@ -10,49 +10,65 @@
    "__typename": "CheckRun",
    "conclusion": "SUCCESS",
    "name": "check (ubuntu-latest)",
-   "status": "COMPLETED"
+   "startedAt": "2026-10-28T17:34:23Z",
+   "status": "COMPLETED",
+   "workflowName": "CI"
   },
   {
    "__typename": "CheckRun",
    "conclusion": "SUCCESS",
    "name": "check (windows-latest)",
-   "status": "COMPLETED"
+   "startedAt": "2026-10-28T17:34:23Z",
+   "status": "COMPLETED",
+   "workflowName": "CI"
   },
   {
    "__typename": "CheckRun",
    "conclusion": "SUCCESS",
    "name": "build (macos-latest, aarch64-apple-darwin)",
-   "status": "COMPLETED"
+   "startedAt": "2026-10-28T20:38:19Z",
+   "status": "COMPLETED",
+   "workflowName": "CI"
   },
   {
    "__typename": "CheckRun",
    "conclusion": "SUCCESS",
    "name": "build (macos-latest, x86_64-apple-darwin)",
-   "status": "COMPLETED"
+   "startedAt": "2026-10-28T20:38:22Z",
+   "status": "COMPLETED",
+   "workflowName": "CI"
   },
   {
    "__typename": "CheckRun",
    "conclusion": "SUCCESS",
    "name": "build (ubuntu-latest, x86_64-unknown-linux-gnu)",
-   "status": "COMPLETED"
+   "startedAt": "2026-10-28T17:39:33Z",
+   "status": "COMPLETED",
+   "workflowName": "CI"
   },
   {
    "__typename": "CheckRun",
    "conclusion": "SUCCESS",
    "name": "build (ubuntu-24.04-arm, aarch64-unknown-linux-gnu)",
-   "status": "COMPLETED"
+   "startedAt": "2026-10-28T17:39:19Z",
+   "status": "COMPLETED",
+   "workflowName": "CI"
   },
   {
    "__typename": "CheckRun",
    "conclusion": "SUCCESS",
    "name": "build (windows-latest, x86_64-pc-windows-msvc, .exe)",
-   "status": "COMPLETED"
+   "startedAt": "2026-10-28T17:36:16Z",
+   "status": "COMPLETED",
+   "workflowName": "CI"
   },
   {
    "__typename": "CheckRun",
    "conclusion": "SKIPPED",
    "name": "release",
-   "status": "COMPLETED"
+   "startedAt": "2026-10-28T20:39:19Z",
+   "status": "COMPLETED",
+   "workflowName": "CI"
   }
  ],
  "title": "feat(orchestrator): grid theme"
