@@ -86,8 +86,8 @@
   .mic[data-mic=live] svg { display: none; }
   .mic[data-mic=live]::before { content: ""; width: .875rem; height: .875rem; background: currentColor; }
   form.listening textarea { border-color: var(--accent); box-shadow: 0 0 10px var(--glow); }
-  /* The mic's hint in Submit's box: same size, so nothing moves under the finger. Two lines fit. */
-  button.hint { height: 2.75rem; overflow: hidden; padding: 0 .5rem; background: none; color: var(--warn); border-color: var(--warn); font: .8125rem/1.25 var(--mono); text-transform: none; letter-spacing: 0; }
+  /* The mic's hint stands in for Submit in the same box, so nothing moves under the finger. Two lines fit. */
+  .row .hint { flex: 1; display: flex; align-items: center; justify-content: center; box-sizing: border-box; height: 2.75rem; overflow: hidden; padding: 0 .5rem; border: 1px solid var(--warn); color: var(--warn); font-size: .8125rem; line-height: 1.25; text-align: center; }
   .toggle { display: flex; align-items: center; gap: .5rem; min-height: 2.75rem; margin: -1rem 0 1rem; }
   .toggle input { width: 1.25rem; height: 1.25rem; margin: 0; accent-color: var(--accent); }
   .dim { color: var(--dim); }
@@ -182,7 +182,7 @@
       <select id="harness" aria-label="harness"><option value="">auto</option></select>
       <input id="model" aria-label="model" placeholder="model (optional)" autocapitalize="off" autocorrect="off" spellcheck="false">
     </div>
-    <div class="row"><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><button id="send">Submit</button></div>
+    <div class="row"><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><span class="hint" hidden></span><button id="send">Submit</button></div>
     <label class="toggle dim" hidden><input type="checkbox" id="autoread"> auto-read answers</label>
   </form>
   <ul id="tasks"></ul>
@@ -198,7 +198,7 @@
   <div id="thread" class="meta dim"></div>
   <form id="reply" hidden>
     <textarea id="reply-text" aria-label="reply" placeholder="Reply in this thread…" required></textarea>
-    <div class="row"><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><button id="send-reply">Reply</button></div>
+    <div class="row"><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><span class="hint" hidden></span><button id="send-reply">Reply</button></div>
     <p id="reply-error" class="bad" hidden></p>
   </form>
   <details><summary>transcript</summary><pre id="log"></pre></details>
@@ -296,7 +296,8 @@ const hasNewText = (base, text) => text.trim() !== '' && text.trim() !== base.tr
 // Hint for a session, shown in Submit's place: nothing once stopping; `starting` until the browser says it hears.
 const micLine = (s) => (s.stopping ? '' : !s.live ? 'starting…' : s.held ? 'release to send · slide away to cancel' : 'tap mic to stop');
 
-// The dictation session, at most one: { r, btn, form, field, base, live, held, send, stopping, dead, timer }.
+// The dictation session, at most one: { r, btn, form, field, base, live, held, send, stopping, dead, timer, tickerH }.
+// `tickerH`: the ticker's height when it began (0 = hidden), kept while dictating.
 let rec = null;
 function micShow(s) {
   const on = rec === s && !s.stopping, state = on ? (s.live ? 'live' : 'starting') : '';
@@ -304,9 +305,10 @@ function micShow(s) {
   s.btn.setAttribute('aria-pressed', String(on));
   s.btn.setAttribute('aria-label', !on ? 'Start dictation' : s.live ? 'Stop dictation' : 'Starting dictation');
   s.form.classList.toggle('listening', on && s.live);
-  const hint = rec === s ? micLine(s) : '', submit = s.form.querySelector('button:not([type=button])');
-  submit.textContent = hint || submit.dataset.label;
-  submit.classList.toggle('hint', !!hint);
+  const hint = rec === s ? micLine(s) : '', box = s.form.querySelector('.hint');
+  box.textContent = hint;
+  box.hidden = !hint;
+  s.form.querySelector('button:not([type=button])').hidden = !!hint;
   renderStrip();
 }
 // Sends the field when the composer can; offline, the text stays for later.
@@ -326,7 +328,8 @@ function micEnd(s) {
 function micStart(btn, held) {
   hush(); // else the mic hears the readback
   const form = btn.closest('form'), field = form.querySelector('textarea'), r = new Recognition();
-  const s = rec = { r, btn, form, field, base: field.value.trimEnd(), live: false, held, send: false, stopping: false, dead: false, timer: 0 };
+  const tk = $('ticker'), tickerH = tk.hidden ? 0 : tk.offsetHeight;
+  const s = rec = { r, btn, form, field, base: field.value.trimEnd(), live: false, held, send: false, stopping: false, dead: false, timer: 0, tickerH };
   Object.assign(r, { lang: navigator.language, interimResults: true });
   r.onresult = (e) => {
     if (rec !== s) return;
@@ -400,8 +403,6 @@ function pressEnd(end, e) {
 }
 for (const btn of document.querySelectorAll('.mic')) {
   btn.hidden = !Recognition;
-  const submit = btn.form.querySelector('button:not([type=button])');
-  submit.dataset.label = submit.textContent;
   btn.oncontextmenu = (e) => e.preventDefault();
   // No click after a touch press: the strip can change height mid-press, so it would land on whatever moved under the finger.
   btn.addEventListener('touchend', (e) => { if (touched) { touched = false; e.preventDefault(); } });
@@ -513,7 +514,10 @@ function renderStrip() {
     : work;
   const tk = $('ticker');
   tk.replaceChildren(...t.parts);
-  tk.hidden = !t.parts.length;
+  // While dictating the ticker keeps its height, so nothing moves under the finger.
+  const keep = rec && rec.tickerH;
+  tk.hidden = rec ? !keep : !t.parts.length;
+  Object.assign(tk.style, { height: keep ? `${keep}px` : '', overflow: keep ? 'hidden' : '' });
   tk.className = t.cls;
   if (t.open) tk.href = `#task/${t.open}`; else tk.removeAttribute('href');
   $('cycle').classList.toggle('run', everOpen && !offline && tasks.some((x) => x.status === 'running'));
