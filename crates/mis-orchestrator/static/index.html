@@ -31,12 +31,14 @@
   .strip { margin: 0 calc(-1 * var(--pad)) 1.25rem; padding: 1rem var(--pad) 0; background: linear-gradient(var(--field), transparent); }
   .top { display: flex; flex-wrap: wrap; align-items: center; gap: .625rem; }
   .title { font: 700 1rem/1 var(--display); text-transform: uppercase; letter-spacing: .16em; white-space: nowrap; color: var(--accent); text-shadow: 0 0 10px var(--glow); }
-  /* Connection and work: dim = idle, bright with glow = working, hollow = reconnecting, warn = offline or no workers. */
+  /* Connection and work: dim = idle, bright with glow = working, hollow = reconnecting, warn = offline or no workers,
+     warn with glow = the mic is listening. */
   .dot { flex: none; box-sizing: border-box; width: .625rem; height: .625rem; border-radius: 50%; background: var(--accent); }
   .dot.rest { background: var(--idle); }
   .dot.work { box-shadow: 0 0 3px 1px var(--glow), 0 0 10px var(--glow); }
   .dot.hollow { background: none; border: 2px solid var(--dim); }
   .dot.down { background: var(--warn); }
+  .dot.listen { background: var(--warn); box-shadow: 0 0 10px var(--warn); }
   #tabs { display: flex; margin-left: auto; border: 1px solid var(--rule); }
   [role=tab] { display: inline-flex; align-items: center; justify-content: center; min-height: 2.75rem; min-width: 2.75rem; padding: 0 .75rem; color: var(--dim); text-decoration: none; text-transform: uppercase; letter-spacing: .14em; font: 600 .8125rem var(--display); }
   [role=tab][aria-selected=true] { color: var(--bg); background: var(--accent); box-shadow: 0 0 10px var(--glow); }
@@ -44,7 +46,7 @@
   /* One line while work runs; the activity is the part the ellipsis cuts. */
   #ticker.run { white-space: pre; overflow: hidden; color: var(--run); }
   #ticker .act { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  #ticker.warn, #ticker.listen { color: var(--warn); } #ticker.bad { color: var(--bad); } #ticker.note { color: var(--fg); }
+  #ticker.warn { color: var(--warn); } #ticker.bad { color: var(--bad); } #ticker.note { color: var(--fg); }
   #ticker[href]::after { content: " ›"; white-space: pre; }
   /* Light cycle: a short bright segment rides the line while work runs; still when idle or offline. */
   .cycle { position: relative; height: 2px; margin: 0 calc(-1 * var(--pad)); background: var(--rule); overflow: hidden; }
@@ -79,11 +81,13 @@
   button:disabled { opacity: .5; cursor: default; }
   /* Listening / speaking: lit edge. */
   .mic[aria-pressed=true], #speak.on { color: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--glow), 0 0 12px var(--glow); }
-  /* Recording: warn fill with a stop square. A finger hides it, so the field glows and the ticker says so too. */
+  /* Recording: warn fill with a stop square. A finger hides it, so the field glows, the dot turns warn and Submit shows the hint. */
   .mic[data-mic=live] { background: var(--warn); border-color: var(--warn); color: var(--bg); box-shadow: 0 0 12px var(--warn); }
   .mic[data-mic=live] svg { display: none; }
   .mic[data-mic=live]::before { content: ""; width: .875rem; height: .875rem; background: currentColor; }
   form.listening textarea { border-color: var(--accent); box-shadow: 0 0 10px var(--glow); }
+  /* The mic's hint in Submit's box: same size, so nothing moves under the finger. Two lines fit. */
+  button.hint { height: 2.75rem; overflow: hidden; padding: 0 .5rem; background: none; color: var(--warn); border-color: var(--warn); font: .8125rem/1.25 var(--mono); text-transform: none; letter-spacing: 0; }
   .toggle { display: flex; align-items: center; gap: .5rem; min-height: 2.75rem; margin: -1rem 0 1rem; }
   .toggle input { width: 1.25rem; height: 1.25rem; margin: 0; accent-color: var(--accent); }
   .dim { color: var(--dim); }
@@ -289,8 +293,8 @@ const pressOutcome = (end, heldMs) => (end !== 'up' ? 'cancel' : heldMs < HOLD_M
 const slidOff = (r, x, y) => x < r.left - SLIDE_PX || x > r.right + SLIDE_PX || y < r.top - SLIDE_PX || y > r.bottom + SLIDE_PX;
 // A held release sends only when dictation added words.
 const hasNewText = (base, text) => text.trim() !== '' && text.trim() !== base.trim();
-// Ticker line for a session: nothing once stopping; `starting` until the browser says it hears.
-const micLine = (s) => (s.stopping ? '' : !s.live ? 'starting mic…' : s.held ? 'listening · release to send · slide away to cancel' : 'listening · tap mic to stop');
+// Hint for a session, shown in Submit's place: nothing once stopping; `starting` until the browser says it hears.
+const micLine = (s) => (s.stopping ? '' : !s.live ? 'starting…' : s.held ? 'release to send · slide away to cancel' : 'tap mic to stop');
 
 // The dictation session, at most one: { r, btn, form, field, base, live, held, send, stopping, dead, timer }.
 let rec = null;
@@ -300,6 +304,9 @@ function micShow(s) {
   s.btn.setAttribute('aria-pressed', String(on));
   s.btn.setAttribute('aria-label', !on ? 'Start dictation' : s.live ? 'Stop dictation' : 'Starting dictation');
   s.form.classList.toggle('listening', on && s.live);
+  const hint = rec === s ? micLine(s) : '', submit = s.form.querySelector('button:not([type=button])');
+  submit.textContent = hint || submit.dataset.label;
+  submit.classList.toggle('hint', !!hint);
   renderStrip();
 }
 // Sends the field when the composer can; offline, the text stays for later.
@@ -393,6 +400,8 @@ function pressEnd(end, e) {
 }
 for (const btn of document.querySelectorAll('.mic')) {
   btn.hidden = !Recognition;
+  const submit = btn.form.querySelector('button:not([type=button])');
+  submit.dataset.label = submit.textContent;
   btn.oncontextmenu = (e) => e.preventDefault();
   // No click after a touch press: the strip can change height mid-press, so it would land on whatever moved under the finger.
   btn.addEventListener('touchend', (e) => { if (touched) { touched = false; e.preventDefault(); } });
@@ -489,18 +498,16 @@ function ticker() {
 }
 
 // Dot, then the ticker: a flash wins, then the connection until a socket has opened, then offline, then work.
-// The dot alone says idle; an idle ticker collapses.
+// The dot alone says idle (or listening); an idle ticker collapses.
 function renderStrip() {
   const live = ws && ws.readyState === WebSocket.OPEN, trying = ws || retryTimer, work = ticker();
-  const [cls, label] = !live ? (offline || !trying ? ['down', 'offline'] : ['hollow', everOpen ? 'reconnecting' : 'connecting'])
+  const [cls, label] = rec && rec.live && !rec.stopping ? ['listen', 'listening']
+    : !live ? (offline || !trying ? ['down', 'offline'] : ['hollow', everOpen ? 'reconnecting' : 'connecting'])
     : work.cls === 'bad' ? ['down', 'no workers'] : work.parts.length ? ['work', 'working'] : ['rest', 'idle'];
   $('dot').className = `dot ${cls}`;
   $('dot').setAttribute('aria-label', label);
   $('dot').title = label;
-  // A listening mic outranks a flash: the line tells the user when to speak.
-  const m = rec && micLine(rec);
-  const t = m ? { parts: [m], cls: 'listen' }
-    : flashText ? { parts: [flashText], cls: 'note' }
+  const t = flashText ? { parts: [flashText], cls: 'note' }
     : !everOpen ? { parts: [connMsg], cls: '' }
     : offline ? { parts: [`offline · retrying${authNeeded ? ' (wrong token?)' : ''}`], cls: 'warn' }
     : work;
