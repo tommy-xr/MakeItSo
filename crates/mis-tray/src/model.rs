@@ -83,6 +83,7 @@ pub fn text(m: &MenuModel) -> String {
 }
 
 /// Same kinds of item in the same order, so `new` can relabel `old`'s menu in place.
+#[cfg(any(target_os = "macos", windows))]
 pub fn same_shape(old: &MenuModel, new: &MenuModel) -> bool {
     let kinds = |m: &MenuModel| {
         m.items
@@ -311,6 +312,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "macos", windows))]
     #[test]
     fn shape_ignores_labels() {
         let a = menu_model(None, "p");
