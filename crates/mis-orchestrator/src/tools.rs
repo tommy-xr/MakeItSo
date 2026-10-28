@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use crate::ledger::Ledger;
 use crate::summary;
 
-/// `list_tasks` returns at most this many, newest first.
+/// `list_tasks` returns at most this many, newest first (its description says 50).
 const MAX_TASKS: usize = 50;
 /// `show_task` keeps the latest transcript lines within this many chars.
 const MAX_TRANSCRIPT_CHARS: usize = 8_000;
@@ -25,7 +25,7 @@ pub fn list() -> Vec<Value> {
         }),
         json!({
             "name": "list_tasks",
-            "description": "Recent tasks, newest first: id, status, harness/model/machine, elapsed, current activity, prompt preview and outcome summary.",
+            "description": "The newest 50 tasks (of that status, if given), newest first: id, status, harness/model/machine, elapsed, current activity, prompt preview and outcome summary.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"status": {
@@ -121,16 +121,7 @@ pub fn call(l: &Ledger, name: &str, args: &Value) -> Result<Value, String> {
                 .collect())
         }
         "show_task" => {
-            let prefix = args["id"].as_str().unwrap_or("").trim();
-            let hits: Vec<_> = tasks
-                .iter()
-                .filter(|t| !prefix.is_empty() && t.id.to_string().starts_with(prefix))
-                .collect();
-            let id = match hits[..] {
-                [t] => t.id,
-                [] => return Err(format!("no task matches {prefix:?}")),
-                _ => return Err(format!("{prefix:?} matches {} tasks", hits.len())),
-            };
+            let id = resolve_task(&tasks, args["id"].as_str().unwrap_or(""))?;
             let (t, events, _) = l.show(id).expect("listed task exists");
             Ok(json!({
                 "id": t.id,

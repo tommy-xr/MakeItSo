@@ -156,17 +156,19 @@ const ASK_SYSTEM: &str = "You answer questions about a Make It So fleet: worker 
      running coding-agent tasks. Look things up with the mis tools; never guess. Be terse: \
      plain sentences, no headings, no tables. Name tasks by their first 8 id characters.";
 
-/// The question to send: `[task-id] [question]`, a lone hex word being an id.
-fn ask_question(words: &[String]) -> String {
-    let is_id = |w: &str| w.len() >= 4 && w.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
-    match words {
+/// The question to send: `[task-id] [question]`, a lone hex word of 8+ chars
+/// (as `mis status` prints ids) being an id.
+fn ask_question(words: &[String]) -> Result<String> {
+    let is_id = |w: &str| w.len() >= 8 && w.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+    Ok(match words {
         [] => FLEET_QUESTION.into(),
         [id] if is_id(id) => format!(
             "About task {id}: what was it asked, what did it do, and how did it end? One paragraph."
         ),
         [q] => q.clone(),
-        [id, q, ..] => format!("About task {id}: {q}"),
-    }
+        [id, q] if is_id(id) => format!("About task {id}: {q}"),
+        _ => bail!("usage: mis ask [TASK_ID] [QUESTION]"),
+    })
 }
 
 /// `ws://h:1/` -> `http://h:1/mcp`, `wss://h` -> `https://h/mcp`.
@@ -178,7 +180,7 @@ fn mcp_url(ws: &str) -> Result<String> {
 }
 
 /// `claude` argv and env for `mis ask`. Header values ride in env vars
-/// (`${MIS_ASK_H0}`, which claude expands) so secrets stay out of `ps`.
+/// (`${MIS_ASK_H0}`) so secrets stay out of `ps`.
 fn ask_command(
     url: &str,
     model: &str,
@@ -190,15 +192,12 @@ fn ask_command(
         .enumerate()
         .map(|(i, (_, v))| (format!("MIS_ASK_H{i}"), v.clone()))
         .collect();
-    let names: serde_json::Map<String, serde_json::Value> = headers
+    let refs: Vec<(&str, String)> = headers
         .iter()
         .zip(&env)
-        .map(|((k, _), (var, _))| (k.to_string(), format!("${{{var}}}").into()))
+        .map(|((k, _), (var, _))| (*k, format!("${{{var}}}")))
         .collect();
-    let server = mis_agent::MCP_SERVER;
-    let config =
-        serde_json::json!({"mcpServers": {server: {"type": "http", "url": url, "headers": names}}});
-    let argv = [
+    let mut argv: Vec<String> = [
         "-p",
         "--output-format",
         "stream-json",
@@ -206,23 +205,18 @@ fn ask_command(
         &format!("--model={model}"),
         "--system-prompt",
         ASK_SYSTEM,
-        // No user hooks, CLAUDE.md, other MCP servers or built-in tools: only ours.
+        // No user hooks, CLAUDE.md or built-in tools: only our MCP server.
         "--setting-sources",
         "",
         "--tools",
         "",
-        "--mcp-config",
-        &config.to_string(),
-        "--strict-mcp-config",
-        "--allowedTools",
-        &format!("mcp__{server}__*"),
         "--max-turns",
         "6",
-        "--",
-        question,
     ]
     .map(String::from)
     .to_vec();
+    argv.extend(mis_agent::claude::mcp_args(url, &refs));
+    argv.extend(["--".into(), question.into()]);
     (argv, env)
 }
 
@@ -239,7 +233,8 @@ async fn ask(args: &Args, words: &[String], model: &str) -> Result<()> {
     }
     // Same auth as /mcp: a bad token fails here, not as a vague model answer.
     connect(args).await?;
-    let (argv, env) = ask_command(&mcp_url(&args.url)?, model, &ask_question(words), &headers);
+    let question = ask_question(words)?;
+    let (argv, env) = ask_command(&mcp_url(&args.url)?, model, &question, &headers);
     let mut child = tokio::process::Command::new("claude")
         .args(argv)
         .envs(env)
@@ -254,7 +249,8 @@ async fn ask(args: &Args, words: &[String], model: &str) -> Result<()> {
             match e {
                 AgentEvent::Text { text } => println!("{}", text.trim()),
                 AgentEvent::Finished { ok: false, summary } => {
-                    bail!("claude failed: {}", summary.unwrap_or_default())
+                    let why = summary.unwrap_or_else(|| "no answer within 6 turns".into());
+                    bail!("claude failed: {why}")
                 }
                 _ => {}
             }
@@ -410,19 +406,6 @@ fn unix_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-/// The one task whose id starts with `prefix`.
-fn resolve(tasks: &[TaskSummary], prefix: &str) -> Result<TaskId> {
-    let hits: Vec<_> = tasks
-        .iter()
-        .filter(|t| t.id.to_string().starts_with(prefix))
-        .collect();
-    match hits.as_slice() {
-        [t] => Ok(t.id),
-        [] => bail!("no task matches {prefix}"),
-        _ => bail!("{prefix} matches {} tasks", hits.len()),
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -491,7 +474,7 @@ async fn main() -> Result<()> {
             let ServerMsg::Status { tasks, workers, .. } = recv(&mut ws).await? else {
                 bail!("unexpected reply")
             };
-            let task = resolve(&tasks, id)?;
+            let task = resolve_task(&tasks, id).map_err(anyhow::Error::msg)?;
             send(&mut ws, &ClientMsg::Show { task }).await?;
             let (t, events, truncated) = match recv(&mut ws).await? {
                 ServerMsg::TaskDetail {
@@ -626,10 +609,21 @@ mod tests {
     #[test]
     fn ask_question_reads_id_and_question() {
         let w = |xs: &[&str]| ask_question(&xs.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-        assert_eq!(w(&[]), FLEET_QUESTION);
-        assert_eq!(w(&["why so slow?"]), "why so slow?");
-        assert!(w(&["81df88c0"]).starts_with("About task 81df88c0: what was it asked"));
-        assert_eq!(w(&["81df", "why?"]), "About task 81df: why?");
+        assert_eq!(w(&[]).unwrap(), FLEET_QUESTION);
+        assert_eq!(w(&["why so slow?"]).unwrap(), "why so slow?");
+        assert_eq!(
+            w(&["facade"]).unwrap(),
+            "facade",
+            "short hex word is a question"
+        );
+        assert!(w(&["81df88c0"])
+            .unwrap()
+            .starts_with("About task 81df88c0: what was it"));
+        assert_eq!(
+            w(&["81df88c0", "why?"]).unwrap(),
+            "About task 81df88c0: why?"
+        );
+        assert!(w(&["why slow", "x"]).is_err());
     }
 
     #[test]
@@ -655,23 +649,12 @@ mod tests {
         let mis = &config["mcpServers"]["mis"];
         assert_eq!(mis["url"], "http://h/mcp");
         assert_eq!(mis["headers"]["authorization"], "${MIS_ASK_H0}");
-        assert_eq!(at("--allowedTools"), "mcp__mis__*");
+        assert_eq!(at("--allowedTools"), "mcp__mis");
         assert_eq!(at("--tools"), "");
         assert_eq!(at("--max-turns"), "6");
         assert!(argv.contains(&"--model=haiku".to_string()));
         // Question last, after `--`, so a leading '-' isn't a flag.
         assert_eq!(argv[argv.len() - 2..], ["--", "-q"]);
-    }
-
-    #[test]
-    fn resolve_needs_one_match() {
-        let tasks = [
-            summary("aaaa0000-0000-0000-0000-000000000000"),
-            summary("aaab0000-0000-0000-0000-000000000000"),
-        ];
-        assert_eq!(resolve(&tasks, "aaab").unwrap(), tasks[1].id);
-        assert!(resolve(&tasks, "aaa").is_err());
-        assert!(resolve(&tasks, "b").is_err());
     }
 
     #[test]

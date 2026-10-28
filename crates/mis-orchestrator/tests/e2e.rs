@@ -1165,6 +1165,7 @@ fn rpc(method: &str, params: serde_json::Value) -> serde_json::Value {
 async fn mcp_lists_tools_and_shows_a_finished_task() {
     let base = start().await;
     let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    send(&mut client, &ClientMsg::Subscribe).await;
     let mut worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
     send(
         &mut client,
@@ -1193,9 +1194,14 @@ async fn mcp_lists_tools_and_shows_a_finished_task() {
     ] {
         send(&mut worker, &WorkerMsg::Event { task, event }).await;
     }
-    // Status round trip: the worker's events are in the ledger once it answers.
-    send(&mut client, &ClientMsg::Status).await;
-    let _: ServerMsg = recv(&mut client).await;
+    // The ledger has the task done once its Finished is broadcast.
+    while !matches!(
+        recv(&mut client).await,
+        ServerMsg::Event {
+            event: AgentEvent::Finished { .. },
+            ..
+        }
+    ) {}
 
     let (status, list) = mcp_post(&base, None, rpc("tools/list", serde_json::json!({}))).await;
     assert!(status.contains("200"), "{status}");
