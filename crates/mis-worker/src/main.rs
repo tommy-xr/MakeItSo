@@ -353,8 +353,9 @@ async fn run_task(
             return;
         }
     };
-    // Attached images live in a dir of their own until the task ends.
-    let image_dir = std::env::temp_dir().join("mis-worker").join(id.to_string());
+    // Attached images live in a dir of their own until the task ends. No shared
+    // parent: on a multi-user /tmp another user's would lock us out.
+    let image_dir = std::env::temp_dir().join(format!("mis-task-{id}"));
     let image_paths = match images.is_empty() {
         true => vec![],
         false => match mis_agent::write_images(&image_dir, &images) {
