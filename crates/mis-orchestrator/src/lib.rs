@@ -477,7 +477,7 @@ pub fn router(app: App) -> Router {
         .with_state(app)
 }
 
-/// Wall-clock seconds, only for display (`stats_at`).
+/// Wall-clock seconds, for display (`stats_at`) and push JWT expiry.
 fn unix_secs() -> u64 {
     unix_ms() / 1000
 }
@@ -528,8 +528,8 @@ async fn touch_icon() -> impl IntoResponse {
     )
 }
 
-/// Shows pushed notifications and opens their task. Revalidated like the page;
-/// `Service-Worker-Allowed` lets it control `/` whatever path serves it.
+/// Shows pushed notifications and opens their task. Revalidated like the page,
+/// so a rebuilt orchestrator's worker takes over.
 async fn service_worker() -> impl IntoResponse {
     (
         [

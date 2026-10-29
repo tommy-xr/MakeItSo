@@ -32,11 +32,20 @@ pub struct Subscription {
     pub auth: String,
 }
 
-/// The decoded parts a push request needs, or why `sub` is unusable.
+/// The decoded parts a push request needs, or why `sub` is unusable. Push
+/// services are HTTPS; plain HTTP only to this machine (a local stand-in).
 fn keys(sub: &Subscription) -> Result<(Uri, p256::PublicKey, Auth), String> {
     let uri: Uri = sub.endpoint.parse().map_err(|_| "bad endpoint")?;
-    if !matches!(uri.scheme_str(), Some("https" | "http")) || uri.host().is_none() {
-        return Err("endpoint must be an http(s) URL".into());
+    let loopback = |h: &str| {
+        let h = h.trim_start_matches('[').trim_end_matches(']');
+        h == "localhost"
+            || h.parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    };
+    match (uri.scheme_str(), uri.host()) {
+        (Some("https"), Some(_)) => {}
+        (Some("http"), Some(h)) if loopback(h) => {}
+        _ => return Err("endpoint must be an https URL".into()),
     }
     let b64 = |s: &str| Base64UrlUnpadded::decode_vec(s.trim_end_matches('='));
     let key = b64(&sub.p256dh)
@@ -49,12 +58,17 @@ fn keys(sub: &Subscription) -> Result<(Uri, p256::PublicKey, Auth), String> {
 }
 
 /// Add `sub`, replacing one with the same endpoint (its keys may have changed);
-/// past the cap the oldest goes. Newest last.
-pub fn add(subs: &mut Vec<Subscription>, sub: Subscription) {
+/// past the cap the oldest goes. Newest last. False if it was already there as is
+/// (pages re-send theirs on every connect).
+pub fn add(subs: &mut Vec<Subscription>, sub: Subscription) -> bool {
+    if subs.contains(&sub) {
+        return false;
+    }
     subs.retain(|s| s.endpoint != sub.endpoint);
     subs.push(sub);
     let over = subs.len().saturating_sub(MAX_SUBSCRIPTIONS);
     subs.drain(..over);
+    true
 }
 
 /// The push service says this subscription is gone for good.
@@ -135,8 +149,12 @@ pub struct Push {
 }
 
 impl Push {
-    /// Load (or create) the key and subscriptions in `dir`.
+    /// Load (or create) the key and subscriptions in `dir`. `subject` must be a
+    /// `mailto:` or `https:` URL; Apple refuses anything else.
     pub fn open(dir: PathBuf, subject: String) -> anyhow::Result<Self> {
+        if !(subject.starts_with("mailto:") || subject.starts_with("https://")) {
+            anyhow::bail!("VAPID subject {subject:?} must start with mailto: or https://");
+        }
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true);
         #[cfg(unix)]
@@ -148,10 +166,12 @@ impl Push {
         let pem = secret.to_pkcs8_pem(LineEnding::LF)?;
         let public = secret.public_key().to_encoded_point(false);
         let path = dir.join(SUBS_FILE);
+        // Unreadable: start empty; pages re-send their subscriptions when they connect.
         let subs = match std::fs::read(&path) {
-            Ok(b) => {
-                serde_json::from_slice(&b).with_context(|| format!("parsing {}", path.display()))?
-            }
+            Ok(b) => serde_json::from_slice(&b).unwrap_or_else(|e| {
+                tracing::warn!("ignoring {}: {e}", path.display());
+                vec![]
+            }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
@@ -163,6 +183,7 @@ impl Push {
             subs: Mutex::new(subs),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()?,
         })
     }
@@ -175,23 +196,36 @@ impl Push {
     pub fn subscribe(&self, sub: Subscription) -> Result<(), String> {
         keys(&sub)?;
         let host = host(&sub.endpoint);
-        self.update(|subs| add(subs, sub));
-        tracing::info!(%host, "push subscription added");
+        if self.update(|subs| add(subs, sub))? {
+            tracing::info!(%host, "push subscription added");
+        }
         Ok(())
     }
 
     pub fn unsubscribe(&self, endpoint: &str) {
-        self.update(|subs| subs.retain(|s| s.endpoint != endpoint));
+        let removed = |subs: &mut Vec<Subscription>| {
+            let n = subs.len();
+            subs.retain(|s| s.endpoint != endpoint);
+            subs.len() != n
+        };
+        if let Err(e) = self.update(removed) {
+            tracing::warn!("{e}");
+        }
     }
 
-    /// Change the subscriptions and save them, under the lock so saves keep order.
-    fn update(&self, f: impl FnOnce(&mut Vec<Subscription>)) {
+    /// Apply `f`; if it changed something, save, and keep the change only once
+    /// saved. Under the lock, so saves keep order.
+    fn update(&self, f: impl FnOnce(&mut Vec<Subscription>) -> bool) -> Result<bool, String> {
         let mut subs = self.subs.lock().unwrap();
-        f(&mut subs);
-        let json = serde_json::to_vec_pretty(&*subs).expect("serializable");
-        if let Err(e) = write_private(&self.dir.join(SUBS_FILE), &json) {
-            tracing::warn!("saving push subscriptions: {e}");
+        let mut next = subs.clone();
+        if !f(&mut next) {
+            return Ok(false);
         }
+        let json = serde_json::to_vec_pretty(&next).expect("serializable");
+        write_private(&self.dir.join(SUBS_FILE), &json)
+            .map_err(|e| format!("saving push subscriptions: {e}"))?;
+        *subs = next;
+        Ok(true)
     }
 
     /// Push to every subscription; drop those the service says are gone.
@@ -221,10 +255,7 @@ impl Push {
         urgent: bool,
     ) -> anyhow::Result<u16> {
         let (uri, key, auth) = keys(sub).map_err(anyhow::Error::msg)?;
-        let exp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .saturating_add(TTL)
-            .as_secs();
+        let exp = crate::unix_secs() + TTL.as_secs();
         let vapid = vapid_header(&self.key, &self.public, &uri, &self.subject, exp)?;
         let req = WebPushBuilder::new(uri, key, auth)
             .with_valid_duration(TTL)
@@ -236,7 +267,9 @@ impl Push {
         let urgency = HeaderValue::from_static(if urgent { "high" } else { "normal" });
         parts.headers.insert("urgency", urgency);
         let req = reqwest::Request::try_from(axum::http::Request::from_parts(parts, body))?;
-        Ok(self.http.execute(req).await?.status().as_u16())
+        // Errors carry the URL; the endpoint is a capability, kept out of logs.
+        let resp = self.http.execute(req).await.map_err(|e| e.without_url())?;
+        Ok(resp.status().as_u16())
     }
 }
 
@@ -270,10 +303,11 @@ mod tests {
     #[test]
     fn add_replaces_same_endpoint_and_caps_dropping_oldest() {
         let mut subs = vec![];
-        add(&mut subs, sub("https://p.example/a"));
+        assert!(add(&mut subs, sub("https://p.example/a")));
+        assert!(!add(&mut subs, sub("https://p.example/a")), "re-sent as is");
         let mut again = sub("https://p.example/a");
         again.auth = Base64UrlUnpadded::encode_string(&[2; 16]);
-        add(&mut subs, again.clone());
+        assert!(add(&mut subs, again.clone()));
         assert_eq!(subs, vec![again]);
         for i in 0..MAX_SUBSCRIPTIONS {
             add(&mut subs, sub(&format!("https://p.example/{i}")));
@@ -294,7 +328,16 @@ mod tests {
             ..sub("https://p.example/a")
         };
         assert!(keys(&padded).is_ok(), "browsers may pad");
-        for endpoint in ["", "/relative", "ftp://p.example/a", "not a url"] {
+        assert!(keys(&sub("http://127.0.0.1:9/a")).is_ok(), "local stand-in");
+        assert!(keys(&sub("http://[::1]:9/a")).is_ok());
+        for endpoint in [
+            "",
+            "/relative",
+            "ftp://p.example/a",
+            "not a url",
+            "http://p.example/a",
+            "http://169.254.169.254/a",
+        ] {
             assert!(keys(&sub(endpoint)).is_err(), "{endpoint}");
         }
         let bad_key = Subscription {
@@ -350,11 +393,25 @@ mod tests {
     }
 
     #[test]
+    fn bad_subject_or_subscriptions_file() {
+        let dir = temp_dir();
+        assert!(Push::open(dir.clone(), "me@example.invalid".into()).is_err());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(SUBS_FILE), "{").unwrap();
+        let push = Push::open(dir.clone(), "https://example.invalid".into()).unwrap();
+        assert!(
+            push.subs.lock().unwrap().is_empty(),
+            "corrupt list: start empty"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_corrupt_key_is_an_error_not_a_new_key() {
         let dir = temp_dir();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(KEY_FILE), "garbage").unwrap();
-        assert!(Push::open(dir.clone(), "s".into()).is_err());
+        assert!(Push::open(dir.clone(), "mailto:s@example.invalid".into()).is_err());
         assert_eq!(
             std::fs::read_to_string(dir.join(KEY_FILE)).unwrap(),
             "garbage"

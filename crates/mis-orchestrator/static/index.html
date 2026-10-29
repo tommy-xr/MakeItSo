@@ -1072,7 +1072,8 @@ function connect() {
     pending = null; // a submit sent on the old socket gets no reply here; its draft stays
     send({ type: 'subscribe' });
     send({ type: 'status' });
-    pushSync();
+    // The orchestrator may have restarted with a new key: re-read it before syncing.
+    if (push.key) info().then((i) => { if (i.vapid) push.key = i.vapid; pushSync(); }).catch(() => {});
     // Re-fetch the open transcript; the old one stays up until the new one replaces it.
     if (detail && route().view === 'detail') { detail.refetch = true; send({ type: 'show', task: detail.id }); } else detail = null;
     render();
@@ -1169,7 +1170,9 @@ setInterval(tick, 1000);
 // Push notifications: offered where the browser has push (on iOS, only once added to the Home Screen),
 // the orchestrator has a key and the token may act. Permission is asked only from the toggle's tap.
 const push = { key: null, reg: null, sub: null, busy: false, err: '' };
-const pushable = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && navigator.standalone !== false;
+// iOS has `navigator.standalone`: false in a Safari tab, where push isn't available.
+const pushable = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window
+  && !(navigator.standalone === false && navigator.maxTouchPoints > 0);
 const unb64 = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
 const b64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 function pushStart(key) {
@@ -1189,10 +1192,13 @@ function pushStart(key) {
 // One made with another key (the orchestrator's state was reset) can't be pushed to: renew it.
 function pushSync() {
   const sub = push.sub;
-  if (!sub || readOnly || !push.key) return;
+  if (!sub || readOnly || !push.key || push.busy) return;
   const key = sub.options && sub.options.applicationServerKey;
   if (key && b64(key) !== push.key) {
-    sub.unsubscribe().then(() => pushSubscribe()).catch((e) => { push.err = e.message; render(); });
+    Object.assign(push, { busy: true, sub: null });
+    send({ type: 'push_unsubscribe', endpoint: sub.endpoint });
+    sub.unsubscribe().then(pushSubscribe).catch((e) => { push.err = e.message; })
+      .finally(() => { push.busy = false; render(); });
     return;
   }
   const { endpoint, keys } = sub.toJSON();
@@ -1200,7 +1206,8 @@ function pushSync() {
 }
 async function pushSubscribe() {
   push.sub = await push.reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64(push.key) });
-  pushSync();
+  const { endpoint, keys } = push.sub.toJSON();
+  send({ type: 'push_subscribe', endpoint, p256dh: keys.p256dh, auth: keys.auth });
 }
 function renderNotify() {
   const denied = 'Notification' in window && Notification.permission === 'denied';
@@ -1230,11 +1237,14 @@ $('notify').onchange = async (e) => {
 };
 
 // What the stored token may do (scope), then connect.
-function start() {
+function info() {
   const token = store.get();
   let headers = {};
   try { if (token) headers = new Headers({ authorization: `Bearer ${token}` }); } catch {} // connect() says why it's invalid
-  fetch('/api/info', { headers }).then((r) => r.json()).then((info) => {
+  return fetch('/api/info', { headers }).then((r) => r.json());
+}
+function start() {
+  info().then((info) => {
     authNeeded = info.auth;
     readOnly = info.scope === 'read';
     $('ver').textContent = [info.version, readOnly && 'read-only'].filter(Boolean).join(' · ');

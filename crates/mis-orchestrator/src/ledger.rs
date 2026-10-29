@@ -139,8 +139,6 @@ struct TaskEntry {
     limited: bool,
     /// A client opened it after it finished.
     seen: bool,
-    /// A `Notify` went out for it.
-    notified: bool,
 }
 
 /// What a task needs from the user; opening it once finished clears it.
@@ -196,28 +194,27 @@ impl TaskEntry {
             links: vec![],
             limited: false,
             seen: false,
-            notified: false,
         }
     }
 
-    /// Notification for the first transition into needing the user, e.g.
-    /// `failed · fix the mic button` / `after 3m12s`; None if it doesn't, or did already.
-    /// Only the status and clipped prompt: the payload transits a browser vendor's service.
-    fn notify(&mut self) -> Option<Effect> {
-        let label = match attention(self.status, self.limited, self.seen) {
-            _ if self.notified => return None,
+    /// Notification for the task needing the user, e.g. `failed · fix the mic
+    /// button` / `after 3m12s`; None if it doesn't. Called only on the one-time
+    /// move into Done/Failed, so it goes out once. Only the status, clipped prompt
+    /// and time: the payload transits a browser vendor's service.
+    fn notify(&self) -> Option<Effect> {
+        let a = attention(self.status, self.limited, self.seen);
+        let label = match a {
             Attention::None => return None,
             Attention::Failed => "failed",
             Attention::Limited => "limited",
             Attention::Unread => "done",
         };
-        self.notified = true;
-        let took = self.finished_at.map(|f| f.saturating_sub(self.started_at));
+        let took = (self.finished_at.unwrap_or(0)).saturating_sub(self.started_at);
         Some(Effect::Notify {
             task: self.task.id,
             title: format!("{label} · {}", first_line(&self.task.prompt, 80)),
-            body: took.map_or(label.into(), |ms| format!("after {}", fmt_elapsed(ms))),
-            urgent: label != "done",
+            body: format!("after {}", fmt_elapsed(took)),
+            urgent: a != Attention::Unread,
         })
     }
 

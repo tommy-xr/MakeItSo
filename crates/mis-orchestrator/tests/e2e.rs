@@ -2036,6 +2036,11 @@ async fn push_setup(stub: &PushStub) -> (String, std::path::PathBuf, Ws, Ws) {
         },
     )
     .await;
+    // Same socket, handled in order: once Status answers, the subscription is saved.
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { .. } = recv(&mut client).await else {
+        panic!("subscribe refused?")
+    };
     let worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
     (base, dir, client, worker)
 }
