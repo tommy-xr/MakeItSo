@@ -87,7 +87,18 @@
   .row button { flex: 1; }
   .row input { flex: 1; min-width: 0; min-height: 2.75rem; padding: 0 .75rem; }
   .row.tight { margin-bottom: 0; }
-  .row .mic, #speak { flex: none; }
+  .row .mic, .row .clip, #speak { flex: none; }
+  .clip { display: grid; place-items: center; width: 2.75rem; padding: 0; }
+  .clip svg { width: 1.25rem; height: 1.25rem; }
+  /* Attached photos: fixed squares, so loading never reflows; dim with a spinner until uploaded. */
+  .shots { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 .5rem; }
+  .shot { position: relative; flex: none; width: 4rem; height: 4rem; border: 1px solid var(--line); background: var(--field); }
+  .shot img { display: block; width: 100%; height: 100%; object-fit: cover; }
+  .shot.busy img { opacity: .35; }
+  .shot.busy::after { content: ""; position: absolute; inset: 0; margin: auto; width: 1.25rem; height: 1.25rem; border: 2px solid var(--accent); border-right-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; }
+  .shot .x { position: absolute; top: 0; right: 0; width: 1.75rem; height: 1.75rem; min-height: 0; padding: 0; border: 0; background: color-mix(in srgb, var(--bg) 70%, transparent); color: var(--fg); font: 1rem/1 var(--mono); letter-spacing: 0; }
+  #shots-view { margin-top: .5rem; }
+  #shots-view a { display: block; width: 100%; height: 100%; }
   /* No scroll, selection or callout under a held finger. */
   .mic { display: grid; place-items: center; width: 2.75rem; padding: 0; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
   .mic svg { width: 1.25rem; height: 1.25rem; }
@@ -225,12 +236,13 @@
 
 <main id="list" hidden>
   <form id="new">
+    <div id="shots" class="shots" hidden></div>
     <textarea id="prompt" placeholder="New task…" required></textarea>
     <div class="row tight">
       <select id="harness" aria-label="harness"><option value="">auto</option></select>
       <input id="model" aria-label="model" placeholder="model (optional)" autocapitalize="off" autocorrect="off" spellcheck="false">
     </div>
-    <div class="row"><button id="send">Submit</button><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button></div>
+    <div class="row"><button id="send">Submit</button><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" id="clip" class="clip" aria-label="Attach photos"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M20 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.4 8.4a1.7 1.7 0 0 1-2.4-2.4l7.7-7.7"/></svg></button><input type="file" id="pick" accept="image/*" multiple hidden><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button></div>
     <label class="toggle dim" hidden><input type="checkbox" id="autoread"> auto-read answers</label>
   </form>
   <ul id="tasks"></ul>
@@ -243,6 +255,7 @@
   <section id="evidence" hidden><div class="evh"><h3>evidence</h3><button type="button" id="refresh-ev" aria-label="Refresh PR status" hidden>↻</button></div><ul class="evl"></ul></section>
   <div id="meta" class="meta"></div>
   <div id="ask" class="meta dim"></div>
+  <div id="shots-view" class="shots" hidden></div>
   <div id="thread" class="meta dim"></div>
   <form id="reply" hidden>
     <textarea id="reply-text" aria-label="reply" placeholder="Reply in this thread…" required></textarea>
@@ -286,6 +299,10 @@ let from = '#'; // last list view, so a task's back link returns to Workers when
 let pending = null;
 let replyFor = null; // thread whose draft the reply field holds
 const mine = new Set(); // tasks this page submitted; auto-read speaks only these
+// Photos for the new task: downscaled here (phone shots are ~4 MB), uploaded on pick, sent as ids.
+// Each is { url: preview object URL, id: upload id once stored }.
+const MAX_SHOTS = 4, MAX_SIDE = 1600;
+let shots = [];
 
 // Composer text kept across reloads and drops until the server takes it: `draft:new`, and
 // `draft:reply:<task id>` per thread (the newest DRAFT_REPLIES), as { text, at }.
@@ -687,6 +704,8 @@ function render() {
   document.body.classList.toggle('stale', everOpen && offline);
   // Sending needs a socket and no submit in flight; drafts stay in their fields meanwhile.
   $('send').disabled = $('send-reply').disabled = !live || !!pending;
+  if (shots.some((x) => !x.id)) $('send').disabled = true; // photos still uploading
+  $('clip').disabled = shots.length >= MAX_SHOTS || !!pending;
   for (const v in views) $(v).hidden = !everOpen || v !== r.view;
   if (r.view === 'detail') $('detail').querySelector('.back').href = from;
   else from = location.hash || '#';
@@ -894,6 +913,7 @@ function renderDetail(id) {
   $('meta').replaceChildren(...(t ? [chip(t.status),
     [...placement(t), t.session && `session ${short(t.session)}`].filter(Boolean).join(' · ')] : []));
   $('ask').textContent = t ? t.prompt : '';
+  renderAttached((t && t.images) || []);
   // Thread links: up to the parent, down to each reply.
   const replies = tasks.filter((x) => x.parent === id);
   $('thread').replaceChildren(...(t && t.parent ? [el('a', { href: `#task/${t.parent}`, className: 'thread' }, `↑ reply to ${short(t.parent)}`)] : []),
@@ -994,7 +1014,10 @@ function onMessage(msg) {
       // Taken: its draft goes, unless typed on since.
       if (drafts.get(p.key).trim() === p.text) drafts.set(p.key, '');
       if (p.key !== 'draft:new') location.hash = `#task/${msg.task}`;
-      else if ($('prompt').value.trim() === p.text) $('prompt').value = '';
+      else {
+        if ($('prompt').value.trim() === p.text) $('prompt').value = '';
+        clearShots();
+      }
       refreshSoon();
       break;
     }
@@ -1021,6 +1044,13 @@ function onMessage(msg) {
       if (pending && pending.key !== 'draft:new') {
         pending = null;
         Object.assign($('reply-error'), { textContent: msg.message, hidden: false });
+        break;
+      }
+      // A refused new task (e.g. an expired photo): say so; text and photos stay.
+      if (pending) {
+        pending = null;
+        flash(`error: ${msg.message}`);
+        render();
         break;
       }
       // A refused refresh (worker offline): say so, keep the view.
@@ -1124,6 +1154,80 @@ function checkAlive() {
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reconnectNow(); });
 window.addEventListener('online', reconnectNow);
 
+function authHeaders() {
+  const token = store.get();
+  try { return token ? { authorization: `Bearer ${token}` } : {}; } catch { return {}; }
+}
+// Longest side to MAX_SIDE, JPEG, upright: bitmaps honour EXIF orientation; else the <img> path does.
+async function shrink(file) {
+  let src;
+  try { src = await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch {
+    src = new Image();
+    src.src = URL.createObjectURL(file);
+    try { await src.decode(); } finally { URL.revokeObjectURL(src.src); }
+  }
+  const w = src.width, h = src.height, k = Math.min(1, MAX_SIDE / Math.max(w, h));
+  const c = Object.assign(document.createElement('canvas'), { width: Math.round(w * k), height: Math.round(h * k) });
+  c.getContext('2d').drawImage(src, 0, 0, c.width, c.height);
+  if (src.close) src.close();
+  return new Promise((ok, no) => c.toBlob((b) => (b ? ok(b) : no(new Error('could not encode'))), 'image/jpeg', 0.85));
+}
+async function attach(file) {
+  const shot = { url: '', id: null };
+  shots.push(shot);
+  try {
+    const blob = await shrink(file);
+    shot.url = URL.createObjectURL(blob);
+    renderShots();
+    const r = await fetch('/api/upload', { method: 'POST', headers: { ...authHeaders(), 'content-type': 'image/jpeg' }, body: blob });
+    if (!r.ok) throw new Error((await r.text()) || r.statusText);
+    shot.id = (await r.json()).id;
+  } catch (e) {
+    dropShot(shot);
+    flash(`photo not attached: ${e.message}`);
+  }
+  if (shots.includes(shot)) renderShots();
+}
+function dropShot(shot) {
+  if (shot.url) URL.revokeObjectURL(shot.url);
+  shots = shots.filter((x) => x !== shot);
+  renderShots();
+}
+function clearShots() { for (const x of shots) dropShot(x); }
+function renderShots() {
+  $('shots').replaceChildren(...shots.filter((x) => x.url).map((x) => el('div', { className: `shot${x.id ? '' : ' busy'}` },
+    el('img', { src: x.url, alt: '' }),
+    el('button', { type: 'button', className: 'x', ariaLabel: 'Remove photo', onclick: () => dropShot(x) }, '✕'))));
+  $('shots').hidden = !$('shots').children.length;
+  render();
+}
+$('clip').onclick = () => $('pick').click();
+$('pick').onchange = () => {
+  for (const f of [...$('pick').files].slice(0, MAX_SHOTS - shots.length)) attach(f);
+  $('pick').value = '';
+  render();
+};
+// A task's photos in its drill-in: fetched with the token (an <img> can't send it), kept as object URLs.
+const seenShots = new Map();
+let attachedKey = '';
+function renderAttached(ids) {
+  const box = $('shots-view');
+  if (ids.join() === attachedKey) return;
+  attachedKey = ids.join();
+  box.hidden = !ids.length;
+  box.replaceChildren(...ids.map((id) => {
+    const img = el('img', { alt: 'attached photo' }), a = el('a', { target: '_blank', rel: 'noopener' }, img);
+    if (!seenShots.has(id)) {
+      seenShots.set(id, fetch(`/api/images/${id}`, { headers: authHeaders() })
+        .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(r.status))))
+        .then((b) => URL.createObjectURL(b)));
+      seenShots.get(id).catch(() => seenShots.delete(id));
+    }
+    seenShots.get(id).then((url) => { img.src = a.href = url; }, () => { img.alt = 'photo gone'; });
+    return el('div', { className: 'shot' }, a);
+  }));
+}
+
 $('auth').onsubmit = (e) => {
   e.preventDefault();
   store.set($('token').value.trim());
@@ -1137,7 +1241,7 @@ $('new').onsubmit = (e) => {
   const prompt = $('prompt').value.trim();
   if (!prompt || pending) return;
   pending = { key: 'draft:new', text: prompt };
-  send({ type: 'submit', prompt, cwd: null, harness: $('harness').value || null, model: $('model').value.trim() || null });
+  send({ type: 'submit', prompt, cwd: null, harness: $('harness').value || null, model: $('model').value.trim() || null, images: shots.map((x) => x.id) });
   render();
 };
 $('reply').onsubmit = (e) => {
