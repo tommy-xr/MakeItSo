@@ -157,3 +157,10 @@ The orchestrator keeps its VAPID key and the subscriptions in `--state-dir` / `M
 Privacy: a notification carries only the task's status, a clipped first line of its prompt, and how
 long it took. It travels through the browser vendor's push service (Apple, Google or Mozilla),
 end-to-end encrypted (RFC 8291): the service sees when and how much, not what.
+
+## Image attachments
+
+`POST /api/upload` with a raw JPEG, PNG, WebP or GIF body (up to 10 MB; read-only tokens get 403)
+returns `{"id": ...}`; a `submit` may attach up to 4 ids as `images`. The worker writes them to a
+temp dir for the run: codex gets `-i <file>` each, claude a prompt line naming the files. Uploads
+live in `<state-dir>/images/` and are deleted after 7 days, attached or not.
