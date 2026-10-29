@@ -143,6 +143,17 @@ it from a phone:
 - `cloudflared tunnel --url http://localhost:7474`
 - `tailscale serve 7474`
 
+## Task history
+
+The orchestrator saves its tasks (status, transcript, summary, evidence, attention) in
+`<state-dir>/ledger.json` and `<state-dir>/transcripts/`, readable only by you, at most once a second
+and on Ctrl-C / SIGTERM, and restores them on start. Tasks are forgotten 30 days after they end.
+
+A restart drops every connection. A worker's agent keeps running meanwhile; if the worker reconnects
+within the grace period (60 s) still running its task, the task carries on, otherwise it fails.
+Tasks still being planned fail. An unreadable `ledger.json` is moved to `ledger.json.bad-<time>` and
+the orchestrator starts empty. A second orchestrator on the same state dir refuses to start.
+
 ## Push notifications
 
 Workers -> *notify me* pushes a notification when a task fails, hits a usage limit, or finishes;

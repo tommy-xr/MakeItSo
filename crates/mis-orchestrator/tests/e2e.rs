@@ -2339,3 +2339,163 @@ async fn read_token_cannot_upload_but_can_view() {
     assert_eq!(http(&base, &get, b"").await.0, 401);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Serve `app` until the sender fires; the handle resolves once it has stopped.
+async fn start_stoppable(
+    app: App,
+) -> (
+    String,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let shutdown = async {
+        let _ = stopped.await;
+    };
+    let served = tokio::spawn(mis_orchestrator::serve_until(listener, app, shutdown));
+    (format!("ws://{addr}"), stop, served)
+}
+
+/// Ask for status until `done` holds: other sockets' messages race ours.
+async fn status_until(client: &mut Ws, done: impl Fn(&[TaskSummary]) -> bool) -> Vec<TaskSummary> {
+    for _ in 0..100 {
+        send(client, &ClientMsg::Status).await;
+        let ServerMsg::Status { tasks, .. } = recv(client).await else {
+            panic!()
+        };
+        if done(&tasks) {
+            return tasks;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("status never got there");
+}
+
+async fn submit_claude(client: &mut Ws, worker: &mut Ws, prompt: &str) -> TaskId {
+    let submit = ClientMsg::Submit {
+        prompt: prompt.into(),
+        cwd: None,
+        harness: Some("claude".into()),
+        model: None,
+        reply_to: None,
+        images: vec![],
+    };
+    send(client, &submit).await;
+    let ServerMsg::Submitted { task } = recv(client).await else {
+        panic!()
+    };
+    let OrchMsg::Assign { task: assigned, .. } = recv(worker).await else {
+        panic!()
+    };
+    assert_eq!(assigned.id, task);
+    task
+}
+
+#[tokio::test]
+async fn task_history_survives_a_restart() {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-ledger-{}", uuid::Uuid::new_v4()));
+    let app = || {
+        App::new(None)
+            .with_ledger_dir(dir.clone())
+            .with_grace(std::time::Duration::from_secs(30))
+    };
+    let (base, stop, served) = start_stoppable(app()).await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    let wid = uuid::Uuid::new_v4();
+    let mut worker = join(&base, wid, "claude", vec![]).await;
+
+    // One task finishes with a PR, whose status the worker reads; another is mid-run.
+    let done = submit_claude(&mut client, &mut worker, "open a PR").await;
+    let url = "https://github.com/o/r/pull/42";
+    for event in [
+        AgentEvent::Text {
+            text: format!("opened {url}"),
+        },
+        AgentEvent::Finished {
+            ok: true,
+            summary: Some("Opened the PR".into()),
+        },
+    ] {
+        send(&mut worker, &WorkerMsg::Event { task: done, event }).await;
+    }
+    let OrchMsg::CheckPrs { .. } = recv(&mut worker).await else {
+        panic!()
+    };
+    let pr = PrStatus {
+        state: PrState::Merged,
+        checks: Checks::Passing,
+        failing: vec![],
+        mergeable: None,
+        review: None,
+        head: "abc".into(),
+        observed_at: 0,
+    };
+    let status = WorkerMsg::PrStatus {
+        task: done,
+        url: url.into(),
+        status: pr,
+    };
+    send(&mut worker, &status).await;
+    let running = submit_claude(&mut client, &mut worker, "take a while").await;
+    let halfway = AgentEvent::Text {
+        text: "halfway".into(),
+    };
+    let event = WorkerMsg::Event {
+        task: running,
+        event: halfway.clone(),
+    };
+    send(&mut worker, &event).await;
+    let before = status_until(&mut client, |ts| {
+        ts.len() == 2 && ts[0].links[0].pr.is_some() && ts[1].activity == "halfway"
+    })
+    .await;
+    stop.send(()).unwrap();
+    served.await.unwrap().unwrap();
+    drop((client, worker));
+
+    // A new orchestrator on the same dir: same tasks, same answers and evidence.
+    let (base, stop, served) = start_stoppable(app()).await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { tasks, workers, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    assert_eq!(tasks, before);
+    assert_eq!(tasks[0].status, TaskStatus::Done);
+    assert_eq!(tasks[0].summary.as_deref(), Some("Opened the PR"));
+    assert_eq!(tasks[0].attention, Attention::Unread);
+    assert_eq!(tasks[1].status, TaskStatus::Running);
+    assert_eq!((workers[0].id, workers[0].online), (wid, false));
+    send(&mut client, &ClientMsg::Show { task: done }).await;
+    let ServerMsg::TaskDetail {
+        events, truncated, ..
+    } = recv(&mut client).await
+    else {
+        panic!()
+    };
+    assert_eq!(events.len(), 2);
+    assert!(!truncated);
+
+    // The worker comes back still running its task, and finishes it.
+    let mut worker = join(&base, wid, "claude", vec![running]).await;
+    let finished = AgentEvent::Finished {
+        ok: true,
+        summary: Some("took a while".into()),
+    };
+    let event = WorkerMsg::Event {
+        task: running,
+        event: finished,
+    };
+    send(&mut worker, &event).await;
+    status_until(&mut client, |ts| ts[1].status == TaskStatus::Done).await;
+    send(&mut client, &ClientMsg::Show { task: running }).await;
+    let ServerMsg::TaskDetail { events, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    assert_eq!(events[0], halfway, "transcript from before the restart");
+    stop.send(()).unwrap();
+    served.await.unwrap().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}

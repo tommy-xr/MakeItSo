@@ -53,8 +53,9 @@ struct Args {
     /// Fetch Access keys from here instead of the team's certs URL (testing).
     #[arg(long, hide = true)]
     cf_access_certs_url: Option<String>,
-    /// Holds the push notification key and subscriptions, and uploaded images
-    /// (`images/`, deleted after a week). Default: ~/.local/state/mis
+    /// Holds task history (`ledger.json`, `transcripts/`; tasks are kept 30 days
+    /// after they end), the push notification key and subscriptions, and uploaded
+    /// images (`images/`, deleted after a week). Default: ~/.local/state/mis
     /// (%LOCALAPPDATA%\mis on Windows).
     #[arg(long, env = "MIS_STATE_DIR")]
     state_dir: Option<std::path::PathBuf>,
@@ -209,6 +210,7 @@ async fn main() -> anyhow::Result<()> {
     }
     match args.state_dir.clone().or_else(default_state_dir) {
         Some(dir) => {
+            app = app.with_ledger_dir(dir.clone());
             match Push::open(dir.clone(), args.vapid_subject.clone()) {
                 Ok(push) => {
                     tracing::info!(dir = %dir.display(), "push notifications on");
@@ -222,7 +224,8 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         None => tracing::warn!(
-            "push notifications and image attachments off: no --state-dir and no home dir"
+            "no --state-dir and no home dir: task history is lost on restart; \
+             push notifications and image attachments off"
         ),
     }
     if args.no_planner {
@@ -240,7 +243,23 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(model = %args.summary_model, "summaries: local claude (tool-less)");
         app = app.with_summarizer(one_shot_claude(&args.summary_model, &[]));
     }
-    mis_orchestrator::serve(listener, app).await
+    mis_orchestrator::serve_until(listener, app, shutdown_signal()).await
+}
+
+/// Ctrl-C, or SIGTERM (`kill`, service managers) on Unix.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
+    tracing::info!("shutting down");
 }
 
 #[cfg(test)]
