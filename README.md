@@ -164,3 +164,6 @@ end-to-end encrypted (RFC 8291): the service sees when and how much, not what.
 returns `{"id": ...}`; a `submit` may attach up to 4 ids as `images`. The worker writes them to a
 temp dir for the run: codex gets `-i <file>` each, claude a prompt line naming the files. Uploads
 live in `<state-dir>/images/` and are deleted after 7 days, attached or not.
+
+On the page, the paperclip beside the mic attaches up to 4 photos (camera or library on a phone),
+shrunk to 1600 px JPEG before upload; a task's photos show in its view.
