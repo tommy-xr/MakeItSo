@@ -40,6 +40,14 @@ pub enum Effect {
     Close {
         conn: ConnId,
     },
+    /// Push a notification to the user's devices: `task` started needing them.
+    /// `urgent` for failures, which shouldn't wait for a device to wake.
+    Notify {
+        task: TaskId,
+        title: String,
+        body: String,
+        urgent: bool,
+    },
 }
 
 struct Worker {
@@ -131,6 +139,8 @@ struct TaskEntry {
     limited: bool,
     /// A client opened it after it finished.
     seen: bool,
+    /// A `Notify` went out for it.
+    notified: bool,
 }
 
 /// What a task needs from the user; opening it once finished clears it.
@@ -186,7 +196,29 @@ impl TaskEntry {
             links: vec![],
             limited: false,
             seen: false,
+            notified: false,
         }
+    }
+
+    /// Notification for the first transition into needing the user, e.g.
+    /// `failed · fix the mic button` / `after 3m12s`; None if it doesn't, or did already.
+    /// Only the status and clipped prompt: the payload transits a browser vendor's service.
+    fn notify(&mut self) -> Option<Effect> {
+        let label = match attention(self.status, self.limited, self.seen) {
+            _ if self.notified => return None,
+            Attention::None => return None,
+            Attention::Failed => "failed",
+            Attention::Limited => "limited",
+            Attention::Unread => "done",
+        };
+        self.notified = true;
+        let took = self.finished_at.map(|f| f.saturating_sub(self.started_at));
+        Some(Effect::Notify {
+            task: self.task.id,
+            title: format!("{label} · {}", first_line(&self.task.prompt, 80)),
+            body: took.map_or(label.into(), |ms| format!("after {}", fmt_elapsed(ms))),
+            urgent: label != "done",
+        })
     }
 
     /// What the task is doing now, for one-line displays.
@@ -590,7 +622,8 @@ impl Ledger {
                             },
                         ];
                         events.iter().for_each(|e| t.record(e, now));
-                        events.into_iter().map(broadcast).collect()
+                        let notify = t.notify();
+                        events.into_iter().map(broadcast).chain(notify).collect()
                     }
                     Ok(p) => {
                         // The worker reports its own; the planner's would mislead.
@@ -623,7 +656,8 @@ impl Ledger {
                             summary: Some(why),
                         };
                         t.record(&event, now);
-                        vec![broadcast(event)]
+                        let notify = t.notify();
+                        [broadcast(event)].into_iter().chain(notify).collect()
                     }
                 }
             }
@@ -791,6 +825,7 @@ impl Ledger {
         }
         let mut summarize = None;
         let mut check = None;
+        let mut notify = None;
         if let AgentEvent::Finished { ok, .. } = &event {
             let urls = t.pr_urls();
             if !urls.is_empty() {
@@ -810,6 +845,7 @@ impl Ledger {
                     prompt: summary::prompt(&t.task.prompt, &t.events),
                 });
             }
+            notify = t.notify();
         }
         let mut effects = vec![Effect::Broadcast(ServerMsg::Event {
             task,
@@ -818,6 +854,7 @@ impl Ledger {
         })];
         effects.extend(summarize);
         effects.extend(check);
+        effects.extend(notify);
         effects.extend(self.schedule());
         effects
     }
@@ -1004,18 +1041,19 @@ impl Ledger {
         self.tasks
             .iter_mut()
             .filter(|t| pred(t))
-            .map(|t| {
+            .flat_map(|t| {
                 t.status = TaskStatus::Failed;
                 let event = AgentEvent::Finished {
                     ok: false,
                     summary: Some(why.into()),
                 };
                 t.record(&event, now);
-                Effect::Broadcast(ServerMsg::Event {
+                let broadcast = Effect::Broadcast(ServerMsg::Event {
                     task: t.task.id,
                     worker: Some(wid),
                     event,
-                })
+                });
+                [Some(broadcast), t.notify()].into_iter().flatten()
             })
             .collect()
     }
@@ -2016,6 +2054,133 @@ mod tests {
         assert_eq!(attention_of(&l, failed), Attention::Failed);
         l.seen(failed);
         assert_eq!(attention_of(&l, failed), Attention::None);
+    }
+
+    /// The `Notify` effects among `effects`, as (task, title, body, urgent).
+    fn notified(effects: &[Effect]) -> Vec<(TaskId, &str, &str, bool)> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Notify {
+                    task,
+                    title,
+                    body,
+                    urgent,
+                } => Some((*task, title.as_str(), body.as_str(), *urgent)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn finishing_notifies_once_with_status_prompt_and_time() {
+        let mut l = Ledger::default();
+        let wid = Uuid::new_v4();
+        l.connect(wid, info(), &[], 1, T0);
+        l.now_ms = 1_000;
+        let prompt = format!("fix the mic button {}\nsecond line", "x".repeat(100));
+        let (task, _) = l.submit(prompt, None, Some("claude".into()), None);
+        let eff = l.event(wid, 1, task, text("working"));
+        assert!(notified(&eff).is_empty(), "running needs nothing");
+        l.now_ms = 1_000 + 192_000;
+        let eff = l.event(
+            wid,
+            1,
+            task,
+            AgentEvent::Finished {
+                ok: true,
+                summary: None,
+            },
+        );
+        let [(t, title, body, urgent)] = notified(&eff)[..] else {
+            panic!("{eff:?}")
+        };
+        assert_eq!(t, task);
+        assert!(title.starts_with("done · fix the mic button x"), "{title}");
+        assert_eq!(
+            title.chars().count(),
+            "done · ".chars().count() + 80,
+            "clipped to 80"
+        );
+        assert!(title.ends_with('…') && !title.contains("second"));
+        assert_eq!((body, urgent), ("after 3m12s", false));
+        // Nothing after: a late or replayed Finished, a reconnect, a Status, being seen.
+        let replay = AgentEvent::Finished {
+            ok: false,
+            summary: None,
+        };
+        assert!(notified(&l.event(wid, 1, task, replay)).is_empty());
+        let (_, eff) = l.connect(wid, info(), &[task], 2, T0);
+        assert!(notified(&eff).is_empty());
+        assert!(notified(&l.seen(task)).is_empty());
+        l.status();
+        assert!(notified(&l.tick(T0, secs(60))).is_empty());
+    }
+
+    #[test]
+    fn failures_and_limits_notify_urgently() {
+        let (mut l, wid, task) = running_setup();
+        let eff = l.event(
+            wid,
+            1,
+            task,
+            AgentEvent::Finished {
+                ok: false,
+                summary: None,
+            },
+        );
+        assert_eq!(notified(&eff), vec![(task, "failed · p", "after 0s", true)]);
+
+        let (limited, _) = l.submit("q".into(), None, Some("claude".into()), None);
+        let hit = AgentEvent::Limited { resets_at: None };
+        assert!(notified(&l.event(wid, 1, limited, hit)).is_empty());
+        let eff = l.event(
+            wid,
+            1,
+            limited,
+            AgentEvent::Finished {
+                ok: false,
+                summary: None,
+            },
+        );
+        assert_eq!(
+            notified(&eff),
+            vec![(limited, "limited · q", "after 0s", true)]
+        );
+    }
+
+    #[test]
+    fn orchestrator_failures_and_planner_results_notify() {
+        // Worker gone past its grace: its running task fails.
+        let (mut l, wid, task) = running_setup();
+        l.disconnect(wid, 1);
+        let eff = l.expire(wid, 1);
+        assert_eq!(notified(&eff), vec![(task, "failed · p", "after 0s", true)]);
+        assert!(notified(&l.expire(wid, 1)).is_empty());
+
+        // Answered by the planner; a planner failure.
+        let (answered, _) = l.submit("what is 2+2?".into(), None, None, None);
+        let answer = r#"{"answer":"4","reason":"r"}"#;
+        let eff = l.planning_event(
+            answered,
+            AgentEvent::Finished {
+                ok: true,
+                summary: Some(answer.into()),
+            },
+        );
+        assert_eq!(
+            notified(&eff),
+            vec![(answered, "done · what is 2+2?", "after 0s", false)]
+        );
+        let (bad, _) = l.submit("r".into(), None, None, None);
+        let eff = l.planning_event(
+            bad,
+            AgentEvent::Finished {
+                ok: false,
+                summary: None,
+            },
+        );
+        assert_eq!(notified(&eff), vec![(bad, "failed · r", "after 0s", true)]);
     }
 
     #[test]

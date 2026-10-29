@@ -255,6 +255,16 @@ pub enum ClientMsg {
     RefreshEvidence {
         task: TaskId,
     },
+    /// Send Web Push notifications to this browser subscription when a task
+    /// needs the user. Fields are the `PushSubscription`'s, base64url.
+    PushSubscribe {
+        endpoint: String,
+        p256dh: String,
+        auth: String,
+    },
+    PushUnsubscribe {
+        endpoint: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

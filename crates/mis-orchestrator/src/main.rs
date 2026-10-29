@@ -1,5 +1,6 @@
 use clap::Parser;
 use mis_orchestrator::access_gate::AccessGate;
+use mis_orchestrator::push::Push;
 use mis_orchestrator::{access, normalize_origins, App};
 
 #[derive(Parser)]
@@ -51,6 +52,32 @@ struct Args {
     /// Fetch Access keys from here instead of the team's certs URL (testing).
     #[arg(long, hide = true)]
     cf_access_certs_url: Option<String>,
+    /// Holds the push notification key and subscriptions. Default: ~/.local/state/mis
+    /// (%LOCALAPPDATA%\mis on Windows).
+    #[arg(long, env = "MIS_STATE_DIR")]
+    state_dir: Option<std::path::PathBuf>,
+    /// VAPID contact push services may use about this sender (`mailto:` or `https:`).
+    #[arg(
+        long,
+        env = "MIS_VAPID_SUBJECT",
+        default_value = "https://github.com/tommy-xr/MakeItSo"
+    )]
+    vapid_subject: String,
+}
+
+/// `$XDG_STATE_HOME/mis`, else `~/.local/state/mis`; `%LOCALAPPDATA%\mis` on Windows.
+fn default_state_dir() -> Option<std::path::PathBuf> {
+    let var = |k| {
+        std::env::var_os(k)
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+    };
+    let base = if cfg!(windows) {
+        var("LOCALAPPDATA")?
+    } else {
+        var("XDG_STATE_HOME").or_else(|| Some(var("HOME")?.join(".local/state")))?
+    };
+    Some(base.join("mis"))
 }
 
 /// Local `claude` for one tool-less turn on `model`: no user/project settings
@@ -177,6 +204,16 @@ async fn main() -> anyhow::Result<()> {
         .with_allowed_origins(origins);
     if let Some(gate) = gate {
         app = app.with_access(gate);
+    }
+    match args.state_dir.clone().or_else(default_state_dir) {
+        Some(dir) => match Push::open(dir.clone(), args.vapid_subject.clone()) {
+            Ok(push) => {
+                tracing::info!(dir = %dir.display(), "push notifications on");
+                app = app.with_push(push);
+            }
+            Err(e) => tracing::warn!("push notifications off: {e:#}"),
+        },
+        None => tracing::warn!("push notifications off: no --state-dir and no home dir"),
     }
     if args.no_planner {
         tracing::info!("planner off; tasks without --harness run on claude");
