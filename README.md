@@ -142,3 +142,18 @@ it from a phone:
 
 - `cloudflared tunnel --url http://localhost:7474`
 - `tailscale serve 7474`
+
+## Push notifications
+
+Workers -> *notify me* pushes a notification when a task fails, hits a usage limit, or finishes;
+tapping it opens the task. On iPhone (iOS 16.4+) add the page to the Home Screen first (Share ->
+Add to Home Screen) and toggle it there; desktop Chrome/Firefox work in a tab. It needs HTTPS (or
+`localhost`), and is hidden for read-only tokens.
+
+The orchestrator keeps its VAPID key and the subscriptions in `--state-dir` / `MIS_STATE_DIR`
+(default `~/.local/state/mis`, `%LOCALAPPDATA%\mis` on Windows), readable only by you. Set
+`MIS_VAPID_SUBJECT` to a `mailto:` or `https:` contact for push services (default: this repo's URL).
+
+Privacy: a notification carries only the task's status, a clipped first line of its prompt, and how
+long it took. It travels through the browser vendor's push service (Apple, Google or Mozilla),
+end-to-end encrypted (RFC 8291): the service sees when and how much, not what.

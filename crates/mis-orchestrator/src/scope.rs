@@ -17,10 +17,13 @@ pub enum Scope {
 pub fn allowed(scope: Scope, msg: &ClientMsg) -> bool {
     match msg {
         ClientMsg::Status | ClientMsg::Subscribe | ClientMsg::Show { .. } => true,
-        // Seen clears attention for everyone; RefreshEvidence sets a worker running `gh`.
-        ClientMsg::Submit { .. } | ClientMsg::Seen { .. } | ClientMsg::RefreshEvidence { .. } => {
-            scope == Scope::Full
-        }
+        // Seen clears attention for everyone; RefreshEvidence sets a worker running `gh`;
+        // a push subscription makes the orchestrator POST task prompts to its endpoint.
+        ClientMsg::Submit { .. }
+        | ClientMsg::Seen { .. }
+        | ClientMsg::RefreshEvidence { .. }
+        | ClientMsg::PushSubscribe { .. }
+        | ClientMsg::PushUnsubscribe { .. } => scope == Scope::Full,
     }
 }
 
@@ -54,6 +57,14 @@ mod tests {
             submit(Some(task)),
             ClientMsg::Seen { task },
             ClientMsg::RefreshEvidence { task },
+            ClientMsg::PushSubscribe {
+                endpoint: "e".into(),
+                p256dh: "k".into(),
+                auth: "a".into(),
+            },
+            ClientMsg::PushUnsubscribe {
+                endpoint: "e".into(),
+            },
         ];
         for m in acts {
             assert!(!allowed(Scope::Read, &m), "{m:?}");

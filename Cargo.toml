@@ -25,3 +25,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml = "1.1.8"
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }
+# Web Push encryption (RFC 8291 aes128gcm) on RustCrypto; builds requests, sends nothing,
+# so reqwest stays the only HTTP/TLS stack. VAPID is signed with jsonwebtoken. Pinned: crypto.
+web-push-native = { version = "=0.5.0", default-features = false }
+base64ct = { version = "1.8", features = ["alloc"] }

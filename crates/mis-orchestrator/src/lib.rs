@@ -26,6 +26,7 @@ pub mod access;
 pub mod access_gate;
 pub mod ledger;
 pub mod plan;
+pub mod push;
 pub mod scope;
 pub mod summary;
 pub mod tools;
@@ -73,6 +74,8 @@ pub struct App {
     started: Instant,
     /// Cloudflare Access in front: remote requests need its JWT.
     access: Option<Arc<AccessGate>>,
+    /// Web Push to subscribed browsers. None: notifications are off.
+    push: Option<Arc<push::Push>>,
 }
 
 impl App {
@@ -98,6 +101,7 @@ impl App {
             ping_every: Duration::from_secs(25),
             started: Instant::now(),
             access: None,
+            push: None,
         }
     }
 
@@ -139,6 +143,12 @@ impl App {
     /// Require a valid Cloudflare Access JWT on non-local requests.
     pub fn with_access(mut self, gate: AccessGate) -> Self {
         self.access = Some(Arc::new(gate));
+        self
+    }
+
+    /// Notify subscribed browsers when a task needs the user.
+    pub fn with_push(mut self, push: push::Push) -> Self {
+        self.push = Some(Arc::new(push));
         self
     }
 
@@ -198,6 +208,16 @@ impl App {
                 // Dropping the sender ends that socket's `worker_conn` loop.
                 Effect::Close { conn } => {
                     self.conns.lock().unwrap().remove(&conn);
+                }
+                Effect::Notify {
+                    task,
+                    title,
+                    body,
+                    urgent,
+                } => {
+                    if let Some(push) = self.push.clone() {
+                        tokio::spawn(async move { push.send(task, &title, &body, urgent).await });
+                    }
                 }
             }
         }
@@ -449,6 +469,7 @@ pub fn router(app: App) -> Router {
         .route("/manifest.webmanifest", get(manifest))
         .route("/icon.svg", get(icon))
         .route("/apple-touch-icon.png", get(touch_icon))
+        .route("/sw.js", get(service_worker))
         .route("/api/info", get(info))
         .route("/ws/worker", get(ws_worker))
         .route("/ws/client", get(ws_client))
@@ -456,7 +477,7 @@ pub fn router(app: App) -> Router {
         .with_state(app)
 }
 
-/// Wall-clock seconds, only for display (`stats_at`).
+/// Wall-clock seconds, for display (`stats_at`) and push JWT expiry.
 fn unix_secs() -> u64 {
     unix_ms() / 1000
 }
@@ -507,9 +528,26 @@ async fn touch_icon() -> impl IntoResponse {
     )
 }
 
+/// Shows pushed notifications and opens their task. Revalidated like the page,
+/// so a rebuilt orchestrator's worker takes over.
+async fn service_worker() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (
+                header::HeaderName::from_static("service-worker-allowed"),
+                "/",
+            ),
+        ],
+        include_str!("../static/sw.js"),
+    )
+}
+
 /// Lets the page decide whether to ask for a token (not when Access already let
 /// it in) and whether to offer composers, and shows what is running. `scope`: what
-/// this request's bearer token, if any, would get (null: refused).
+/// this request's bearer token, if any, would get (null: refused). `vapid`: the
+/// key to subscribe to push with (null: notifications off).
 async fn info(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -522,6 +560,7 @@ async fn info(
         "auth": app.token.is_some() && !access,
         "access": access,
         "scope": scope,
+        "vapid": app.push.as_ref().map(|p| p.public_key()),
         "version": VERSION,
     }))
 }
@@ -717,6 +756,21 @@ async fn client_conn(mut sock: WebSocket, app: App, scope: Scope) {
                         None => ServerMsg::Error { message: format!("unknown task {task}") },
                     };
                     send_json(&mut sock, &reply).await;
+                }
+                Some(ClientMsg::PushSubscribe { endpoint, p256dh, auth }) => {
+                    let sub = push::Subscription { endpoint, p256dh, auth };
+                    let refused = match &app.push {
+                        Some(p) => p.subscribe(sub).err(),
+                        None => Some("push notifications are off".into()),
+                    };
+                    if let Some(message) = refused {
+                        send_json(&mut sock, &ServerMsg::Error { message }).await;
+                    }
+                }
+                Some(ClientMsg::PushUnsubscribe { endpoint }) => {
+                    if let Some(p) = &app.push {
+                        p.unsubscribe(&endpoint);
+                    }
                 }
                 Some(ClientMsg::RefreshEvidence { task }) => {
                     let refused = app.transition(|l| match l.refresh_evidence(task) {

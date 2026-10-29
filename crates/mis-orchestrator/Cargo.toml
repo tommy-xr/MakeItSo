@@ -9,6 +9,7 @@ mis-types.workspace = true
 mis-agent.workspace = true
 anyhow.workspace = true
 axum.workspace = true
+base64ct.workspace = true
 clap.workspace = true
 futures-util.workspace = true
 if-addrs.workspace = true
@@ -20,6 +21,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+web-push-native.workspace = true
 
 [dev-dependencies]
 tokio-tungstenite.workspace = true
