@@ -527,7 +527,7 @@ async fn serves_page_and_info_without_token() {
     assert!(page.contains(r#"id="speak""#));
     let info = http_get(&base, "/api/info").await;
     assert!(
-        info.contains(r#"{"access":false,"auth":true,"scope":null,"version":"#),
+        info.contains(r#"{"access":false,"auth":true,"scope":null,"vapid":null,"version":"#),
         "{info}"
     );
     // Home-screen install assets.
@@ -538,6 +538,16 @@ async fn serves_page_and_info_without_token() {
         "{manifest}"
     );
     assert!(http_get(&base, "/icon.svg").await.contains("image/svg+xml"));
+    // Service worker for push: may control `/`, revalidated like the page.
+    let sw = http_get(&base, "/sw.js").await;
+    for h in [
+        "text/javascript",
+        "service-worker-allowed: /",
+        "cache-control: no-cache",
+        "showNotification",
+    ] {
+        assert!(sw.contains(h), "{h}: {sw}");
+    }
 }
 
 const ACCESS_AUD: &str = "aud-tag";
@@ -624,12 +634,12 @@ async fn info_reports_access_so_page_skips_token() {
     let jwt = format!("cf-access-jwt-assertion: {}\r\n", access_jwt(ACCESS_AUD));
     let info = http_get_with(&base, "/api/info", &jwt).await;
     assert!(
-        info.contains(r#"{"access":true,"auth":false,"scope":"full","version":"#),
+        info.contains(r#"{"access":true,"auth":false,"scope":"full","vapid":null,"version":"#),
         "{info}"
     );
     let info = http_get(&base, "/api/info").await;
     assert!(
-        info.contains(r#"{"access":false,"auth":true,"scope":null,"version":"#),
+        info.contains(r#"{"access":false,"auth":true,"scope":null,"vapid":null,"version":"#),
         "{info}"
     );
 }
@@ -1957,4 +1967,183 @@ async fn failed_and_unread_tasks_need_attention_until_seen() {
         panic!()
     };
     assert_eq!(attention(&tasks), [Attention::Failed, Attention::None]);
+}
+
+/// Local stand-in for a browser vendor's push service: records each POST and
+/// answers with `status`.
+struct PushStub {
+    endpoint: String,
+    hits: tokio::sync::mpsc::UnboundedReceiver<(axum::http::HeaderMap, Vec<u8>)>,
+    status: std::sync::Arc<std::sync::atomic::AtomicU16>,
+}
+
+async fn push_stub() -> PushStub {
+    use axum::http::{HeaderMap, StatusCode};
+    use std::sync::atomic::Ordering;
+    let (tx, hits) = tokio::sync::mpsc::unbounded_channel();
+    let status = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(201));
+    let answer = status.clone();
+    let stub = axum::Router::new().route(
+        "/push/dev1",
+        axum::routing::post(
+            move |headers: HeaderMap, body: axum::body::Bytes| async move {
+                tx.send((headers, body.to_vec())).unwrap();
+                StatusCode::from_u16(answer.load(Ordering::SeqCst)).unwrap()
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, stub).await });
+    PushStub {
+        endpoint: format!("http://{addr}/push/dev1"),
+        hits,
+        status,
+    }
+}
+
+/// The browser's side of a subscription: its key pair and auth secret.
+fn browser_keys() -> (web_push_native::p256::SecretKey, [u8; 16]) {
+    (
+        web_push_native::p256::SecretKey::from_slice(&[7; 32]).unwrap(),
+        [1; 16],
+    )
+}
+
+fn b64(bytes: &[u8]) -> String {
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    Base64UrlUnpadded::encode_string(bytes)
+}
+
+/// Orchestrator with push on (state in a fresh dir), a client subscribed to
+/// `stub`, and a worker. Returns (base, state dir, client, worker).
+async fn push_setup(stub: &PushStub) -> (String, std::path::PathBuf, Ws, Ws) {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-push-{}", uuid::Uuid::new_v4()));
+    let push = mis_orchestrator::push::Push::open(dir.clone(), "mailto:ops@example.invalid".into())
+        .unwrap();
+    let base = start_app(App::new(None).with_push(push)).await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    let (ua, auth) = browser_keys();
+    let p256dh = b64(&ua.public_key().to_sec1_bytes());
+    let endpoint = stub.endpoint.clone();
+    let auth = b64(&auth);
+    send(
+        &mut client,
+        &ClientMsg::PushSubscribe {
+            endpoint,
+            p256dh,
+            auth,
+        },
+    )
+    .await;
+    let worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+    (base, dir, client, worker)
+}
+
+/// Submit `prompt` and have the worker fail it.
+async fn fail_task(client: &mut Ws, worker: &mut Ws, prompt: &str) -> TaskId {
+    let submit = ClientMsg::Submit {
+        prompt: prompt.into(),
+        cwd: None,
+        harness: Some("claude".into()),
+        model: None,
+        reply_to: None,
+    };
+    send(client, &submit).await;
+    let ServerMsg::Submitted { task } = recv(client).await else {
+        panic!("subscribe refused?")
+    };
+    let OrchMsg::Assign { .. } = recv(worker).await else {
+        panic!()
+    };
+    let event = AgentEvent::Finished {
+        ok: false,
+        summary: None,
+    };
+    send(worker, &WorkerMsg::Event { task, event }).await;
+    task
+}
+
+async fn next_push(stub: &mut PushStub) -> (axum::http::HeaderMap, Vec<u8>) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), stub.hits.recv())
+        .await
+        .expect("no push")
+        .unwrap()
+}
+
+async fn no_more_pushes(stub: &mut PushStub) {
+    let more = tokio::time::timeout(std::time::Duration::from_millis(300), stub.hits.recv()).await;
+    assert!(more.is_err(), "unexpected push");
+}
+
+#[tokio::test]
+async fn failed_task_pushes_once_encrypted_and_signed() {
+    let mut stub = push_stub().await;
+    let (base, dir, mut client, mut worker) = push_setup(&stub).await;
+    let task = fail_task(&mut client, &mut worker, "fix the mic button").await;
+    let (headers, body) = next_push(&mut stub).await;
+    no_more_pushes(&mut stub).await;
+
+    let h = |k: &str| headers.get(k).unwrap().to_str().unwrap().to_string();
+    assert_eq!(h("content-encoding"), "aes128gcm");
+    assert_eq!(h("ttl"), "3600");
+    assert_eq!(h("urgency"), "high");
+    // VAPID: a JWT for the push service's origin, signed by the key /api/info offers.
+    let info = http_get(&base, "/api/info").await;
+    let info: serde_json::Value =
+        serde_json::from_str(info.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let auth = h("authorization");
+    let (jwt, k) = auth
+        .strip_prefix("vapid t=")
+        .and_then(|rest| rest.split_once(", k="))
+        .unwrap();
+    assert_eq!(info["vapid"], k);
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    let point = Base64UrlUnpadded::decode_vec(k).unwrap();
+    let key =
+        jsonwebtoken::DecodingKey::from_ec_components(&b64(&point[1..33]), &b64(&point[33..]))
+            .unwrap();
+    let origin = stub.endpoint.trim_end_matches("/push/dev1");
+    let mut check = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::ES256);
+    check.set_audience(&[origin]);
+    let claims = jsonwebtoken::decode::<serde_json::Value>(jwt, &key, &check)
+        .unwrap()
+        .claims;
+    assert_eq!(claims["sub"], "mailto:ops@example.invalid");
+    // Only the browser's keys open the payload.
+    let (ua, auth) = browser_keys();
+    let auth = web_push_native::Auth::clone_from_slice(&auth);
+    let plain = web_push_native::decrypt(body, &ua, &auth).unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+    assert_eq!(
+        payload,
+        serde_json::json!({
+            "title": "failed · fix the mic button",
+            "body": "after 0s",
+            "tag": task,
+            "url": format!("/#task/{task}"),
+        })
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn gone_push_subscription_is_dropped() {
+    let mut stub = push_stub().await;
+    stub.status.store(410, std::sync::atomic::Ordering::SeqCst);
+    let (_base, dir, mut client, mut worker) = push_setup(&stub).await;
+    let saved = || std::fs::read_to_string(dir.join("push-subscriptions.json")).unwrap();
+    assert!(saved().contains(&stub.endpoint));
+    fail_task(&mut client, &mut worker, "one").await;
+    next_push(&mut stub).await;
+    for _ in 0..50 {
+        if !saved().contains(&stub.endpoint) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(!saved().contains(&stub.endpoint), "{}", saved());
+    fail_task(&mut client, &mut worker, "two").await;
+    no_more_pushes(&mut stub).await;
+    std::fs::remove_dir_all(dir).unwrap();
 }
