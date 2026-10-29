@@ -1835,12 +1835,14 @@ name = "mis-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64ct",
  "futures-util",
  "mis-types",
  "serde_json",
  "tokio",
  "toml 1.1.8+spec-1.1.0",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

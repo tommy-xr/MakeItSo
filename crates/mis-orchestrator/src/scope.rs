@@ -39,6 +39,7 @@ mod tests {
             harness: None,
             model: None,
             reply_to,
+            images: vec![],
         };
         let looks = [
             ClientMsg::Status,

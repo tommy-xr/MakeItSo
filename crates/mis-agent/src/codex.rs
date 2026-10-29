@@ -245,6 +245,10 @@ impl CodexAgent {
         if let Some(m) = o.mcp {
             a.extend(mcp_args(&m.url));
         }
+        // `-i` takes values until the next flag: `--` stops it short of the prompt.
+        for path in o.images {
+            a.extend(["-i".into(), path.clone()]);
+        }
         a.push("--".into());
         a.extend(o.resume.map(String::from));
         a.push(prompt.into());
@@ -566,6 +570,29 @@ mod tests {
                 "t-1",
                 "-more"
             ]
+        );
+    }
+
+    #[test]
+    fn argv_attaches_each_image_before_the_prompt() {
+        let images = ["/t/a.jpg".to_string(), "/t/b.png".to_string()];
+        let o = RunOpts {
+            images: &images,
+            ..Default::default()
+        };
+        let a = CodexAgent::default().argv("hi", &o);
+        assert_eq!(
+            &a[a.len() - 6..],
+            ["-i", "/t/a.jpg", "-i", "/t/b.png", "--", "hi"]
+        );
+        let o = RunOpts {
+            resume: Some("t-1"),
+            ..o
+        };
+        let a = CodexAgent::default().argv("hi", &o);
+        assert_eq!(
+            &a[a.len() - 7..],
+            ["-i", "/t/a.jpg", "-i", "/t/b.png", "--", "t-1", "hi"]
         );
     }
 

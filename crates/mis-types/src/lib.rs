@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 mod access;
 pub use access::access_headers;
+mod image;
+pub use image::{ImageFile, ImageKind, MAX_IMAGES, MAX_IMAGE_BYTES};
 mod links;
 pub use links::{github_link, github_links, Checks, Link, LinkKind, PrState, PrStatus};
 pub mod mcp;
@@ -214,6 +216,9 @@ pub enum OrchMsg {
     },
     Assign {
         task: Task,
+        /// The task's attached images, in the order the user attached them.
+        #[serde(default)]
+        images: Vec<ImageFile>,
     },
     /// Read these PR links of a task this worker ran now, then again while
     /// their checks are pending. Replaces any earlier watch of that task.
@@ -240,6 +245,9 @@ pub enum ClientMsg {
         /// one; `cwd`/`harness`/`model` are then taken from it.
         #[serde(default)]
         reply_to: Option<TaskId>,
+        /// Uploaded images (`POST /api/upload` ids) to attach, at most `MAX_IMAGES`.
+        #[serde(default)]
+        images: Vec<Uuid>,
     },
     /// Stream all task events from now on.
     Subscribe,
@@ -335,6 +343,9 @@ pub struct TaskSummary {
     /// usage: Unix millis when the first of them frees up.
     #[serde(default)]
     pub blocked_until: Option<u64>,
+    /// Attached images, served at `/api/images/<id>`.
+    #[serde(default)]
+    pub images: Vec<Uuid>,
 }
 
 /// First non-blank line of `s`, cut to `max` chars with a trailing ellipsis.
@@ -581,6 +592,18 @@ mod tests {
         assert_eq!((old.started_at, old.tokens_in), (None, None));
         assert!(old.activity.is_empty() && old.links.is_empty());
         assert_eq!(old.attention, Attention::None);
+        assert!(old.images.is_empty());
+        // Clients and orchestrators predating images still parse.
+        let submit: ClientMsg =
+            serde_json::from_str(r#"{"type":"submit","prompt":"p","cwd":null,"harness":null}"#)
+                .unwrap();
+        assert!(matches!(submit, ClientMsg::Submit { images, .. } if images.is_empty()));
+        let assign: OrchMsg = serde_json::from_str(
+            r#"{"type":"assign","task":{"id":"00000000-0000-0000-0000-000000000000",
+                "prompt":"p","cwd":null,"harness":"claude"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(assign, OrchMsg::Assign { images, .. } if images.is_empty()));
         // Stats from workers predating limits have none; a window may lack its reset.
         let s: WorkerStats = serde_json::from_str(r#"{"cpu_pct":7,"disk_used_pct":1}"#).unwrap();
         assert!(s.limits.is_empty());
@@ -644,6 +667,7 @@ mod tests {
             links: vec![],
             attention: Attention::None,
             blocked_until: None,
+            images: vec![],
         }
     }
 
