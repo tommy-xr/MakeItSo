@@ -88,7 +88,7 @@ pub fn payload(task: TaskId, title: &str, body: &str) -> String {
 }
 
 /// Write `bytes` to `path` readable only by this user, atomically (temp + rename).
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
     let _ = std::fs::remove_file(&tmp); // so the mode below applies
     let mut opts = std::fs::OpenOptions::new();

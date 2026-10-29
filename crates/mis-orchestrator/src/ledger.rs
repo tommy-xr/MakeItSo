@@ -20,6 +20,12 @@ pub enum Effect {
         conn: ConnId,
         msg: OrchMsg,
     },
+    /// Send `OrchMsg::Assign` for `task` with these images' bytes.
+    Assign {
+        conn: ConnId,
+        task: Task,
+        images: Vec<Uuid>,
+    },
     Broadcast(ServerMsg),
     /// Worker went offline; call `expire(wid, generation)` after the grace period.
     StartGrace {
@@ -139,6 +145,8 @@ struct TaskEntry {
     limited: bool,
     /// A client opened it after it finished.
     seen: bool,
+    /// Attached image ids, sent with the task to its worker.
+    images: Vec<Uuid>,
 }
 
 /// What a task needs from the user; opening it once finished clears it.
@@ -194,6 +202,7 @@ impl TaskEntry {
             links: vec![],
             limited: false,
             seen: false,
+            images: vec![],
         }
     }
 
@@ -269,6 +278,7 @@ impl TaskEntry {
             attention: attention(self.status, self.limited, self.seen),
             // Needs the fleet; see `Ledger::status`.
             blocked_until: None,
+            images: self.images.clone(),
         }
     }
 
@@ -433,10 +443,11 @@ impl Ledger {
         cwd: Option<String>,
         harness: Option<String>,
         model: Option<String>,
+        images: Vec<Uuid>,
     ) -> (TaskId, Vec<Effect>) {
         let id = Uuid::new_v4();
         let planning = harness.is_none();
-        let plan_prompt = planning.then(|| plan::prompt(&prompt, &self.fleet()));
+        let plan_prompt = planning.then(|| plan::prompt(&prompt, images.len(), &self.fleet()));
         let mut entry = TaskEntry::new(
             Task {
                 id,
@@ -452,6 +463,7 @@ impl Ledger {
         if planning {
             entry.status = TaskStatus::Planning;
         }
+        entry.images = images;
         self.tasks.push(entry);
         if let Some(prompt) = plan_prompt {
             return (id, vec![Effect::Plan { task: id, prompt }]);
@@ -469,6 +481,7 @@ impl Ledger {
         &mut self,
         parent: TaskId,
         text: String,
+        images: Vec<Uuid>,
         planner: bool,
     ) -> Result<(TaskId, Vec<Effect>), String> {
         let p = self
@@ -500,6 +513,7 @@ impl Ledger {
                 };
                 let mut entry = TaskEntry::new(task, self.now_ms);
                 entry.pin = Some(wid);
+                entry.images = images;
                 let id = entry.task.id;
                 self.tasks.push(entry);
                 self.queue.push_back(id);
@@ -512,7 +526,7 @@ impl Ledger {
                     false => (Some(p.task.harness.clone()), p.task.model.clone()),
                 };
                 let harness = harness.or_else(|| (!planner).then(|| "claude".into()));
-                self.submit(prompt, p.task.cwd.clone(), harness, model)
+                self.submit(prompt, p.task.cwd.clone(), harness, model, images)
             }
         };
         let t = self.tasks.iter_mut().find(|t| t.task.id == id);
@@ -987,11 +1001,10 @@ impl Ledger {
                     let t = &mut self.tasks[ti];
                     t.status = TaskStatus::Running;
                     t.worker = Some(wid);
-                    effects.push(Effect::Send {
+                    effects.push(Effect::Assign {
                         conn,
-                        msg: OrchMsg::Assign {
-                            task: t.task.clone(),
-                        },
+                        task: t.task.clone(),
+                        images: t.images.clone(),
                     });
                 }
                 None => remaining.push_back(id),
@@ -1235,10 +1248,7 @@ mod tests {
         effects
             .iter()
             .filter_map(|e| match e {
-                Effect::Send {
-                    conn,
-                    msg: OrchMsg::Assign { task },
-                } => Some((*conn, task.id)),
+                Effect::Assign { conn, task, .. } => Some((*conn, task.id)),
                 _ => None,
             })
             .collect()
@@ -1253,7 +1263,7 @@ mod tests {
         let mut l = Ledger::default();
         let wid = Uuid::new_v4();
         l.connect(wid, info(), &[], 1, T0);
-        let (task, eff) = l.submit("p".into(), None, Some("claude".into()), None);
+        let (task, eff) = l.submit("p".into(), None, Some("claude".into()), None, vec![]);
         assert_eq!(assigned(&eff), vec![(1, task)]);
         (l, wid, task)
     }
@@ -1287,7 +1297,7 @@ mod tests {
         );
         assert_eq!(finished(&eff, task), Some(true));
         assert!(!l.is_busy(wid));
-        let (next, eff) = l.submit("q".into(), None, Some("claude".into()), None);
+        let (next, eff) = l.submit("q".into(), None, Some("claude".into()), None, vec![]);
         assert_eq!(assigned(&eff), vec![(2, next)]);
     }
 
@@ -1324,7 +1334,7 @@ mod tests {
         l.disconnect(wid, 1); // offline, so the next task must land on `other`
         let other = Uuid::new_v4();
         l.connect(other, info(), &[], 5, T0);
-        let (foreign, eff) = l.submit("f".into(), None, Some("claude".into()), None);
+        let (foreign, eff) = l.submit("f".into(), None, Some("claude".into()), None, vec![]);
         assert_eq!(assigned(&eff), vec![(5, foreign)]);
 
         let (unknown, _) = l.connect(wid, info(), &[task, foreign, Uuid::nil()], 2, T0);
@@ -1359,7 +1369,7 @@ mod tests {
         let wid = Uuid::new_v4();
         l.connect(wid, info(), &[], 1, T0);
         l.disconnect(wid, 1);
-        let (task, eff) = l.submit("p".into(), None, Some("claude".into()), None);
+        let (task, eff) = l.submit("p".into(), None, Some("claude".into()), None, vec![]);
         assert!(assigned(&eff).is_empty());
         assert_eq!(task_status(&l, task), TaskStatus::Queued);
         let (_, eff) = l.connect(wid, info(), &[], 2, T0);
@@ -1424,12 +1434,14 @@ mod tests {
             },
         );
         // Requested: sent to the worker and kept over the reported one.
-        let (next, eff) = l.submit("q".into(), None, Some("claude".into()), Some("opus".into()));
-        let [Effect::Send {
-            msg: OrchMsg::Assign { task: sent },
-            ..
-        }] = &eff[..]
-        else {
+        let (next, eff) = l.submit(
+            "q".into(),
+            None,
+            Some("claude".into()),
+            Some("opus".into()),
+            vec![],
+        );
+        let [Effect::Assign { task: sent, .. }] = &eff[..] else {
             panic!("{eff:?}")
         };
         assert_eq!(sent.model.as_deref(), Some("opus"));
@@ -1500,7 +1512,13 @@ mod tests {
         let mut both = info();
         both.harnesses.push("codex".into());
         l.connect(wid, both, &[], 1, T0);
-        let (task, eff) = l.submit("hey run as codex and say hi".into(), None, None, None);
+        let (task, eff) = l.submit(
+            "hey run as codex and say hi".into(),
+            None,
+            None,
+            None,
+            vec![],
+        );
         assert_eq!(task_status(&l, task), TaskStatus::Planning);
         let [Effect::Plan { task: t, prompt }] = &eff[..] else {
             panic!("{eff:?}")
@@ -1540,9 +1558,10 @@ mod tests {
                     model: None,
                 },
             ..
-        }), Effect::Send {
+        }), Effect::Assign {
             conn: 1,
-            msg: OrchMsg::Assign { task: sent },
+            task: sent,
+            ..
         }] = &eff[..]
         else {
             panic!("{eff:?}")
@@ -1583,7 +1602,7 @@ mod tests {
         assert_eq!(fleet["claude"], ["sonnet"]);
         assert!(fleet["codex"].is_empty());
 
-        let (task, _) = l.submit("summarize the README".into(), None, None, None);
+        let (task, _) = l.submit("summarize the README".into(), None, None, None, vec![]);
         let eff = l.planning_event(
             task,
             AgentEvent::Finished {
@@ -1594,10 +1613,7 @@ mod tests {
         let sent: Vec<_> = eff
             .iter()
             .filter_map(|e| match e {
-                Effect::Send {
-                    msg: OrchMsg::Assign { task },
-                    ..
-                } => Some(task.model.as_deref()),
+                Effect::Assign { task, .. } => Some(task.model.as_deref()),
                 Effect::Broadcast(ServerMsg::Event {
                     event: AgentEvent::Planned { model, .. },
                     ..
@@ -1613,7 +1629,7 @@ mod tests {
     fn planner_answer_finishes_task_without_worker() {
         let mut l = Ledger::default();
         l.connect(Uuid::new_v4(), info(), &[], 1, T0);
-        let (task, _) = l.submit("what is 2+2?".into(), None, None, None);
+        let (task, _) = l.submit("what is 2+2?".into(), None, None, None, vec![]);
         l.planning_event(
             task,
             AgentEvent::Started {
@@ -1653,7 +1669,7 @@ mod tests {
     fn planner_model_is_not_shown_unless_it_answers() {
         let mut l = Ledger::default();
         l.connect(Uuid::new_v4(), info(), &[], 1, T0);
-        let (task, _) = l.submit("fix the bug".into(), None, None, None);
+        let (task, _) = l.submit("fix the bug".into(), None, None, None, vec![]);
         l.planning_event(
             task,
             AgentEvent::Started {
@@ -1717,9 +1733,9 @@ mod tests {
             now_ms: 1_000,
             ..Default::default()
         };
-        let (planned, _) = l.submit("p".into(), None, None, None);
+        let (planned, _) = l.submit("p".into(), None, None, None, vec![]);
         assert_eq!(summary(&l, planned).activity, "planning…");
-        let (queued, _) = l.submit("q".into(), None, Some("claude".into()), None);
+        let (queued, _) = l.submit("q".into(), None, Some("claude".into()), None, vec![]);
         assert_eq!(summary(&l, queued).activity, "queued");
 
         let wid = Uuid::new_v4();
@@ -1788,7 +1804,7 @@ mod tests {
         );
         let s = summary(&l, planned);
         assert_eq!((s.tokens_in, s.activity.as_str()), (None, "started"));
-        let (answered, _) = l.submit("2+2".into(), None, None, None);
+        let (answered, _) = l.submit("2+2".into(), None, None, None, vec![]);
         l.planning_event(answered, usage);
         l.planning_event(
             answered,
@@ -1906,7 +1922,7 @@ mod tests {
         assert_eq!(l.show(task).unwrap().0.summary.as_deref(), Some("boom"));
         // Planner answers never reach `event`, so never summarize.
         let mut l = Ledger::default();
-        let (task, _) = l.submit("2+2".into(), None, None, None);
+        let (task, _) = l.submit("2+2".into(), None, None, None, vec![]);
         let eff = l.planning_event(
             task,
             AgentEvent::Finished {
@@ -1955,7 +1971,7 @@ mod tests {
     fn bad_plan_fails_task() {
         let mut l = Ledger::default();
         l.connect(Uuid::new_v4(), info(), &[], 1, T0);
-        let (task, _) = l.submit("p".into(), None, None, None);
+        let (task, _) = l.submit("p".into(), None, None, None, vec![]);
         let eff = l.planning_event(
             task,
             AgentEvent::Finished {
@@ -1970,7 +1986,7 @@ mod tests {
     #[test]
     fn plan_without_workers_queues_until_one_joins() {
         let mut l = Ledger::default();
-        let (task, eff) = l.submit("use codex".into(), None, None, None);
+        let (task, eff) = l.submit("use codex".into(), None, None, None, vec![]);
         let [Effect::Plan { prompt, .. }] = &eff[..] else {
             panic!("{eff:?}")
         };
@@ -2012,10 +2028,7 @@ mod tests {
         effects
             .iter()
             .filter_map(|e| match e {
-                Effect::Send {
-                    msg: OrchMsg::Assign { task },
-                    ..
-                } => Some(task.clone()),
+                Effect::Assign { task, .. } => Some(task.clone()),
                 _ => None,
             })
             .collect()
@@ -2046,7 +2059,7 @@ mod tests {
         assert!(l.seen(task).is_empty(), "seen twice: nothing new to tell");
         assert!(l.seen(Uuid::new_v4()).is_empty());
 
-        let (failed, _) = l.submit("q".into(), None, Some("claude".into()), None);
+        let (failed, _) = l.submit("q".into(), None, Some("claude".into()), None, vec![]);
         finish(&mut l, wid, failed, false);
         assert_eq!(attention_of(&l, failed), Attention::Failed);
         l.seen(failed);
@@ -2076,7 +2089,7 @@ mod tests {
         l.connect(wid, info(), &[], 1, T0);
         l.now_ms = 1_000;
         let prompt = format!("fix the mic button {}\nsecond line", "x".repeat(100));
-        let (task, _) = l.submit(prompt, None, Some("claude".into()), None);
+        let (task, _) = l.submit(prompt, None, Some("claude".into()), None, vec![]);
         let eff = l.event(wid, 1, task, text("working"));
         assert!(notified(&eff).is_empty(), "running needs nothing");
         l.now_ms = 1_000 + 192_000;
@@ -2128,7 +2141,7 @@ mod tests {
         );
         assert_eq!(notified(&eff), vec![(task, "failed · p", "after 0s", true)]);
 
-        let (limited, _) = l.submit("q".into(), None, Some("claude".into()), None);
+        let (limited, _) = l.submit("q".into(), None, Some("claude".into()), None, vec![]);
         let hit = AgentEvent::Limited { resets_at: None };
         assert!(notified(&l.event(wid, 1, limited, hit)).is_empty());
         let eff = l.event(
@@ -2156,7 +2169,7 @@ mod tests {
         assert!(notified(&l.expire(wid, 1)).is_empty());
 
         // Answered by the planner; a planner failure.
-        let (answered, _) = l.submit("what is 2+2?".into(), None, None, None);
+        let (answered, _) = l.submit("what is 2+2?".into(), None, None, None, vec![]);
         let answer = r#"{"answer":"4","reason":"r"}"#;
         let eff = l.planning_event(
             answered,
@@ -2169,7 +2182,7 @@ mod tests {
             notified(&eff),
             vec![(answered, "done · what is 2+2?", "after 0s", false)]
         );
-        let (bad, _) = l.submit("r".into(), None, None, None);
+        let (bad, _) = l.submit("r".into(), None, None, None, vec![]);
         let eff = l.planning_event(
             bad,
             AgentEvent::Finished {
@@ -2212,7 +2225,7 @@ mod tests {
         // Limited, then carried on and finished ok: just a result to read.
         // (After the reset: until then the worker gets no claude work.)
         l.now_ms = 1_800_000_000_000;
-        let (next, _) = l.submit("q".into(), None, Some("claude".into()), None);
+        let (next, _) = l.submit("q".into(), None, Some("claude".into()), None, vec![]);
         l.event(wid, 1, next, limited);
         finish(&mut l, wid, next, true);
         assert_eq!(attention_of(&l, next), Attention::Unread);
@@ -2221,7 +2234,7 @@ mod tests {
     #[test]
     fn planner_usage_limit_counts_too() {
         let mut l = Ledger::default();
-        let (task, _) = l.submit("p".into(), None, None, None);
+        let (task, _) = l.submit("p".into(), None, None, None, vec![]);
         let limited = AgentEvent::Limited { resets_at: None };
         assert_eq!(l.planning_event(task, limited.clone()).len(), 1);
         let failed = AgentEvent::Finished {
@@ -2237,7 +2250,7 @@ mod tests {
     fn replies_carry_their_own_attention() {
         let (mut l, wid, parent) = finished_setup();
         l.seen(parent);
-        let (reply, _) = l.reply(parent, "and tests?".into(), true).unwrap();
+        let (reply, _) = l.reply(parent, "and tests?".into(), vec![], true).unwrap();
         assert_eq!(attention_of(&l, reply), Attention::None);
         finish(&mut l, wid, reply, false);
         assert_eq!(
@@ -2247,12 +2260,34 @@ mod tests {
     }
 
     #[test]
+    fn images_go_with_their_own_task_only() {
+        let mut l = Ledger::default();
+        let wid = Uuid::new_v4();
+        l.connect(wid, info(), &[], 1, T0);
+        let photo = Uuid::new_v4();
+        let (task, eff) = l.submit("p".into(), None, Some("claude".into()), None, vec![photo]);
+        let [Effect::Assign { images, .. }] = &eff[..] else {
+            panic!("{eff:?}")
+        };
+        assert_eq!(images, &[photo]);
+        assert_eq!(l.show(task).unwrap().0.images, [photo]);
+        finish(&mut l, wid, task, true);
+        // A reply carries the images sent with it, not its parent's.
+        let (reply, eff) = l.reply(task, "and this?".into(), vec![], true).unwrap();
+        let [Effect::Assign { images, .. }] = &eff[..] else {
+            panic!("{eff:?}")
+        };
+        assert!(images.is_empty());
+        assert!(l.show(reply).unwrap().0.images.is_empty());
+    }
+
+    #[test]
     fn reply_resumes_on_the_parents_worker_once_idle() {
         let (mut l, wid, parent) = finished_setup();
         // Busy the parent's worker; an idle second worker must not take the reply.
-        let (busy, _) = l.submit("other".into(), None, Some("claude".into()), None);
+        let (busy, _) = l.submit("other".into(), None, Some("claude".into()), None, vec![]);
         l.connect(Uuid::new_v4(), info(), &[], 2, T0);
-        let (reply, eff) = l.reply(parent, "and tests?".into(), true).unwrap();
+        let (reply, eff) = l.reply(parent, "and tests?".into(), vec![], true).unwrap();
         assert!(assigned(&eff).is_empty());
         assert_eq!(l.show(reply).unwrap().0.parent, Some(parent));
         let eff = l.event(
@@ -2278,10 +2313,10 @@ mod tests {
     fn reply_needs_a_finished_parent_and_its_worker_online() {
         let (mut l, wid, task) = running_setup();
         assert!(l
-            .reply(task, "x".into(), true)
+            .reply(task, "x".into(), vec![], true)
             .unwrap_err()
             .contains("hasn't finished"));
-        assert!(l.reply(Uuid::nil(), "x".into(), true).is_err());
+        assert!(l.reply(Uuid::nil(), "x".into(), vec![], true).is_err());
         let (mut l, _, parent) = {
             l.event(
                 wid,
@@ -2304,15 +2339,15 @@ mod tests {
             (l, wid, task)
         };
         l.disconnect(wid, 1);
-        let why = l.reply(parent, "x".into(), true).unwrap_err();
+        let why = l.reply(parent, "x".into(), vec![], true).unwrap_err();
         assert!(why.contains("offline"), "{why}");
     }
 
     #[test]
     fn queued_reply_fails_when_its_worker_leaves() {
         let (mut l, wid, parent) = finished_setup();
-        l.submit("busy".into(), None, Some("claude".into()), None);
-        let (reply, _) = l.reply(parent, "x".into(), true).unwrap();
+        l.submit("busy".into(), None, Some("claude".into()), None, vec![]);
+        let (reply, _) = l.reply(parent, "x".into(), vec![], true).unwrap();
         l.disconnect(wid, 1);
         let eff = l.expire(wid, 1);
         assert_eq!(finished(&eff, reply), Some(false));
@@ -2325,14 +2360,14 @@ mod tests {
     #[test]
     fn queued_reply_fails_when_its_worker_drops_the_harness() {
         let (mut l, wid, parent) = finished_setup();
-        let (busy, _) = l.submit("busy".into(), None, Some("claude".into()), None);
-        let (reply, _) = l.reply(parent, "x".into(), true).unwrap();
+        let (busy, _) = l.submit("busy".into(), None, Some("claude".into()), None, vec![]);
+        let (reply, _) = l.reply(parent, "x".into(), vec![], true).unwrap();
         let mut codex = info();
         codex.harnesses = vec!["codex".into()];
         let (_, eff) = l.connect(wid, codex, &[busy], 2, T0);
         assert_eq!(finished(&eff, reply), Some(false));
         assert!(!l.queue.contains(&reply));
-        let why = l.reply(parent, "y".into(), true).unwrap_err();
+        let why = l.reply(parent, "y".into(), vec![], true).unwrap_err();
         assert!(why.contains("no longer runs claude"), "{why}");
     }
 
@@ -2340,7 +2375,7 @@ mod tests {
     fn reply_to_planner_answer_is_planned_with_context() {
         let mut l = Ledger::default();
         l.connect(Uuid::new_v4(), info(), &[], 1, T0);
-        let (parent, _) = l.submit("what is 2+2?".into(), None, None, None);
+        let (parent, _) = l.submit("what is 2+2?".into(), None, None, None, vec![]);
         l.planning_event(
             parent,
             AgentEvent::Finished {
@@ -2348,7 +2383,7 @@ mod tests {
                 summary: Some(r#"{"answer":"4"}"#.into()),
             },
         );
-        let (reply, eff) = l.reply(parent, "and 3+3?".into(), true).unwrap();
+        let (reply, eff) = l.reply(parent, "and 3+3?".into(), vec![], true).unwrap();
         let [Effect::Plan { task, prompt }] = &eff[..] else {
             panic!("{eff:?}")
         };
@@ -2361,7 +2396,7 @@ mod tests {
             .ends_with("Earlier request:\nwhat is 2+2?\n\nEarlier answer:\n4"));
         assert!(prompt.contains("and 3+3?"));
         // No planner: straight to a claude worker, still with the context.
-        let (reply, eff) = l.reply(parent, "and 4+4?".into(), false).unwrap();
+        let (reply, eff) = l.reply(parent, "and 4+4?".into(), vec![], false).unwrap();
         let [t] = &sent(&eff)[..] else {
             panic!("{eff:?}")
         };
@@ -2384,7 +2419,7 @@ mod tests {
                 summary: Some("boom".into()),
             },
         );
-        let (reply, eff) = l.reply(parent, "retry".into(), true).unwrap();
+        let (reply, eff) = l.reply(parent, "retry".into(), vec![], true).unwrap();
         let [t] = &sent(&eff)[..] else {
             panic!("{eff:?}")
         };
@@ -2761,7 +2796,7 @@ mod tests {
             secs(1),
             0,
         );
-        let (task, eff) = l.submit("p".into(), None, Some("claude".into()), None);
+        let (task, eff) = l.submit("p".into(), None, Some("claude".into()), None, vec![]);
         assert_eq!(assigned(&eff), vec![(2, task)]);
         assert_eq!(status_of(&l, task).blocked_until, None);
     }
@@ -2789,7 +2824,7 @@ mod tests {
             l.usage[&a].exhausted_until("claude", NOW),
             Some(NOW + 3 * HOUR)
         );
-        let (task, eff) = l.submit("p".into(), None, Some("claude".into()), None);
+        let (task, eff) = l.submit("p".into(), None, Some("claude".into()), None, vec![]);
         assert!(assigned(&eff).is_empty());
         let s = status_of(&l, task);
         assert_eq!(s.blocked_until, Some(NOW + 3 * HOUR));
@@ -2857,13 +2892,13 @@ mod tests {
         let other = Uuid::from_u128(9);
         l.connect(other, info(), &[], 6, T0);
 
-        let (reply, eff) = l.reply(task, "go on".into(), true).unwrap();
+        let (reply, eff) = l.reply(task, "go on".into(), vec![], true).unwrap();
         assert!(
             assigned(&eff).is_empty(),
             "pinned: not moved to the other worker"
         );
         assert_eq!(status_of(&l, reply).blocked_until, Some(resets * 1000));
-        let (fresh, eff) = l.submit("p".into(), None, Some("claude".into()), None);
+        let (fresh, eff) = l.submit("p".into(), None, Some("claude".into()), None, vec![]);
         assert_eq!(assigned(&eff), vec![(6, fresh)]);
 
         l.now_ms = resets * 1000;
@@ -2910,7 +2945,7 @@ mod tests {
         l.disconnect(a, 1);
         let (_, eff) = l.connect(a, info(), &[], 2, T0);
         assert!(assigned(&eff).is_empty());
-        let (task, eff) = l.submit("p".into(), None, Some("claude".into()), None);
+        let (task, eff) = l.submit("p".into(), None, Some("claude".into()), None, vec![]);
         assert!(
             assigned(&eff).is_empty(),
             "reconnected, no beat yet: still out"

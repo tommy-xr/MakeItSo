@@ -4,7 +4,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
-use mis_types::{AgentEvent, LimitWindow, TaskId};
+use mis_types::{AgentEvent, ImageFile, ImageKind, LimitWindow, TaskId};
 use tokio::sync::mpsc;
 
 pub mod claude;
@@ -39,6 +39,8 @@ pub struct RunOpts<'a> {
     pub mcp: Option<&'a Mcp>,
     /// Session to continue (claude `--resume`, codex `exec resume`).
     pub resume: Option<&'a str>,
+    /// Absolute paths of images attached to the prompt.
+    pub images: &'a [String],
 }
 
 pub trait Agent: Send + Sync {
@@ -96,6 +98,33 @@ pub async fn run_guarded(
         .await;
 }
 
+/// Decode `images` into `dir` (created, owner-only) as `<id>.<ext>`; their
+/// absolute paths, in order. Err on bytes that aren't base64 of an accepted image.
+pub fn write_images(dir: &Path, images: &[ImageFile]) -> anyhow::Result<Vec<String>> {
+    use anyhow::Context;
+    use base64ct::{Base64, Encoding};
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder
+        .create(dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
+    let dir = std::path::absolute(dir)?;
+    images
+        .iter()
+        .map(|img| {
+            let bytes = Base64::decode_vec(&img.data)
+                .map_err(|e| anyhow::anyhow!("image {}: {e}", img.id))?;
+            let kind = ImageKind::sniff(&bytes)
+                .with_context(|| format!("image {} is not jpeg, png, webp or gif", img.id))?;
+            let path = dir.join(format!("{}.{}", img.id, kind.ext()));
+            std::fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
+            Ok(path.display().to_string())
+        })
+        .collect()
+}
+
 /// Agents whose CLI is on PATH.
 pub fn available(skip_permissions: bool) -> Vec<Box<dyn Agent>> {
     let mut v: Vec<Box<dyn Agent>> = Vec::new();
@@ -127,4 +156,37 @@ pub fn which(bin: &str) -> bool {
     std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64ct::{Base64, Encoding};
+
+    #[test]
+    fn writes_images_by_sniffed_kind_and_refuses_others() {
+        let dir = std::env::temp_dir().join(format!("mis-agent-test-{}", uuid::Uuid::new_v4()));
+        let png = b"\x89PNG\r\n\x1a\n rest".to_vec();
+        let ok = ImageFile {
+            id: uuid::Uuid::new_v4(),
+            data: Base64::encode_string(&png),
+        };
+        let paths = write_images(&dir, std::slice::from_ref(&ok)).unwrap();
+        assert_eq!(
+            paths,
+            [dir.join(format!("{}.png", ok.id)).display().to_string()]
+        );
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), png);
+        let html = ImageFile {
+            data: Base64::encode_string(b"<html>"),
+            ..ok.clone()
+        };
+        assert!(write_images(&dir, &[html]).is_err());
+        let garbage = ImageFile {
+            data: "not base64!".into(),
+            ..ok
+        };
+        assert!(write_images(&dir, &[garbage]).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

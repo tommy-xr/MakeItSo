@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -24,6 +24,7 @@ pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("MIS_GIT_
 
 pub mod access;
 pub mod access_gate;
+pub mod images;
 pub mod ledger;
 pub mod plan;
 pub mod push;
@@ -76,6 +77,8 @@ pub struct App {
     access: Option<Arc<AccessGate>>,
     /// Web Push to subscribed browsers. None: notifications are off.
     push: Option<Arc<push::Push>>,
+    /// Uploaded images. None: attachments are off.
+    images: Option<Arc<images::Images>>,
 }
 
 impl App {
@@ -102,6 +105,7 @@ impl App {
             started: Instant::now(),
             access: None,
             push: None,
+            images: None,
         }
     }
 
@@ -152,6 +156,12 @@ impl App {
         self
     }
 
+    /// Accept image uploads and attach them to tasks.
+    pub fn with_images(mut self, images: images::Images) -> Self {
+        self.images = Some(Arc::new(images));
+        self
+    }
+
     pub fn with_planner(mut self, planner: Arc<dyn Agent>) -> Self {
         self.planner = Some(planner);
         self
@@ -182,6 +192,15 @@ impl App {
                 Effect::Send { conn, msg } => {
                     if let Some(tx) = self.conns.lock().unwrap().get(&conn) {
                         let _ = tx.send(msg);
+                    }
+                }
+                Effect::Assign { conn, task, images } => {
+                    let images = match (&self.images, images.is_empty()) {
+                        (Some(store), false) => store.files(&images),
+                        _ => vec![],
+                    };
+                    if let Some(tx) = self.conns.lock().unwrap().get(&conn) {
+                        let _ = tx.send(OrchMsg::Assign { task, images });
                     }
                 }
                 Effect::Broadcast(msg) => {
@@ -263,6 +282,32 @@ impl App {
             },
         )
         .await;
+    }
+
+    /// Images for a new task: Err says why they can't be attached.
+    fn check_images(&self, ids: &[uuid::Uuid]) -> Result<(), String> {
+        match &self.images {
+            _ if ids.is_empty() => Ok(()),
+            Some(store) => images::check(ids, |id| store.find(id).is_some()),
+            None => Err("image attachments are off".into()),
+        }
+    }
+
+    /// Delete week-old images now and every `SWEEP_EVERY`.
+    fn spawn_image_sweep(&self) {
+        let Some(store) = self.images.clone() else {
+            return;
+        };
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(images::SWEEP_EVERY);
+            loop {
+                every.tick().await;
+                let gone = store.sweep(std::time::SystemTime::now());
+                if gone > 0 {
+                    tracing::info!(gone, "swept old images");
+                }
+            }
+        });
     }
 
     /// Periodically disconnect workers that stopped sending heartbeats.
@@ -474,6 +519,8 @@ pub fn router(app: App) -> Router {
         .route("/ws/worker", get(ws_worker))
         .route("/ws/client", get(ws_client))
         .route("/mcp", post(mcp))
+        .route("/api/upload", post(upload))
+        .route("/api/images/{id}", get(image))
         .with_state(app)
 }
 
@@ -491,6 +538,7 @@ fn unix_ms() -> u64 {
 
 pub async fn serve(listener: TcpListener, app: App) -> anyhow::Result<()> {
     app.spawn_liveness();
+    app.spawn_image_sweep();
     let svc = router(app).into_make_service_with_connect_info::<SocketAddr>();
     axum::serve(listener, svc).await?;
     Ok(())
@@ -585,6 +633,64 @@ async fn mcp(
     match reply {
         Some(r) => Json(r).into_response(),
         None => StatusCode::ACCEPTED.into_response(),
+    }
+}
+
+/// Store one image (raw body) for a later `Submit`; replies `{"id": ..}`.
+/// Acting, so read-only tokens get 403.
+async fn upload(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> Response {
+    match app.admit_scope(&headers, peer, "/api/upload").await {
+        Some(Scope::Full) => {}
+        Some(Scope::Read) => return (StatusCode::FORBIDDEN, "read-only token").into_response(),
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    }
+    let Some(store) = &app.images else {
+        let off = "image attachments are off";
+        return (StatusCode::SERVICE_UNAVAILABLE, off).into_response();
+    };
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_IMAGE_BYTES).await else {
+        let why = format!("images are limited to {} MB", MAX_IMAGE_BYTES >> 20);
+        return (StatusCode::PAYLOAD_TOO_LARGE, why).into_response();
+    };
+    let content_type = headers.get(header::CONTENT_TYPE);
+    let kind = match images::validate(content_type.and_then(|v| v.to_str().ok()), &bytes) {
+        Ok(kind) => kind,
+        Err(why) => return (StatusCode::UNSUPPORTED_MEDIA_TYPE, why).into_response(),
+    };
+    match store.store(kind, &bytes) {
+        Ok(id) => Json(serde_json::json!({ "id": id })).into_response(),
+        Err(e) => {
+            tracing::warn!("storing image: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// An uploaded image, for thumbnails. `id` parses as a Uuid, so it can't name a path.
+async fn image(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+) -> Response {
+    if !app.admit(&headers, peer, "/api/images").await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match app.images.as_ref().and_then(|s| s.read(id)) {
+        Some((kind, bytes)) => (
+            [
+                (header::CONTENT_TYPE, kind.mime()),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -723,11 +829,13 @@ async fn client_conn(mut sock: WebSocket, app: App, scope: Scope) {
                     let status = app.ledger().status();
                     send_json(&mut sock, &status).await;
                 }
-                Some(ClientMsg::Submit { prompt, reply_to: Some(parent), .. }) => {
+                Some(ClientMsg::Submit { prompt, reply_to: Some(parent), images, .. }) => {
                     let planner = app.planner.is_some();
-                    let task = app.transition(|l| match l.reply(parent, prompt, planner) {
-                        Ok((task, effects)) => (Ok(task), effects),
-                        Err(why) => (Err(why), vec![]),
+                    let task = app.check_images(&images).and_then(|()| {
+                        app.transition(|l| match l.reply(parent, prompt, images, planner) {
+                            Ok((task, effects)) => (Ok(task), effects),
+                            Err(why) => (Err(why), vec![]),
+                        })
                     });
                     let reply = match task {
                         Ok(task) => ServerMsg::Submitted { task },
@@ -735,14 +843,19 @@ async fn client_conn(mut sock: WebSocket, app: App, scope: Scope) {
                     };
                     send_json(&mut sock, &reply).await;
                 }
-                Some(ClientMsg::Submit { prompt, cwd, harness, model, reply_to: None }) => {
+                Some(ClientMsg::Submit { prompt, cwd, harness, model, reply_to: None, images }) => {
                     let model = model.filter(|m| !m.trim().is_empty());
                     // A chosen model pins the default harness: the planner could pick
                     // one that doesn't know that model.
                     let unplanned = app.planner.is_none() || model.is_some();
                     let harness = harness.or_else(|| unplanned.then(|| "claude".into()));
-                    let task = app.transition(|l| l.submit(prompt, cwd, harness, model));
-                    send_json(&mut sock, &ServerMsg::Submitted { task }).await;
+                    let reply = match app.check_images(&images) {
+                        Ok(()) => ServerMsg::Submitted {
+                            task: app.transition(|l| l.submit(prompt, cwd, harness, model, images)),
+                        },
+                        Err(message) => ServerMsg::Error { message },
+                    };
+                    send_json(&mut sock, &reply).await;
                 }
                 Some(ClientMsg::Subscribe) => sub = Some(app.events.subscribe()),
                 Some(ClientMsg::Seen { task }) => app.transition(|l| ((), l.seen(task))),

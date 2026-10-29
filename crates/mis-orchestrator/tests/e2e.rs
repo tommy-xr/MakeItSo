@@ -110,6 +110,7 @@ async fn submit_assign_finish() {
             harness: None,
             model: None,
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
@@ -126,7 +127,7 @@ async fn submit_assign_finish() {
     // Worker joins and immediately receives the queued task.
     let wid = uuid::Uuid::new_v4();
     let mut worker = join(&base, wid, "claude", vec![]).await;
-    let OrchMsg::Assign { task: assigned } = recv(&mut worker).await else {
+    let OrchMsg::Assign { task: assigned, .. } = recv(&mut worker).await else {
         panic!()
     };
     assert_eq!(assigned.id, task);
@@ -204,13 +205,14 @@ async fn model_reaches_worker_and_status() {
                 harness: harness.map(String::from),
                 model: model.map(String::from),
                 reply_to: None,
+                images: vec![],
             },
         )
         .await;
         let ServerMsg::Submitted { task } = recv(&mut client).await else {
             panic!()
         };
-        let OrchMsg::Assign { task: assigned } = recv(&mut worker).await else {
+        let OrchMsg::Assign { task: assigned, .. } = recv(&mut worker).await else {
             panic!()
         };
         assert_eq!(
@@ -264,6 +266,7 @@ async fn harness_mismatch_stays_queued() {
             harness: Some("claude".into()),
             model: None,
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
@@ -292,6 +295,7 @@ async fn worker_disconnect_fails_task_and_notifies() {
             harness: None,
             model: None,
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
@@ -335,6 +339,7 @@ async fn events_from_wrong_worker_are_ignored() {
             harness: None,
             model: None,
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
@@ -450,6 +455,7 @@ async fn read_token_sees_but_cannot_submit() {
         harness: None,
         model: None,
         reply_to: None,
+        images: vec![],
     };
     send(&mut client, &submit).await;
     let reply: ServerMsg = recv(&mut client).await;
@@ -672,6 +678,7 @@ async fn reconnect_keeps_reported_task_and_fails_unreported() {
             harness: None,
             model: None,
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
@@ -767,6 +774,7 @@ async fn disconnect_then_reconnect_within_grace_keeps_task() {
             harness: None,
             model: None,
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
@@ -810,13 +818,14 @@ async fn disconnect_then_reconnect_within_grace_keeps_task() {
             harness: None,
             model: None,
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
     let ServerMsg::Submitted { task: next } = recv(&mut client).await else {
         panic!()
     };
-    let OrchMsg::Assign { task: assigned } = recv(&mut worker).await else {
+    let OrchMsg::Assign { task: assigned, .. } = recv(&mut worker).await else {
         panic!()
     };
     assert_eq!(assigned.id, next);
@@ -836,6 +845,7 @@ async fn show_returns_transcript() {
             harness: None,
             model: None,
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
@@ -919,6 +929,7 @@ async fn status_shows_activity_tokens_and_timing() {
             harness: Some("claude".into()),
             model: None,
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
@@ -1018,6 +1029,7 @@ async fn planner_routes_to_codex_and_streams_its_output() {
             harness: None,
             model: None,
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
@@ -1054,7 +1066,7 @@ async fn planner_routes_to_codex_and_streams_its_output() {
     }
     assert_eq!(texts, ["user asked for codex"]);
     // Only the codex worker gets it, with the rewritten prompt and chosen model.
-    let OrchMsg::Assign { task: assigned } = recv(&mut codex).await else {
+    let OrchMsg::Assign { task: assigned, .. } = recv(&mut codex).await else {
         panic!()
     };
     assert_eq!(
@@ -1090,6 +1102,7 @@ async fn planner_answers_trivial_question_without_a_worker() {
             harness: None,
             model: None,
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
@@ -1276,6 +1289,7 @@ async fn out_of_usage_worker_waits_until_its_limit_lifts() {
             harness: Some("claude".into()),
             model: None,
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
@@ -1292,7 +1306,7 @@ async fn out_of_usage_worker_waits_until_its_limit_lifts() {
 
     // A later beat reads under the limit: the task goes out.
     send(&mut worker, &WorkerMsg::Stats(claude_5h(20.0))).await;
-    let OrchMsg::Assign { task: assigned } = recv(&mut worker).await else {
+    let OrchMsg::Assign { task: assigned, .. } = recv(&mut worker).await else {
         panic!()
     };
     assert_eq!(assigned.id, task);
@@ -1348,6 +1362,7 @@ async fn finished_task_gets_summary_but_planner_answer_does_not() {
         harness: harness.map(String::from),
         model: None,
         reply_to: None,
+        images: vec![],
     };
     send(&mut client, &submit(None)).await;
     let ServerMsg::Submitted { task: answered } = recv(&mut client).await else {
@@ -1413,6 +1428,7 @@ async fn status_event_sets_activity_and_is_kept() {
             harness: Some("claude".into()),
             model: None,
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
@@ -1463,6 +1479,7 @@ async fn pr_link_in_agent_text_reaches_status_and_show() {
             harness: Some("claude".into()),
             model: None,
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
@@ -1518,6 +1535,7 @@ async fn reported_evidence_reaches_status_and_show() {
             harness: Some("claude".into()),
             model: None,
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
@@ -1597,6 +1615,7 @@ async fn mcp_lists_tools_and_shows_a_finished_task() {
             harness: Some("claude".into()),
             model: None,
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
@@ -1675,6 +1694,7 @@ async fn reply(client: &mut Ws, parent: TaskId, text: &str) -> TaskId {
             harness: None,
             model: None,
             reply_to: Some(parent),
+            images: vec![],
         },
     )
     .await;
@@ -1700,6 +1720,7 @@ async fn reply_resumes_the_session_on_the_same_worker() {
             harness: Some("claude".into()),
             model: Some("haiku".into()),
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
@@ -1734,7 +1755,7 @@ async fn reply_resumes_the_session_on_the_same_worker() {
     }
 
     let task = reply(&mut client, parent, "which have tests?").await;
-    let OrchMsg::Assign { task: sent } = recv(&mut a).await else {
+    let OrchMsg::Assign { task: sent, .. } = recv(&mut a).await else {
         panic!()
     };
     assert_eq!(sent.id, task);
@@ -1815,6 +1836,7 @@ async fn reply_to_a_planner_answer_is_planned_with_context() {
             harness: None,
             model: None,
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
@@ -1831,7 +1853,7 @@ async fn reply_to_a_planner_answer_is_planned_with_context() {
     ) {}
 
     let task = reply(&mut client, parent, "now show it in a file").await;
-    let OrchMsg::Assign { task: sent } = recv(&mut worker).await else {
+    let OrchMsg::Assign { task: sent, .. } = recv(&mut worker).await else {
         panic!()
     };
     assert_eq!((sent.id, sent.resume.as_deref()), (task, None));
@@ -1855,6 +1877,7 @@ async fn pr_status_reaches_status_and_show_and_refresh_reaches_the_worker() {
             harness: Some("claude".into()),
             model: None,
             reply_to: None,
+            images: vec![],
         },
     )
     .await;
@@ -1931,12 +1954,13 @@ async fn failed_and_unread_tasks_need_attention_until_seen() {
             harness: Some("claude".into()),
             model: None,
             reply_to: None,
+            images: vec![],
         };
         send(&mut client, &submit).await;
         let ServerMsg::Submitted { task } = recv(&mut client).await else {
             panic!()
         };
-        let OrchMsg::Assign { task: assigned } = recv(&mut worker).await else {
+        let OrchMsg::Assign { task: assigned, .. } = recv(&mut worker).await else {
             panic!()
         };
         assert_eq!(assigned.id, task);
@@ -2053,6 +2077,7 @@ async fn fail_task(client: &mut Ws, worker: &mut Ws, prompt: &str) -> TaskId {
         harness: Some("claude".into()),
         model: None,
         reply_to: None,
+        images: vec![],
     };
     send(client, &submit).await;
     let ServerMsg::Submitted { task } = recv(client).await else {
@@ -2150,5 +2175,167 @@ async fn gone_push_subscription_is_dropped() {
     assert!(!saved().contains(&stub.endpoint), "{}", saved());
     fail_task(&mut client, &mut worker, "two").await;
     no_more_pushes(&mut stub).await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Minimal HTTP/1.1 request; returns the status, raw head and body bytes.
+async fn http(base: &str, head: &str, body: &[u8]) -> (u16, String, Vec<u8>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let addr = base.trim_start_matches("ws://");
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let req = format!(
+        "{head}\r\nHost: {addr}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    s.write_all(&[req.as_bytes(), body].concat()).await.unwrap();
+    let mut out = Vec::new();
+    s.read_to_end(&mut out).await.unwrap();
+    let split = out.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let head = String::from_utf8(out[..split].to_vec()).unwrap();
+    let status = head[9..12].parse().unwrap();
+    (status, head, out[split + 4..].to_vec())
+}
+
+/// POST `bytes` to `/api/upload`; the status and body.
+async fn upload(base: &str, headers: &str, bytes: &[u8]) -> (u16, String) {
+    let head = format!("POST /api/upload HTTP/1.1\r\n{headers}");
+    let (status, _, body) = http(base, head.trim_end(), bytes).await;
+    (status, String::from_utf8(body).unwrap())
+}
+
+fn image_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("mis-e2e-images-{}", uuid::Uuid::new_v4()))
+}
+
+/// A JPEG-headed blob with every byte value, so encoding slips would show.
+fn jpeg() -> Vec<u8> {
+    let mut b = b"\xFF\xD8\xFF\xE0".to_vec();
+    b.extend((0..300_000u32).map(|i| (i % 251) as u8));
+    b
+}
+
+#[tokio::test]
+async fn attached_image_reaches_the_agent_as_a_file() {
+    let dir = image_dir();
+    let store = mis_orchestrator::images::Images::open(dir.clone()).unwrap();
+    let base = start_app(App::new(None).with_images(store)).await;
+    let photo = jpeg();
+    let (status, body) = upload(&base, "Content-Type: image/jpeg\r\n", &photo).await;
+    assert_eq!(status, 200, "{body}");
+    let id: uuid::Uuid = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    // Magic bytes decide, not the header.
+    let (status, _) = upload(&base, "Content-Type: image/jpeg\r\n", b"<html>").await;
+    assert_eq!(status, 415);
+
+    // Served back for thumbnails, typed and unsniffable; ids never become paths.
+    let (status, head, served) = http(&base, &format!("GET /api/images/{id} HTTP/1.1"), b"").await;
+    assert_eq!(status, 200);
+    assert!(head.contains("content-type: image/jpeg"), "{head}");
+    assert!(head.contains("x-content-type-options: nosniff"), "{head}");
+    assert_eq!(served, photo);
+    for (path, want) in [
+        (format!("/api/images/{}", uuid::Uuid::new_v4()), 404),
+        ("/api/images/..%2f..%2fetc%2fpasswd".into(), 400),
+        ("/api/images/not-a-uuid".into(), 400),
+    ] {
+        let (status, ..) = http(&base, &format!("GET {path} HTTP/1.1"), b"").await;
+        assert_eq!(status, want, "{path}");
+    }
+
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    let submit = |images| ClientMsg::Submit {
+        prompt: "what is this?".into(),
+        cwd: None,
+        harness: Some("codex".into()),
+        model: None,
+        reply_to: None,
+        images,
+    };
+    // A fifth image, or one never uploaded, is refused.
+    for (images, why) in [
+        (vec![id; 5], "at most 4 images"),
+        (vec![id, uuid::Uuid::new_v4()], "unknown image"),
+    ] {
+        send(&mut client, &submit(images)).await;
+        let ServerMsg::Error { message } = recv(&mut client).await else {
+            panic!()
+        };
+        assert!(message.contains(why), "{message}");
+    }
+    send(&mut client, &submit(vec![id])).await;
+    let ServerMsg::Submitted { task } = recv(&mut client).await else {
+        panic!()
+    };
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { tasks, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    assert_eq!(tasks[0].images, [id], "the task view lists its images");
+
+    // The worker gets the bytes with the task, writes them out, and hands the
+    // file to the agent: codex as `-i`, claude named in the prompt.
+    let mut worker = join(&base, uuid::Uuid::new_v4(), "codex", vec![]).await;
+    let OrchMsg::Assign {
+        task: assigned,
+        images,
+    } = recv(&mut worker).await
+    else {
+        panic!()
+    };
+    assert_eq!(assigned.id, task);
+    let task_dir = dir.join("worker-task");
+    let paths = mis_agent::write_images(&task_dir, &images).unwrap();
+    assert_eq!(
+        paths,
+        [task_dir.join(format!("{id}.jpg")).display().to_string()]
+    );
+    assert_eq!(std::fs::read(&paths[0]).unwrap(), photo);
+    let opts = mis_agent::RunOpts {
+        images: &paths,
+        ..Default::default()
+    };
+    let codex = mis_agent::codex::CodexAgent::default().argv(&assigned.prompt, &opts);
+    assert_eq!(
+        &codex[codex.len() - 4..],
+        ["-i", paths[0].as_str(), "--", "what is this?"]
+    );
+    let claude = mis_agent::claude::ClaudeAgent::default().argv(&assigned.prompt, &opts);
+    assert_eq!(
+        claude.last().unwrap(),
+        &format!(
+            "what is this?\n\nAttached images: {} (read them with the Read tool)",
+            paths[0]
+        )
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn read_token_cannot_upload_but_can_view() {
+    let dir = image_dir();
+    let store = mis_orchestrator::images::Images::open(dir.clone()).unwrap();
+    let base = start_app(with_read_token().with_images(store)).await;
+    // Refused before the body is read; with one unread the close would reset the socket.
+    let as_ =
+        |token: &str| format!("Content-Type: image/jpeg\r\nAuthorization: Bearer {token}\r\n");
+    assert_eq!(upload(&base, &as_("r"), b"").await.0, 403);
+    assert_eq!(
+        upload(&base, "Content-Type: image/jpeg\r\n", b"").await.0,
+        401
+    );
+    let (status, body) = upload(&base, &as_("s"), &jpeg()).await;
+    assert_eq!(status, 200, "{body}");
+    let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let get = format!("GET /api/images/{id} HTTP/1.1\r\nAuthorization: Bearer r");
+    assert_eq!(http(&base, &get, b"").await.0, 200);
+    let get = format!("GET /api/images/{id} HTTP/1.1");
+    assert_eq!(http(&base, &get, b"").await.0, 401);
     std::fs::remove_dir_all(dir).unwrap();
 }

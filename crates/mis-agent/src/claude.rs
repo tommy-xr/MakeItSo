@@ -249,8 +249,19 @@ impl ClaudeAgent {
         if let Some(s) = o.resume {
             a.extend([format!("--resume={s}"), "--fork-session".into()]);
         }
-        a.extend(["--".into(), prompt.into()]); // prompt may start with '-'
+        a.extend(["--".into(), with_images(prompt, o.images)]); // prompt may start with '-'
         a
+    }
+}
+
+/// Claude has no image flag: name the files in the prompt for its Read tool.
+fn with_images(prompt: &str, images: &[String]) -> String {
+    match images {
+        [] => prompt.into(),
+        _ => format!(
+            "{prompt}\n\nAttached images: {} (read them with the Read tool)",
+            images.join(", ")
+        ),
     }
 }
 
@@ -573,6 +584,24 @@ mod tests {
         );
         let plain = ClaudeAgent::default().argv("hi", &RunOpts::default());
         assert!(!plain.iter().any(|a| a.starts_with("--resume")));
+        assert_eq!(plain.last().unwrap(), "hi");
+    }
+
+    #[test]
+    fn argv_names_images_in_the_prompt() {
+        let images = ["/t/a.jpg".to_string(), "/t/b.png".to_string()];
+        let o = RunOpts {
+            images: &images,
+            ..Default::default()
+        };
+        let a = ClaudeAgent::default().argv("what is this?", &o);
+        assert_eq!(
+            &a[a.len() - 2..],
+            [
+                "--",
+                "what is this?\n\nAttached images: /t/a.jpg, /t/b.png (read them with the Read tool)"
+            ]
+        );
     }
 
     #[test]

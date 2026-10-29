@@ -694,6 +694,7 @@ async fn run(args: Args) -> Result<Option<TaskSummary>> {
                     harness: harness.clone(),
                     model: model.clone(),
                     reply_to: None,
+                    images: vec![],
                 },
             )
             .await?;
@@ -732,6 +733,7 @@ async fn run(args: Args) -> Result<Option<TaskSummary>> {
                     harness: None,
                     model: None,
                     reply_to: Some(parent),
+                    images: vec![],
                 },
             )
             .await?;
@@ -799,6 +801,7 @@ mod tests {
             links: vec![],
             attention: Attention::None,
             blocked_until: None,
+            images: vec![],
         }
     }
 

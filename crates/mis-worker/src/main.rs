@@ -19,9 +19,10 @@ use futures_util::{SinkExt, StreamExt};
 use mis_agent::Agent;
 use mis_types::*;
 use tokio::sync::mpsc;
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Parser)]
@@ -208,7 +209,12 @@ async fn session(
     ev_tx: &mpsc::Sender<(TaskId, AgentEvent)>,
     c: &mut Conn,
 ) -> Result<()> {
-    let (ws, _) = connect_async(worker_request(cfg, access)?)
+    // An assignment carries up to MAX_IMAGES base64 images in one frame.
+    let room = Some(MAX_IMAGES * MAX_IMAGE_BYTES * 4 / 3 + (1 << 20));
+    let config = WebSocketConfig::default()
+        .max_message_size(room)
+        .max_frame_size(room);
+    let (ws, _) = connect_async_with_config(worker_request(cfg, access)?, Some(config), false)
         .await
         .with_context(|| format!("connecting to {}", cfg.url))?;
     let (mut sink, mut stream) = ws.split();
@@ -289,7 +295,7 @@ fn handle_incoming(
                 tracing::info!(%id, "registered");
                 c.backoff = Duration::from_secs(1);
             }
-            Ok(OrchMsg::Assign { task }) => {
+            Ok(OrchMsg::Assign { task, images }) => {
                 if !c.running.insert(task.id) {
                     tracing::warn!(id = %task.id, "already running; ignoring duplicate assign");
                     return Ok(());
@@ -297,7 +303,7 @@ fn handle_incoming(
                 tracing::info!(id = %task.id, "assigned to {}: {}", task.harness, task.prompt);
                 let ctx = ctx.clone();
                 let tx = ev_tx.clone();
-                tokio::spawn(async move { run_task(&ctx, task, tx).await });
+                tokio::spawn(async move { run_task(&ctx, task, images, tx).await });
             }
             Ok(OrchMsg::CheckPrs { task, urls }) => {
                 c.watches.retain(|_, h| !h.is_finished());
@@ -319,7 +325,12 @@ fn handle_incoming(
     Ok(())
 }
 
-async fn run_task(ctx: &Ctx, task: Task, tx: mpsc::Sender<(TaskId, AgentEvent)>) {
+async fn run_task(
+    ctx: &Ctx,
+    task: Task,
+    images: Vec<ImageFile>,
+    tx: mpsc::Sender<(TaskId, AgentEvent)>,
+) {
     let id = task.id;
     let fail = |summary: String| {
         (
@@ -341,6 +352,19 @@ async fn run_task(ctx: &Ctx, task: Task, tx: mpsc::Sender<(TaskId, AgentEvent)>)
             let _ = tx.send(fail(why)).await;
             return;
         }
+    };
+    // Attached images live in a dir of their own until the task ends.
+    let image_dir = std::env::temp_dir().join("mis-worker").join(id.to_string());
+    let image_paths = match images.is_empty() {
+        true => vec![],
+        false => match mis_agent::write_images(&image_dir, &images) {
+            Ok(paths) => paths,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&image_dir);
+                let _ = tx.send(fail(format!("attached images: {e:#}"))).await;
+                return;
+            }
+        },
     };
     // Without the server the task still runs, just without its reporting tools.
     let server = mcp::serve(id, tx.clone())
@@ -375,10 +399,14 @@ async fn run_task(ctx: &Ctx, task: Task, tx: mpsc::Sender<(TaskId, AgentEvent)>)
             model: task.model.as_deref(),
             mcp: server.as_ref().map(|s| &s.mcp),
             resume: task.resume.as_deref(),
+            images: &image_paths,
         },
         atx,
     );
     tokio::join!(run, fwd);
+    if !images.is_empty() {
+        let _ = std::fs::remove_dir_all(&image_dir);
+    }
 }
 
 /// Cloudflare Access headers from `cfg`, checked so bad values fail early.

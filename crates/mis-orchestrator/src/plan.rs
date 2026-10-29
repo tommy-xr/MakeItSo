@@ -32,8 +32,9 @@ pub struct Plan {
 pub const SCHEMA: &str = r#"{"type":"object","properties":{"harness":{"type":"string"},"prompt":{"type":"string"},"model":{"type":"string"},"reason":{"type":"string"},"answer":{"type":"string"}},"required":["reason"]}"#;
 
 /// Prompt asking the model to answer a trivial question itself, or else pick a
-/// harness and model and strip dispatch instructions.
-pub fn prompt(request: &str, fleet: &Fleet) -> String {
+/// harness and model and strip dispatch instructions. A request with `images`
+/// attached always dispatches: only the agent gets to see them.
+pub fn prompt(request: &str, images: usize, fleet: &Fleet) -> String {
     let harnesses: Vec<&str> = fleet.keys().map(String::as_str).collect();
     let default = harnesses
         .iter()
@@ -59,6 +60,13 @@ pub fn prompt(request: &str, fleet: &Fleet) -> String {
              calls for another. Otherwise omit \"model\".\n"
         )
     };
+    let attached = match images {
+        0 => String::new(),
+        n => format!(
+            "The user attached {n} image(s) that only the agent will see, so never \
+             answer this request yourself.\n"
+        ),
+    };
     format!(
         "You dispatch requests to a fleet of coding agents. Available harnesses: {}.\n\
          If the request names no harness, agent or model and is a trivial question you can \
@@ -71,7 +79,8 @@ pub fn prompt(request: &str, fleet: &Fleet) -> String {
          If the request contains dispatch instructions, set \"prompt\" to the request with \
          only those words removed, everything else verbatim; if nothing is left, ask the \
          agent to introduce itself. Otherwise omit \"prompt\" and the request is used as-is.\n\
-         Set \"reason\" to one short sentence.\n\n\
+         Set \"reason\" to one short sentence.\n\
+         {attached}\n\
          Request:\n{request}",
         harnesses.join(", ")
     )
@@ -177,7 +186,7 @@ mod tests {
 
     #[test]
     fn prompt_lists_harnesses_models_and_request() {
-        let p = prompt("hey run as codex", &both());
+        let p = prompt("hey run as codex", 0, &both());
         assert!(p.contains("claude, codex"));
         assert!(p.contains("otherwise pick claude"));
         assert!(p.contains("- claude: haiku, sonnet\n"));
@@ -186,8 +195,12 @@ mod tests {
         assert!(p.contains("names no harness, agent or model"));
         assert!(p.ends_with("Request:\nhey run as codex"));
         let codex: Fleet = [("codex".into(), vec![])].into();
-        let p = prompt("x", &codex);
+        let p = prompt("x", 0, &codex);
         assert!(p.contains("otherwise pick codex"));
         assert!(!p.contains("\"model\""));
+        assert!(!p.contains("attached"));
+        let p = prompt("what is this?", 2, &codex);
+        assert!(p.contains("attached 2 image(s) that only the agent will see"));
+        assert!(p.ends_with("yourself.\n\nRequest:\nwhat is this?"));
     }
 }

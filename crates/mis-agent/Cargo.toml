@@ -7,8 +7,12 @@ license.workspace = true
 [dependencies]
 mis-types.workspace = true
 anyhow.workspace = true
+base64ct.workspace = true
 tracing.workspace = true
 futures-util.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 toml.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true
