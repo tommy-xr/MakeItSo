@@ -116,6 +116,7 @@
   @media (prefers-reduced-motion: reduce) { .recbar .dots i { animation: none; opacity: .6; } }
   .toggle { display: flex; align-items: center; gap: .5rem; min-height: 2.75rem; margin: -1rem 0 1rem; }
   .toggle input { width: 1.25rem; height: 1.25rem; margin: 0; accent-color: var(--accent); }
+  #notify-row { margin: 0 0 .5rem; }
   .dim { color: var(--dim); }
   #fleet { padding-bottom: .75rem; }
   ul { list-style: none; margin: 0; padding: 0; }
@@ -253,6 +254,7 @@
 </main>
 
 <main id="workers" hidden>
+  <label class="toggle" id="notify-row" hidden><input type="checkbox" id="notify"> notify me <span id="notify-state" class="dim"></span></label>
   <div id="fleet" class="dim"></div>
   <ul id="machines"></ul>
 </main>
@@ -927,6 +929,7 @@ function limitRows(w) {
 }
 
 function renderWorkers() {
+  renderNotify();
   $('fleet').textContent = `${workers.filter((w) => w.online).length}/${workers.length} online`;
   $('machines').replaceChildren(...workers.map((w) => {
     const st = workerState(w), run = runningOn(w.id);
@@ -1069,6 +1072,7 @@ function connect() {
     pending = null; // a submit sent on the old socket gets no reply here; its draft stays
     send({ type: 'subscribe' });
     send({ type: 'status' });
+    pushSync();
     // Re-fetch the open transcript; the old one stays up until the new one replaces it.
     if (detail && route().view === 'detail') { detail.refetch = true; send({ type: 'show', task: detail.id }); } else detail = null;
     render();
@@ -1162,6 +1166,69 @@ $('prompt').value = drafts.get('draft:new');
 window.onhashchange = () => { micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; render(); };
 setInterval(tick, 1000);
 
+// Push notifications: offered where the browser has push (on iOS, only once added to the Home Screen),
+// the orchestrator has a key and the token may act. Permission is asked only from the toggle's tap.
+const push = { key: null, reg: null, sub: null, busy: false, err: '' };
+const pushable = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && navigator.standalone !== false;
+const unb64 = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+const b64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+function pushStart(key) {
+  if (!key || !pushable()) return;
+  push.key = key;
+  // A tapped notification for an open window: show its task here.
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    const url = e.data && e.data.open && new URL(e.data.open);
+    if (url && url.origin === location.origin) location.hash = url.hash;
+  });
+  navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready).then((reg) => {
+    push.reg = reg;
+    return reg.pushManager.getSubscription();
+  }).then((sub) => { push.sub = sub; pushSync(); render(); }).catch((e) => console.warn('push unavailable', e));
+}
+// Tell the orchestrator about this browser's subscription on every connect (it may have dropped it).
+// One made with another key (the orchestrator's state was reset) can't be pushed to: renew it.
+function pushSync() {
+  const sub = push.sub;
+  if (!sub || readOnly || !push.key) return;
+  const key = sub.options && sub.options.applicationServerKey;
+  if (key && b64(key) !== push.key) {
+    sub.unsubscribe().then(() => pushSubscribe()).catch((e) => { push.err = e.message; render(); });
+    return;
+  }
+  const { endpoint, keys } = sub.toJSON();
+  send({ type: 'push_subscribe', endpoint, p256dh: keys.p256dh, auth: keys.auth });
+}
+async function pushSubscribe() {
+  push.sub = await push.reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64(push.key) });
+  pushSync();
+}
+function renderNotify() {
+  const denied = 'Notification' in window && Notification.permission === 'denied';
+  $('notify-row').hidden = readOnly || !push.reg;
+  $('notify').checked = !!push.sub && !denied;
+  $('notify').disabled = push.busy || denied;
+  $('notify-state').textContent = `· ${push.busy ? '…' : denied ? 'blocked in settings' : push.err || (push.sub ? 'on' : 'off')}`;
+}
+$('notify').onchange = async (e) => {
+  const on = e.target.checked;
+  // Asked straight from the tap: iOS only prompts from a user gesture.
+  const asked = on ? Notification.requestPermission() : null;
+  Object.assign(push, { busy: true, err: '' });
+  renderNotify();
+  try {
+    if (on) {
+      if ((await asked) !== 'granted') throw new Error('not allowed');
+      await pushSubscribe();
+    } else if (push.sub) {
+      send({ type: 'push_unsubscribe', endpoint: push.sub.endpoint });
+      await push.sub.unsubscribe();
+      push.sub = null;
+    }
+  } catch (err) { push.err = err.message; }
+  push.busy = false;
+  renderNotify();
+};
+
 // What the stored token may do (scope), then connect.
 function start() {
   const token = store.get();
@@ -1171,6 +1238,7 @@ function start() {
     authNeeded = info.auth;
     readOnly = info.scope === 'read';
     $('ver').textContent = [info.version, readOnly && 'read-only'].filter(Boolean).join(' · ');
+    if (!push.key) pushStart(info.vapid);
     connect();
   }).catch((e) => { connMsg = `cannot reach server: ${e.message}`; render(); });
 }
