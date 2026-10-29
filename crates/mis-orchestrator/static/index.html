@@ -1207,23 +1207,24 @@ $('pick').onchange = () => {
   $('pick').value = '';
   render();
 };
-// A task's photos in its drill-in: fetched with the token (an <img> can't send it), kept as object URLs.
-const seenShots = new Map();
-let attachedKey = '';
+// The open task's photos, fetched with the token (an <img> can't send it) into object URLs that
+// are revoked when another task's replace them. A network failure retries on the next render; a 404 doesn't.
+let attached = { key: '', urls: [] };
 function renderAttached(ids) {
-  const box = $('shots-view');
-  if (ids.join() === attachedKey) return;
-  attachedKey = ids.join();
+  const box = $('shots-view'), key = ids.join();
+  if (key === attached.key) return;
+  attached.urls.forEach((u) => URL.revokeObjectURL(u));
+  const now = attached = { key, urls: [] };
   box.hidden = !ids.length;
   box.replaceChildren(...ids.map((id) => {
     const img = el('img', { alt: 'attached photo' }), a = el('a', { target: '_blank', rel: 'noopener' }, img);
-    if (!seenShots.has(id)) {
-      seenShots.set(id, fetch(`/api/images/${id}`, { headers: authHeaders() })
-        .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(r.status))))
-        .then((b) => URL.createObjectURL(b)));
-      seenShots.get(id).catch(() => seenShots.delete(id));
-    }
-    seenShots.get(id).then((url) => { img.src = a.href = url; }, () => { img.alt = 'photo gone'; });
+    fetch(`/api/images/${id}`, { headers: authHeaders() }).then(async (r) => {
+      if (!r.ok) { img.alt = 'photo gone'; return; }
+      const url = URL.createObjectURL(await r.blob());
+      if (attached !== now) { URL.revokeObjectURL(url); return; } // another task is open now
+      now.urls.push(url);
+      img.src = a.href = url;
+    }).catch(() => { if (attached === now) now.key = ''; });
     return el('div', { className: 'shot' }, a);
   }));
 }
