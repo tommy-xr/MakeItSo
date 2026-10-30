@@ -22,13 +22,12 @@ pub struct SetupArgs {
     /// Bearer token; empty for none.
     #[arg(long)]
     token: Option<String>,
-    /// Cloudflare Access service-token id; needs --cf-access-client-secret.
+    /// Cloudflare Access service-token id. The secret comes from
+    /// CF_ACCESS_CLIENT_SECRET, or a hidden prompt; never a flag.
     #[arg(long)]
     cf_access_client_id: Option<String>,
-    #[arg(long)]
-    cf_access_client_secret: Option<String>,
     /// Not behind Cloudflare Access; skips that question.
-    #[arg(long, conflicts_with_all = ["cf_access_client_id", "cf_access_client_secret"])]
+    #[arg(long, conflicts_with = "cf_access_client_id")]
     no_cf_access: bool,
     /// Directory tasks may run in (repeatable, comma-separated ok). Default: the
     /// current directory.
@@ -58,20 +57,25 @@ pub async fn run(a: SetupArgs) -> Result<()> {
         None if tty => ask_token()?,
         None => None,
     };
-    let (cf_id, cf_secret) =
-        if a.cf_access_client_id.is_some() || a.cf_access_client_secret.is_some() {
-            (a.cf_access_client_id, a.cf_access_client_secret)
-        } else if tty
+    let cf_id = match a.cf_access_client_id {
+        Some(id) => Some(id),
+        None if tty
             && !a.no_cf_access
             && may_need_access(&url)
-            && confirm("Behind Cloudflare Access? [y/N]: ")?
+            && confirm("Behind Cloudflare Access? [y/N]: ")? =>
         {
-            let id = ask("Access client id", None)?;
-            let secret = rpassword::prompt_password("Access client secret (hidden): ")?;
-            (Some(id), Some(secret))
-        } else {
-            (None, None)
-        };
+            Some(ask("Access client id", None)?)
+        }
+        None => None,
+    };
+    let cf_secret = match (&cf_id, crate::access_secret_env()) {
+        (None, _) => None,
+        (Some(_), Some(s)) => Some(s),
+        (Some(_), None) if tty => Some(rpassword::prompt_password(
+            "Access client secret (hidden): ",
+        )?),
+        (Some(_), None) => None,
+    };
     access_headers(cf_id.as_deref(), cf_secret.as_deref()).map_err(anyhow::Error::msg)?;
     let answer = match a.roots.is_empty() {
         false => a.roots.join(","),

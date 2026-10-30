@@ -76,9 +76,9 @@ mis-worker setup                 # asks url, token, roots; test-connects; saves 
 mis-worker --skip-permissions    # then runs from the saved config
 ```
 
-Every question has a flag (`--url`, `--token`, `--cf-access-client-id`, `--cf-access-client-secret`,
-`--root`), so it also runs unattended. Config lives in `~/.config/mis/worker.toml` (or
-`$MIS_STATE_DIR`); flags and env override it:
+Every question has a flag (`--url`, `--token`, `--cf-access-client-id`, `--root`), so it also runs
+unattended. The Access secret is never a flag: it comes from `CF_ACCESS_CLIENT_SECRET` or a hidden
+prompt. Config lives in `~/.config/mis/worker.toml` (or `$MIS_STATE_DIR`); flags and env override it:
 
 ```toml
 url = "wss://mis.example.com"
@@ -94,7 +94,8 @@ Start the orchestrator with `--bind 0.0.0.0:7474` and a `MIS_TOKEN`. It prints a
 ready-to-paste `MIS_URL=... mis-worker` line for each LAN address (and for `--public-url` if set).
 
 Behind a Cloudflare Tunnel with an Access service-auth policy, give `mis` and `mis-worker` the
-service token too (or pass `--cf-access-client-id` / `--cf-access-client-secret`):
+service token too (`mis` also takes `--cf-access-client-id` / `--cf-access-client-secret`; `mis-worker`
+reads the secret from env only):
 
 ```sh
 export CF_ACCESS_CLIENT_ID=<id>.access
@@ -126,8 +127,8 @@ In the Zero Trust dashboard:
 
 ```sh
 mis-orchestrator --cf-access-team <team> --cf-access-aud <aud-tag>   # or MIS_CF_ACCESS_TEAM / _AUD
-mis-worker setup --url wss://mis.example.com \
-  --cf-access-client-id <id>.access --cf-access-client-secret <secret>
+CF_ACCESS_CLIENT_SECRET=<secret> mis-worker setup --url wss://mis.example.com \
+  --cf-access-client-id <id>.access
 ```
 
 Requests with a valid Access JWT need no `MIS_TOKEN`, so the page skips the token prompt. Requests

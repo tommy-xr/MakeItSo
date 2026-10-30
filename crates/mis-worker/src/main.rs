@@ -35,13 +35,12 @@ struct Args {
     /// Default: ws://127.0.0.1:7474.
     #[arg(long, env = "MIS_URL")]
     url: Option<String>,
-    #[arg(long, env = "MIS_TOKEN")]
+    #[arg(long, env = "MIS_TOKEN", hide_env_values = true)]
     token: Option<String>,
-    /// Cloudflare Access service-token id; needs --cf-access-client-secret.
+    /// Cloudflare Access service-token id; the secret comes from
+    /// CF_ACCESS_CLIENT_SECRET (env only, so it stays out of `ps`).
     #[arg(long, env = "CF_ACCESS_CLIENT_ID")]
     cf_access_client_id: Option<String>,
-    #[arg(long, env = "CF_ACCESS_CLIENT_SECRET", hide_env_values = true)]
-    cf_access_client_secret: Option<String>,
     /// Directory tasks may run in (repeatable; MIS_ROOTS is comma/`:`-separated).
     /// Default: the current directory.
     #[arg(long = "root", env = "MIS_ROOTS")]
@@ -62,9 +61,21 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+    use tracing_subscriber::filter::{LevelFilter, Targets};
+    use tracing_subscriber::prelude::*;
+    let env =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    // At trace, tungstenite logs the raw upgrade request (token, Access secret)
+    // and every frame (prompts, images): cap it at debug, whatever RUST_LOG says.
+    let cap = Targets::new()
+        .with_default(LevelFilter::TRACE)
+        .with_target("tungstenite", LevelFilter::DEBUG)
+        .with_target("tokio_tungstenite", LevelFilter::DEBUG);
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_filter(cap)
+                .with_filter(env),
         )
         .init();
     let args = Args::parse();
@@ -76,7 +87,7 @@ async fn main() -> Result<()> {
         url: args.url,
         token: args.token,
         cf_access_client_id: args.cf_access_client_id,
-        cf_access_client_secret: args.cf_access_client_secret,
+        cf_access_client_secret: access_secret_env(),
         roots: args
             .roots
             .iter()
@@ -408,6 +419,13 @@ async fn run_task(
     if !images.is_empty() {
         let _ = std::fs::remove_dir_all(&image_dir);
     }
+}
+
+/// `CF_ACCESS_CLIENT_SECRET`; empty counts as unset.
+fn access_secret_env() -> Option<String> {
+    std::env::var("CF_ACCESS_CLIENT_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 /// Cloudflare Access headers from `cfg`, checked so bad values fail early.
