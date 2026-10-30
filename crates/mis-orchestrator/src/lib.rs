@@ -29,6 +29,7 @@ pub mod ledger;
 pub mod plan;
 pub mod push;
 pub mod scope;
+pub mod store;
 pub mod summary;
 pub mod tools;
 
@@ -36,6 +37,10 @@ pub mod tools;
 /// leaving it in Planning forever.
 const PLANNER_TIMEOUT: Duration = Duration::from_secs(90);
 const SUMMARY_TIMEOUT: Duration = Duration::from_secs(60);
+/// How often the ledger is saved (only files that changed are written).
+const SAVE_EVERY: Duration = Duration::from_secs(1);
+/// How often tasks past `ledger::persist::KEEP_MS` are forgotten.
+const FORGET_EVERY: Duration = Duration::from_secs(3600);
 
 use access::Identity;
 use access_gate::{AccessGate, JWT_HEADER};
@@ -79,6 +84,10 @@ pub struct App {
     push: Option<Arc<push::Push>>,
     /// Uploaded images. None: attachments are off.
     images: Option<Arc<images::Images>>,
+    /// Where the ledger is saved. None: task history is lost on restart.
+    ledger_dir: Option<std::path::PathBuf>,
+    /// Open once serving, until shut down.
+    store: Arc<Mutex<Option<store::Store>>>,
 }
 
 impl App {
@@ -106,6 +115,8 @@ impl App {
             access: None,
             push: None,
             images: None,
+            ledger_dir: None,
+            store: Default::default(),
         }
     }
 
@@ -162,6 +173,12 @@ impl App {
         self
     }
 
+    /// Save the ledger in `dir` and restore it from there when serving starts.
+    pub fn with_ledger_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.ledger_dir = Some(dir);
+        self
+    }
+
     pub fn with_planner(mut self, planner: Arc<dyn Agent>) -> Self {
         self.planner = Some(planner);
         self
@@ -187,6 +204,11 @@ impl App {
     }
 
     fn apply(&self, effects: Vec<Effect>) {
+        // Save who runs what before telling the worker, so a crash can't hand
+        // the task to another worker on restart.
+        if effects.iter().any(|e| matches!(e, Effect::Assign { .. })) {
+            self.save();
+        }
         for e in effects {
             match e {
                 Effect::Send { conn, msg } => {
@@ -308,6 +330,75 @@ impl App {
                 }
             }
         });
+    }
+
+    /// Restore the saved ledger, if it has a dir. Unusable: serve without
+    /// saving. Err: another orchestrator has it.
+    fn open_store(&self) -> anyhow::Result<()> {
+        let Some(dir) = &self.ledger_dir else {
+            return Ok(());
+        };
+        match store::Store::open(dir, self.now(), unix_ms()) {
+            Ok((store, ledger, effects)) => {
+                tracing::info!(dir = %dir.display(), "task history kept");
+                *self.ledger.lock().unwrap() = ledger;
+                *self.store.lock().unwrap() = Some(store);
+                self.apply(effects);
+                self.forget_old_tasks();
+            }
+            Err(e) if e.is::<store::Locked>() => return Err(e),
+            Err(e) => tracing::warn!("task history won't survive a restart: {e:#}"),
+        }
+        Ok(())
+    }
+
+    /// Snapshot the ledger under its lock, then write it. The store's lock is
+    /// held throughout, so an older snapshot can't overwrite a newer one.
+    fn save(&self) {
+        let mut store = self.store.lock().unwrap();
+        let Some(store) = store.as_mut() else {
+            return;
+        };
+        let snap = self.ledger.lock().unwrap().snapshot(store.written());
+        store.save(snap);
+    }
+
+    fn forget_old_tasks(&self) {
+        let gone = self.transition(|l| l.sweep());
+        if let Some(store) = self.store.lock().unwrap().as_mut() {
+            store.forget(&gone);
+        }
+    }
+
+    /// Save every `SAVE_EVERY` and forget old tasks every `FORGET_EVERY`.
+    async fn keep_saved(&self) {
+        if self.store.lock().unwrap().is_none() {
+            return std::future::pending().await;
+        }
+        let mut save = tokio::time::interval(SAVE_EVERY);
+        let mut forget =
+            tokio::time::interval_at(tokio::time::Instant::now() + FORGET_EVERY, FORGET_EVERY);
+        loop {
+            tokio::select! {
+                _ = save.tick() => {
+                    let app = self.clone();
+                    let _ = tokio::task::spawn_blocking(move || app.save()).await;
+                }
+                _ = forget.tick() => self.forget_old_tasks(),
+            }
+        }
+    }
+
+    /// Save a last time and release the dir for the next orchestrator. The
+    /// ledger stays locked while writing, so nothing changes unsaved meanwhile.
+    fn close_store(&self) {
+        let mut store = self.store.lock().unwrap();
+        let Some(mut s) = store.take() else {
+            return;
+        };
+        let ledger = self.ledger.lock().unwrap();
+        s.save(ledger.snapshot(s.written()));
+        tracing::info!("task history saved");
     }
 
     /// Periodically disconnect workers that stopped sending heartbeats.
@@ -537,10 +628,25 @@ fn unix_ms() -> u64 {
 }
 
 pub async fn serve(listener: TcpListener, app: App) -> anyhow::Result<()> {
+    serve_until(listener, app, std::future::pending()).await
+}
+
+/// Serve until `shutdown` resolves, then save the ledger a last time.
+pub async fn serve_until(
+    listener: TcpListener,
+    app: App,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> anyhow::Result<()> {
+    app.open_store()?;
     app.spawn_liveness();
     app.spawn_image_sweep();
-    let svc = router(app).into_make_service_with_connect_info::<SocketAddr>();
-    axum::serve(listener, svc).await?;
+    let svc = router(app.clone()).into_make_service_with_connect_info::<SocketAddr>();
+    tokio::select! {
+        served = axum::serve(listener, svc) => served?,
+        _ = app.keep_saved() => {}
+        _ = shutdown => {}
+    }
+    app.close_store();
     Ok(())
 }
 

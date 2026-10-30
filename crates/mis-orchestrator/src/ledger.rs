@@ -10,6 +10,8 @@ use uuid::Uuid;
 
 use crate::{plan, summary};
 
+pub mod persist;
+
 /// Opaque handle for one worker connection; the shell maps it to a socket.
 pub type ConnId = u64;
 
@@ -112,6 +114,8 @@ const PR_UNAVAILABLE: &str = "PR status unavailable: ";
 /// A fresh reply's context keeps at most this much of the parent's prompt and answer.
 const MAX_CONTEXT_CHARS: usize = 4_000;
 
+/// Saved as is (see `persist`), but for the transcript, which goes in a file of its own.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct TaskEntry {
     task: Task,
     status: TaskStatus,
@@ -122,8 +126,10 @@ struct TaskEntry {
     /// Model the planner reported; credited if it answers the task itself.
     planner_model: Option<String>,
     summary: Option<String>,
+    #[serde(skip)]
     events: Vec<AgentEvent>,
     /// Serialized size of `events`.
+    #[serde(skip)]
     bytes: usize,
     truncated: bool,
     /// Unix millis: submitted, finished.

@@ -87,7 +87,8 @@ pub fn payload(task: TaskId, title: &str, body: &str) -> String {
     .to_string()
 }
 
-/// Write `bytes` to `path` readable only by this user, atomically (temp + rename).
+/// Write `bytes` to `path` readable only by this user, atomically and durably
+/// (temp, fsync, rename).
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
     let _ = std::fs::remove_file(&tmp); // so the mode below applies
@@ -95,7 +96,9 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     opts.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    opts.open(&tmp)?.write_all(bytes)?;
+    let mut file = opts.open(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
     std::fs::rename(&tmp, path)
 }
 
