@@ -350,7 +350,7 @@ function el(tag, props, ...kids) {
 function eventLine(e) {
   switch (e.type) {
     case 'usage': return null; // running totals, shown on the task row
-    case 'planned': return `plan: ${e.harness}${e.model ? `/${e.model}` : ''}: ${e.prompt}`;
+    case 'planned': return `plan: ${e.harness}${e.model ? `/${e.model}` : ''}${e.worker ? ` on ${hostOf(e.worker)}` : ''}: ${e.prompt}`;
     case 'started': return 'started';
     case 'text': return e.text;
     case 'tool_use': return `> ${e.name} ${JSON.stringify(e.input)}`;
@@ -666,6 +666,12 @@ function ticker() {
     const wait = `${queued > 1 ? `${queued} ` : ''}queued · ${blocked.harness} resets ${span(blocked.blocked_until - Date.now() - skew)}`;
     return { parts: dots([planning && `${planning} planning`, wait]), cls: 'warn', open: blocked.id };
   }
+  // Held for one worker (routed there, or a reply to its session): say which; a tap opens that task.
+  const held = tasks.find((t) => t.status === 'queued' && t.activity && t.activity !== 'queued');
+  if (held) {
+    const wait = `${queued > 1 ? `${queued} ` : ''}queued · ${held.activity}`;
+    return { parts: dots([planning && `${planning} planning`, wait]), cls: 'warn', open: held.id };
+  }
   if (queued || planning) return { parts: dots([planning && `${planning} planning`, queued && `${queued} queued`]), cls: 'run' };
   // A tap opens the most urgent, newest first; opening it settles it, so the next tap opens the next.
   const need = tasks.filter((t) => ATTENTION[t.attention]).reverse().sort((a, b) => rank(a) - rank(b));
@@ -830,13 +836,15 @@ function heldRows(key, list) {
   return rows;
 }
 
-// Status + prompt, then placement/time/tokens, then what a running task is doing, then the answer preview.
+// Status + prompt, then placement/time/tokens, then what a running task is doing (or what a queued one
+// waits for), then the answer preview.
 function taskRows(ul, rows) {
   ul.replaceChildren(...rows.map(([depth, t]) => el('li', depth ? { className: 'reply', style: `--depth: ${depth}` } : {},
     el('a', { href: `#task/${t.id}` },
       el('div', { className: 'head clamp2' }, depth ? '↳ ' : '', attDot(t), chip(t.status), t.prompt),
       el('div', { className: 'sub dim' }, ...dots([...placement(t), clock(t), tokensOf(t), linksBrief(t)])),
-      t.status === 'running' && t.activity ? el('div', { className: 'activity' }, t.activity) : '',
+      (t.status === 'running' || t.status === 'queued') && t.activity && t.activity !== 'queued'
+        ? el('div', { className: 'activity' }, t.activity) : '',
       t.summary ? el('pre', { className: 'answer clamp3' }, t.summary) : ''))));
   if (!rows.length) ul.append(el('li', { className: 'dim' }, 'no tasks yet'));
 }

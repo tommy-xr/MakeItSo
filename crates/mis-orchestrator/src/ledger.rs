@@ -143,7 +143,8 @@ struct TaskEntry {
     step: Option<String>,
     /// The task this one replies to.
     parent: Option<TaskId>,
-    /// Only this worker may run it: it holds the session being resumed.
+    /// Only this worker may run it: it holds the session being resumed (a
+    /// reply), or the planner routed the task there for its purpose or tools.
     pin: Option<WorkerId>,
     /// Evidence: GitHub links in the agent's output and items it reported, most
     /// recently mentioned last. Kept apart from `events`, so transcript eviction
@@ -155,6 +156,10 @@ struct TaskEntry {
     seen: bool,
     /// Attached image ids, sent with the task to its worker.
     images: Vec<Uuid>,
+    /// Workers as offered to the planner, so its pick resolves to the worker
+    /// it saw even if the fleet changes meanwhile. Planning doesn't survive a restart.
+    #[serde(skip)]
+    offered: Vec<plan::Card>,
 }
 
 /// What a task needs from the user; opening it once finished clears it.
@@ -211,6 +216,7 @@ impl TaskEntry {
             limited: false,
             seen: false,
             images: vec![],
+            offered: vec![],
         }
     }
 
@@ -456,8 +462,17 @@ impl Ledger {
         if let Some(until) = s.blocked_until {
             let wait = fmt_elapsed(until.saturating_sub(self.now_ms));
             s.activity = format!("queued · {} resets {wait}", t.task.harness);
+        } else if let Some(pin) = t.pin.filter(|_| t.status == TaskStatus::Queued) {
+            s.activity = format!("waiting for {}", self.host(pin));
         }
         s
+    }
+
+    /// `wid`'s card name; its short id once it has left.
+    fn host(&self, wid: WorkerId) -> String {
+        let cards = self.cards();
+        let card = cards.into_iter().find(|c| c.id == wid);
+        card.map_or_else(|| wid.to_string()[..8].to_string(), |c| c.name)
     }
 
     /// For a queued task that only usage limits hold back: when the first
@@ -500,7 +515,9 @@ impl Ledger {
     ) -> (TaskId, Vec<Effect>) {
         let id = Uuid::new_v4();
         let planning = harness.is_none();
-        let plan_prompt = planning.then(|| plan::prompt(&prompt, images.len(), &self.fleet()));
+        let offered = self.cards();
+        let plan_prompt =
+            planning.then(|| plan::prompt(&prompt, images.len(), &self.fleet(), &offered));
         let mut entry = TaskEntry::new(
             Task {
                 id,
@@ -515,6 +532,7 @@ impl Ledger {
         );
         if planning {
             entry.status = TaskStatus::Planning;
+            entry.offered = offered;
         }
         entry.images = images;
         self.tasks.push(entry);
@@ -614,6 +632,15 @@ impl Ledger {
         }
     }
 
+    /// Every known worker, online or not, for the planner to route on.
+    fn cards(&self) -> Vec<plan::Card> {
+        plan::cards(
+            self.workers
+                .iter()
+                .map(|(id, w)| (*id, &w.info, w.conn.is_some())),
+        )
+    }
+
     /// Every harness a known worker offers, with the models every such worker
     /// advertises (scheduling ignores the model, so any of them may get the task);
     /// with no workers, every harness that exists and no models, so a plan made
@@ -664,7 +691,7 @@ impl Ledger {
         match event {
             AgentEvent::Finished { ok, summary } => {
                 let plan = match (ok, summary) {
-                    (true, Some(reply)) => plan::parse(&reply, &t.task.prompt, &fleet),
+                    (true, Some(reply)) => plan::parse(&reply, &t.task.prompt, &fleet, &t.offered),
                     (_, summary) => Err(summary.unwrap_or_else(|| "planner failed".into())),
                 };
                 match plan {
@@ -695,6 +722,7 @@ impl Ledger {
                         t.task.harness = p.harness.clone();
                         t.task.prompt = p.prompt.clone();
                         t.task.model = p.model.clone();
+                        t.pin = p.pin;
                         t.status = TaskStatus::Queued;
                         self.queue.push_back(task);
                         let mut events = vec![];
@@ -705,6 +733,7 @@ impl Ledger {
                             harness: p.harness,
                             prompt: p.prompt,
                             model: p.model,
+                            worker: p.pin,
                         });
                         events.iter().for_each(|e| t.record(e, now));
                         // Not the planner's reason: the worker hasn't started yet.
@@ -850,8 +879,13 @@ impl Ledger {
         }
         self.workers.remove(&wid);
         let mut effects = self.fail_running(wid, &[], "worker disconnected");
-        // Replies waiting for this worker's session can never run now.
-        effects.extend(self.fail_pinned(wid, "worker left; its session is gone", |_| true));
+        // Replies waiting for this worker's session can never run now. Tasks
+        // routed here keep waiting: the worker may come back.
+        effects.extend(
+            self.fail_pinned(wid, "worker left; its session is gone", |t| {
+                t.task.resume.is_some()
+            }),
+        );
         effects
     }
 
@@ -1287,6 +1321,102 @@ mod tests {
         }
     }
 
+    /// Submit `prompt` for planning and finish the plan with `reply`.
+    fn plan_with(l: &mut Ledger, prompt: &str, reply: &str) -> (TaskId, Vec<Effect>) {
+        let (task, _) = l.submit(prompt.into(), None, None, None, vec![]);
+        let reply = AgentEvent::Finished {
+            ok: true,
+            summary: Some(reply.into()),
+        };
+        (task, l.planning_event(task, reply))
+    }
+
+    fn studio() -> WorkerInfo {
+        WorkerInfo {
+            hostname: "studio".into(),
+            purpose: Some("Blender + blender-mcp; 3D assets".into()),
+            ..info()
+        }
+    }
+
+    const TO_STUDIO: &str = r#"{"harness":"claude","worker":"studio","reason":"needs Blender"}"#;
+
+    #[test]
+    fn routed_task_runs_on_its_worker_and_generic_on_any() {
+        let mut l = Ledger::default();
+        let (laptop, studio_id) = (Uuid::new_v4(), Uuid::new_v4());
+        l.connect(laptop, info(), &[], 1, T0);
+        l.connect(studio_id, studio(), &[], 2, T0);
+        let (_, eff) = l.submit("x".into(), None, None, None, vec![]);
+        let [Effect::Plan { prompt, .. }] = &eff[..] else {
+            panic!("{eff:?}")
+        };
+        assert!(
+            prompt.contains("- studio: harnesses claude; purpose: Blender"),
+            "{prompt}"
+        );
+        // Blender task, Blender worker online: it goes there though the laptop is idle too.
+        let (chair, eff) = plan_with(&mut l, "model a chair", TO_STUDIO);
+        assert_eq!(assigned(&eff), [(2, chair)]);
+        let planned = eff.iter().any(|e| {
+            matches!(e, Effect::Broadcast(ServerMsg::Event { event: AgentEvent::Planned { worker, .. }, .. }) if *worker == Some(studio_id))
+        });
+        assert!(planned, "{eff:?}");
+        // A second one waits for the busy studio rather than taking the idle laptop.
+        let (table, eff) = plan_with(&mut l, "model a table", TO_STUDIO);
+        assert!(assigned(&eff).is_empty());
+        assert_eq!(status_of(&l, table).activity, "waiting for studio");
+        // Generic task: any idle worker.
+        let (typo, eff) = plan_with(&mut l, "fix a typo", r#"{"harness":"claude"}"#);
+        assert_eq!(assigned(&eff), [(1, typo)]);
+    }
+
+    #[test]
+    fn routed_task_waits_for_an_offline_worker_even_past_grace() {
+        let mut l = Ledger::default();
+        let (laptop, studio_id) = (Uuid::new_v4(), Uuid::new_v4());
+        l.connect(laptop, info(), &[], 1, T0);
+        l.connect(studio_id, studio(), &[], 2, T0);
+        l.disconnect(studio_id, 2);
+        let (chair, eff) = plan_with(&mut l, "model a chair", TO_STUDIO);
+        assert!(assigned(&eff).is_empty(), "ran elsewhere: {eff:?}");
+        assert_eq!(status_of(&l, chair).activity, "waiting for studio");
+        // Grace ends: the worker is dropped, the task keeps waiting.
+        l.expire(studio_id, 1);
+        assert_eq!(task_status(&l, chair), TaskStatus::Queued);
+        assert!(status_of(&l, chair).activity.starts_with("waiting for "));
+        // It comes back: the task runs there.
+        let (_, eff) = l.connect(studio_id, studio(), &[], 3, T0);
+        assert_eq!(assigned(&eff), [(3, chair)]);
+    }
+
+    #[test]
+    fn pick_resolves_to_the_worker_offered_even_after_it_left() {
+        let mut l = Ledger::default();
+        let studio_id = Uuid::new_v4();
+        l.connect(Uuid::new_v4(), info(), &[], 1, T0);
+        l.connect(studio_id, studio(), &[], 2, T0);
+        l.disconnect(studio_id, 2);
+        let (task, _) = l.submit("model a chair".into(), None, None, None, vec![]);
+        l.expire(studio_id, 1);
+        let reply = AgentEvent::Finished {
+            ok: true,
+            summary: Some(TO_STUDIO.into()),
+        };
+        l.planning_event(task, reply);
+        assert_eq!(task_status(&l, task), TaskStatus::Queued);
+        let (_, eff) = l.connect(studio_id, studio(), &[], 3, T0);
+        assert_eq!(assigned(&eff), [(3, task)]);
+    }
+
+    #[test]
+    fn plan_naming_an_unknown_worker_fails_the_task() {
+        let mut l = Ledger::default();
+        l.connect(Uuid::new_v4(), info(), &[], 1, T0);
+        let (task, eff) = plan_with(&mut l, "model a chair", TO_STUDIO);
+        assert_eq!(finished(&eff, task), Some(false));
+    }
+
     fn finished(effects: &[Effect], task: TaskId) -> Option<bool> {
         effects.iter().find_map(|e| match e {
             Effect::Broadcast(ServerMsg::Event {
@@ -1610,6 +1740,7 @@ mod tests {
                     harness,
                     prompt,
                     model: None,
+                    worker: None,
                 },
             ..
         }), Effect::Assign {
