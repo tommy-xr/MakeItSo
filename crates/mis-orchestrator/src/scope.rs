@@ -18,12 +18,15 @@ pub fn allowed(scope: Scope, msg: &ClientMsg) -> bool {
     match msg {
         ClientMsg::Status | ClientMsg::Subscribe | ClientMsg::Show { .. } => true,
         // Seen clears attention for everyone; RefreshEvidence sets a worker running `gh`;
-        // a push subscription makes the orchestrator POST task prompts to its endpoint.
+        // a push subscription makes the orchestrator POST task prompts to its endpoint;
+        // a purpose rewrites a worker's config and steers routing; a suggestion runs a model.
         ClientMsg::Submit { .. }
         | ClientMsg::Seen { .. }
         | ClientMsg::RefreshEvidence { .. }
         | ClientMsg::PushSubscribe { .. }
-        | ClientMsg::PushUnsubscribe { .. } => scope == Scope::Full,
+        | ClientMsg::PushUnsubscribe { .. }
+        | ClientMsg::SetPurpose { .. }
+        | ClientMsg::SuggestPurpose { .. } => scope == Scope::Full,
     }
 }
 

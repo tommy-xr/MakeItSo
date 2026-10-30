@@ -236,6 +236,7 @@ async fn main() -> anyhow::Result<()> {
             &args.planner_model,
             &["--json-schema", mis_orchestrator::plan::SCHEMA],
         ));
+        app = app.with_drafter(one_shot_claude(&args.planner_model, &[]));
     } else {
         tracing::warn!("no `claude` on PATH: planner off; tasks without --harness run on claude");
     }

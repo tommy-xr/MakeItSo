@@ -38,6 +38,21 @@ pub struct Machine {
 }
 
 impl Inventory {
+    /// Apps, then MCP server names, in `self` but not in `old`: "new: Houdini, houdini-mcp".
+    pub fn added_since(&self, old: &Inventory) -> Vec<String> {
+        let apps = (self.apps.iter())
+            .filter(|a| !old.apps.iter().any(|o| o.name == a.name))
+            .map(|a| a.name.clone());
+        let had: Vec<&String> = old.mcp.values().flatten().collect();
+        let mut mcp: Vec<String> = (self.mcp.values().flatten())
+            .filter(|n| !had.contains(n))
+            .cloned()
+            .collect();
+        mcp.sort();
+        mcp.dedup();
+        apps.chain(mcp).collect()
+    }
+
     /// One line for prompts and terminals, e.g. "apps: Blender 4.2.3, ffmpeg;
     /// mcp claude: blender; machine: macOS 15.3, 12 cpus, 32 GB, Apple M2".
     pub fn brief(&self) -> String {
@@ -75,6 +90,33 @@ impl Inventory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn added_since_names_new_apps_then_new_mcp_servers() {
+        let app = |n: &str| InstalledApp {
+            name: n.into(),
+            version: None,
+        };
+        let old = Inventory {
+            apps: vec![app("Blender")],
+            mcp: [("claude".into(), vec!["blender".into()])].into(),
+            ..Default::default()
+        };
+        let new = Inventory {
+            apps: vec![app("Blender"), app("Houdini")],
+            mcp: [
+                (
+                    "claude".into(),
+                    vec!["blender".into(), "houdini-mcp".into()],
+                ),
+                ("codex".into(), vec!["blender".into(), "houdini-mcp".into()]),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        assert_eq!(new.added_since(&old), ["Houdini", "houdini-mcp"]);
+        assert!(old.added_since(&new).is_empty());
+    }
 
     #[test]
     fn brief_lists_what_is_known() {

@@ -24,6 +24,9 @@ struct Saved<'a> {
     version: u32,
     /// Known workers, restored offline.
     workers: BTreeMap<WorkerId, WorkerInfo>,
+    /// `Ledger::noted`.
+    #[serde(default)]
+    noted: BTreeMap<WorkerId, Inventory>,
     /// In submission order, without transcripts.
     tasks: Cow<'a, [TaskEntry]>,
 }
@@ -67,6 +70,9 @@ impl Ledger {
             version: VERSION,
             workers: (self.workers.iter())
                 .map(|(id, w)| (*id, w.info.clone()))
+                .collect(),
+            noted: (self.noted.iter())
+                .map(|(id, i)| (*id, i.clone()))
                 .collect(),
             tasks: Cow::Borrowed(&self.tasks),
         };
@@ -123,6 +129,7 @@ impl Ledger {
             l.workers.insert(wid, w);
             effects.push(Effect::StartGrace { wid, generation });
         }
+        l.noted = saved.noted.into_iter().collect();
         l.tasks = saved.tasks.into_owned();
         let written = (l.tasks.iter())
             .filter(|t| finished(t.status))

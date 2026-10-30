@@ -26,6 +26,7 @@ pub mod access;
 pub mod access_gate;
 pub mod images;
 pub mod ledger;
+pub mod note;
 pub mod plan;
 pub mod push;
 pub mod scope;
@@ -70,6 +71,8 @@ pub struct App {
     summarizer: Option<Arc<dyn Agent>>,
     /// Bounds concurrent summarizer processes, apart from the planner's.
     summary_slots: Arc<tokio::sync::Semaphore>,
+    /// Drafts worker purpose notes (the planner's model, free text). None: no suggestions.
+    drafter: Option<Arc<dyn Agent>>,
     /// A worker silent (no Hello/Stats) this long is treated as disconnected.
     stale_after: Duration,
     /// How often to check for silent workers.
@@ -106,6 +109,7 @@ impl App {
             planner_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             summarizer: None,
             summary_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            drafter: None,
             // Two missed beats plus slack for network jitter.
             stale_after: 2 * STATS_INTERVAL + Duration::from_secs(5),
             tick_every: Duration::from_secs(5),
@@ -189,6 +193,11 @@ impl App {
         self
     }
 
+    pub fn with_drafter(mut self, drafter: Arc<dyn Agent>) -> Self {
+        self.drafter = Some(drafter);
+        self
+    }
+
     /// The locked ledger, told the wall-clock time for whatever happens next.
     fn ledger(&self) -> std::sync::MutexGuard<'_, Ledger> {
         let mut l = self.ledger.lock().unwrap();
@@ -239,6 +248,12 @@ impl App {
                 Effect::Plan { task, prompt } => {
                     let app = self.clone();
                     tokio::spawn(async move { app.run_planner(task, prompt).await });
+                }
+                Effect::SuggestPurpose { worker, prompt } => {
+                    if let Some(agent) = self.drafter.clone() {
+                        let app = self.clone();
+                        tokio::spawn(async move { app.run_drafter(agent, worker, prompt).await });
+                    }
                 }
                 Effect::Summarize { task, prompt } => {
                     if let Some(agent) = self.summarizer.clone() {
@@ -301,6 +316,38 @@ impl App {
                     tracing::warn!(%task, "summarizer failed: {}", summary.unwrap_or_default())
                 }
                 _ => {}
+            },
+        )
+        .await;
+    }
+
+    /// Broadcast the drafter's note for `worker`; it is never saved here.
+    async fn run_drafter(&self, agent: Arc<dyn Agent>, worker: WorkerId, prompt: String) {
+        // The worker id stands in for a task id: it only labels the run.
+        run_oneshot(
+            "drafter",
+            agent.as_ref(),
+            &self.summary_slots,
+            worker,
+            &prompt,
+            SUMMARY_TIMEOUT,
+            |ev| {
+                let (draft, error) = match ev {
+                    AgentEvent::Finished {
+                        ok: true,
+                        summary: Some(reply),
+                    } => (note::clean(&reply), None),
+                    AgentEvent::Finished { summary, .. } => {
+                        (String::new(), Some(summary.unwrap_or("no draft".into())))
+                    }
+                    _ => return,
+                };
+                let msg = ServerMsg::PurposeDraft {
+                    worker,
+                    draft,
+                    error,
+                };
+                let _ = self.events.send(msg);
             },
         )
         .await;
@@ -924,6 +971,9 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
                     Some(WorkerMsg::PrUnavailable { task, why }) => {
                         app.transition(|l| ((), l.pr_unavailable(wid, conn, task, &why)));
                     }
+                    Some(WorkerMsg::Purpose { purpose }) => {
+                        app.transition(|l| ((), l.worker_purpose(wid, conn, purpose)));
+                    }
                     Some(WorkerMsg::Hello { .. }) => {}
                     None => break,
                 }
@@ -1030,6 +1080,27 @@ async fn client_conn(mut sock: WebSocket, app: App, scope: Scope) {
                 Some(ClientMsg::PushUnsubscribe { endpoint }) => {
                     if let Some(p) = &app.push {
                         p.unsubscribe(&endpoint);
+                    }
+                }
+                Some(ClientMsg::SetPurpose { worker, purpose }) => {
+                    let refused = app.transition(|l| match l.set_purpose(worker, &purpose) {
+                        Ok(effects) => (None, effects),
+                        Err(why) => (Some(why), vec![]),
+                    });
+                    if let Some(message) = refused {
+                        send_json(&mut sock, &ServerMsg::Error { message }).await;
+                    }
+                }
+                Some(ClientMsg::SuggestPurpose { worker }) => {
+                    let refused = match app.drafter {
+                        None => Some("suggestions need the planner (claude on the orchestrator)".into()),
+                        Some(_) => app.transition(|l| match l.suggest_purpose(worker) {
+                            Ok(effects) => (None, effects),
+                            Err(why) => (Some(why.to_string()), vec![]),
+                        }),
+                    };
+                    if let Some(message) = refused {
+                        send_json(&mut sock, &ServerMsg::Error { message }).await;
                     }
                 }
                 Some(ClientMsg::RefreshEvidence { task }) => {

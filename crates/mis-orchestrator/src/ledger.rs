@@ -8,7 +8,7 @@ use std::time::Duration;
 use mis_types::*;
 use uuid::Uuid;
 
-use crate::{plan, summary};
+use crate::{note, plan, summary};
 
 pub mod persist;
 
@@ -37,6 +37,12 @@ pub enum Effect {
     /// Run the planner on `prompt`; feed its events to `planning_event(task, ..)`.
     Plan {
         task: TaskId,
+        prompt: String,
+    },
+    /// Ask the planner model to draft `worker`'s purpose; broadcast the reply as
+    /// `ServerMsg::PurposeDraft`.
+    SuggestPurpose {
+        worker: WorkerId,
         prompt: String,
     },
     /// Run the summarizer on `prompt`; feed its reply to `summarized(task, ..)`.
@@ -381,6 +387,9 @@ pub struct Ledger {
     pub now_ms: u64,
     workers: HashMap<WorkerId, Worker>,
     usage: HashMap<WorkerId, Usage>,
+    /// Each worker's inventory when its purpose was last saved (or first seen):
+    /// what it gained since is offered as "new" for the note. Outlives the worker.
+    noted: HashMap<WorkerId, Inventory>,
     tasks: Vec<TaskEntry>, // insertion order = submission order
     queue: VecDeque<TaskId>,
     /// The supervisor's last report; not saved, so a restart clears it.
@@ -400,6 +409,8 @@ impl Ledger {
                     online: w.conn.is_some(),
                     stats: w.stats.as_ref().map(|(s, _)| s.clone()),
                     stats_at: w.stats.as_ref().map(|(_, at)| *at),
+                    new_tools: (self.noted.get(id))
+                        .map_or(vec![], |old| w.info.inventory.added_since(old)),
                 })
                 .collect(),
             tasks: self.tasks.iter().map(|t| self.summary(t)).collect(),
@@ -632,6 +643,43 @@ impl Ledger {
         }
     }
 
+    /// Have online worker `wid` save `purpose` (blank clears); it confirms with
+    /// `worker_purpose`, which updates what clients see.
+    pub fn set_purpose(&self, wid: WorkerId, purpose: &str) -> Result<Vec<Effect>, String> {
+        let conn = (self.workers.get(&wid))
+            .and_then(|w| w.conn)
+            .ok_or("that worker is offline; its note lives in its worker.toml")?;
+        let purpose = Some(purpose.trim().to_string()).filter(|p| !p.is_empty());
+        let msg = OrchMsg::SetPurpose { purpose };
+        Ok(vec![Effect::Send { conn, msg }])
+    }
+
+    /// `wid` saved its purpose: show it, and count its tools as noted.
+    pub fn worker_purpose(
+        &mut self,
+        wid: WorkerId,
+        conn: ConnId,
+        purpose: Option<String>,
+    ) -> Vec<Effect> {
+        let Some(w) = self.workers.get_mut(&wid).filter(|w| w.conn == Some(conn)) else {
+            return vec![];
+        };
+        w.info.purpose = purpose;
+        self.noted.insert(wid, w.info.inventory.clone());
+        vec![Effect::Broadcast(self.status())]
+    }
+
+    /// Ask for a draft of `wid`'s purpose covering its new tools.
+    pub fn suggest_purpose(&self, wid: WorkerId) -> Result<Vec<Effect>, String> {
+        let w = self.workers.get(&wid).ok_or("unknown worker")?;
+        let new = (self.noted.get(&wid)).map_or(vec![], |old| w.info.inventory.added_since(old));
+        let prompt = note::prompt(w.info.purpose.as_deref(), &new, &w.info.inventory.brief());
+        Ok(vec![Effect::SuggestPurpose {
+            worker: wid,
+            prompt,
+        }])
+    }
+
     /// Every known worker, online or not, for the planner to route on.
     fn cards(&self) -> Vec<plan::Card> {
         plan::cards(
@@ -781,6 +829,7 @@ impl Ledger {
         now: Duration,
     ) -> (Vec<TaskId>, Vec<Effect>) {
         let generation = self.workers.get(&wid).map_or(0, |w| w.generation) + 1;
+        (self.noted.entry(wid)).or_insert_with(|| info.inventory.clone());
         self.workers.insert(
             wid,
             Worker {

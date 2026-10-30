@@ -1030,6 +1030,7 @@ mod tests {
             online: true,
             stats: None,
             stats_at: None,
+            new_tools: vec![],
         };
         assert_eq!(placement(&t, &[w]), "claude/sonnet @ mini");
         t.harness.clear();
