@@ -11,7 +11,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::{self, http::Uri, Message};
 
 use crate::config::{self, Config};
-use crate::roots;
+use crate::{inventory, roots};
 
 /// Each flag answers (and skips) one question.
 #[derive(clap::Args)]
@@ -33,6 +33,10 @@ pub struct SetupArgs {
     /// current directory.
     #[arg(long = "root")]
     roots: Vec<String>,
+    /// What this machine is for, e.g. "Blender + blender-mcp; 3D modelling,
+    /// glTF export". The planner routes matching tasks here. Empty clears it.
+    #[arg(long)]
+    purpose: Option<String>,
 }
 
 pub async fn run(a: SetupArgs) -> Result<()> {
@@ -100,7 +104,7 @@ pub async fn run(a: SetupArgs) -> Result<()> {
         // Advertise no harnesses so the orchestrator assigns nothing to this probe.
         harnesses: vec![],
         roots: roots.iter().map(|r| r.display().to_string()).collect(),
-        models: Default::default(),
+        ..Default::default()
     };
     let mut tries = 1;
     let cfg = loop {
@@ -111,6 +115,7 @@ pub async fn run(a: SetupArgs) -> Result<()> {
             cf_access_client_secret: cf_secret.clone(),
             roots: roots.clone(),
             models: saved.models.clone(),
+            ..Default::default()
         };
         let resolved = config::merge(cfg.clone(), Config::default(), cwd.clone());
         match test_connect(&resolved, id, &info).await {
@@ -146,9 +151,41 @@ pub async fn run(a: SetupArgs) -> Result<()> {
             .map_or("none (runs its default)".into(), |m| m.join(", "));
         println!("{h} models ({from}): {list}");
     }
+    let scan = roots.clone();
+    let inventory = tokio::task::spawn_blocking(move || inventory::collect(&scan)).await?;
+    print_inventory(&inventory);
+    let purpose = match a.purpose {
+        Some(p) => p,
+        None if tty => {
+            eprintln!("Purpose: what this machine is for, so the planner sends it matching tasks.");
+            let answer = match &saved.purpose {
+                Some(p) => line(&format!("Purpose [{p}] (- clears): "))?,
+                None => line("Purpose (blank for none): ")?,
+            };
+            match answer.as_str() {
+                "" => saved.purpose.clone().unwrap_or_default(),
+                "-" => String::new(),
+                _ => answer,
+            }
+        }
+        None => saved.purpose.clone().unwrap_or_default(),
+    };
+    let cfg = Config {
+        purpose: Some(purpose.trim().to_string()).filter(|p| !p.is_empty()),
+        inventory: Some(inventory),
+        ..cfg
+    };
     config::write(&path, &cfg)?;
     println!("wrote {}", path.display());
     Ok(())
+}
+
+/// One line per part of `Inventory::brief`, e.g. "apps: Blender 4.2.3".
+fn print_inventory(inv: &Inventory) {
+    match inv.brief().as_str() {
+        "" => println!("inventory: nothing found"),
+        brief => brief.split("; ").for_each(|part| println!("{part}")),
+    }
 }
 
 /// Open the worker socket, say Hello, and wait for Welcome.

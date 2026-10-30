@@ -12,7 +12,9 @@ use uuid::Uuid;
 mod access;
 pub use access::access_headers;
 mod image;
+mod inventory;
 pub use image::{ImageFile, ImageKind, MAX_IMAGES, MAX_IMAGE_BYTES};
+pub use inventory::{InstalledApp, Inventory, Machine};
 mod links;
 pub use links::{github_link, github_links, Checks, Link, LinkKind, PrState, PrStatus};
 pub mod mcp;
@@ -79,7 +81,7 @@ pub fn merge_limits(have: &mut Vec<LimitWindow>, new: Vec<LimitWindow>) {
 }
 
 /// Reported by a worker on connect; the orchestrator keeps these as its ledger.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct WorkerInfo {
     pub hostname: String,
     pub os: String,
@@ -93,6 +95,12 @@ pub struct WorkerInfo {
     /// runs its own default.
     #[serde(default)]
     pub models: BTreeMap<String, Vec<String>>,
+    /// What the user says this machine is for (worker.toml `purpose`), e.g.
+    /// "Blender + blender-mcp; 3D modelling and glTF export".
+    #[serde(default)]
+    pub purpose: Option<String>,
+    #[serde(default)]
+    pub inventory: Inventory,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -511,6 +519,18 @@ mod tests {
                     harnesses: vec!["claude".into()],
                     roots: vec!["/code".into()],
                     models: [("claude".into(), vec!["sonnet".into()])].into(),
+                    purpose: Some("3D assets".into()),
+                    inventory: Inventory {
+                        mcp: [("claude".into(), vec!["blender".into()])].into(),
+                        apps: vec![InstalledApp {
+                            name: "Blender".into(),
+                            version: Some("4.2.3".into()),
+                        }],
+                        machine: Machine {
+                            cpus: 12,
+                            ..Default::default()
+                        },
+                    },
                 },
             },
             WorkerMsg::Event {
@@ -578,6 +598,10 @@ mod tests {
         let old: WorkerInfo =
             serde_json::from_str(r#"{"hostname":"h","os":"o","arch":"a","harnesses":[]}"#).unwrap();
         assert!(old.roots.is_empty() && old.models.is_empty());
+        // ...and predating purpose and inventory.
+        assert_eq!((old.purpose, old.inventory), (None, Inventory::default()));
+        let partial: Inventory = serde_json::from_str(r#"{"apps":[{"name":"gh"}]}"#).unwrap();
+        assert_eq!(partial.apps[0].version, None);
         // Tag sits beside the stats fields; missing fields default.
         let s: WorkerMsg = serde_json::from_str(r#"{"type":"stats","cpu_pct":7}"#).unwrap();
         assert_eq!(
@@ -698,6 +722,7 @@ mod tests {
                 harnesses: vec![],
                 roots: vec![],
                 models: Default::default(),
+                ..Default::default()
             },
             busy: false,
             online: true,

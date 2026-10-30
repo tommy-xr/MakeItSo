@@ -159,6 +159,7 @@ mod tests {
             harnesses: vec!["claude".into()],
             roots: vec!["/code".into()],
             models: Default::default(),
+            ..Default::default()
         };
         l.connect(wid, info, &[], 1, Duration::ZERO);
         let (a, _) = l.submit(

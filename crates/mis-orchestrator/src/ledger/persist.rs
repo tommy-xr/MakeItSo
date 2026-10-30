@@ -188,6 +188,7 @@ mod tests {
             harnesses: vec!["claude".into()],
             roots: vec![],
             models: Default::default(),
+            ..Default::default()
         }
     }
 

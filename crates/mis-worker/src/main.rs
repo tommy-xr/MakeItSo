@@ -2,6 +2,7 @@
 //! assigned tasks through `mis_agent` and streams events back.
 
 mod config;
+mod inventory;
 mod mcp;
 mod pr;
 mod roots;
@@ -93,9 +94,10 @@ async fn main() -> Result<()> {
             .iter()
             .flat_map(|r| roots::split_roots(r))
             .collect(),
-        models: Default::default(),
+        ..Default::default()
     };
-    let cfg = config::merge(cli, config::load(&path)?, std::env::current_dir()?);
+    let file = config::load(&path)?;
+    let cfg = config::merge(cli, file.clone(), std::env::current_dir()?);
     // Validate before the reconnect loop so bad credentials fail fast.
     let access = access_values(&cfg)?;
     let roots = roots::canonical_roots(&cfg.roots)?;
@@ -105,6 +107,11 @@ async fn main() -> Result<()> {
     if agents.is_empty() {
         anyhow::bail!("no agent harness found on PATH (need `claude` or `codex`)");
     }
+    let scan = roots.clone();
+    let inventory = tokio::task::spawn_blocking(move || inventory::collect(&scan)).await?;
+    if let Err(e) = config::save_inventory(&path, file, &inventory) {
+        tracing::warn!("could not save inventory: {e:#}");
+    }
     let info = WorkerInfo {
         hostname: hostname(),
         os: std::env::consts::OS.into(),
@@ -112,8 +119,11 @@ async fn main() -> Result<()> {
         harnesses: agents.iter().map(|a| a.name().to_string()).collect(),
         roots: roots.iter().map(|r| r.display().to_string()).collect(),
         models: advertised(&agents, &cfg.models),
+        purpose: cfg.purpose.clone(),
+        inventory,
     };
     tracing::info!(?info.harnesses, ?info.models, ?info.roots, "connecting to {}", cfg.url);
+    tracing::info!("inventory: {}", info.inventory.brief());
     // PR status reads, sent as they come; dropped if the socket dies mid-send.
     let (pr_tx, pr_rx) = mpsc::channel::<WorkerMsg>(64);
     let ctx = Ctx {

@@ -1283,6 +1283,7 @@ mod tests {
             harnesses: vec!["claude".into()],
             roots: vec![],
             models: [("claude".into(), vec!["haiku".into(), "sonnet".into()])].into(),
+            ..Default::default()
         }
     }
 
