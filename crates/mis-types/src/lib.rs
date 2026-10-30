@@ -302,6 +302,21 @@ pub enum Attention {
     Unread,
 }
 
+/// What `scripts/mis-up --watch` reports about the orchestrator's next build.
+/// Kept in memory only: a restarted orchestrator starts at `None`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Update {
+    #[default]
+    None,
+    /// `sha` built; the supervisor restarts onto it once no task runs.
+    Pending { sha: String, subject: String },
+    /// `sha` didn't build; this version keeps serving.
+    Failed { sha: String, subject: String },
+    /// `sha`'s orchestrator exited right after starting; the previous build runs again.
+    RolledBack { sha: String, subject: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TaskSummary {
     pub id: TaskId,
@@ -456,6 +471,8 @@ pub enum ServerMsg {
         /// clock rather than their own.
         #[serde(default)]
         now_ms: Option<u64>,
+        #[serde(default)]
+        update: Update,
     },
     Submitted {
         task: TaskId,
@@ -749,5 +766,26 @@ mod tests {
         assert_eq!(http_url("ws://127.0.0.1:7474"), "http://127.0.0.1:7474");
         assert_eq!(http_url("wss://m.example"), "https://m.example");
         assert_eq!(http_url("https://news.example"), "https://news.example");
+    }
+
+    #[test]
+    fn update_wire_shape() {
+        let u: Update =
+            serde_json::from_str(r#"{"state":"rolled_back","sha":"a1b2c3d","subject":"s"}"#)
+                .unwrap();
+        let sha = "a1b2c3d".into();
+        assert_eq!(
+            u,
+            Update::RolledBack {
+                sha,
+                subject: "s".into()
+            }
+        );
+        // Orchestrators predating `update` report none.
+        let old = r#"{"type":"status","workers":[],"tasks":[]}"#;
+        let ServerMsg::Status { update, .. } = serde_json::from_str(old).unwrap() else {
+            panic!("status");
+        };
+        assert_eq!(update, Update::None);
     }
 }

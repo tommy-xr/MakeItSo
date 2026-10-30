@@ -1,0 +1,222 @@
+#!/bin/sh
+# Run Make It So from a checkout of main, with ~/.config/mis/orchestrator.env.
+#   mis-up               orchestrator only (LAN workers connect to ws://<this-mac>:7474)
+#   mis-up --tunnel      also run `cloudflared tunnel run mis` for phone access
+#   mis-up --worker      also run a local worker on ~/code (tools run without prompts)
+#   mis-up --update      fast-forward main from origin first
+#   mis-up --watch       every MIS_UPDATE_INTERVAL s (300): when origin/main moves, pull and build;
+#                        once no task runs, restart the orchestrator and local worker on it (the
+#                        tunnel stays up). A failed build keeps the running version; an orchestrator
+#                        that exits within 30 s is rolled back. The page's title bar shows which.
+#   mis-up --worker-only just a worker; other args go to mis-worker (e.g. --url). With --watch a
+#                        remote machine updates the same way, waiting until no task runs anywhere.
+# Other args pass through to mis-orchestrator. Builds $MIS_REPO (default ~/code/make-it-so) only
+# when it is on main with no local changes: agents switch branches there. Each build's binaries
+# are copied to <state dir>/builds/<sha> and run from there, so a build never swaps a running one.
+set -e
+REPO=${MIS_REPO:-$HOME/code/make-it-so}
+ENV_FILE=$HOME/.config/mis/orchestrator.env
+tunnel=0 worker=0 update=0 watch=0 only=0 url='' pass=''
+while [ $# -gt 0 ]; do
+  case $1 in
+    --tunnel) tunnel=1 ;;
+    --worker) worker=1 ;;
+    --update) update=1 ;;
+    --watch) watch=1 ;;
+    --worker-only) only=1 ;;
+    --url) url=$2 pass="$pass $1 $2"; shift ;;
+    --url=*) url=${1#--url=} pass="$pass $1" ;;
+    *) pass="$pass $1" ;;
+  esac
+  shift
+done
+# A remote worker may have no orchestrator env file.
+# shellcheck source=/dev/null
+if [ $only = 0 ] || [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
+BIND=${MIS_BIND:-127.0.0.1:7474}
+STATE=${MIS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/mis}
+BUILDS=$STATE/builds
+TARGET=${CARGO_TARGET_DIR:-$REPO/target}
+INTERVAL=${MIS_UPDATE_INTERVAL:-300}
+if [ $only = 1 ]; then
+  bins=mis-worker
+  url=${url:-${MIS_URL:-}}
+  case $url in ws*) url=http${url#ws} ;; esac
+else
+  bins="mis-orchestrator mis-worker"
+  url=http://127.0.0.1:${BIND##*:}
+fi
+
+log() { echo "mis-up: $*" >&2; }
+short() { echo "$1" | cut -c1-7; }
+on_clean_main() {
+  [ "$(git -C "$REPO" branch --show-current)" = main ] && [ -z "$(git -C "$REPO" status --porcelain)" ]
+}
+
+# Build HEAD and copy its binaries to $BUILDS/<sha>.
+build() {
+  sha=$(git -C "$REPO" rev-parse HEAD)
+  log "building $REPO @ $(git -C "$REPO" log -1 --format='%h %s')"
+  pkgs=; for b in $bins; do pkgs="$pkgs -p $b"; done
+  # shellcheck disable=SC2086
+  cargo build -q $pkgs --manifest-path "$REPO/Cargo.toml" || return 1
+  rm -rf "$BUILDS/.new" "${BUILDS:?}/$sha"
+  mkdir -p "$BUILDS/.new"
+  for b in $bins; do cp "$TARGET/debug/$b" "$BUILDS/.new/" || return 1; done
+  mv "$BUILDS/.new" "$BUILDS/$sha"
+}
+
+# Start build $1's orchestrator and local worker (or just the worker); `main` is the one to watch.
+start() {
+  touch "$BUILDS/$1" # most recently used: kept by prune
+  if [ $only = 1 ]; then
+    # shellcheck disable=SC2086
+    "$BUILDS/$1/mis-worker" $pass &
+    wpid=$! main=$!
+    return
+  fi
+  # shellcheck disable=SC2086
+  "$BUILDS/$1/mis-orchestrator" --bind "$BIND" $pass &
+  orch=$! main=$!
+  if [ $worker = 1 ]; then
+    ( sleep 2; exec "$BUILDS/$1/mis-worker" --url "ws://127.0.0.1:${BIND##*:}" --root "$HOME/code" --skip-permissions ) &
+    wpid=$!
+  fi
+}
+
+# SIGTERM pid $1 and wait for it to exit (the orchestrator saves its ledger); SIGKILL after 10 s.
+stop() {
+  [ -n "$1" ] && kill "$1" 2>/dev/null || return 0
+  i=0
+  while kill -0 "$1" 2>/dev/null && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  kill -9 "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
+
+restart() {
+  stop "$wpid"; stop "$orch"
+  wpid='' orch=''
+  start "$1"
+}
+
+# Auth headers for curl, fed on stdin so the token never shows in argv.
+headers() {
+  [ -n "${MIS_TOKEN:-}" ] && printf 'Authorization: Bearer %s\n' "$MIS_TOKEN"
+  [ -n "${CF_ACCESS_CLIENT_ID:-}" ] && printf 'CF-Access-Client-Id: %s\nCF-Access-Client-Secret: %s\n' \
+    "$CF_ACCESS_CLIENT_ID" "${CF_ACCESS_CLIENT_SECRET:-}"
+  true
+}
+
+# Tell the local orchestrator about update $2 (pending, failed, rolled_back); the page shows it.
+report() {
+  [ $only = 1 ] && return 0
+  subject=$(git -C "$REPO" log -1 --format=%s "$2" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g')
+  body="{\"state\":\"$1\",\"sha\":\"$2\",\"subject\":\"$subject\"}"
+  headers | curl -sf -m 10 -o /dev/null -H @- --data-binary "$body" "$url/api/update" ||
+    log "could not report '$1' to $url"
+}
+
+# Tasks a restart would interrupt, fleet-wide; empty if the orchestrator can't be asked.
+running() {
+  headers | curl -sf -m 10 -H @- "$url/api/update" | sed -n 's/.*"running":\([0-9]*\).*/\1/p'
+}
+
+# Wait for a moment with no task running.
+idle() {
+  told=''
+  while n=$(running); [ "$n" != 0 ]; do
+    if [ -z "$n" ] && [ -z "$told" ]; then
+      log "can't ask $url/api/update how many tasks run; retrying"; told=1
+    fi
+    nap 5
+  done
+}
+
+# Sleep $1 s; if the watched process exits meanwhile, exit with its status, as a plain run would.
+nap() {
+  slept=0
+  while [ $slept -lt "$1" ]; do
+    if ! kill -0 "$main" 2>/dev/null; then
+      st=0; wait "$main" || st=$?
+      log "exited ($st)"; exit $st
+    fi
+    sleep 1; slept=$((slept + 1))
+  done
+}
+
+# Healthy: still running 30 s after start.
+healthy() {
+  i=0
+  while [ $i -lt 30 ]; do
+    kill -0 "$main" 2>/dev/null || return 1
+    sleep 1; i=$((i + 1))
+  done
+}
+
+# Keep the three most recently built or run builds.
+prune() {
+  # shellcheck disable=SC2012 # names are shas
+  ls -t "$BUILDS" | tail -n +4 | while read -r d; do rm -rf "${BUILDS:?}/$d"; done
+}
+
+if [ $watch = 1 ] && [ -z "$url" ]; then
+  echo "mis-up: --worker-only --watch needs --url or MIS_URL to ask when no task runs" >&2
+  exit 1
+fi
+if ! on_clean_main; then
+  branch=$(git -C "$REPO" branch --show-current)
+  echo "mis-up: $REPO is on '${branch:-detached}'$( [ -n "$(git -C "$REPO" status --porcelain)" ] && echo ' with local changes'); want main, clean." >&2
+  echo "        An agent may be working there. Try again when it's done, or: git -C $REPO checkout main" >&2
+  exit 1
+fi
+[ $update = 1 ] && git -C "$REPO" pull -q --ff-only
+build || exit 1
+cur=$sha
+tpid='' orch='' wpid='' main=''
+trap 'kill $tpid $orch $wpid 2>/dev/null || true' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [ $tunnel = 1 ]; then
+  cloudflared tunnel run mis >"$HOME/.config/mis/cloudflared.log" 2>&1 &
+  tpid=$!
+  echo "tunnel up: $MIS_PUBLIC_URL (log: ~/.config/mis/cloudflared.log)" >&2
+fi
+start "$cur"
+prune
+if [ $watch = 0 ]; then
+  wait "$main"
+  exit
+fi
+
+# Watch: from here every failure is logged and the running version keeps serving.
+set +e
+tried=$cur
+while :; do
+  nap "$INTERVAL"
+  git -C "$REPO" fetch -q origin main || { log "fetch failed"; continue; }
+  new=$(git -C "$REPO" rev-parse origin/main)
+  # Each sha gets one try: a failed build or a rollback waits for the next commit.
+  [ "$new" = "$tried" ] || [ "$new" = "$(git -C "$REPO" rev-parse HEAD)" ] && continue
+  on_clean_main || { log "$REPO is not clean main; not updating"; continue; }
+  tried=$new
+  git -C "$REPO" merge -q --ff-only origin/main || { log "can't fast-forward to origin/main"; continue; }
+  if ! build; then
+    log "build failed; still running $(short "$cur")"
+    report failed "$new"
+    continue
+  fi
+  report pending "$new"
+  idle
+  log "restarting on $(short "$new")"
+  restart "$new"
+  if healthy; then
+    cur=$new
+  else
+    log "new build exited within 30 s; rolling back to $(short "$cur")"
+    restart "$cur"
+    # Report once it is listening again.
+    tries=0; until [ -n "$(running)" ] || [ $tries -ge 20 ]; do nap 1; tries=$((tries + 1)); done
+    report rolled_back "$new"
+  fi
+  prune
+done

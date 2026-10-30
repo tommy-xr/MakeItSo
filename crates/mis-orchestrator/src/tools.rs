@@ -53,6 +53,7 @@ pub fn call(l: &Ledger, name: &str, args: &Value) -> Result<Value, String> {
         workers,
         tasks,
         now_ms,
+        ..
     } = l.status()
     else {
         unreachable!("status() returns Status")

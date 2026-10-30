@@ -65,7 +65,7 @@ pub async fn session(conn: &Conn, on_status: impl Fn(Fleet)) -> Result<()> {
             m = ws.next() => match m {
                 // Skip messages this build doesn't know rather than reconnect.
                 Some(Ok(Message::Text(t))) => match serde_json::from_str(&t) {
-                    Ok(ServerMsg::Status { workers, tasks, now_ms }) => {
+                    Ok(ServerMsg::Status { workers, tasks, now_ms, .. }) => {
                         let now_ms = now_ms.unwrap_or_else(unix_ms);
                         on_status(Fleet { workers, tasks, now_ms });
                     }

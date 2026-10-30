@@ -113,6 +113,8 @@ pub const MAX_PR_CHECKS: usize = 5;
 const PR_UNAVAILABLE: &str = "PR status unavailable: ";
 /// A fresh reply's context keeps at most this much of the parent's prompt and answer.
 const MAX_CONTEXT_CHARS: usize = 4_000;
+/// Update subjects are cut to this, for the title bar.
+const MAX_SUBJECT: usize = 120;
 
 /// Saved as is (see `persist`), but for the transcript, which goes in a file of its own.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -375,6 +377,8 @@ pub struct Ledger {
     usage: HashMap<WorkerId, Usage>,
     tasks: Vec<TaskEntry>, // insertion order = submission order
     queue: VecDeque<TaskId>,
+    /// The supervisor's last report; not saved, so a restart clears it.
+    update: Update,
 }
 
 impl Ledger {
@@ -394,7 +398,50 @@ impl Ledger {
                 .collect(),
             tasks: self.tasks.iter().map(|t| self.summary(t)).collect(),
             now_ms: Some(self.now_ms),
+            update: self.update.clone(),
         }
+    }
+
+    /// Tasks a restart would interrupt: running on a worker, or being planned here.
+    pub fn running(&self) -> usize {
+        let busy = |t: &&TaskEntry| matches!(t.status, TaskStatus::Running | TaskStatus::Planning);
+        self.tasks.iter().filter(busy).count()
+    }
+
+    pub fn update(&self) -> &Update {
+        &self.update
+    }
+
+    /// The supervisor reports an update; clients see it in Status.
+    /// Err: a sha that isn't 7-40 hex digits.
+    pub fn set_update(&mut self, update: Update) -> Result<Vec<Effect>, String> {
+        let sha = |sha: String| match (7..=40).contains(&sha.len())
+            && sha.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            true => Ok(sha),
+            false => Err(format!("sha {sha:?}: want 7-40 hex digits")),
+        };
+        let line = |s: String| first_line(&s, MAX_SUBJECT);
+        let update = match update {
+            Update::None => Update::None,
+            Update::Pending { sha: s, subject } => Update::Pending {
+                sha: sha(s)?,
+                subject: line(subject),
+            },
+            Update::Failed { sha: s, subject } => Update::Failed {
+                sha: sha(s)?,
+                subject: line(subject),
+            },
+            Update::RolledBack { sha: s, subject } => Update::RolledBack {
+                sha: sha(s)?,
+                subject: line(subject),
+            },
+        };
+        if update == self.update {
+            return Ok(vec![]);
+        }
+        self.update = update;
+        Ok(vec![Effect::Broadcast(self.status())])
     }
 
     fn exhausted_until(&self, wid: WorkerId, harness: &str) -> Option<u64> {
@@ -2070,6 +2117,49 @@ mod tests {
         assert_eq!(attention_of(&l, failed), Attention::Failed);
         l.seen(failed);
         assert_eq!(attention_of(&l, failed), Attention::None);
+    }
+
+    #[test]
+    fn update_report_is_checked_and_broadcast_once() {
+        let mut l = Ledger::default();
+        let pending = |sha: &str, subject: &str| Update::Pending {
+            sha: sha.into(),
+            subject: subject.into(),
+        };
+        for bad in ["", "a1b2c3", "a1b2c3g", &"a".repeat(41)] {
+            assert!(l.set_update(pending(bad, "s")).is_err(), "{bad:?}");
+        }
+        assert_eq!(l.update(), &Update::None, "refused reports change nothing");
+        let long = format!("fix it\n\nbody {}", "x".repeat(200));
+        let eff = l.set_update(pending("a1b2c3d", "fix it\n\nbody")).unwrap();
+        let [Effect::Broadcast(ServerMsg::Status { update, .. })] = &eff[..] else {
+            panic!("{eff:?}")
+        };
+        assert_eq!(update, &pending("a1b2c3d", "fix it"), "subject: first line");
+        let again = l.set_update(pending("a1b2c3d", &long)).unwrap();
+        assert!(again.is_empty(), "same report: nothing new to tell");
+        let failed = Update::Failed {
+            sha: "b".repeat(40),
+            subject: "x".repeat(200),
+        };
+        assert_eq!(l.set_update(failed).unwrap().len(), 1);
+        let Update::Failed { subject, .. } = l.update() else {
+            panic!("{:?}", l.update())
+        };
+        assert_eq!(subject.chars().count(), MAX_SUBJECT);
+        assert_eq!(l.set_update(Update::None).unwrap().len(), 1, "cleared");
+    }
+
+    #[test]
+    fn running_counts_what_a_restart_interrupts() {
+        let (mut l, wid, task) = running_setup();
+        assert_eq!(l.running(), 1);
+        l.submit("plan me".into(), None, None, None, vec![]);
+        assert_eq!(l.running(), 2, "planning runs here");
+        l.submit("queued".into(), None, Some("codex".into()), None, vec![]);
+        assert_eq!(l.running(), 2, "queued survives a restart");
+        finish(&mut l, wid, task, true);
+        assert_eq!(l.running(), 1);
     }
 
     /// The `Notify` effects among `effects`, as (task, title, body, urgent).
