@@ -220,6 +220,10 @@ pub enum WorkerMsg {
     Purpose {
         purpose: Option<String>,
     },
+    /// `OrchMsg::SetPurpose` couldn't be saved; the old purpose stands.
+    PurposeFailed {
+        why: String,
+    },
 }
 
 /// Orchestrator -> worker.
@@ -655,6 +659,7 @@ mod tests {
                 purpose: Some("3D".into()),
             },
             WorkerMsg::Purpose { purpose: None },
+            WorkerMsg::PurposeFailed { why: "w".into() },
         ] {
             let s = serde_json::to_string(&m).unwrap();
             assert_eq!(serde_json::from_str::<WorkerMsg>(&s).unwrap(), m);

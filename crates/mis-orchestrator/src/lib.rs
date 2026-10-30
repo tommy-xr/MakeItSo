@@ -974,6 +974,9 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
                     Some(WorkerMsg::Purpose { purpose }) => {
                         app.transition(|l| ((), l.worker_purpose(wid, conn, purpose)));
                     }
+                    Some(WorkerMsg::PurposeFailed { why }) => {
+                        app.transition(|l| ((), l.purpose_failed(wid, conn, &why)));
+                    }
                     Some(WorkerMsg::Hello { .. }) => {}
                     None => break,
                 }

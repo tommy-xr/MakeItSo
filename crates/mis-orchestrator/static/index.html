@@ -1046,36 +1046,38 @@ function meter(label, v) {
 
 // The purpose editor on a worker's page, kept across Status redraws so typing survives; untouched,
 // it follows the worker's note. A suggestion only fills the field: nothing is saved until Save.
+// `saving` is the text sent until the worker confirms it; `asked` the text when Suggest was pressed.
 let note = null;
 function noteEditor(w) {
   if (!note || note.id !== w.id) {
     const field = el('textarea', { placeholder: 'What this machine is for, e.g. Blender + blender-mcp; 3D modelling, glTF export' });
     field.setAttribute('aria-label', 'purpose');
     const suggest = el('button', { type: 'button' }, 'Suggest note');
-    const n = { id: w.id, field, suggest, news: el('p', { className: 'new' }), hint: el('p', { className: 'dim' }), dirty: false, saving: false };
+    const n = { id: w.id, field, suggest, news: el('p', { className: 'new' }), hint: el('p', { className: 'dim' }), dirty: false, saving: null, asked: null };
     n.form = el('form', { id: 'note' }, n.news, field, el('div', { className: 'row' }, suggest, el('button', {}, 'Save note')), n.hint);
     field.addEventListener('input', () => { n.dirty = true; });
     n.form.addEventListener('submit', (e) => {
       e.preventDefault();
+      n.saving = field.value.trim();
       send({ type: 'set_purpose', worker: n.id, purpose: field.value });
-      Object.assign(n, { dirty: false, saving: true });
       n.hint.textContent = 'saving…';
     });
     suggest.addEventListener('click', () => {
+      n.asked = field.value;
       send({ type: 'suggest_purpose', worker: n.id });
       suggest.disabled = true;
       n.hint.textContent = 'drafting…';
     });
     note = n;
   }
+  if (note.saving !== null && (w.info.purpose || '') === note.saving) {
+    Object.assign(note, { saving: null, dirty: note.field.value.trim() !== (w.info.purpose || '') });
+    note.hint.textContent = 'saved';
+  }
   if (!note.dirty) note.field.value = w.info.purpose || '';
   const fresh = w.new_tools || [];
   note.news.textContent = `new: ${fresh.join(', ')}`;
   note.news.hidden = note.suggest.hidden = !fresh.length;
-  if (note.saving && (w.info.purpose || '') === note.field.value.trim()) {
-    note.saving = false;
-    note.hint.textContent = 'saved';
-  }
   return note.form;
 }
 
@@ -1151,9 +1153,13 @@ function onMessage(msg) {
       break;
     }
     case 'purpose_draft':
-      if (note && note.id === msg.worker) {
+      // Only the editor that asked takes it, and never over text typed since.
+      if (note && note.id === msg.worker && note.asked !== null) {
+        const typed = note.field.value !== note.asked;
+        note.asked = null;
         note.suggest.disabled = false;
         if (msg.error) note.hint.textContent = `no draft: ${msg.error}`;
+        else if (typed) note.hint.textContent = `suggested (not applied, you were typing): ${msg.draft}`;
         else {
           note.dirty = true;
           note.field.value = msg.draft;
@@ -1163,8 +1169,8 @@ function onMessage(msg) {
       break;
     case 'error':
       // A refused save or suggestion: the flash says why; the editor stops waiting.
-      if (note && (note.saving || note.suggest.disabled)) {
-        note.saving = false;
+      if (note && (note.saving !== null || note.asked !== null)) {
+        Object.assign(note, { saving: null, asked: null });
         note.suggest.disabled = false;
         note.hint.textContent = '';
       }

@@ -351,15 +351,22 @@ fn handle_incoming(
                     };
                     config::write(&c.config, &file)
                 });
-                match saved {
+                // Confirmed only once on disk, else reported.
+                let reply = match saved {
                     Ok(()) => {
                         tracing::info!(?purpose, "purpose saved");
                         c.info.purpose = purpose.clone();
-                        // Confirmed only once on disk; dropped if the channel is full.
-                        let _ = ctx.pr_tx.try_send(WorkerMsg::Purpose { purpose });
+                        WorkerMsg::Purpose { purpose }
                     }
-                    Err(e) => tracing::warn!("saving purpose: {e:#}"),
-                }
+                    Err(e) => {
+                        tracing::warn!("saving purpose: {e:#}");
+                        WorkerMsg::PurposeFailed {
+                            why: format!("{e:#}"),
+                        }
+                    }
+                };
+                let tx = ctx.pr_tx.clone();
+                tokio::spawn(async move { tx.send(reply).await });
             }
             Err(e) => tracing::warn!("bad message from orchestrator: {e}"),
         },

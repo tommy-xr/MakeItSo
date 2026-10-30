@@ -669,6 +669,15 @@ impl Ledger {
         vec![Effect::Broadcast(self.status())]
     }
 
+    /// `wid` couldn't save the purpose it was sent: tell clients why.
+    pub fn purpose_failed(&self, wid: WorkerId, conn: ConnId, why: &str) -> Vec<Effect> {
+        if !self.workers.get(&wid).is_some_and(|w| w.conn == Some(conn)) {
+            return vec![];
+        }
+        let message = format!("{} couldn't save its purpose: {why}", self.host(wid));
+        vec![Effect::Broadcast(ServerMsg::Error { message })]
+    }
+
     /// Ask for a draft of `wid`'s purpose covering its new tools.
     pub fn suggest_purpose(&self, wid: WorkerId) -> Result<Vec<Effect>, String> {
         let w = self.workers.get(&wid).ok_or("unknown worker")?;
@@ -1502,6 +1511,11 @@ mod tests {
         );
         assert_eq!(l.worker_purpose(wid, 1, want.clone()).len(), 1);
         assert_eq!(l.workers[&wid].info.purpose, want);
+        let eff = l.purpose_failed(wid, 1, "disk full");
+        let [Effect::Broadcast(ServerMsg::Error { message })] = &eff[..] else {
+            panic!("{eff:?}")
+        };
+        assert_eq!(message, "studio couldn't save its purpose: disk full");
         // Blank clears; offline is refused.
         let eff = l.set_purpose(wid, " ").unwrap();
         assert!(matches!(
