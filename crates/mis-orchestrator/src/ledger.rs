@@ -8,7 +8,7 @@ use std::time::Duration;
 use mis_types::*;
 use uuid::Uuid;
 
-use crate::{plan, summary};
+use crate::{note, plan, summary};
 
 pub mod persist;
 
@@ -37,6 +37,12 @@ pub enum Effect {
     /// Run the planner on `prompt`; feed its events to `planning_event(task, ..)`.
     Plan {
         task: TaskId,
+        prompt: String,
+    },
+    /// Ask the planner model to draft `worker`'s purpose; broadcast the reply as
+    /// `ServerMsg::PurposeDraft`.
+    SuggestPurpose {
+        worker: WorkerId,
         prompt: String,
     },
     /// Run the summarizer on `prompt`; feed its reply to `summarized(task, ..)`.
@@ -381,6 +387,9 @@ pub struct Ledger {
     pub now_ms: u64,
     workers: HashMap<WorkerId, Worker>,
     usage: HashMap<WorkerId, Usage>,
+    /// Each worker's inventory when its purpose was last saved (or first seen):
+    /// what it gained since is offered as "new" for the note. Outlives the worker.
+    noted: HashMap<WorkerId, Inventory>,
     tasks: Vec<TaskEntry>, // insertion order = submission order
     queue: VecDeque<TaskId>,
     /// The supervisor's last report; not saved, so a restart clears it.
@@ -400,6 +409,8 @@ impl Ledger {
                     online: w.conn.is_some(),
                     stats: w.stats.as_ref().map(|(s, _)| s.clone()),
                     stats_at: w.stats.as_ref().map(|(_, at)| *at),
+                    new_tools: (self.noted.get(id))
+                        .map_or(vec![], |old| w.info.inventory.added_since(old)),
                 })
                 .collect(),
             tasks: self.tasks.iter().map(|t| self.summary(t)).collect(),
@@ -632,6 +643,52 @@ impl Ledger {
         }
     }
 
+    /// Have online worker `wid` save `purpose` (blank clears); it confirms with
+    /// `worker_purpose`, which updates what clients see.
+    pub fn set_purpose(&self, wid: WorkerId, purpose: &str) -> Result<Vec<Effect>, String> {
+        let conn = (self.workers.get(&wid))
+            .and_then(|w| w.conn)
+            .ok_or("that worker is offline; its note lives in its worker.toml")?;
+        let purpose = Some(purpose.trim().to_string()).filter(|p| !p.is_empty());
+        let msg = OrchMsg::SetPurpose { purpose };
+        Ok(vec![Effect::Send { conn, msg }])
+    }
+
+    /// `wid` saved its purpose: show it, and count its tools as noted.
+    pub fn worker_purpose(
+        &mut self,
+        wid: WorkerId,
+        conn: ConnId,
+        purpose: Option<String>,
+    ) -> Vec<Effect> {
+        let Some(w) = self.workers.get_mut(&wid).filter(|w| w.conn == Some(conn)) else {
+            return vec![];
+        };
+        w.info.purpose = purpose;
+        self.noted.insert(wid, w.info.inventory.clone());
+        vec![Effect::Broadcast(self.status())]
+    }
+
+    /// `wid` couldn't save the purpose it was sent: tell clients why.
+    pub fn purpose_failed(&self, wid: WorkerId, conn: ConnId, why: &str) -> Vec<Effect> {
+        if !self.workers.get(&wid).is_some_and(|w| w.conn == Some(conn)) {
+            return vec![];
+        }
+        let message = format!("{} couldn't save its purpose: {why}", self.host(wid));
+        vec![Effect::Broadcast(ServerMsg::Error { message })]
+    }
+
+    /// Ask for a draft of `wid`'s purpose covering its new tools.
+    pub fn suggest_purpose(&self, wid: WorkerId) -> Result<Vec<Effect>, String> {
+        let w = self.workers.get(&wid).ok_or("unknown worker")?;
+        let new = (self.noted.get(&wid)).map_or(vec![], |old| w.info.inventory.added_since(old));
+        let prompt = note::prompt(w.info.purpose.as_deref(), &new, &w.info.inventory.brief());
+        Ok(vec![Effect::SuggestPurpose {
+            worker: wid,
+            prompt,
+        }])
+    }
+
     /// Every known worker, online or not, for the planner to route on.
     fn cards(&self) -> Vec<plan::Card> {
         plan::cards(
@@ -781,6 +838,12 @@ impl Ledger {
         now: Duration,
     ) -> (Vec<TaskId>, Vec<Effect>) {
         let generation = self.workers.get(&wid).map_or(0, |w| w.generation) + 1;
+        // The first inventory is the baseline. An empty one isn't: it comes from
+        // `mis-worker setup`'s test connection or a worker predating inventories.
+        let noted = self.noted.entry(wid).or_default();
+        if *noted == Inventory::default() {
+            *noted = info.inventory.clone();
+        }
         self.workers.insert(
             wid,
             Worker {
@@ -1407,6 +1470,93 @@ mod tests {
         assert_eq!(task_status(&l, task), TaskStatus::Queued);
         let (_, eff) = l.connect(studio_id, studio(), &[], 3, T0);
         assert_eq!(assigned(&eff), [(3, task)]);
+    }
+
+    fn with_app(mut i: WorkerInfo, name: &str) -> WorkerInfo {
+        i.inventory.apps.push(InstalledApp {
+            name: name.into(),
+            version: None,
+        });
+        i
+    }
+
+    fn new_tools(l: &Ledger, wid: WorkerId) -> Vec<String> {
+        let ServerMsg::Status { workers, .. } = l.status() else {
+            unreachable!()
+        };
+        workers.into_iter().find(|w| w.id == wid).unwrap().new_tools
+    }
+
+    #[test]
+    fn purpose_goes_to_the_worker_and_shows_once_it_confirms() {
+        let mut l = Ledger::default();
+        let wid = Uuid::new_v4();
+        l.connect(wid, studio(), &[], 1, T0);
+        let eff = l.set_purpose(wid, "  Blender + Houdini  ").unwrap();
+        let [Effect::Send { conn: 1, msg }] = &eff[..] else {
+            panic!("{eff:?}")
+        };
+        let want = Some("Blender + Houdini".to_string());
+        assert_eq!(
+            *msg,
+            OrchMsg::SetPurpose {
+                purpose: want.clone()
+            }
+        );
+        // Not shown until the worker saved it.
+        assert_ne!(l.workers[&wid].info.purpose, want);
+        assert!(
+            l.worker_purpose(wid, 9, want.clone()).is_empty(),
+            "stale conn"
+        );
+        assert_eq!(l.worker_purpose(wid, 1, want.clone()).len(), 1);
+        assert_eq!(l.workers[&wid].info.purpose, want);
+        let eff = l.purpose_failed(wid, 1, "disk full");
+        let [Effect::Broadcast(ServerMsg::Error { message })] = &eff[..] else {
+            panic!("{eff:?}")
+        };
+        assert_eq!(message, "studio couldn't save its purpose: disk full");
+        // Blank clears; offline is refused.
+        let eff = l.set_purpose(wid, " ").unwrap();
+        assert!(matches!(
+            &eff[..],
+            [Effect::Send {
+                msg: OrchMsg::SetPurpose { purpose: None },
+                ..
+            }]
+        ));
+        l.disconnect(wid, 1);
+        assert!(l.set_purpose(wid, "x").unwrap_err().contains("offline"));
+    }
+
+    #[test]
+    fn new_tools_since_the_note_was_saved_survive_reconnects() {
+        let mut l = Ledger::default();
+        let wid = Uuid::new_v4();
+        // Setup's test connection reports no inventory: no baseline yet.
+        l.connect(wid, studio(), &[], 1, T0);
+        l.connect(wid, with_app(studio(), "Blender"), &[], 1, T0);
+        assert!(
+            new_tools(&l, wid).is_empty(),
+            "first inventory is the baseline"
+        );
+        // Back with Houdini, after being dropped past grace: still new.
+        l.disconnect(wid, 1);
+        l.expire(wid, 1);
+        let houdini = with_app(with_app(studio(), "Blender"), "Houdini");
+        l.connect(wid, houdini.clone(), &[], 2, T0);
+        l.connect(wid, houdini, &[], 3, T0);
+        assert_eq!(new_tools(&l, wid), ["Houdini"]);
+        let eff = l.suggest_purpose(wid).unwrap();
+        let [Effect::SuggestPurpose { worker, prompt }] = &eff[..] else {
+            panic!("{eff:?}")
+        };
+        assert_eq!(*worker, wid);
+        assert!(prompt.contains("Current note: Blender + blender-mcp; 3D assets\nNew: Houdini\n"));
+        // Saving the note (even unchanged) settles them.
+        l.worker_purpose(wid, 3, studio().purpose);
+        assert!(new_tools(&l, wid).is_empty());
+        assert!(l.suggest_purpose(Uuid::new_v4()).is_err());
     }
 
     #[test]

@@ -93,6 +93,10 @@ inventory: MCP server names per harness (`~/.claude.json`, `.mcp.json` under the
 `~/.codex/config.toml`; names only, never commands, args, env or URLs), known apps such as Blender,
 Godot, Xcode, ffmpeg, and CPU / RAM / GPU. Both go to the orchestrator and show under Workers. Each start
 re-takes the inventory and saves it in `worker.toml` when it changed (the file is rewritten, so comments are lost).
+The planner routes on both: a task that needs a worker's tools waits for that worker
+("waiting for studio") instead of running elsewhere. Edit the note from the worker's page; when the
+worker gains apps or MCP servers, the page lists them and **Suggest note** drafts an update for you
+to edit and save.
 
 ## Remote machines
 

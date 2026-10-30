@@ -124,7 +124,8 @@ async fn main() -> Result<()> {
     };
     tracing::info!(?info.harnesses, ?info.models, ?info.roots, "connecting to {}", cfg.url);
     tracing::info!("inventory: {}", info.inventory.brief());
-    // PR status reads, sent as they come; dropped if the socket dies mid-send.
+    // PR status reads and purpose confirmations, sent as they come; dropped if
+    // the socket dies mid-send.
     let (pr_tx, pr_rx) = mpsc::channel::<WorkerMsg>(64);
     let ctx = Ctx {
         agents: Arc::new(agents),
@@ -143,10 +144,12 @@ async fn main() -> Result<()> {
         watches: HashMap::new(),
         backoff: Duration::from_secs(1),
         sampler: stats::Sampler::new(ctx.roots.first().cloned().unwrap_or_else(|| "/".into())),
+        info,
+        config: path,
     };
 
     loop {
-        match session(&cfg, &access, id, &info, &ctx, &ev_tx, &mut conn).await {
+        match session(&cfg, &access, id, &ctx, &ev_tx, &mut conn).await {
             Ok(()) => tracing::info!("orchestrator closed connection"),
             Err(e) => tracing::warn!("connection lost: {e:#}"),
         }
@@ -217,6 +220,10 @@ struct Conn {
     watches: HashMap<TaskId, tokio::task::AbortHandle>,
     backoff: Duration,
     sampler: stats::Sampler,
+    /// Sent in each Hello; its purpose changes on `OrchMsg::SetPurpose`.
+    info: WorkerInfo,
+    /// worker.toml, where a new purpose is saved.
+    config: PathBuf,
 }
 
 /// One connection's lifetime: handshake, then forward events and run assignments
@@ -225,7 +232,6 @@ async fn session(
     cfg: &config::Resolved,
     access: &[(&'static str, HeaderValue)],
     id: WorkerId,
-    info: &WorkerInfo,
     ctx: &Ctx,
     ev_tx: &mpsc::Sender<(TaskId, AgentEvent)>,
     c: &mut Conn,
@@ -242,7 +248,7 @@ async fn session(
     let running: Vec<TaskId> = c.running.iter().copied().collect();
     sink.send(text(&WorkerMsg::Hello {
         id,
-        info: info.clone(),
+        info: c.info.clone(),
         running,
     }))
     .await?;
@@ -336,6 +342,31 @@ fn handle_incoming(
                     pr::watch(std::ffi::OsStr::new("gh"), task, &urls, tx).await
                 });
                 c.watches.insert(task, watch.abort_handle());
+            }
+            Ok(OrchMsg::SetPurpose { purpose }) => {
+                let saved = config::load(&c.config).and_then(|file| {
+                    let file = config::Config {
+                        purpose: purpose.clone(),
+                        ..file
+                    };
+                    config::write(&c.config, &file)
+                });
+                // Confirmed only once on disk, else reported.
+                let reply = match saved {
+                    Ok(()) => {
+                        tracing::info!(?purpose, "purpose saved");
+                        c.info.purpose = purpose.clone();
+                        WorkerMsg::Purpose { purpose }
+                    }
+                    Err(e) => {
+                        tracing::warn!("saving purpose: {e:#}");
+                        WorkerMsg::PurposeFailed {
+                            why: format!("{e:#}"),
+                        }
+                    }
+                };
+                let tx = ctx.pr_tx.clone();
+                tokio::spawn(async move { tx.send(reply).await });
             }
             Err(e) => tracing::warn!("bad message from orchestrator: {e}"),
         },

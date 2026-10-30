@@ -222,6 +222,7 @@ mod tests {
             online,
             stats: None,
             stats_at: None,
+            new_tools: vec![],
         }
     }
 

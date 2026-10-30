@@ -24,6 +24,9 @@ struct Saved<'a> {
     version: u32,
     /// Known workers, restored offline.
     workers: BTreeMap<WorkerId, WorkerInfo>,
+    /// `Ledger::noted`.
+    #[serde(default)]
+    noted: BTreeMap<WorkerId, Inventory>,
     /// In submission order, without transcripts.
     tasks: Cow<'a, [TaskEntry]>,
 }
@@ -67,6 +70,9 @@ impl Ledger {
             version: VERSION,
             workers: (self.workers.iter())
                 .map(|(id, w)| (*id, w.info.clone()))
+                .collect(),
+            noted: (self.noted.iter())
+                .map(|(id, i)| (*id, i.clone()))
                 .collect(),
             tasks: Cow::Borrowed(&self.tasks),
         };
@@ -123,6 +129,7 @@ impl Ledger {
             l.workers.insert(wid, w);
             effects.push(Effect::StartGrace { wid, generation });
         }
+        l.noted = saved.noted.into_iter().collect();
         l.tasks = saved.tasks.into_owned();
         let written = (l.tasks.iter())
             .filter(|t| finished(t.status))
@@ -373,6 +380,27 @@ mod tests {
         assert_eq!(s.summary.as_deref(), Some(PLANNING_LOST));
         assert_eq!(s.attention, Attention::Failed);
         assert!(matches!(&effects[..], [Effect::Notify { task, .. }] if *task == id));
+    }
+
+    #[test]
+    fn noted_inventory_survives_a_restart() {
+        let app = |name: &str| InstalledApp {
+            name: name.into(),
+            version: None,
+        };
+        let mut l = Ledger::default();
+        let w = uuid::Uuid::new_v4();
+        let mut first = info();
+        first.inventory.apps.push(app("Blender"));
+        l.connect(w, first.clone(), &[], 1, NOW);
+        let (mut r, _) = round_trip(&l);
+        let mut more = first;
+        more.inventory.apps.push(app("Houdini"));
+        r.connect(w, more, &[], 2, NOW);
+        let ServerMsg::Status { workers, .. } = r.status() else {
+            unreachable!()
+        };
+        assert_eq!(workers[0].new_tools, ["Houdini"]);
     }
 
     #[test]

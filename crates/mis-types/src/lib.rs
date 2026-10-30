@@ -216,6 +216,14 @@ pub enum WorkerMsg {
         task: TaskId,
         why: String,
     },
+    /// Its purpose, saved to worker.toml after `OrchMsg::SetPurpose`.
+    Purpose {
+        purpose: Option<String>,
+    },
+    /// `OrchMsg::SetPurpose` couldn't be saved; the old purpose stands.
+    PurposeFailed {
+        why: String,
+    },
 }
 
 /// Orchestrator -> worker.
@@ -236,6 +244,11 @@ pub enum OrchMsg {
     CheckPrs {
         task: TaskId,
         urls: Vec<String>,
+    },
+    /// Save this purpose (None clears it) in worker.toml, then confirm with
+    /// `WorkerMsg::Purpose`.
+    SetPurpose {
+        purpose: Option<String>,
     },
 }
 
@@ -284,6 +297,17 @@ pub enum ClientMsg {
     PushUnsubscribe {
         endpoint: String,
     },
+    /// Replace a worker's purpose note; blank clears it. Online workers only.
+    SetPurpose {
+        worker: WorkerId,
+        purpose: String,
+    },
+    /// Ask the planner model to draft an updated purpose from the old note and
+    /// the worker's new tools. The draft comes back as `ServerMsg::PurposeDraft`
+    /// and is never saved unless the user sends it with `SetPurpose`.
+    SuggestPurpose {
+        worker: WorkerId,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -297,6 +321,9 @@ pub struct WorkerSummary {
     pub stats: Option<WorkerStats>,
     /// Unix seconds when `stats` arrived, so clients can judge staleness.
     pub stats_at: Option<u64>,
+    /// Apps and MCP servers it gained since its purpose was last saved.
+    #[serde(default)]
+    pub new_tools: Vec<String>,
 }
 
 /// Why a task needs the user, until they open it (`ClientMsg::Seen`).
@@ -503,6 +530,14 @@ pub enum ServerMsg {
     Error {
         message: String,
     },
+    /// Answer to `SuggestPurpose`: a draft for the user to edit, or why there is none.
+    PurposeDraft {
+        worker: WorkerId,
+        #[serde(default)]
+        draft: String,
+        #[serde(default)]
+        error: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -619,6 +654,26 @@ mod tests {
             s,
             r#"{"type":"refresh_evidence","task":"00000000-0000-0000-0000-000000000000"}"#
         );
+        for m in [
+            WorkerMsg::Purpose {
+                purpose: Some("3D".into()),
+            },
+            WorkerMsg::Purpose { purpose: None },
+            WorkerMsg::PurposeFailed { why: "w".into() },
+        ] {
+            let s = serde_json::to_string(&m).unwrap();
+            assert_eq!(serde_json::from_str::<WorkerMsg>(&s).unwrap(), m);
+        }
+        let set = OrchMsg::SetPurpose { purpose: None };
+        let s = serde_json::to_string(&set).unwrap();
+        assert_eq!(s, r#"{"type":"set_purpose","purpose":null}"#);
+        let draft = ServerMsg::PurposeDraft {
+            worker: Uuid::nil(),
+            draft: "d".into(),
+            error: None,
+        };
+        let s = serde_json::to_string(&draft).unwrap();
+        assert_eq!(serde_json::from_str::<ServerMsg>(&s).unwrap(), draft);
         let check = OrchMsg::CheckPrs {
             task: Uuid::nil(),
             urls: vec!["u".into()],
@@ -731,6 +786,7 @@ mod tests {
             online: true,
             stats: None,
             stats_at: None,
+            new_tools: vec![],
         }
     }
 

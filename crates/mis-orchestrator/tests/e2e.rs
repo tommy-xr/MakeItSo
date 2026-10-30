@@ -2656,3 +2656,119 @@ async fn planner_routes_to_the_named_worker() {
         "the other worker got it"
     );
 }
+
+/// Drafter stub: replies with a quoted note, as models sometimes do.
+struct FakeDrafter;
+impl mis_agent::Agent for FakeDrafter {
+    fn name(&self) -> &'static str {
+        "fake"
+    }
+    fn models(&self) -> Vec<String> {
+        vec![]
+    }
+    fn run<'a>(
+        &'a self,
+        _task: TaskId,
+        prompt: &'a str,
+        _opts: mis_agent::RunOpts<'a>,
+        tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> mis_agent::BoxFut<'a> {
+        Box::pin(async move {
+            assert!(prompt.contains("New: Houdini"), "{prompt}");
+            let summary = Some("\"Blender + Houdini; 3D assets\"".into());
+            tx.send(AgentEvent::Finished { ok: true, summary }).await?;
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn purpose_edit_reaches_the_worker_and_suggestion_drafts_only() {
+    let base = start_app(App::new(None).with_drafter(std::sync::Arc::new(FakeDrafter))).await;
+    let wid = uuid::Uuid::new_v4();
+    let hello = |apps: &[&str]| WorkerMsg::Hello {
+        id: wid,
+        info: WorkerInfo {
+            purpose: Some("Blender; 3D assets".into()),
+            inventory: Inventory {
+                apps: (apps.iter())
+                    .map(|a| InstalledApp {
+                        name: a.to_string(),
+                        version: None,
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            ..info("claude")
+        },
+        running: vec![],
+    };
+    let (mut first, _) = connect_async(format!("{base}/ws/worker")).await.unwrap();
+    send(&mut first, &hello(&["Blender"])).await;
+    assert!(matches!(recv(&mut first).await, OrchMsg::Welcome { .. }));
+    drop(first);
+    // Back with Houdini installed.
+    let (mut worker, _) = connect_async(format!("{base}/ws/worker")).await.unwrap();
+    send(&mut worker, &hello(&["Blender", "Houdini"])).await;
+    assert!(matches!(recv(&mut worker).await, OrchMsg::Welcome { .. }));
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    let w = only_worker(&mut client).await;
+    assert_eq!(w.new_tools, ["Houdini"]);
+
+    // A suggestion is a draft for the user; nothing reaches the worker.
+    send(&mut client, &ClientMsg::Subscribe).await;
+    send(&mut client, &ClientMsg::SuggestPurpose { worker: wid }).await;
+    let draft = loop {
+        if let ServerMsg::PurposeDraft {
+            worker,
+            draft,
+            error,
+        } = recv(&mut client).await
+        {
+            assert_eq!((worker, error), (wid, None));
+            break draft;
+        }
+    };
+    assert_eq!(draft, "Blender + Houdini; 3D assets");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), worker.next())
+            .await
+            .is_err(),
+        "suggesting changed the worker"
+    );
+
+    // The user accepts it: the worker is told, saves, confirms; then it shows.
+    let set = ClientMsg::SetPurpose {
+        worker: wid,
+        purpose: draft.clone(),
+    };
+    send(&mut client, &set).await;
+    let OrchMsg::SetPurpose { purpose } = recv(&mut worker).await else {
+        panic!()
+    };
+    assert_eq!(purpose.as_deref(), Some(draft.as_str()));
+    send(&mut worker, &WorkerMsg::Purpose { purpose }).await;
+    let w = loop {
+        if let ServerMsg::Status { workers, .. } = recv(&mut client).await {
+            break workers.into_iter().next().unwrap();
+        }
+    };
+    assert_eq!(w.info.purpose.as_deref(), Some(draft.as_str()));
+    assert!(w.new_tools.is_empty());
+}
+
+#[tokio::test]
+async fn read_token_cannot_edit_a_purpose() {
+    let base = start_app(with_read_token()).await;
+    let req = client_req(&base, &[("authorization", "Bearer r")]);
+    let (mut client, _) = connect_async(req).await.unwrap();
+    let set = ClientMsg::SetPurpose {
+        worker: uuid::Uuid::nil(),
+        purpose: "x".into(),
+    };
+    send(&mut client, &set).await;
+    let ServerMsg::Error { message } = recv(&mut client).await else {
+        panic!()
+    };
+    assert_eq!(message, "read-only token");
+}
