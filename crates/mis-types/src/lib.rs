@@ -139,6 +139,9 @@ pub enum AgentEvent {
         prompt: String,
         #[serde(default)]
         model: Option<String>,
+        /// The only worker that may run it, chosen for its purpose or tools.
+        #[serde(default)]
+        worker: Option<WorkerId>,
     },
     Started {
         session: Option<String>,

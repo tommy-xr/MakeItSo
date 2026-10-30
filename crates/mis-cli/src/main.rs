@@ -348,9 +348,14 @@ fn print_event(task: TaskId, event: &AgentEvent) {
             harness,
             prompt,
             model,
+            worker,
         } => {
             let model = model.as_ref().map(|m| format!("/{m}")).unwrap_or_default();
-            println!("[{short}] plan: {harness}{model}: {prompt}")
+            let on = worker.map(|w| format!(" on {}", &w.to_string()[..8]));
+            println!(
+                "[{short}] plan: {harness}{model}{}: {prompt}",
+                on.unwrap_or_default()
+            )
         }
         AgentEvent::Started { .. } => println!("[{short}] started"),
         AgentEvent::Text { text } => println!("[{short}] {text}"),

@@ -350,7 +350,7 @@ function el(tag, props, ...kids) {
 function eventLine(e) {
   switch (e.type) {
     case 'usage': return null; // running totals, shown on the task row
-    case 'planned': return `plan: ${e.harness}${e.model ? `/${e.model}` : ''}: ${e.prompt}`;
+    case 'planned': return `plan: ${e.harness}${e.model ? `/${e.model}` : ''}${e.worker ? ` on ${hostOf(e.worker)}` : ''}: ${e.prompt}`;
     case 'started': return 'started';
     case 'text': return e.text;
     case 'tool_use': return `> ${e.name} ${JSON.stringify(e.input)}`;

@@ -1053,6 +1053,7 @@ async fn planner_routes_to_codex_and_streams_its_output() {
                         harness,
                         prompt,
                         model,
+                        worker: None,
                     },
                 task: t,
             } => {
@@ -2607,4 +2608,51 @@ async fn worker_purpose_and_inventory_reach_status() {
     };
     let w = workers.iter().find(|w| w.id == wid).unwrap();
     assert_eq!(w.info, blender);
+}
+
+#[tokio::test]
+async fn planner_routes_to_the_named_worker() {
+    let planner = FakePlanner(r#"{"harness":"claude","worker":"studio","reason":"needs Blender"}"#);
+    let base = start_app(App::new(None).with_planner(std::sync::Arc::new(planner))).await;
+    // An idle claude worker that is not the studio, joined first.
+    let mut other = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+    let _codex = join(&base, uuid::Uuid::new_v4(), "codex", vec![]).await;
+    let studio_id = uuid::Uuid::new_v4();
+    let (mut studio, _) = connect_async(format!("{base}/ws/worker")).await.unwrap();
+    let info = WorkerInfo {
+        hostname: "studio".into(),
+        purpose: Some("Blender + blender-mcp; 3D assets".into()),
+        ..info("claude")
+    };
+    let hello = WorkerMsg::Hello {
+        id: studio_id,
+        info,
+        running: vec![],
+    };
+    send(&mut studio, &hello).await;
+    assert!(matches!(recv(&mut studio).await, OrchMsg::Welcome { .. }));
+
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    let submit = ClientMsg::Submit {
+        prompt: "model a low-poly chair and export glTF".into(),
+        cwd: None,
+        harness: None,
+        model: None,
+        reply_to: None,
+        images: vec![],
+    };
+    send(&mut client, &submit).await;
+    let ServerMsg::Submitted { task } = recv(&mut client).await else {
+        panic!()
+    };
+    let OrchMsg::Assign { task: assigned, .. } = recv(&mut studio).await else {
+        panic!()
+    };
+    assert_eq!(assigned.id, task);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), other.next())
+            .await
+            .is_err(),
+        "the other worker got it"
+    );
 }
