@@ -6,11 +6,15 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+use tokio_tungstenite::tungstenite::Message;
 
 const SECRET: &str = "shh-access-secret-0123";
+/// Rides an orchestrator frame; must not show up in trace logs either.
+const PAYLOAD: &str = "frame-marker-4567";
 
 /// Temp HOME holding a fake `claude` so the worker finds a harness.
 fn sandbox() -> PathBuf {
@@ -39,6 +43,10 @@ fn worker(dir: &std::path::Path) -> tokio::process::Command {
     cmd
 }
 
+fn hex(s: &str) -> String {
+    s.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
 #[tokio::test]
 #[allow(clippy::result_large_err)] // the handshake callback's signature, not ours
 async fn access_headers_ride_the_upgrade_and_secret_stays_out_of_logs() {
@@ -49,37 +57,63 @@ async fn access_headers_ride_the_upgrade_and_secret_stays_out_of_logs() {
         .env("MIS_URL", &url)
         .env("CF_ACCESS_CLIENT_ID", "abc.access")
         .env("CF_ACCESS_CLIENT_SECRET", SECRET)
-        .stderr(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .unwrap();
+    // Logs go to stdout. Drain from the start: trace output would fill the pipe and stall the worker.
+    let (reg_tx, reg_rx) = tokio::sync::oneshot::channel();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let drain = tokio::spawn(async move {
+        let mut logs = String::new();
+        let mut reg_tx = Some(reg_tx);
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line.contains("registered") {
+                reg_tx.take().map(|t| t.send(()));
+            }
+            logs.push_str(&line);
+            logs.push('\n');
+        }
+        logs
+    });
 
-    let (tcp, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
-        .await
-        .expect("worker never connected")
-        .unwrap();
     let seen = Arc::new(Mutex::new(None));
     let capture = seen.clone();
-    let mut ws = tokio_tungstenite::accept_hdr_async(tcp, move |req: &Request, resp: Response| {
-        *capture.lock().unwrap() = Some((req.uri().path().to_string(), req.headers().clone()));
-        Ok(resp)
-    })
-    .await
-    .unwrap();
-    // Wait for Hello so the worker has logged its startup.
-    let hello = ws.next().await.unwrap().unwrap().into_text().unwrap();
-    assert!(hello.contains("\"hello\""), "{hello}");
+    let run = async {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut ws =
+            tokio_tungstenite::accept_hdr_async(tcp, move |req: &Request, resp: Response| {
+                *capture.lock().unwrap() =
+                    Some((req.uri().path().to_string(), req.headers().clone()));
+                Ok(resp)
+            })
+            .await
+            .unwrap();
+        let hello = ws.next().await.unwrap().unwrap().into_text().unwrap();
+        assert!(hello.contains("\"hello\""), "{hello}");
+        // A frame carrying the marker, then a Welcome; once the worker logs
+        // "registered" it has read (and could have traced) both.
+        ws.send(Message::text(PAYLOAD)).await.unwrap();
+        let welcome = format!(r#"{{"type":"welcome","id":"{}"}}"#, uuid::Uuid::nil());
+        ws.send(Message::text(welcome)).await.unwrap();
+        reg_rx.await.expect("worker exited before registering");
+    };
+    let ok = tokio::time::timeout(Duration::from_secs(10), run).await;
+    child.start_kill().unwrap();
+    let logs = drain.await.unwrap();
+    assert!(ok.is_ok(), "worker never registered:\n{logs}");
 
     let (path, headers) = seen.lock().unwrap().take().unwrap();
     assert_eq!(path, "/ws/worker");
     assert_eq!(headers["cf-access-client-id"], "abc.access");
     assert_eq!(headers["cf-access-client-secret"], SECRET);
-
-    child.start_kill().unwrap();
-    let out = child.wait_with_output().await.unwrap();
-    let logs = String::from_utf8_lossy(&out.stderr) + String::from_utf8_lossy(&out.stdout);
     assert!(logs.contains("connecting to"), "{logs}");
-    assert!(!logs.contains(SECRET), "secret leaked into logs:\n{logs}");
+    for s in [SECRET, PAYLOAD] {
+        assert!(
+            !logs.contains(s) && !logs.contains(&hex(s)),
+            "{s} leaked:\n{logs}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

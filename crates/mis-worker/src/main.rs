@@ -35,7 +35,7 @@ struct Args {
     /// Default: ws://127.0.0.1:7474.
     #[arg(long, env = "MIS_URL")]
     url: Option<String>,
-    #[arg(long, env = "MIS_TOKEN")]
+    #[arg(long, env = "MIS_TOKEN", hide_env_values = true)]
     token: Option<String>,
     /// Cloudflare Access service-token id; the secret comes from
     /// CF_ACCESS_CLIENT_SECRET (env only, so it stays out of `ps`).
@@ -63,8 +63,11 @@ enum Cmd {
 async fn main() -> Result<()> {
     let filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
-    // tungstenite traces the raw upgrade request, token and Access secret included.
-    let filter = filter.add_directive("tungstenite::handshake::client=debug".parse()?);
+    // At trace, tungstenite logs the raw upgrade request (token, Access secret)
+    // and every frame (prompts, images); never let it.
+    let filter = filter
+        .add_directive("tungstenite=debug".parse()?)
+        .add_directive("tokio_tungstenite=debug".parse()?);
     tracing_subscriber::fmt().with_env_filter(filter).init();
     let args = Args::parse();
     if let Some(Cmd::Setup(a)) = args.cmd {
