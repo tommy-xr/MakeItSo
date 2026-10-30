@@ -253,29 +253,37 @@ fn probe_version(f: Found) -> Option<String> {
 }
 
 /// stdout of `cmd` if it exits ok within `PROBE_TIMEOUT`; killed otherwise.
+/// stdout is read on its own thread: a descendant holding the pipe open must
+/// not outlast the deadline.
 fn output_within(mut cmd: Command) -> Option<String> {
+    let start = Instant::now();
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let start = Instant::now();
+    let mut pipe = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut pipe, &mut s);
+        let _ = tx.send(s);
+    });
+    let out = rx.recv_timeout(PROBE_TIMEOUT).ok();
     loop {
-        match child.try_wait().ok()? {
-            Some(status) if status.success() => break,
-            Some(_) => return None,
-            None if start.elapsed() > PROBE_TIMEOUT => {
+        match child.try_wait() {
+            Ok(Some(status)) => return out.filter(|_| status.success()),
+            Ok(None) if out.is_some() && start.elapsed() < PROBE_TIMEOUT => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
+            _ => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return None;
             }
-            None => std::thread::sleep(Duration::from_millis(20)),
         }
     }
-    let mut s = String::new();
-    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut s).ok()?;
-    Some(s)
 }
 
 fn machine() -> Machine {
@@ -502,5 +510,14 @@ mod tests {
         let t = Instant::now();
         assert_eq!(output_within(cmd), None);
         assert!(t.elapsed() < Duration::from_secs(4));
+        // Exits at once, but a child it left behind holds stdout open.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 5 & echo 1.2"]);
+        let t = Instant::now();
+        assert_eq!(output_within(cmd), None);
+        assert!(t.elapsed() < Duration::from_secs(4));
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo v1.2.3"]);
+        assert_eq!(output_within(cmd).as_deref(), Some("v1.2.3\n"));
     }
 }

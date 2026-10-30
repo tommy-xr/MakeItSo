@@ -68,29 +68,41 @@ pub fn merge(cli: Config, file: Config, cwd: PathBuf) -> Resolved {
 /// Missing file = empty config.
 pub fn load(path: &Path) -> anyhow::Result<Config> {
     match std::fs::read_to_string(path) {
-        Ok(s) => toml::from_str(&s).with_context(|| format!("reading {}", path.display())),
+        // Message only: toml's Display quotes the offending line, which may be a secret.
+        Ok(s) => toml::from_str(&s).map_err(|e| {
+            let line = e.span().map_or(0, |r| s[..r.start].lines().count().max(1));
+            anyhow::anyhow!(
+                "reading {}: {} (line {line})",
+                path.display(),
+                e.message().trim()
+            )
+        }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
 }
 
 /// Save `cfg`, readable only by this user on unix since it holds secrets.
+/// Written beside it then renamed, so a crash mid-write keeps the old file.
 pub fn write(path: &Path, cfg: &Config) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let body = toml::to_string(cfg)?; // before truncating, so a failure keeps the old file
+    let body = toml::to_string(cfg)?;
+    let tmp = path.with_extension("toml.tmp");
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
     let mut f = opts
-        .open(path)
-        .with_context(|| format!("writing {}", path.display()))?;
-    // `mode` only applies on create; tighten a file that already existed.
+        .open(&tmp)
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    // `mode` only applies on create; tighten a leftover temp file.
     #[cfg(unix)]
     f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     std::io::Write::write_all(&mut f, body.as_bytes())?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 
@@ -226,6 +238,18 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         save_inventory(&path, got, &inv).unwrap();
         assert!(!path.exists(), "unchanged inventory rewrote the file");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_error_does_not_quote_the_file() {
+        let dir = std::env::temp_dir().join(format!("mis-cfg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("worker.toml");
+        std::fs::write(&path, "url = \"ws://x\"\ntoken = sk-live-unquoted\n").unwrap();
+        let e = format!("{:#}", load(&path).unwrap_err());
+        assert!(!e.contains("sk-live"), "{e}");
+        assert!(e.contains("(line 2)"), "{e}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
