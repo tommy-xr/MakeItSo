@@ -34,7 +34,7 @@
   body { --pad: 1.25rem; box-sizing: border-box; margin: 0 auto; max-width: 46rem; min-height: 100svh; padding: 0 var(--pad) 3rem; color: var(--fg); font: 1rem/1.55 var(--mono); }
   @media (min-width: 64rem) { body { --pad: 2.5rem; border-inline: 1px solid var(--rule); } }
   /* Title strip: dot, wordmark and tabs; then the ticker of live work; then the light-cycle line. */
-  .strip { margin: 0 calc(-1 * var(--pad)) 1.25rem; padding: calc(1rem + env(safe-area-inset-top, 0px)) var(--pad) 0; background: linear-gradient(var(--field), transparent); }
+  .strip { position: relative; margin: 0 calc(-1 * var(--pad)) 1.25rem; padding: calc(1rem + env(safe-area-inset-top, 0px)) var(--pad) 0; background: linear-gradient(var(--field), transparent); }
   .top { display: flex; flex-wrap: wrap; align-items: center; gap: .625rem; }
   .title { font: 700 1rem/1 var(--display); text-transform: uppercase; letter-spacing: .16em; white-space: nowrap; color: var(--accent); text-shadow: 0 0 10px var(--glow); }
   /* Connection and work: dim = idle, bright with glow = working, hollow = reconnecting, warn = offline or no workers,
@@ -66,6 +66,13 @@
   /* Idle: no ticker, so the tabs need room above the line. */
   #ticker[hidden] + .cycle { margin-top: 1rem; }
   .cycle.run::after { content: ""; position: absolute; inset: 0 auto 0 0; width: 34%; background: linear-gradient(90deg, transparent, var(--accent)); animation: ride 4s linear infinite; }
+  /* Update from `mis-up --watch`: a tag riding the line's right end, out of the flow so it never moves the strip.
+     The ::after widens the tap target (tap shows the commit subject). `.strip` outranks the button[type=button] rule. */
+  .strip .upd { position: absolute; min-height: 0; right: var(--pad); bottom: 1px; transform: translateY(50%); max-width: calc(100% - 2 * var(--pad)); box-sizing: border-box; padding: .1875rem .4375rem; color: var(--accent); background: var(--bg); border: 1px solid currentColor; box-shadow: 0 0 6px var(--glow); font: 600 .5625rem/1 var(--display); letter-spacing: .12em; text-transform: uppercase; }
+  .upd::after { content: ""; position: absolute; inset: -.875rem -.5rem; }
+  .upd span { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .upd code { font: inherit; font-family: var(--mono); letter-spacing: 0; text-transform: none; }
+  .strip .upd.bad { color: var(--bad); box-shadow: none; } .strip .upd.warn { color: var(--warn); box-shadow: none; }
   @keyframes ride { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
   @media (prefers-reduced-motion: reduce) { .cycle.run::after { display: none; } }
   /* Offline for a while: the last view stays, dimmed. */
@@ -226,6 +233,7 @@
   </div>
   <a id="ticker">connecting…</a>
   <div id="cycle" class="cycle" aria-hidden="true"></div>
+  <button type="button" id="upd" class="upd" aria-expanded="false" hidden><span></span></button>
 </header>
 
 <form id="auth" hidden>
@@ -684,7 +692,27 @@ function renderStrip() {
   if (t.open) tk.href = `#task/${t.open}`; else tk.removeAttribute('href');
   $('cycle').classList.toggle('run', everOpen && !offline && tasks.some((x) => x.status === 'running'));
   renderGauges();
+  renderUpdate();
 }
+
+// The supervisor's update report from the last Status: [label, class, show the sha]. Tap toggles the commit subject.
+let update = { state: 'none' };
+const UPDATE = { pending: ['update pending', '', true], failed: ['update failed · build', 'bad', false], rolled_back: ['rolled back', 'warn', true] };
+function renderUpdate() {
+  const u = $('upd'), [label, cls, withSha] = UPDATE[update.state] || [];
+  u.hidden = !label;
+  if (!label) { u.setAttribute('aria-expanded', 'false'); return; }
+  const sha = String(update.sha).slice(0, 7), open = u.getAttribute('aria-expanded') === 'true';
+  u.className = `upd ${cls}`;
+  u.title = `${sha} ${update.subject}`;
+  u.firstChild.replaceChildren(...(open ? [el('code', {}, `${sha} ${update.subject}`)]
+    : withSha ? [`${label} · `, el('code', {}, sha)] : [label]));
+}
+$('upd').onclick = (e) => {
+  const u = e.currentTarget;
+  u.setAttribute('aria-expanded', String(u.getAttribute('aria-expanded') !== 'true'));
+  renderUpdate();
+};
 
 // `#` tasks, `#task/<id>`, `#workers`, `#worker/<id>`.
 function route() {
@@ -997,6 +1025,7 @@ function onMessage(msg) {
   switch (msg.type) {
     case 'status': {
       tasks = msg.tasks;
+      update = msg.update || { state: 'none' };
       if (num(msg.now_ms) !== null) skew = msg.now_ms - Date.now();
       // The server's order is unstable; sort so rows don't jump on refresh.
       workers = [...msg.workers].sort((a, b) => a.info.hostname.localeCompare(b.info.hostname) || a.id.localeCompare(b.id));
