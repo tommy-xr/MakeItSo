@@ -88,6 +88,12 @@ cf_access_client_secret = "..."
 roots = ["/Users/me/code"]       # task --cwd must start under one (not a sandbox); default: cwd
 ```
 
+Setup also asks what the machine is for (`--purpose "Blender + blender-mcp; 3D assets"`) and takes an
+inventory: MCP server names per harness (`~/.claude.json`, `.mcp.json` under the roots,
+`~/.codex/config.toml`; names only, never commands, args, env or URLs), known apps such as Blender,
+Godot, Xcode, ffmpeg, and CPU / RAM / GPU. Both go to the orchestrator and show under Workers. Each start
+re-takes the inventory and saves it in `worker.toml` when it changed (the file is rewritten, so comments are lost).
+
 ## Remote machines
 
 Start the orchestrator with `--bind 0.0.0.0:7474` and a `MIS_TOKEN`. It prints a

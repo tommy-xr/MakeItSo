@@ -198,6 +198,11 @@
   .worker .open { text-decoration: none; }
   .worker .open::after { content: ""; position: absolute; inset: 0; }
   .worker .task { position: relative; display: inline-block; padding: .625rem .25rem; margin: -.625rem 0; }
+  /* Purpose and tools: what the planner routes on. The tools line opens above the row's link. */
+  .purpose { margin-top: .25rem; overflow-wrap: anywhere; }
+  details.caps { position: relative; margin: 0; border: 0; font-size: .875rem; }
+  .caps summary { padding: .625rem 0; margin: -.375rem 0 -.625rem; font: inherit; text-transform: none; letter-spacing: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .caps dl { margin: .5rem 0 0; gap: .125rem .75rem; }
   #machine h2 { margin: 1.5rem 0 0; font-size: 1rem; }
   h3 { margin: 2rem 0 .5rem; font: 600 .8125rem var(--display); text-transform: uppercase; letter-spacing: .14em; color: var(--dim); }
   /* Meters: grey when fine or unknown, orange from 75%, red from 90%. */
@@ -976,6 +981,31 @@ function limitRows(w) {
   return rows.length ? el('div', { className: 'lims' }, ...rows, el('div', { className: 'dim' }, ages.join(' · '))) : '';
 }
 
+// Inventory from the worker's Hello; older workers send none.
+const appText = (a) => (a.version ? `${a.name} ${a.version}` : a.name);
+const invOf = (w) => w.info.inventory || {};
+const mcpOf = (w) => Object.entries(invOf(w).mcp || {}).filter(([, v]) => v.length);
+const machineText = (w) => {
+  const m = invOf(w).machine || {};
+  return [m.os_version || `${w.info.os} ${w.info.arch}`, m.cpus && `${m.cpus} cpus`, m.mem_gb && `${Math.round(m.mem_gb)} GB`, m.gpu]
+    .filter(Boolean).join(', ');
+};
+// Rows for a <dl>: apps, then MCP servers per harness.
+const capRows = (w) => [
+  ...((invOf(w).apps || []).length ? [el('dt', {}, 'apps'), el('dd', {}, invOf(w).apps.map(appText).join(', '))] : []),
+  ...mcpOf(w).flatMap(([h, v]) => [el('dt', {}, `${h} mcp`), el('dd', {}, v.join(', '))]),
+];
+// Workers whose tools line is open, so a Status redraw keeps it open.
+const capsOpen = new Set();
+function capsLine(w) {
+  const apps = invOf(w).apps || [], mcp = mcpOf(w).reduce((n, [, v]) => n + v.length, 0);
+  if (!apps.length && !mcp) return '';
+  const sum = [...apps.map((a) => a.name), mcp && `${mcp} mcp`].filter(Boolean).join(' · ');
+  const d = el('details', { className: 'caps dim', open: capsOpen.has(w.id) }, el('summary', {}, sum), el('dl', {}, ...capRows(w)));
+  d.addEventListener('toggle', () => (d.open ? capsOpen.add(w.id) : capsOpen.delete(w.id)));
+  return d;
+}
+
 function renderWorkers() {
   renderNotify();
   $('fleet').textContent = `${workers.filter((w) => w.online).length}/${workers.length} online`;
@@ -986,7 +1016,8 @@ function renderWorkers() {
         run ? el('a', { href: `#task/${run.id}`, className: 'task' }, short(run.id)) : ''),
       // Activity last: it's the part the ellipsis may cut.
       run ? el('div', { className: 'activity' }, ...dots([clock(run), tokensOf(run), run.activity])) : '',
-      meterLine(w), limitRows(w));
+      w.info.purpose ? el('div', { className: 'purpose' }, w.info.purpose) : '',
+      capsLine(w), meterLine(w), limitRows(w));
   }));
   if (!workers.length) $('machines').append(el('li', { className: 'dim' }, 'no workers connected'));
 }
@@ -1010,9 +1041,11 @@ function renderMachine(id) {
   $('wbody').className = st === 'offline' ? 'off' : '';
   $('wbody').replaceChildren(
     el('h2', {}, `${w.info.hostname} `, chip(st)),
+    w.info.purpose ? el('p', { className: 'purpose' }, w.info.purpose) : '',
     el('dl', {},
-      el('dt', {}, 'os'), el('dd', {}, `${w.info.os} ${w.info.arch}`),
+      el('dt', {}, 'machine'), el('dd', {}, machineText(w)),
       el('dt', {}, 'harnesses'), el('dd', {}, w.info.harnesses.join(', ') || '-'),
+      ...capRows(w),
       el('dt', {}, 'roots'), el('dd', {}, (w.info.roots || []).join('\n') || '-')),
     meter(disk === null ? 'disk —' : `disk ${free === null ? '' : `${Math.round(free)} GB free, `}${pct(disk)} used`, disk),
     meter(`cpu ${pct(cpu)}`, cpu),

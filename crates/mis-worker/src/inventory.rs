@@ -238,7 +238,7 @@ fn probe_version(f: Found) -> Option<String> {
     let out = match f {
         Found::Bundle(b) => {
             let plist = b.join("Contents/Info.plist");
-            let mut cmd = Command::new("plutil");
+            let mut cmd = Command::new("/usr/bin/plutil");
             cmd.args(["-extract", "CFBundleShortVersionString", "raw", "-o", "-"])
                 .arg(plist);
             output_within(cmd)?
@@ -281,8 +281,9 @@ fn output_within(mut cmd: Command) -> Option<String> {
 fn machine() -> Machine {
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();
+    // Absolute: /usr/sbin is often missing from a service's PATH.
     let gpu = if cfg!(target_os = "macos") {
-        let mut cmd = Command::new("system_profiler");
+        let mut cmd = Command::new("/usr/sbin/system_profiler");
         cmd.arg("SPDisplaysDataType");
         output_within(cmd)
     } else {
