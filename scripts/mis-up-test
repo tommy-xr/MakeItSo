@@ -47,6 +47,7 @@ is() { # state sha: the orchestrator reports update `state` for `sha`
   local u; u=$(upd) || return 1
   [[ $u == *"\"state\":\"$1\""* && $u == *"\"sha\":\"$2"* ]]
 }
+nothing_pending() { [[ $(upd) == *'"update":{"state":"none"}'* ]]; }
 running() { upd | sed -n 's/.*"running":\([0-9]*\).*/\1/p'; }
 snap() { [ -z "${SNAP:-}" ] || $SNAP "$1" "$URL/"; }
 fail() { echo "FAIL $*"; echo "--- mis-up.log"; tail -30 "$W/mis-up.log"; exit 1; }
@@ -78,7 +79,7 @@ check "still serving $v0" serving "$v0"
 check "task still running" busy 1
 touch "$W/gate"
 within 60 "restarted on $v1 after the task finished" serving "$v1"
-check "new orchestrator reports nothing pending" is none ""
+check "new orchestrator reports nothing pending" nothing_pending
 check "runs the stored build, not target/debug" pgrep -f "$W/home/.local/state/mis/builds/[0-9a-f]*/mis-orchestrator"
 within 30 "task history kept: $task done" task_done
 snap restarted
