@@ -15,6 +15,10 @@ PORT=${PORT:-7661}
 URL=http://127.0.0.1:$PORT
 export CARGO_HOME=${CARGO_HOME:-$HOME/.cargo} RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$here/target}
+# Reuse only a work dir this script made: it is wiped first.
+if [ -e "$W" ] && [ -n "$(ls -A "$W")" ] && [ ! -e "$W/.mis-up-test" ]; then
+  echo "$W is not empty and not from mis-up-test; pick another dir" >&2; exit 1
+fi
 rm -rf "$W"; mkdir -p "$W"/home/.config/mis "$W"/home/code "$W"/fake
 cargo build -q -p mis-cli --manifest-path "$here/Cargo.toml"
 mis() { MIS_URL=ws://127.0.0.1:$PORT MIS_TOKEN=s "$CARGO_TARGET_DIR/debug/mis" "$@"; }
@@ -34,6 +38,7 @@ case "\$*" in *hold*) while [ ! -f "$W/gate" ]; do sleep 0.2; done ;; esac
 echo '{"type":"result","subtype":"success","is_error":false,"result":"done"}'
 FAKE
 chmod +x "$W/fake/claude"
+touch "$W/.mis-up-test"
 
 env -u XDG_STATE_HOME -u MIS_STATE_DIR -u MIS_URL -u MIS_TOKEN HOME="$W/home" MIS_REPO="$W/repo" \
   MIS_UPDATE_INTERVAL=2 PATH="$W/fake:$PATH" \
