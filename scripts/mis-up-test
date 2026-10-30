@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# End-to-end check of `mis-up --watch` against a throwaway origin built from this checkout's HEAD:
+#   1. a commit lands while a task runs: "pending" shows, the old version serves until the task ends,
+#      then the orchestrator restarts on the new commit;
+#   2. a commit that doesn't build: "failed", the old version still serves;
+#   3. a commit whose orchestrator exits at start: "rolled back" to the previous build.
+# Real cargo builds (CARGO_TARGET_DIR, default this checkout's target/), so it takes minutes.
+# Never touches ~/.config/mis or the real checkout: HOME, the repo and origin live in the work dir.
+# Usage: scripts/mis-up-test [work dir]
+#   PORT (7661) for the orchestrator; SNAP=<cmd> runs `<cmd> <checkpoint> <page url>` at each state.
+set -euo pipefail
+here=$(cd "$(dirname "$0")/.." && pwd)
+W=${1:-$(mktemp -d)}
+PORT=${PORT:-7661}
+URL=http://127.0.0.1:$PORT
+export CARGO_HOME=${CARGO_HOME:-$HOME/.cargo} RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}
+export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$here/target}
+rm -rf "$W"; mkdir -p "$W"/home/.config/mis "$W"/home/code "$W"/fake
+cargo build -q -p mis-cli --manifest-path "$here/Cargo.toml"
+mis() { MIS_URL=ws://127.0.0.1:$PORT MIS_TOKEN=s "$CARGO_TARGET_DIR/debug/mis" "$@"; }
+
+# Origin with main = HEAD; the checkout mis-up builds; a dev clone that pushes.
+git init -q --bare -b main "$W/origin.git"
+git -C "$here" push -q "$W/origin.git" HEAD:refs/heads/main
+git clone -q "$W/origin.git" "$W/repo"
+git clone -q "$W/origin.git" "$W/dev"
+push() { git -C "$W/dev" -c user.name=t -c user.email=t@t commit -qam "$1" && git -C "$W/dev" push -q; git -C "$W/dev" rev-parse --short HEAD; }
+printf 'MIS_BIND=127.0.0.1:%s\nMIS_TOKEN=s\n' "$PORT" >"$W/home/.config/mis/orchestrator.env"
+# Fake claude: prompts saying "hold" run until $W/gate exists.
+cat >"$W/fake/claude" <<FAKE
+#!/bin/sh
+echo '{"type":"system","subtype":"init","session_id":"s-'\$\$'","model":"fake"}'
+case "\$*" in *hold*) while [ ! -f "$W/gate" ]; do sleep 0.2; done ;; esac
+echo '{"type":"result","subtype":"success","is_error":false,"result":"done"}'
+FAKE
+chmod +x "$W/fake/claude"
+
+env -u XDG_STATE_HOME -u MIS_STATE_DIR -u MIS_URL -u MIS_TOKEN HOME="$W/home" MIS_REPO="$W/repo" \
+  MIS_UPDATE_INTERVAL=2 PATH="$W/fake:$PATH" \
+  "$here/scripts/mis-up" --watch --worker --no-planner --no-summary >"$W/mis-up.log" 2>&1 &
+sup=$!
+trap 'kill $sup 2>/dev/null; wait $sup 2>/dev/null' EXIT
+
+ver() { curl -sf "$URL/api/info" | sed -n 's/.*"version":"[^"+]*+\([^"]*\)".*/\1/p'; }
+upd() { curl -sf -H 'Authorization: Bearer s' "$URL/api/update"; }
+is() { # state sha: the orchestrator reports update `state` for `sha`
+  local u; u=$(upd) || return 1
+  [[ $u == *"\"state\":\"$1\""* && $u == *"\"sha\":\"$2"* ]]
+}
+running() { upd | sed -n 's/.*"running":\([0-9]*\).*/\1/p'; }
+snap() { [ -z "${SNAP:-}" ] || $SNAP "$1" "$URL/"; }
+fail() { echo "FAIL $*"; echo "--- mis-up.log"; tail -30 "$W/mis-up.log"; exit 1; }
+within() { # seconds description command...: poll until the command succeeds
+  local t=$1 what=$2; shift 2
+  for ((i = 0; i < t; i++)); do "$@" && { echo "ok   $what (${i}s)"; return; }; sleep 1; done
+  fail "$what (after ${t}s)"
+}
+check() { local what=$1; shift; if "$@"; then echo "ok   $what"; else fail "$what"; fi; }
+serving() { [ "$(ver)" = "$1" ]; }
+busy() { [ "$(running)" = "$1" ]; }
+task_done() { mis show "$task" | grep -q '^status: *done'; }
+builds_logged() { grep -c '^mis-up: building' "$W/mis-up.log"; }
+builds_kept() { find "$W/home/.local/state/mis/builds" -mindepth 1 -maxdepth 1 -not -name '.*' | wc -l; }
+stopped() { ! curl -sf "$URL/api/info" >/dev/null && ! pgrep -f "$W/home/.local/state/mis/builds" >/dev/null; }
+
+v0=$(git -C "$W/repo" rev-parse --short HEAD)
+within 600 "first build serves $v0" serving "$v0"
+task=$(mis task --harness claude "hold until the gate opens")
+within 30 "task running" busy 1
+
+# 1. Update while a task runs.
+echo "update while busy" >>"$W/dev/README.md"
+v1=$(push "docs: harmless change")
+within 600 "pending $v1 shows while the task runs" is pending "$v1"
+snap pending
+sleep 6
+check "still serving $v0" serving "$v0"
+check "task still running" busy 1
+touch "$W/gate"
+within 60 "restarted on $v1 after the task finished" serving "$v1"
+check "new orchestrator reports nothing pending" is none ""
+check "runs the stored build, not target/debug" pgrep -f "$W/home/.local/state/mis/builds/[0-9a-f]*/mis-orchestrator"
+within 30 "task history kept: $task done" task_done
+snap restarted
+
+# 2. A commit that doesn't build.
+echo "fn broken( {" >>"$W/dev/crates/mis-orchestrator/src/main.rs"
+v2=$(push "feat: does not build")
+within 600 "failed $v2 shows" is failed "$v2"
+check "still serving $v1" serving "$v1"
+snap failed
+
+# 3. Builds, but the orchestrator exits at start.
+git -C "$W/dev" checkout -q HEAD~1 -- crates/mis-orchestrator/src/main.rs
+sed -i.bak 's/^async fn main() -> anyhow::Result<()> {$/&\n    if std::env::var_os("HOME").is_some() { std::process::exit(3); }/' \
+  "$W/dev/crates/mis-orchestrator/src/main.rs"
+rm "$W/dev/crates/mis-orchestrator/src/main.rs.bak"
+grep -q 'process::exit(3)' "$W/dev/crates/mis-orchestrator/src/main.rs" || fail "exit patch didn't apply"
+v3=$(push "feat: orchestrator exits at start")
+within 600 "rolled back from $v3" is rolled_back "$v3"
+check "serving $v1 again" serving "$v1"
+snap rolled_back
+builds=$(builds_logged)
+sleep 8
+check "no retry of $v3" [ "$(builds_logged)" = "$builds" ]
+check "at most 3 builds kept" [ "$(builds_kept)" -le 3 ]
+
+kill -TERM $sup; wait $sup 2>/dev/null || true
+within 15 "SIGTERM stops everything" stopped
+echo "all ok (log: $W/mis-up.log)"
