@@ -384,15 +384,18 @@ mod tests {
 
     #[test]
     fn noted_inventory_survives_a_restart() {
+        let app = |name: &str| InstalledApp {
+            name: name.into(),
+            version: None,
+        };
         let mut l = Ledger::default();
         let w = uuid::Uuid::new_v4();
-        l.connect(w, info(), &[], 1, NOW);
+        let mut first = info();
+        first.inventory.apps.push(app("Blender"));
+        l.connect(w, first.clone(), &[], 1, NOW);
         let (mut r, _) = round_trip(&l);
-        let mut more = info();
-        more.inventory.apps.push(InstalledApp {
-            name: "Houdini".into(),
-            version: None,
-        });
+        let mut more = first;
+        more.inventory.apps.push(app("Houdini"));
         r.connect(w, more, &[], 2, NOW);
         let ServerMsg::Status { workers, .. } = r.status() else {
             unreachable!()

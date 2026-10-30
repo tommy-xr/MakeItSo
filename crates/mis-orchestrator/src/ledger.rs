@@ -829,7 +829,12 @@ impl Ledger {
         now: Duration,
     ) -> (Vec<TaskId>, Vec<Effect>) {
         let generation = self.workers.get(&wid).map_or(0, |w| w.generation) + 1;
-        (self.noted.entry(wid)).or_insert_with(|| info.inventory.clone());
+        // The first inventory is the baseline. An empty one isn't: it comes from
+        // `mis-worker setup`'s test connection or a worker predating inventories.
+        let noted = self.noted.entry(wid).or_default();
+        if *noted == Inventory::default() {
+            *noted = info.inventory.clone();
+        }
         self.workers.insert(
             wid,
             Worker {
@@ -1514,8 +1519,13 @@ mod tests {
     fn new_tools_since_the_note_was_saved_survive_reconnects() {
         let mut l = Ledger::default();
         let wid = Uuid::new_v4();
+        // Setup's test connection reports no inventory: no baseline yet.
+        l.connect(wid, studio(), &[], 1, T0);
         l.connect(wid, with_app(studio(), "Blender"), &[], 1, T0);
-        assert!(new_tools(&l, wid).is_empty(), "first sight is the baseline");
+        assert!(
+            new_tools(&l, wid).is_empty(),
+            "first inventory is the baseline"
+        );
         // Back with Houdini, after being dropped past grace: still new.
         l.disconnect(wid, 1);
         l.expire(wid, 1);

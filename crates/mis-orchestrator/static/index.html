@@ -203,6 +203,11 @@
   details.caps { position: relative; margin: 0; border: 0; font-size: .875rem; }
   .caps summary { padding: .625rem 0; margin: -.375rem 0 -.625rem; font: inherit; text-transform: none; letter-spacing: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .caps dl { margin: .5rem 0 0; gap: .125rem .75rem; }
+  /* Tools gained since the note was saved; the note's editor on the worker's page. */
+  .new { margin: .25rem 0 0; color: var(--warn); overflow-wrap: anywhere; }
+  #note { margin: 1rem 0; }
+  #note .row { margin: .5rem 0 0; }
+  #note > p:last-child { margin: .375rem 0 0; }
   #machine h2 { margin: 1.5rem 0 0; font-size: 1rem; }
   h3 { margin: 2rem 0 .5rem; font: 600 .8125rem var(--display); text-transform: uppercase; letter-spacing: .14em; color: var(--dim); }
   /* Meters: grey when fine or unknown, orange from 75%, red from 90%. */
@@ -1025,6 +1030,7 @@ function renderWorkers() {
       // Activity last: it's the part the ellipsis may cut.
       run ? el('div', { className: 'activity' }, ...dots([clock(run), tokensOf(run), run.activity])) : '',
       w.info.purpose ? el('div', { className: 'purpose' }, w.info.purpose) : '',
+      (w.new_tools || []).length ? el('div', { className: 'new' }, `new: ${w.new_tools.join(', ')}`) : '',
       capsLine(w), meterLine(w), limitRows(w));
   }));
   if (!workers.length) $('machines').append(el('li', { className: 'dim' }, 'no workers connected'));
@@ -1038,6 +1044,41 @@ function meter(label, v) {
   return el('div', { className: `meter ${level(v)}` }, label, bar);
 }
 
+// The purpose editor on a worker's page, kept across Status redraws so typing survives; untouched,
+// it follows the worker's note. A suggestion only fills the field: nothing is saved until Save.
+let note = null;
+function noteEditor(w) {
+  if (!note || note.id !== w.id) {
+    const field = el('textarea', { placeholder: 'What this machine is for, e.g. Blender + blender-mcp; 3D modelling, glTF export' });
+    field.setAttribute('aria-label', 'purpose');
+    const suggest = el('button', { type: 'button' }, 'Suggest note');
+    const n = { id: w.id, field, suggest, news: el('p', { className: 'new' }), hint: el('p', { className: 'dim' }), dirty: false, saving: false };
+    n.form = el('form', { id: 'note' }, n.news, field, el('div', { className: 'row' }, suggest, el('button', {}, 'Save note')), n.hint);
+    field.addEventListener('input', () => { n.dirty = true; });
+    n.form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      send({ type: 'set_purpose', worker: n.id, purpose: field.value });
+      Object.assign(n, { dirty: false, saving: true });
+      n.hint.textContent = 'saving…';
+    });
+    suggest.addEventListener('click', () => {
+      send({ type: 'suggest_purpose', worker: n.id });
+      suggest.disabled = true;
+      n.hint.textContent = 'drafting…';
+    });
+    note = n;
+  }
+  if (!note.dirty) note.field.value = w.info.purpose || '';
+  const fresh = w.new_tools || [];
+  note.news.textContent = `new: ${fresh.join(', ')}`;
+  note.news.hidden = note.suggest.hidden = !fresh.length;
+  if (note.saving && (w.info.purpose || '') === note.field.value.trim()) {
+    note.saving = false;
+    note.hint.textContent = 'saved';
+  }
+  return note.form;
+}
+
 function renderMachine(id) {
   if (frozen()) return;
   const w = workers.find((x) => x.id === id);
@@ -1049,7 +1090,7 @@ function renderMachine(id) {
   $('wbody').className = st === 'offline' ? 'off' : '';
   $('wbody').replaceChildren(
     el('h2', {}, `${w.info.hostname} `, chip(st)),
-    w.info.purpose ? el('p', { className: 'purpose' }, w.info.purpose) : '',
+    readOnly ? (w.info.purpose ? el('p', { className: 'purpose' }, w.info.purpose) : '') : noteEditor(w),
     el('dl', {},
       el('dt', {}, 'machine'), el('dd', {}, machineText(w)),
       el('dt', {}, 'harnesses'), el('dd', {}, w.info.harnesses.join(', ') || '-'),
@@ -1109,7 +1150,24 @@ function onMessage(msg) {
       detail.lines.push(line);
       break;
     }
+    case 'purpose_draft':
+      if (note && note.id === msg.worker) {
+        note.suggest.disabled = false;
+        if (msg.error) note.hint.textContent = `no draft: ${msg.error}`;
+        else {
+          note.dirty = true;
+          note.field.value = msg.draft;
+          note.hint.textContent = 'suggested: edit it, then Save note';
+        }
+      }
+      break;
     case 'error':
+      // A refused save or suggestion: the flash says why; the editor stops waiting.
+      if (note && (note.saving || note.suggest.disabled)) {
+        note.saving = false;
+        note.suggest.disabled = false;
+        note.hint.textContent = '';
+      }
       // A refused reply (e.g. its worker is offline): say so by the form, keep the view.
       if (pending && pending.key !== 'draft:new') {
         pending = null;
