@@ -61,14 +61,23 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let filter =
+    use tracing_subscriber::filter::{LevelFilter, Targets};
+    use tracing_subscriber::prelude::*;
+    let env =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     // At trace, tungstenite logs the raw upgrade request (token, Access secret)
-    // and every frame (prompts, images); never let it.
-    let filter = filter
-        .add_directive("tungstenite=debug".parse()?)
-        .add_directive("tokio_tungstenite=debug".parse()?);
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    // and every frame (prompts, images): cap it at debug, whatever RUST_LOG says.
+    let cap = Targets::new()
+        .with_default(LevelFilter::TRACE)
+        .with_target("tungstenite", LevelFilter::DEBUG)
+        .with_target("tokio_tungstenite", LevelFilter::DEBUG);
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_filter(cap)
+                .with_filter(env),
+        )
+        .init();
     let args = Args::parse();
     if let Some(Cmd::Setup(a)) = args.cmd {
         return setup::run(a).await;
