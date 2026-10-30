@@ -13,7 +13,7 @@ pub type Fleet = BTreeMap<String, Vec<String>>;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Card {
     pub id: WorkerId,
-    /// Hostname, or `hostname-<id prefix>` when two workers share one.
+    /// Hostname, or `hostname-<id prefix>` when two workers share one; unique.
     pub name: String,
     pub online: bool,
     pub harnesses: Vec<String>,
@@ -46,6 +46,15 @@ pub fn cards<'a>(workers: impl IntoIterator<Item = (WorkerId, &'a WorkerInfo, bo
             }
         })
         .collect();
+    // A short suffix can still collide (a host literally named `mac-aaaaaaaa`):
+    // those fall back to the full id.
+    let names: Vec<String> = cards.iter().map(|c| c.name.clone()).collect();
+    for c in &mut cards {
+        if names.iter().filter(|n| **n == c.name).count() > 1 {
+            let host = all.iter().find(|(id, ..)| *id == c.id).unwrap().1;
+            c.name = format!("{}-{}", host.hostname, c.id);
+        }
+    }
     cards.sort_by(|a, b| a.name.cmp(&b.name));
     cards
 }
@@ -372,5 +381,22 @@ mod tests {
             .map(|c| c.name)
             .collect();
         assert_eq!(names, ["mac-aaaaaaaa", "mac-bbbbbbbb"]);
+        let literal = WorkerInfo {
+            hostname: "mac-aaaaaaaa".into(),
+            ..Default::default()
+        };
+        let c = id("cccccccc-0000-4000-8000-000000000000");
+        let names: Vec<String> = cards([(a, &info, true), (b, &info, true), (c, &literal, true)])
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "mac-aaaaaaaa-0000-4000-8000-000000000000",
+                "mac-aaaaaaaa-cccccccc-0000-4000-8000-000000000000",
+                "mac-bbbbbbbb",
+            ]
+        );
     }
 }

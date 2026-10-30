@@ -156,6 +156,10 @@ struct TaskEntry {
     seen: bool,
     /// Attached image ids, sent with the task to its worker.
     images: Vec<Uuid>,
+    /// Workers as offered to the planner, so its pick resolves to the worker
+    /// it saw even if the fleet changes meanwhile. Planning doesn't survive a restart.
+    #[serde(skip)]
+    offered: Vec<plan::Card>,
 }
 
 /// What a task needs from the user; opening it once finished clears it.
@@ -212,6 +216,7 @@ impl TaskEntry {
             limited: false,
             seen: false,
             images: vec![],
+            offered: vec![],
         }
     }
 
@@ -510,8 +515,9 @@ impl Ledger {
     ) -> (TaskId, Vec<Effect>) {
         let id = Uuid::new_v4();
         let planning = harness.is_none();
+        let offered = self.cards();
         let plan_prompt =
-            planning.then(|| plan::prompt(&prompt, images.len(), &self.fleet(), &self.cards()));
+            planning.then(|| plan::prompt(&prompt, images.len(), &self.fleet(), &offered));
         let mut entry = TaskEntry::new(
             Task {
                 id,
@@ -526,6 +532,7 @@ impl Ledger {
         );
         if planning {
             entry.status = TaskStatus::Planning;
+            entry.offered = offered;
         }
         entry.images = images;
         self.tasks.push(entry);
@@ -667,7 +674,6 @@ impl Ledger {
     pub fn planning_event(&mut self, task: TaskId, event: AgentEvent) -> Vec<Effect> {
         // Any known harness is valid: one the planner wasn't offered may still be the user's explicit pick.
         let fleet = self.known_fleet();
-        let cards = self.cards();
         let now = self.now_ms;
         let Some(t) = self.tasks.iter_mut().find(|t| t.task.id == task) else {
             return vec![];
@@ -685,7 +691,7 @@ impl Ledger {
         match event {
             AgentEvent::Finished { ok, summary } => {
                 let plan = match (ok, summary) {
-                    (true, Some(reply)) => plan::parse(&reply, &t.task.prompt, &fleet, &cards),
+                    (true, Some(reply)) => plan::parse(&reply, &t.task.prompt, &fleet, &t.offered),
                     (_, summary) => Err(summary.unwrap_or_else(|| "planner failed".into())),
                 };
                 match plan {
@@ -1382,6 +1388,25 @@ mod tests {
         // It comes back: the task runs there.
         let (_, eff) = l.connect(studio_id, studio(), &[], 3, T0);
         assert_eq!(assigned(&eff), [(3, chair)]);
+    }
+
+    #[test]
+    fn pick_resolves_to_the_worker_offered_even_after_it_left() {
+        let mut l = Ledger::default();
+        let studio_id = Uuid::new_v4();
+        l.connect(Uuid::new_v4(), info(), &[], 1, T0);
+        l.connect(studio_id, studio(), &[], 2, T0);
+        l.disconnect(studio_id, 2);
+        let (task, _) = l.submit("model a chair".into(), None, None, None, vec![]);
+        l.expire(studio_id, 1);
+        let reply = AgentEvent::Finished {
+            ok: true,
+            summary: Some(TO_STUDIO.into()),
+        };
+        l.planning_event(task, reply);
+        assert_eq!(task_status(&l, task), TaskStatus::Queued);
+        let (_, eff) = l.connect(studio_id, studio(), &[], 3, T0);
+        assert_eq!(assigned(&eff), [(3, task)]);
     }
 
     #[test]
