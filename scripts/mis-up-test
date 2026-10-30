@@ -66,7 +66,7 @@ stopped() { ! curl -sf "$URL/api/info" >/dev/null && ! pgrep -f "$W/home/.local/
 
 v0=$(git -C "$W/repo" rev-parse --short HEAD)
 within 600 "first build serves $v0" serving "$v0"
-task=$(mis task --harness claude "hold until the gate opens")
+task=$(mis task --harness claude "hold until the gate opens" | awk '{print $NF}')
 within 30 "task running" busy 1
 
 # 1. Update while a task runs.
@@ -80,7 +80,7 @@ check "task still running" busy 1
 touch "$W/gate"
 within 60 "restarted on $v1 after the task finished" serving "$v1"
 check "new orchestrator reports nothing pending" nothing_pending
-check "runs the stored build, not target/debug" pgrep -f "$W/home/.local/state/mis/builds/[0-9a-f]*/mis-orchestrator"
+check "runs the stored build, not target/debug" pgrep -qf "$W/home/.local/state/mis/builds/[0-9a-f]*/mis-orchestrator"
 within 30 "task history kept: $task done" task_done
 snap restarted
 
