@@ -2499,3 +2499,60 @@ async fn task_history_survives_a_restart() {
     served.await.unwrap().unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn supervisor_reports_update_live_and_read_token_cannot() {
+    let base = start_app(with_read_token()).await;
+    let (mut page, _) = connect_async(client_req(&base, &[("authorization", "Bearer r")]))
+        .await
+        .unwrap();
+    send(&mut page, &ClientMsg::Subscribe).await;
+    send(&mut page, &ClientMsg::Status).await;
+    let ServerMsg::Status { update, .. } = recv(&mut page).await else {
+        panic!()
+    };
+    assert_eq!(update, Update::None);
+
+    let post = |auth: &str| format!("POST /api/update HTTP/1.1\r\n{auth}");
+    let pending = br#"{"state":"pending","sha":"a1b2c3d","subject":"fix the thing"}"#;
+    assert_eq!(
+        http(&base, &post("Authorization: Bearer r"), pending)
+            .await
+            .0,
+        403
+    );
+    assert_eq!(http(&base, post("").trim_end(), pending).await.0, 401);
+    let bad = br#"{"state":"pending","sha":"nope","subject":"x"}"#;
+    assert_eq!(
+        http(&base, &post("Authorization: Bearer s"), bad).await.0,
+        400
+    );
+    assert_eq!(
+        http(&base, &post("Authorization: Bearer s"), pending)
+            .await
+            .0,
+        204
+    );
+
+    // The page sees it without asking.
+    let ServerMsg::Status { update, .. } = recv(&mut page).await else {
+        panic!()
+    };
+    let want = Update::Pending {
+        sha: "a1b2c3d".into(),
+        subject: "fix the thing".into(),
+    };
+    assert_eq!(update, want);
+    // The supervisor polls for a gap; any admitted token may look.
+    let (status, _, body) = http(
+        &base,
+        "GET /api/update HTTP/1.1\r\nAuthorization: Bearer r",
+        b"",
+    )
+    .await;
+    assert_eq!(status, 200);
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["running"], 0);
+    assert_eq!(body["update"]["state"], "pending");
+    assert_eq!(http(&base, "GET /api/update HTTP/1.1", b"").await.0, 401);
+}

@@ -612,6 +612,7 @@ pub fn router(app: App) -> Router {
         .route("/mcp", post(mcp))
         .route("/api/upload", post(upload))
         .route("/api/images/{id}", get(image))
+        .route("/api/update", get(update_status).post(set_update))
         .with_state(app)
 }
 
@@ -774,6 +775,46 @@ async fn upload(
             tracing::warn!("storing image: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
+    }
+}
+
+/// For `scripts/mis-up --watch`: the update shown to clients, and how many
+/// tasks a restart would interrupt (it restarts at 0).
+async fn update_status(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if !app.admit(&headers, peer, "/api/update").await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let l = app.ledger();
+    Json(serde_json::json!({ "update": l.update(), "running": l.running() })).into_response()
+}
+
+/// The supervisor reports an [`Update`]; clients see it live in Status.
+async fn set_update(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    match app.admit_scope(&headers, peer, "/api/update").await {
+        Some(Scope::Full) => {}
+        Some(Scope::Read) => return (StatusCode::FORBIDDEN, "read-only token").into_response(),
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    }
+    let update = match serde_json::from_slice::<Update>(&body) {
+        Ok(u) => u,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let set = app.transition(|l| match l.set_update(update) {
+        Ok(effects) => (Ok(()), effects),
+        Err(why) => (Err(why), vec![]),
+    });
+    match set {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(why) => (StatusCode::BAD_REQUEST, why).into_response(),
     }
 }
 

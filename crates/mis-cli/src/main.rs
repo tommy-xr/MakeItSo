@@ -584,6 +584,7 @@ async fn run(args: Args) -> Result<Option<TaskSummary>> {
                 workers,
                 tasks,
                 now_ms,
+                ..
             } = recv(&mut ws).await?
             else {
                 bail!("unexpected reply")
@@ -841,6 +842,7 @@ mod tests {
                 workers: vec![],
                 tasks: vec![summary(&other.to_string()), t],
                 now_ms: None,
+                update: Update::None,
             }
         };
         assert_eq!(wait_step(id, finished(other)), Wait::Pending);
