@@ -39,7 +39,7 @@ env -u XDG_STATE_HOME -u MIS_STATE_DIR -u MIS_URL -u MIS_TOKEN HOME="$W/home" MI
   MIS_UPDATE_INTERVAL=2 PATH="$W/fake:$PATH" \
   "$here/scripts/mis-up" --watch --worker --no-planner --no-summary >"$W/mis-up.log" 2>&1 &
 sup=$!
-trap 'kill $sup 2>/dev/null; wait $sup 2>/dev/null' EXIT
+trap 'kill $sup 2>/dev/null || true; wait $sup 2>/dev/null || true' EXIT
 
 ver() { curl -sf "$URL/api/info" | sed -n 's/.*"version":"[^"+]*+\([^"]*\)".*/\1/p'; }
 upd() { curl -sf -H 'Authorization: Bearer s' "$URL/api/update"; }
@@ -59,7 +59,7 @@ within() { # seconds description command...: poll until the command succeeds
 check() { local what=$1; shift; if "$@"; then echo "ok   $what"; else fail "$what"; fi; }
 serving() { [ "$(ver)" = "$1" ]; }
 busy() { [ "$(running)" = "$1" ]; }
-task_done() { mis show "$task" | grep -q '^status: *done'; }
+task_done() { mis show "$task" | grep '^status: *done' >/dev/null; }
 builds_logged() { grep -c '^mis-up: building' "$W/mis-up.log"; }
 builds_kept() { find "$W/home/.local/state/mis/builds" -mindepth 1 -maxdepth 1 -not -name '.*' | wc -l; }
 stopped() { ! curl -sf "$URL/api/info" >/dev/null && ! pgrep -f "$W/home/.local/state/mis/builds" >/dev/null; }
