@@ -216,6 +216,7 @@ mod tests {
                 harnesses: vec![],
                 roots: vec![],
                 models: Default::default(),
+                ..Default::default()
             },
             busy: false,
             online,

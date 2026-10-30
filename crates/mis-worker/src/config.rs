@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use mis_types::Inventory;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_URL: &str = "ws://127.0.0.1:7474";
@@ -21,6 +22,10 @@ pub struct Config {
     /// `[models] claude = [...]`: replaces that harness's discovered models.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub models: BTreeMap<String, Vec<String>>,
+    /// What this machine is for, in the user's words; sent to the planner.
+    pub purpose: Option<String>,
+    /// Last inventory taken; rewritten on each start when it changes.
+    pub inventory: Option<Inventory>,
 }
 
 /// Settings the worker runs with.
@@ -33,6 +38,7 @@ pub struct Resolved {
     /// Never empty.
     pub roots: Vec<PathBuf>,
     pub models: BTreeMap<String, Vec<String>>,
+    pub purpose: Option<String>,
 }
 
 /// `cli` beats `file` beats defaults (`DEFAULT_URL`, roots = `[cwd]`). The
@@ -55,36 +61,59 @@ pub fn merge(cli: Config, file: Config, cwd: PathBuf) -> Resolved {
         cf_access_client_secret,
         roots,
         models: file.models,
+        purpose: file.purpose,
     }
 }
 
 /// Missing file = empty config.
 pub fn load(path: &Path) -> anyhow::Result<Config> {
     match std::fs::read_to_string(path) {
-        Ok(s) => toml::from_str(&s).with_context(|| format!("reading {}", path.display())),
+        // Message only: toml's Display quotes the offending line, which may be a secret.
+        Ok(s) => toml::from_str(&s).map_err(|e| {
+            let line = e.span().map_or(0, |r| s[..r.start].lines().count().max(1));
+            anyhow::anyhow!(
+                "reading {}: {} (line {line})",
+                path.display(),
+                e.message().trim()
+            )
+        }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
 }
 
 /// Save `cfg`, readable only by this user on unix since it holds secrets.
+/// Written beside it then renamed, so a crash mid-write keeps the old file.
 pub fn write(path: &Path, cfg: &Config) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let body = toml::to_string(cfg)?; // before truncating, so a failure keeps the old file
+    let body = toml::to_string(cfg)?;
+    let tmp = path.with_extension("toml.tmp");
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
     let mut f = opts
-        .open(path)
-        .with_context(|| format!("writing {}", path.display()))?;
-    // `mode` only applies on create; tighten a file that already existed.
+        .open(&tmp)
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    // `mode` only applies on create; tighten a leftover temp file.
     #[cfg(unix)]
     f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     std::io::Write::write_all(&mut f, body.as_bytes())?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+/// Store `inv` in the file at `path` unless it already holds it. Only the
+/// file's own settings are kept, never flag / env values.
+pub fn save_inventory(path: &Path, mut file: Config, inv: &Inventory) -> anyhow::Result<()> {
+    if file.inventory.as_ref() == Some(inv) {
+        return Ok(());
+    }
+    file.inventory = Some(inv.clone());
+    write(path, &file)
 }
 
 #[cfg(test)]
@@ -163,6 +192,65 @@ mod tests {
             toml::from_str::<Config>(&toml::to_string(&file()).unwrap()).unwrap(),
             file()
         );
+    }
+
+    #[test]
+    fn purpose_and_inventory_roundtrip() {
+        let inv = Inventory {
+            mcp: [("claude".into(), vec!["blender".into()])].into(),
+            apps: vec![mis_types::InstalledApp {
+                name: "Blender".into(),
+                version: Some("4.2.3".into()),
+            }],
+            ..Default::default()
+        };
+        let cfg = Config {
+            purpose: Some("3D assets".into()),
+            inventory: Some(inv),
+            ..file()
+        };
+        let s = toml::to_string(&cfg).unwrap();
+        assert_eq!(toml::from_str::<Config>(&s).unwrap(), cfg);
+        let r = merge(Config::default(), cfg, "/cwd".into());
+        assert_eq!(r.purpose.as_deref(), Some("3D assets"));
+    }
+
+    #[test]
+    fn save_inventory_keeps_purpose_and_skips_unchanged() {
+        let dir = std::env::temp_dir().join(format!("mis-cfg-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("worker.toml");
+        let saved = Config {
+            purpose: Some("3D assets".into()),
+            ..Default::default()
+        };
+        let inv = Inventory::default();
+        save_inventory(&path, saved, &inv).unwrap();
+        let got = load(&path).unwrap();
+        assert_eq!(got.purpose.as_deref(), Some("3D assets"));
+        assert_eq!(got.inventory.as_ref(), Some(&inv));
+        #[cfg(unix)]
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(
+                &std::fs::metadata(&path).unwrap().permissions()
+            ) & 0o777,
+            0o600
+        );
+        std::fs::remove_file(&path).unwrap();
+        save_inventory(&path, got, &inv).unwrap();
+        assert!(!path.exists(), "unchanged inventory rewrote the file");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_error_does_not_quote_the_file() {
+        let dir = std::env::temp_dir().join(format!("mis-cfg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("worker.toml");
+        std::fs::write(&path, "url = \"ws://x\"\ntoken = sk-live-unquoted\n").unwrap();
+        let e = format!("{:#}", load(&path).unwrap_err());
+        assert!(!e.contains("sk-live"), "{e}");
+        assert!(e.contains("(line 2)"), "{e}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

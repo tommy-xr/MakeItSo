@@ -31,6 +31,7 @@ fn info(harness: &str) -> WorkerInfo {
         harnesses: vec![harness.into()],
         roots: vec![],
         models: [(harness.into(), vec![format!("{harness}-mini")])].into(),
+        ..Default::default()
     }
 }
 
@@ -2555,4 +2556,55 @@ async fn supervisor_reports_update_live_and_read_token_cannot() {
     assert_eq!(body["running"], 0);
     assert_eq!(body["update"]["state"], "pending");
     assert_eq!(http(&base, "GET /api/update HTTP/1.1", b"").await.0, 401);
+}
+
+#[tokio::test]
+async fn worker_purpose_and_inventory_reach_status() {
+    let base = start().await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    // A worker predating purpose/inventory still connects.
+    let (mut old, _) = connect_async(format!("{base}/ws/worker")).await.unwrap();
+    let hello = r#"{"type":"hello","id":"00000000-0000-0000-0000-000000000001","running":[],
+        "info":{"hostname":"old","os":"o","arch":"a","harnesses":["claude"]}}"#;
+    old.send(Message::Text(hello.into())).await.unwrap();
+    assert!(matches!(recv(&mut old).await, OrchMsg::Welcome { .. }));
+    let w = only_worker(&mut client).await;
+    assert_eq!(
+        (w.info.purpose, w.info.inventory),
+        (None, Inventory::default())
+    );
+    drop(old);
+
+    let wid = uuid::Uuid::new_v4();
+    let blender = WorkerInfo {
+        purpose: Some("Blender + blender-mcp; 3D modelling, glTF export".into()),
+        inventory: Inventory {
+            mcp: [("claude".into(), vec!["blender".into()])].into(),
+            apps: vec![InstalledApp {
+                name: "Blender".into(),
+                version: Some("4.2.3".into()),
+            }],
+            machine: Machine {
+                cpus: 12,
+                mem_gb: 32.0,
+                gpu: Some("Apple M2 Max".into()),
+                ..Default::default()
+            },
+        },
+        ..info("claude")
+    };
+    let (mut ws, _) = connect_async(format!("{base}/ws/worker")).await.unwrap();
+    let hello = WorkerMsg::Hello {
+        id: wid,
+        info: blender.clone(),
+        running: vec![],
+    };
+    send(&mut ws, &hello).await;
+    assert!(matches!(recv(&mut ws).await, OrchMsg::Welcome { .. }));
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { workers, .. } = recv(&mut client).await else {
+        panic!()
+    };
+    let w = workers.iter().find(|w| w.id == wid).unwrap();
+    assert_eq!(w.info, blender);
 }
