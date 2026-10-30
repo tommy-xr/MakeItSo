@@ -37,11 +37,10 @@ struct Args {
     url: Option<String>,
     #[arg(long, env = "MIS_TOKEN")]
     token: Option<String>,
-    /// Cloudflare Access service-token id; needs --cf-access-client-secret.
+    /// Cloudflare Access service-token id; the secret comes from
+    /// CF_ACCESS_CLIENT_SECRET (env only, so it stays out of `ps`).
     #[arg(long, env = "CF_ACCESS_CLIENT_ID")]
     cf_access_client_id: Option<String>,
-    #[arg(long, env = "CF_ACCESS_CLIENT_SECRET", hide_env_values = true)]
-    cf_access_client_secret: Option<String>,
     /// Directory tasks may run in (repeatable; MIS_ROOTS is comma/`:`-separated).
     /// Default: the current directory.
     #[arg(long = "root", env = "MIS_ROOTS")]
@@ -62,11 +61,11 @@ enum Cmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    // tungstenite traces the raw upgrade request, token and Access secret included.
+    let filter = filter.add_directive("tungstenite::handshake::client=debug".parse()?);
+    tracing_subscriber::fmt().with_env_filter(filter).init();
     let args = Args::parse();
     if let Some(Cmd::Setup(a)) = args.cmd {
         return setup::run(a).await;
@@ -76,7 +75,7 @@ async fn main() -> Result<()> {
         url: args.url,
         token: args.token,
         cf_access_client_id: args.cf_access_client_id,
-        cf_access_client_secret: args.cf_access_client_secret,
+        cf_access_client_secret: access_secret_env(),
         roots: args
             .roots
             .iter()
@@ -408,6 +407,13 @@ async fn run_task(
     if !images.is_empty() {
         let _ = std::fs::remove_dir_all(&image_dir);
     }
+}
+
+/// `CF_ACCESS_CLIENT_SECRET`; empty counts as unset.
+fn access_secret_env() -> Option<String> {
+    std::env::var("CF_ACCESS_CLIENT_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 /// Cloudflare Access headers from `cfg`, checked so bad values fail early.
