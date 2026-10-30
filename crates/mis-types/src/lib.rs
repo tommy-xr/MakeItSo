@@ -650,6 +650,25 @@ mod tests {
             s,
             r#"{"type":"refresh_evidence","task":"00000000-0000-0000-0000-000000000000"}"#
         );
+        for m in [
+            WorkerMsg::Purpose {
+                purpose: Some("3D".into()),
+            },
+            WorkerMsg::Purpose { purpose: None },
+        ] {
+            let s = serde_json::to_string(&m).unwrap();
+            assert_eq!(serde_json::from_str::<WorkerMsg>(&s).unwrap(), m);
+        }
+        let set = OrchMsg::SetPurpose { purpose: None };
+        let s = serde_json::to_string(&set).unwrap();
+        assert_eq!(s, r#"{"type":"set_purpose","purpose":null}"#);
+        let draft = ServerMsg::PurposeDraft {
+            worker: Uuid::nil(),
+            draft: "d".into(),
+            error: None,
+        };
+        let s = serde_json::to_string(&draft).unwrap();
+        assert_eq!(serde_json::from_str::<ServerMsg>(&s).unwrap(), draft);
         let check = OrchMsg::CheckPrs {
             task: Uuid::nil(),
             urls: vec!["u".into()],

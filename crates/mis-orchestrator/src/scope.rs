@@ -69,6 +69,11 @@ mod tests {
             ClientMsg::PushUnsubscribe {
                 endpoint: "e".into(),
             },
+            ClientMsg::SetPurpose {
+                worker: task,
+                purpose: "p".into(),
+            },
+            ClientMsg::SuggestPurpose { worker: task },
         ];
         for m in acts {
             assert!(!allowed(Scope::Read, &m), "{m:?}");

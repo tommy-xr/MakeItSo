@@ -383,6 +383,24 @@ mod tests {
     }
 
     #[test]
+    fn noted_inventory_survives_a_restart() {
+        let mut l = Ledger::default();
+        let w = uuid::Uuid::new_v4();
+        l.connect(w, info(), &[], 1, NOW);
+        let (mut r, _) = round_trip(&l);
+        let mut more = info();
+        more.inventory.apps.push(InstalledApp {
+            name: "Houdini".into(),
+            version: None,
+        });
+        r.connect(w, more, &[], 2, NOW);
+        let ServerMsg::Status { workers, .. } = r.status() else {
+            unreachable!()
+        };
+        assert_eq!(workers[0].new_tools, ["Houdini"]);
+    }
+
+    #[test]
     fn missing_transcript_shows_truncated() {
         let (l, _, [done, ..]) = busy_ledger();
         let snap = l.snapshot(&HashSet::new());

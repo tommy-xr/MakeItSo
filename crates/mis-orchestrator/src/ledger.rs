@@ -1458,6 +1458,83 @@ mod tests {
         assert_eq!(assigned(&eff), [(3, task)]);
     }
 
+    fn with_app(mut i: WorkerInfo, name: &str) -> WorkerInfo {
+        i.inventory.apps.push(InstalledApp {
+            name: name.into(),
+            version: None,
+        });
+        i
+    }
+
+    fn new_tools(l: &Ledger, wid: WorkerId) -> Vec<String> {
+        let ServerMsg::Status { workers, .. } = l.status() else {
+            unreachable!()
+        };
+        workers.into_iter().find(|w| w.id == wid).unwrap().new_tools
+    }
+
+    #[test]
+    fn purpose_goes_to_the_worker_and_shows_once_it_confirms() {
+        let mut l = Ledger::default();
+        let wid = Uuid::new_v4();
+        l.connect(wid, studio(), &[], 1, T0);
+        let eff = l.set_purpose(wid, "  Blender + Houdini  ").unwrap();
+        let [Effect::Send { conn: 1, msg }] = &eff[..] else {
+            panic!("{eff:?}")
+        };
+        let want = Some("Blender + Houdini".to_string());
+        assert_eq!(
+            *msg,
+            OrchMsg::SetPurpose {
+                purpose: want.clone()
+            }
+        );
+        // Not shown until the worker saved it.
+        assert_ne!(l.workers[&wid].info.purpose, want);
+        assert!(
+            l.worker_purpose(wid, 9, want.clone()).is_empty(),
+            "stale conn"
+        );
+        assert_eq!(l.worker_purpose(wid, 1, want.clone()).len(), 1);
+        assert_eq!(l.workers[&wid].info.purpose, want);
+        // Blank clears; offline is refused.
+        let eff = l.set_purpose(wid, " ").unwrap();
+        assert!(matches!(
+            &eff[..],
+            [Effect::Send {
+                msg: OrchMsg::SetPurpose { purpose: None },
+                ..
+            }]
+        ));
+        l.disconnect(wid, 1);
+        assert!(l.set_purpose(wid, "x").unwrap_err().contains("offline"));
+    }
+
+    #[test]
+    fn new_tools_since_the_note_was_saved_survive_reconnects() {
+        let mut l = Ledger::default();
+        let wid = Uuid::new_v4();
+        l.connect(wid, with_app(studio(), "Blender"), &[], 1, T0);
+        assert!(new_tools(&l, wid).is_empty(), "first sight is the baseline");
+        // Back with Houdini, after being dropped past grace: still new.
+        l.disconnect(wid, 1);
+        l.expire(wid, 1);
+        let houdini = with_app(with_app(studio(), "Blender"), "Houdini");
+        l.connect(wid, houdini.clone(), &[], 2, T0);
+        l.connect(wid, houdini, &[], 3, T0);
+        assert_eq!(new_tools(&l, wid), ["Houdini"]);
+        let eff = l.suggest_purpose(wid).unwrap();
+        let [Effect::SuggestPurpose { worker, prompt }] = &eff[..] else {
+            panic!("{eff:?}")
+        };
+        assert_eq!(*worker, wid);
+        assert!(prompt.contains("Current note: Blender + blender-mcp; 3D assets\nNew: Houdini\n"));
+        // Saving the note (even unchanged) settles them.
+        l.worker_purpose(wid, 3, studio().purpose);
+        assert!(new_tools(&l, wid).is_empty());
+        assert!(l.suggest_purpose(Uuid::new_v4()).is_err());
+    }
+
     #[test]
     fn plan_naming_an_unknown_worker_fails_the_task() {
         let mut l = Ledger::default();
