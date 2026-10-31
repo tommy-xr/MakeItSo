@@ -67,10 +67,18 @@ struct Args {
     )]
     vapid_subject: String,
     /// Release channel this build follows: `stable` (tagged releases), `edge` (every merge to
-    /// main) or `off`. Workers switch to this build from it. Default: stable for CI release
-    /// builds, else off (`mis-up` sets off).
+    /// main) or `off`. It checks every 5 min and, once no task runs, restarts on a newer release
+    /// that passes `--self-test`; workers switch to this build from it. Default: stable for CI
+    /// release builds, else off (`mis-up` sets off).
     #[arg(long, env = "MIS_UPDATE_CHANNEL", value_enum)]
     update_channel: Option<UpdateChannel>,
+    /// Seconds between release checks (testing).
+    #[arg(long, hide = true, default_value_t = 300)]
+    update_every: u64,
+    /// Check this build can run here (reads the state dir without locking it, binds a port),
+    /// then exit. The updater runs it on a new build before switching.
+    #[arg(long)]
+    self_test: bool,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -206,6 +214,12 @@ async fn main() -> anyhow::Result<()> {
     if !args.read_tokens.is_empty() && args.token.is_none() {
         anyhow::bail!("--read-token / MIS_READ_TOKENS needs --token / MIS_TOKEN");
     }
+    let state_dir = args.state_dir.clone().or_else(default_state_dir);
+    if args.self_test {
+        mis_orchestrator::self_test(state_dir.as_deref())?;
+        println!("self-test ok");
+        return Ok(());
+    }
     let addr: std::net::SocketAddr = args.bind.parse()?;
     if !addr.ip().is_loopback() && args.token.is_none() {
         anyhow::bail!("refusing to bind {addr} without --token / MIS_TOKEN");
@@ -225,7 +239,32 @@ async fn main() -> anyhow::Result<()> {
         &origins,
     );
     let channel = channel(args.update_channel, mis_update::CI_BUILD);
-    tracing::info!(?channel, "update channel");
+    // Resolved before any swap: on Linux a replaced executable's path reads "(deleted)".
+    let exe = std::env::current_exe()?.canonicalize()?;
+    mis_update::cleanup(&exe);
+    let source = mis_update::Source::from_env()?;
+    let blocked = mis_update::blocked(
+        channel.is_none(),
+        mis_orchestrator::VERSION,
+        mis_update::CI_BUILD,
+        source.custom,
+    );
+    let updater = match (channel, blocked) {
+        (Some(channel), None) => {
+            tracing::info!(?channel, "self-update on ({})", source.base);
+            Some(mis_orchestrator::self_update::Updater {
+                channel,
+                source,
+                exe: exe.clone(),
+                state_dir: state_dir.clone(),
+                every: std::time::Duration::from_secs(args.update_every),
+            })
+        }
+        (_, why) => {
+            tracing::info!(?channel, "self-update off: {}", why.unwrap_or("dev build"));
+            None
+        }
+    };
     let mut app = App::new(args.token)
         .with_channel(channel)
         .with_read_tokens(args.read_tokens)
@@ -233,7 +272,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(gate) = gate {
         app = app.with_access(gate);
     }
-    match args.state_dir.clone().or_else(default_state_dir) {
+    match state_dir {
         Some(dir) => {
             app = app.with_ledger_dir(dir.clone());
             match Push::open(dir.clone(), args.vapid_subject.clone()) {
@@ -269,7 +308,27 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(model = %args.summary_model, "summaries: local claude (tool-less)");
         app = app.with_summarizer(one_shot_claude(&args.summary_model, &[]));
     }
-    mis_orchestrator::serve_until(listener, app, shutdown_signal()).await
+    // Shut down on a signal, or once the updater has swapped in a new build: then restart on it.
+    let restarting = std::cell::Cell::new(false);
+    let watched = app.clone();
+    let updated = async move {
+        match updater {
+            Some(u) => u.run(watched).await,
+            None => std::future::pending().await,
+        }
+    };
+    let stop = async {
+        tokio::select! {
+            _ = shutdown_signal() => {}
+            _ = updated => restarting.set(true),
+        }
+    };
+    mis_orchestrator::serve_until(listener, app, stop).await?;
+    if restarting.get() {
+        tracing::info!("restarting on the new build");
+        return Err(mis_update::restart(&exe));
+    }
+    Ok(())
 }
 
 /// Ctrl-C, or SIGTERM (`kill`, service managers) on Unix.

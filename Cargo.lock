@@ -1950,12 +1950,15 @@ name = "mis-update"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "flate2",
  "minisign",
  "minisign-verify",
  "mis-types",
  "reqwest",
+ "serde_json",
  "tar",
+ "tokio",
  "tracing",
 ]
 
@@ -1966,9 +1969,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
- "flate2",
  "futures-util",
- "minisign",
  "mis-agent",
  "mis-types",
  "mis-update",
@@ -1976,7 +1977,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sysinfo",
- "tar",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "toml 1.1.8+spec-1.1.0",

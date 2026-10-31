@@ -24,6 +24,4 @@ rpassword = "7.5.4"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system", "disk"] }
 
 [dev-dependencies]
-flate2 = "1.1"
-minisign = "0.8"
-tar = "0.4"
+mis-update = { workspace = true, features = ["testing"] }
