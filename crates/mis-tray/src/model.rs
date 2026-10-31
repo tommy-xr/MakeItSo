@@ -198,6 +198,7 @@ mod tests {
             links: vec![],
             attention: Default::default(),
             blocked_until: None,
+            approvals: vec![],
             images: vec![],
         }
     }

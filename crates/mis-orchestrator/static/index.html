@@ -57,7 +57,7 @@
   [role=tab][aria-selected=true] { color: var(--bg); background: var(--accent); box-shadow: 0 0 10px var(--glow); }
   #ticker { display: flex; align-items: center; min-height: 2.75rem; color: var(--dim); text-decoration: none; overflow-wrap: anywhere; }
   /* One line while work runs; the activity is the part the ellipsis cuts. */
-  #ticker.run { white-space: pre; overflow: hidden; color: var(--run); }
+  #ticker.run, #ticker.ask { white-space: pre; overflow: hidden; color: var(--run); } #ticker.ask { color: var(--warn); }
   #ticker .act { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   #ticker.warn { color: var(--warn); } #ticker.bad { color: var(--bad); } #ticker.note, #ticker.need { color: var(--fg); }
   #ticker[href]::after { content: " ›"; white-space: pre; }
@@ -145,7 +145,15 @@
   .busy { --s: var(--run); } .idle { --s: var(--ok); } .offline { --s: var(--dim); }
   /* Needs you: a lit dot before the status, red failed, orange usage limit, cyan unread. A glyph, so it stays inline (see .chip). */
   .att { margin-right: .375em; font-size: .75em; color: var(--a); text-shadow: 0 0 6px var(--a); }
-  .att.failed { --a: var(--bad); } .att.limited { --a: var(--warn); } .att.unread { --a: var(--accent); }
+  .att.failed { --a: var(--bad); } .att.limited { --a: var(--warn); } .att.unread { --a: var(--accent); } .att.approval { --a: var(--warn); }
+  /* A tool call the agent waits on: what it wants, then the answers. */
+  .appr { margin: 1rem 0; padding: .75rem; border: 1px solid var(--warn); }
+  .appr .what { margin: .25rem 0 .5rem; overflow-wrap: anywhere; font-weight: 600; }
+  .appr .row { margin: .5rem 0 0; }
+  .appr p { margin: .375rem 0 0; font-size: .8125rem; overflow-wrap: anywhere; }
+  .appr details { margin: 0 0 .5rem; border: 0; }
+  .appr details summary { padding: .25rem 0; }
+  .appr pre { margin: 0; max-height: 12rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8125rem; }
   /* Status outlined in its colour. */
   /* Inline, not inline-block: WebKit adds a stray ellipsis to line-clamped text holding an inline-block. */
   .chip { margin-right: .5em; padding: .0625em .375em; border: 1px solid; color: var(--s); font: 600 .75em var(--display); text-transform: uppercase; letter-spacing: .1em; }
@@ -271,6 +279,7 @@
 
 <main id="detail" hidden>
   <p><a href="#" class="back">← back</a></p>
+  <section id="approvals" hidden></section>
   <pre id="answer" class="answer"></pre>
   <div class="row" hidden><button type="button" id="speak">speak</button></div>
   <section id="evidence" hidden><div class="evh"><h3>evidence</h3><button type="button" id="refresh-ev" aria-label="Refresh PR status" hidden>↻</button></div><ul class="evl"></ul></section>
@@ -660,6 +669,9 @@ const dots = (parts, sep = ' · ') => parts.filter(Boolean).flatMap((p, i) => (i
 function ticker() {
   const count = (s) => tasks.filter((t) => t.status === s).length;
   const running = tasks.filter((t) => t.status === 'running'), queued = count('queued'), planning = count('planning');
+  // An agent waiting on the user beats any other news; a tap opens it.
+  const asking = running.find((t) => t.attention === 'approval');
+  if (asking) return { parts: dots(['approval needed', el('span', { className: 'act' }, asking.approvals[0]?.summary || '')]), cls: 'ask', open: asking.id };
   if (running.length) {
     const newest = running.reduce((a, t) => ((t.started_at || 0) >= (a.started_at || 0) ? t : a));
     const act = (newest.activity || '').replace(/^status: /, '');
@@ -768,7 +780,7 @@ function render() {
 const placement = (t) => [t.harness, t.model, t.worker && hostOf(t.worker)].filter(Boolean);
 
 // Why a task needs the user, most urgent first: [rank, label].
-const ATTENTION = { failed: [0, 'needs you'], limited: [1, 'needs you: usage limit'], unread: [2, 'needs you: unread'] };
+const ATTENTION = { approval: [-1, 'needs you: approval'], failed: [0, 'needs you'], limited: [1, 'needs you: usage limit'], unread: [2, 'needs you: unread'] };
 // Needs you, then working, then the rest.
 const rank = (t) => ATTENTION[t.attention]?.[0] ?? (['planning', 'queued', 'running'].includes(t.status) ? 3 : 4);
 // Threads, each followed by its replies (oldest first), nested: [depth, task]. A thread ranks as its
@@ -944,6 +956,38 @@ $('refresh-ev').onclick = () => {
   render();
 };
 
+// Approvals answered here (id -> when), hidden while the answer travels; one still listed after
+// ANSWER_MS was refused or lost (the worker offline, say), so it shows again to be answered.
+const answered = new Map(), ANSWER_MS = 5000;
+// Cards by approval id, kept across redraws so an open "full call" stays open while reading.
+const cardNodes = new Map();
+function approvalCards(t) {
+  const waiting = ((t && t.approvals) || []).filter((a) => !(Date.now() - answered.get(a.id) < ANSWER_MS));
+  for (const id of cardNodes.keys()) if (!waiting.some((a) => a.id === id)) cardNodes.delete(id);
+  return waiting.map((a) => cardNodes.get(a.id) || cardNodes.set(a.id, approvalCard(t, a)).get(a.id));
+}
+
+function approvalCard(t, a) {
+  const answer = (decision) => () => {
+    answered.set(a.id, Date.now());
+    send({ type: 'approve', task: t.id, id: a.id, decision });
+    setTimeout(render, ANSWER_MS + 50);
+    render();
+  };
+  const btn = (label, decision, primary) => {
+    const b = el('button', primary ? {} : { type: 'button' }, label);
+    b.addEventListener('click', answer(decision));
+    return b;
+  };
+  return el('div', { className: 'appr' },
+    el('div', { className: 'dim' }, `approval needed · ${t.harness || 'agent'} wants to`),
+    el('div', { className: 'what' }, a.summary),
+    a.detail && a.detail !== a.summary ? el('details', { className: 'dim' }, el('summary', {}, 'full call'), el('pre', {}, a.detail)) : '',
+    readOnly ? el('p', { className: 'dim' }, 'waiting for someone with full access')
+      : el('div', { className: 'row' }, btn('Allow', 'allow', true), btn('Deny', 'deny'), ...(a.always ? [btn('Always', 'always')] : [])),
+    a.always && !readOnly ? el('p', { className: 'dim' }, `always: ${a.always}`) : '');
+}
+
 function renderDetail(id) {
   if (!detail || detail.id !== id) {
     // A draft belongs to the thread it was typed in.
@@ -956,6 +1000,9 @@ function renderDetail(id) {
   if (!readOnly && t && ATTENTION[t.attention] && ['done', 'failed'].includes(t.status) && !document.hidden) send({ type: 'seen', task: id });
   // The answer is what a question-style task is for; everything else is secondary.
   const answer = t && t.summary ? t.summary : (t && t.status === 'running' ? 'working…' : '');
+  const cards = approvalCards(t);
+  $('approvals').replaceChildren(...cards);
+  $('approvals').hidden = !cards.length;
   $('answer').textContent = answer;
   $('answer').hidden = !answer;
   $('speak').parentNode.hidden = !synth || !(t && t.summary);
@@ -1033,7 +1080,7 @@ function versionLine(w) {
 }
 // What agents may do unasked (worker.toml [permissions]); older workers send none.
 const permText = (p) => (p.mode === 'full' ? 'full permissions'
-  : `writes: task dir${(p.folders || []).length ? `, ${p.folders.join(', ')}` : ''}`);
+  : `writes: task dir${(p.folders || []).length ? `, ${p.folders.join(', ')}` : ''}${p.mode === 'ask' ? ' · asks for the rest' : ''}`);
 function permLine(w) {
   const p = w.info.permissions;
   if (!p) return w.info.harnesses.length ? el('div', { className: 'new' }, 'tools will be denied: run setup or ', el('span', { className: 'nw' }, '--skip-permissions')) : '';
@@ -1043,10 +1090,11 @@ const permRows = (w) => {
   const p = w.info.permissions, list = (v) => (v || []).join(', ') || 'none';
   if (!p) return [el('dt', {}, 'permissions'), el('dd', { className: 'warn' }, 'none: tools will be denied; run setup or --skip-permissions')];
   if (p.mode === 'full') return [el('dt', {}, 'permissions'), el('dd', {}, 'full: anything, anywhere')];
-  return [el('dt', {}, 'permissions'), el('dd', {}, `folders: task dir\n${(p.folders || []).join('\n')}`.trim()),
+  const mode = p.mode === 'ask' ? 'ask: anything else is asked on the task\n' : '';
+  return [el('dt', {}, 'permissions'), el('dd', {}, `${mode}folders: task dir\n${(p.folders || []).join('\n')}`.trim()),
     el('dt', {}, 'allowed mcp'), el('dd', {}, list(p.mcp)), el('dt', {}, 'commands'),
     // Codex runs any command, inside a sandbox that only lets it write the folders.
-    el('dd', {}, list(p.commands) + (w.info.harnesses.includes('codex') ? '\ncodex: any, sandboxed' : ''))];
+    el('dd', {}, list(p.commands) + (w.info.harnesses.includes('codex') ? `\ncodex: any, sandboxed${p.mode === 'ask' ? '; never asks' : ''}` : ''))];
 };
 
 function renderWorkers() {

@@ -19,14 +19,16 @@ pub fn allowed(scope: Scope, msg: &ClientMsg) -> bool {
         ClientMsg::Status | ClientMsg::Subscribe | ClientMsg::Show { .. } => true,
         // Seen clears attention for everyone; RefreshEvidence sets a worker running `gh`;
         // a push subscription makes the orchestrator POST task prompts to its endpoint;
-        // a purpose rewrites a worker's config and steers routing; a suggestion runs a model.
+        // a purpose rewrites a worker's config and steers routing; a suggestion runs a model;
+        // an approval lets an agent act (and "always" rewrites a worker's config).
         ClientMsg::Submit { .. }
         | ClientMsg::Seen { .. }
         | ClientMsg::RefreshEvidence { .. }
         | ClientMsg::PushSubscribe { .. }
         | ClientMsg::PushUnsubscribe { .. }
         | ClientMsg::SetPurpose { .. }
-        | ClientMsg::SuggestPurpose { .. } => scope == Scope::Full,
+        | ClientMsg::SuggestPurpose { .. }
+        | ClientMsg::Approve { .. } => scope == Scope::Full,
     }
 }
 
@@ -74,6 +76,11 @@ mod tests {
                 purpose: "p".into(),
             },
             ClientMsg::SuggestPurpose { worker: task },
+            ClientMsg::Approve {
+                task,
+                id: task,
+                decision: mis_types::Decision::Allow,
+            },
         ];
         for m in acts {
             assert!(!allowed(Scope::Read, &m), "{m:?}");

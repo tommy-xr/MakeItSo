@@ -1040,6 +1040,15 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
                     Some(WorkerMsg::Update { update }) => {
                         app.transition(|l| ((), l.worker_update(wid, conn, update)));
                     }
+                    Some(WorkerMsg::ApprovalRequest { task, approval }) => {
+                        app.transition(|l| ((), l.approval_request(wid, conn, task, approval)));
+                    }
+                    Some(WorkerMsg::ApprovalClosed { task, id }) => {
+                        app.transition(|l| ((), l.approval_closed(wid, conn, task, id)));
+                    }
+                    Some(WorkerMsg::Permissions { permissions }) => {
+                        app.transition(|l| ((), l.worker_permissions(wid, conn, permissions)));
+                    }
                     Some(WorkerMsg::Hello { .. }) => {}
                     None => break,
                 }
@@ -1150,6 +1159,15 @@ async fn client_conn(mut sock: WebSocket, app: App, scope: Scope) {
                 }
                 Some(ClientMsg::SetPurpose { worker, purpose }) => {
                     let refused = app.transition(|l| match l.set_purpose(worker, &purpose) {
+                        Ok(effects) => (None, effects),
+                        Err(why) => (Some(why), vec![]),
+                    });
+                    if let Some(message) = refused {
+                        send_json(&mut sock, &ServerMsg::Error { message }).await;
+                    }
+                }
+                Some(ClientMsg::Approve { task, id, decision }) => {
+                    let refused = app.transition(|l| match l.approve(task, id, decision) {
                         Ok(effects) => (None, effects),
                         Err(why) => (Some(why), vec![]),
                     });

@@ -25,3 +25,4 @@ sysinfo = { version = "0.39.6", default-features = false, features = ["system", 
 
 [dev-dependencies]
 mis-update = { workspace = true, features = ["testing"] }
+mis-orchestrator = { path = "../mis-orchestrator" }

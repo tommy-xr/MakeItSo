@@ -37,10 +37,11 @@ pub struct SetupArgs {
     /// glTF export". The planner routes matching tasks here. Empty clears it.
     #[arg(long)]
     purpose: Option<String>,
-    /// What agents may do unasked: "folders" (write only in the task's dir and
-    /// --folder dirs; use only --mcp servers and --command prefixes) or "full"
-    /// (anything). Default: folders.
-    #[arg(long, value_parser = ["folders", "full"])]
+    /// What agents may do: "ask" (folders, and claude asks you on the page for
+    /// anything else), "folders" (write only in the task's dir and --folder
+    /// dirs; use only --mcp servers and --command prefixes; the rest is denied)
+    /// or "full" (anything). Default: ask.
+    #[arg(long, value_parser = MODES.map(|(n, _)| n))]
     permissions: Option<String>,
     /// Folder agents may write in (repeatable, comma-separated ok). Default: the roots.
     #[arg(long = "folder")]
@@ -213,8 +214,19 @@ struct PermissionFlags {
     commands: Vec<String>,
 }
 
+/// Setup's names for the modes, recommended first.
+const MODES: [(&str, PermissionMode); 3] = [
+    ("ask", PermissionMode::Ask),
+    ("folders", PermissionMode::Folders),
+    ("full", PermissionMode::Full),
+];
+
+fn mode_named(name: &str) -> Option<PermissionMode> {
+    MODES.iter().find(|(n, _)| *n == name).map(|(_, m)| *m)
+}
+
 /// The `[permissions]` to save: each flag answers one question; on a terminal
-/// the rest are asked, defaulting to the saved value, else folders mode with
+/// the rest are asked, defaulting to the saved value, else ask mode with
 /// the roots, every MCP server found, and no commands.
 fn ask_permissions(
     f: PermissionFlags,
@@ -224,25 +236,24 @@ fn ask_permissions(
     inv: &Inventory,
 ) -> Result<Permissions> {
     let home = std::env::home_dir();
-    let saved_mode = saved.map_or(PermissionMode::Folders, |p| p.mode);
+    let saved_mode = saved.map_or(PermissionMode::Ask, |p| p.mode);
     let mode = match f.mode.as_deref() {
-        Some("full") => PermissionMode::Full,
-        Some(_) => PermissionMode::Folders,
+        Some(name) => mode_named(name).unwrap_or(saved_mode),
         None if tty => {
             eprintln!(
                 "Permissions: folders = agents write only in the task's dir and chosen folders, \
                  and claude runs only the MCP servers and commands you list, plus read-only \
-                 ones (codex runs any command, sandboxed); full = anything, anywhere."
+                 ones (codex runs any command, sandboxed); ask = folders, and claude asks you \
+                 on the page for anything else (recommended); full = anything, anywhere."
             );
-            let default = match saved_mode {
-                PermissionMode::Full => "full",
-                PermissionMode::Folders => "folders",
-            };
+            let default = MODES
+                .iter()
+                .find(|(_, m)| *m == saved_mode)
+                .map_or("ask", |(n, _)| n);
             loop {
-                match ask("Mode (folders/full)", Some(default))?.as_str() {
-                    "full" => break PermissionMode::Full,
-                    "folders" => break PermissionMode::Folders,
-                    _ => eprintln!("answer folders or full"),
+                match mode_named(&ask("Mode (ask/folders/full)", Some(default))?) {
+                    Some(m) => break m,
+                    None => eprintln!("answer ask, folders or full"),
                 }
             }
         }
@@ -361,8 +372,13 @@ fn describe(p: &Permissions) -> String {
     };
     match p.mode {
         PermissionMode::Full => "permissions: full (agents may do anything)".into(),
-        PermissionMode::Folders => format!(
-            "permissions: folders {} (plus each task's dir); mcp {}; commands {}",
+        PermissionMode::Folders | PermissionMode::Ask => format!(
+            "permissions: {} {} (plus each task's dir); mcp {}; commands {}",
+            if p.mode == PermissionMode::Ask {
+                "ask, folders"
+            } else {
+                "folders"
+            },
             list(&p.folders),
             list(&p.mcp),
             list(&p.commands)

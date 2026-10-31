@@ -50,6 +50,9 @@ fn mcp_config(url: &str, headers: &[(&str, String)]) -> String {
         "type": "http",
         "url": url,
         "headers": headers,
+        // Lifts claude's 60 s per-request and 5 min idle limits for this server,
+        // so `approve` can wait for a person (the worker answers by APPROVAL_WAIT).
+        "timeout": (crate::APPROVAL_WAIT + std::time::Duration::from_secs(60)).as_millis() as u64,
     }}});
     config.to_string()
 }
@@ -72,7 +75,7 @@ pub fn mcp_args(url: &str, headers: &[(&str, String)]) -> Vec<String> {
 /// start (Linux without bubblewrap). Allowed commands still need their rule.
 const SANDBOX: &str = r#"{"sandbox":{"enabled":true,"failIfUnavailable":true,"allowUnsandboxedCommands":false,"autoAllowBashIfSandboxed":false,"network":{"allowedDomains":["*"]}}}"#;
 
-/// Flags for `p` (which passed `crate::check`). Folders: edits auto-accepted
+/// Flags for `p` (which passed `crate::check`). Folders and ask: edits auto-accepted
 /// in the cwd and each folder, shell commands sandboxed to them (`SANDBOX`);
 /// `allowed` gets each MCP server's tools and each command prefix. Anything
 /// else is denied, as nobody can answer a prompt.
@@ -272,6 +275,11 @@ impl ClaudeAgent {
         }
         if let Some(p) = o.permissions {
             a.extend(permission_args(p, &mut allowed));
+            // Ask: what the rules don't allow goes to the worker's `approve` tool.
+            if p.mode == PermissionMode::Ask && o.mcp.is_some() {
+                let tool = format!("mcp__{MCP_SERVER}__{}", crate::APPROVE_TOOL);
+                a.extend(["--permission-prompt-tool".into(), tool]);
+            }
         }
         // One list: each value is its own argv entry, as rules may hold spaces.
         if !allowed.is_empty() {
@@ -679,6 +687,35 @@ mod tests {
         };
         let a = ClaudeAgent::default().argv("hi", &o);
         assert_eq!(a[6..], ["--allowedTools", "mcp__mis", "--", "hi"]);
+    }
+
+    #[test]
+    fn ask_sends_what_the_rules_dont_allow_to_the_approve_tool() {
+        let p = Permissions {
+            mode: PermissionMode::Ask,
+            folders: vec!["/u/game".into()],
+            ..Default::default()
+        };
+        let mcp = crate::Mcp {
+            url: "http://127.0.0.1:9/mcp".into(),
+            token: "t".into(),
+        };
+        let o = RunOpts {
+            mcp: Some(&mcp),
+            permissions: Some(&p),
+            ..Default::default()
+        };
+        let a = ClaudeAgent::default().argv("hi", &o);
+        let at = |flag: &str| a.iter().position(|x| x == flag).map(|i| a[i + 1].as_str());
+        assert_eq!(at("--permission-prompt-tool"), Some("mcp__mis__approve"));
+        assert_eq!(at("--permission-mode"), Some("acceptEdits"));
+        assert_eq!(at("--add-dir"), Some("/u/game"));
+        let config: Value = serde_json::from_str(at("--mcp-config").unwrap()).unwrap();
+        assert!(config["mcpServers"]["mis"]["timeout"].as_u64().unwrap() > 30 * 60 * 1000);
+        // No server to ask through: plain folders, denied rather than stuck.
+        let o = RunOpts { mcp: None, ..o };
+        let a = ClaudeAgent::default().argv("hi", &o);
+        assert!(!a.iter().any(|x| x == "--permission-prompt-tool"));
     }
 
     #[test]
