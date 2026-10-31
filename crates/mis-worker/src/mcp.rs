@@ -1,7 +1,10 @@
 //! Loopback MCP server for one task: the agent calls `report_status` and
 //! `report_evidence`, and the worker forwards them as `AgentEvent::Status` and
-//! `AgentEvent::Evidence`. Streamable HTTP, JSON replies only (no SSE): POST
-//! `/mcp` with `Authorization: Bearer <token>`.
+//! `AgentEvent::Evidence`. In ask mode claude also calls `approve` about tool
+//! calls the rules don't allow (`approvals`). Streamable HTTP, JSON replies
+//! only (no SSE): POST `/mcp` with `Authorization: Bearer <token>`.
+
+use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -11,6 +14,8 @@ use axum::Json;
 use mis_types::{first_line, github_link, mcp, AgentEvent, Link, LinkKind, TaskId};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
+
+use crate::approvals::Approvals;
 
 /// Longest status, evidence title or test detail kept; each is one line.
 const MAX_LINE_CHARS: usize = 200;
@@ -27,10 +32,37 @@ pub fn with_hint(prompt: &str) -> String {
     )
 }
 
+/// The tool claude calls in ask mode, never the model: `--permission-prompt-tool`.
+fn approve_tool() -> Value {
+    json!({
+        "name": mis_agent::APPROVE_TOOL,
+        "description": "Permission prompt: asks the user whether a tool call may run.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tool_name": {"type": "string"},
+                "input": {"type": "object"},
+                "tool_use_id": {"type": "string"},
+            },
+            "required": ["tool_name", "input"],
+        },
+    })
+}
+
+/// Whether `req` calls `approve`.
+fn is_approve(req: &Value) -> bool {
+    req["method"] == "tools/call" && req["params"]["name"] == mis_agent::APPROVE_TOOL
+}
+
 /// One JSON-RPC message in; the reply (None for a notification) and the event
-/// to post, if it was a valid tool call.
-pub fn handle(req: &Value) -> (Option<Value>, Option<AgentEvent>) {
-    let tools = [
+/// to post, if it was a valid tool call. `ask` lists `approve`; `approved`
+/// answers a call to it.
+pub fn handle(
+    req: &Value,
+    ask: bool,
+    approved: Option<String>,
+) -> (Option<Value>, Option<AgentEvent>) {
+    let mut tools = vec![
         json!({
             "name": "report_status",
             "description": "Show the user a one-line status of what you are doing now.",
@@ -57,8 +89,14 @@ pub fn handle(req: &Value) -> (Option<Value>, Option<AgentEvent>) {
             },
         }),
     ];
+    if ask {
+        tools.push(approve_tool());
+    }
     let mut event = None;
     let reply = mcp::handle(req, mis_agent::MCP_SERVER, &tools, |name, args| {
+        if name == mis_agent::APPROVE_TOOL {
+            return approved.ok_or_else(|| "nobody to ask".to_string());
+        }
         event = Some(match name {
             "report_evidence" => AgentEvent::Evidence(evidence(args)?),
             _ => {
@@ -145,12 +183,16 @@ struct Ctx {
     task: TaskId,
     token: String,
     tx: mpsc::Sender<(TaskId, AgentEvent)>,
+    /// Ask mode: where `approve` waits for the user.
+    approvals: Option<Arc<Approvals>>,
 }
 
-/// Listen on a random loopback port with a fresh random token; statuses go to `tx`.
+/// Listen on a random loopback port with a fresh random token; statuses go to
+/// `tx`; with `approvals`, `approve` is offered and asks the user.
 pub async fn serve(
     task: TaskId,
     tx: mpsc::Sender<(TaskId, AgentEvent)>,
+    approvals: Option<Arc<Approvals>>,
 ) -> std::io::Result<Server> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}/mcp", listener.local_addr()?);
@@ -160,6 +202,7 @@ pub async fn serve(
         task,
         token: token.clone(),
         tx,
+        approvals,
     };
     let app = axum::Router::new()
         .route("/mcp", axum::routing::post(post))
@@ -183,7 +226,12 @@ async fn post(State(ctx): State<Ctx>, headers: HeaderMap, body: Bytes) -> Respon
     let Ok(req) = serde_json::from_slice::<Value>(&body) else {
         return (StatusCode::BAD_REQUEST, Json(mcp::parse_error())).into_response();
     };
-    let (reply, event) = handle(&req);
+    // Waits for the user; claude's timeout for this server outlasts APPROVAL_WAIT.
+    let approved = match &ctx.approvals {
+        Some(a) if is_approve(&req) => Some(a.ask(ctx.task, &req["params"]["arguments"]).await),
+        _ => None,
+    };
+    let (reply, event) = handle(&req, ctx.approvals.is_some(), approved);
     if let Some(event) = event {
         let _ = ctx.tx.send((ctx.task, event)).await;
     }
@@ -198,7 +246,35 @@ mod tests {
     use super::*;
 
     fn call(method: &str, params: Value) -> (Option<Value>, Option<AgentEvent>) {
-        handle(&json!({"jsonrpc": "2.0", "id": 7, "method": method, "params": params}))
+        handle(
+            &json!({"jsonrpc": "2.0", "id": 7, "method": method, "params": params}),
+            false,
+            None,
+        )
+    }
+
+    #[test]
+    fn approve_is_offered_only_in_ask_mode_and_returns_the_answer() {
+        let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+        let names = |ask| {
+            let (r, _) = handle(&list, ask, None);
+            let tools = r.unwrap()["result"]["tools"].as_array().unwrap().clone();
+            tools
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert!(!names(false).contains(&"approve".to_string()));
+        assert!(names(true).contains(&"approve".to_string()));
+        let req = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "approve", "arguments": {"tool_name": "Bash", "input": {}}}});
+        assert!(is_approve(&req));
+        let answer = r#"{"behavior":"deny","message":"no"}"#.to_string();
+        let (r, e) = handle(&req, true, Some(answer.clone()));
+        assert_eq!(r.unwrap()["result"]["content"][0]["text"], answer);
+        assert_eq!(e, None);
+        let (r, _) = handle(&req, false, None);
+        assert_eq!(r.unwrap()["error"]["message"], "unknown tool");
     }
 
     fn tool(name: &str, args: Value) -> (Option<Value>, Option<AgentEvent>) {
@@ -319,7 +395,7 @@ mod tests {
     async fn serves_status_only_with_the_token() {
         let (tx, mut rx) = mpsc::channel(4);
         let task = TaskId::new_v4();
-        let server = serve(task, tx).await.unwrap();
+        let server = serve(task, tx, None).await.unwrap();
         let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"report_status","arguments":{"text":"hi"}}}"#;
         let url = server.mcp.url.clone();
         assert!(post_raw(&url, None, call).await.starts_with("HTTP/1.1 401"));

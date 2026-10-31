@@ -18,6 +18,10 @@ pub type BoxFut<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '
 pub const MCP_TOKEN_ENV: &str = "MIS_MCP_TOKEN";
 /// Name the worker's MCP server is registered under in each harness.
 pub const MCP_SERVER: &str = "mis";
+/// Tool on that server claude asks, in ask mode, about a call the rules don't allow.
+pub const APPROVE_TOOL: &str = "approve";
+/// How long the worker waits for the user to answer before denying.
+pub const APPROVAL_WAIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 /// Loopback MCP server the agent may call for the duration of one run.
 #[derive(Debug, Clone)]

@@ -97,7 +97,7 @@ cf_access_client_secret = "..."
 roots = ["/Users/me/code"]       # task --cwd must start under one (not a sandbox); default: cwd
 
 [permissions]                    # what agents may do without asking
-mode = "folders"                 # or "full": anything, anywhere
+mode = "ask"                     # folders + ask on the phone; "folders": deny the rest; "full": anything
 folders = ["~/code/game", "~/assets"]  # writable besides the task's dir; default: the roots
 mcp = ["blender"]                # MCP servers whose tools are allowed; default: all found
 commands = ["python3", "git log"]      # claude: command prefixes allowed besides read-only ones; default: none
@@ -114,6 +114,12 @@ sandbox with the folders writable and network on, and the listed MCP servers app
 command inside that sandbox. Both may also write a temp dir. Allow rules in your own claude or codex
 config still apply, and MCP servers run outside either sandbox. A claude MCP server loads in tasks
 when it is user-scoped (`claude mcp add -s user`) or set up for the task's directory.
+
+In ask mode, whatever the rules don't allow is asked instead of denied (claude only: codex has no hook,
+so it runs as folders). The task shows a card with **Allow**, **Deny** and **Always**, and a push says
+"approval needed · <task>: <what>". Always saves a rule to `worker.toml`: the written file's folder,
+the command's program (`python3`), or the MCP server. No answer in 30 minutes is a deny. A worker
+re-asks after the orchestrator restarts.
 
 Setup also asks what the machine is for (`--purpose "Blender + blender-mcp; 3D assets"`) and takes an
 inventory: MCP server names per harness (`~/.claude.json`, `.mcp.json` under the roots,

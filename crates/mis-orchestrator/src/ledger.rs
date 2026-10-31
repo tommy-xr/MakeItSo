@@ -16,6 +16,8 @@ pub mod persist;
 pub type ConnId = u64;
 
 /// What the shell must do after a transition.
+// Broadcast's ServerMsg is big; effects are short-lived, so boxing buys nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, PartialEq)]
 pub enum Effect {
     Send {
@@ -168,11 +170,17 @@ struct TaskEntry {
     /// it saw even if the fleet changes meanwhile. Planning doesn't survive a restart.
     #[serde(skip)]
     offered: Vec<plan::Card>,
+    /// Approvals its agent waits on, oldest first. Not saved: the worker sends
+    /// them again when it reconnects to a restarted orchestrator.
+    #[serde(skip)]
+    approvals: Vec<Approval>,
 }
 
-/// What a task needs from the user; opening it once finished clears it.
-fn attention(status: TaskStatus, limited: bool, seen: bool) -> Attention {
+/// What a task needs from the user: an answer while its agent waits for one;
+/// once finished, a look (opening it clears that).
+fn attention(status: TaskStatus, limited: bool, seen: bool, waiting: bool) -> Attention {
     match status {
+        TaskStatus::Running if waiting => Attention::Approval,
         _ if seen => Attention::None,
         TaskStatus::Done => Attention::Unread,
         TaskStatus::Failed if limited => Attention::Limited,
@@ -225,7 +233,13 @@ impl TaskEntry {
             seen: false,
             images: vec![],
             offered: vec![],
+            approvals: vec![],
         }
+    }
+
+    fn attention(&self) -> Attention {
+        let waiting = !self.approvals.is_empty();
+        attention(self.status, self.limited, self.seen, waiting)
     }
 
     /// Notification for the task needing the user, e.g. `failed · fix the mic
@@ -233,9 +247,9 @@ impl TaskEntry {
     /// move into Done/Failed, so it goes out once. Only the status, clipped prompt
     /// and time: the payload transits a browser vendor's service.
     fn notify(&self) -> Option<Effect> {
-        let a = attention(self.status, self.limited, self.seen);
+        let a = self.attention();
         let label = match a {
-            Attention::None => return None,
+            Attention::None | Attention::Approval => return None,
             Attention::Failed => "failed",
             Attention::Limited => "limited",
             Attention::Unread => "done",
@@ -297,9 +311,13 @@ impl TaskEntry {
             activity: self.activity(),
             parent: self.parent,
             links: self.links.clone(),
-            attention: attention(self.status, self.limited, self.seen),
+            attention: self.attention(),
             // Needs the fleet; see `Ledger::status`.
             blocked_until: None,
+            approvals: match self.status {
+                TaskStatus::Running => self.approvals.clone(),
+                _ => vec![],
+            },
             images: self.images.clone(),
         }
     }
@@ -701,6 +719,107 @@ impl Ledger {
         vec![Effect::Broadcast(ServerMsg::Error { message })]
     }
 
+    /// `wid`'s agent on `task` waits for the user: list it on the task (once;
+    /// a reconnecting worker sends it again) and push "approval needed".
+    pub fn approval_request(
+        &mut self,
+        wid: WorkerId,
+        conn: ConnId,
+        task: TaskId,
+        approval: Approval,
+    ) -> Vec<Effect> {
+        if !self.workers.get(&wid).is_some_and(|w| w.conn == Some(conn)) {
+            return vec![];
+        }
+        let Some(t) = self.tasks.iter_mut().find(|t| t.task.id == task) else {
+            return vec![];
+        };
+        let fresh = !t.approvals.iter().any(|a| a.id == approval.id);
+        if t.worker != Some(wid) || t.status != TaskStatus::Running || !fresh {
+            return vec![];
+        }
+        let notify = Effect::Notify {
+            task,
+            title: format!(
+                "approval needed · {}: {}",
+                first_line(&t.task.prompt, 60),
+                approval.summary
+            ),
+            body: approval.always.as_ref().map_or_else(
+                || "allow or deny".into(),
+                |a| format!("allow, deny, or always allow {a}"),
+            ),
+            urgent: true,
+        };
+        t.approvals.push(approval);
+        vec![Effect::Broadcast(self.status()), notify]
+    }
+
+    /// The user answered approval `id` of `task`: pass it to the task's worker,
+    /// which tells the agent. Kept while the worker is offline: it asks again on reconnect.
+    pub fn approve(
+        &mut self,
+        task: TaskId,
+        id: Uuid,
+        decision: Decision,
+    ) -> Result<Vec<Effect>, String> {
+        let t = (self.tasks.iter_mut())
+            .find(|t| t.task.id == task && t.status == TaskStatus::Running)
+            .ok_or("that task isn't running")?;
+        let i = (t.approvals.iter())
+            .position(|a| a.id == id)
+            .ok_or("that approval is no longer waiting")?;
+        let conn = (t.worker)
+            .and_then(|w| self.workers.get(&w)?.conn)
+            .ok_or("the task's worker is offline; answer once it reconnects")?;
+        t.approvals.remove(i);
+        let msg = OrchMsg::Approval { task, id, decision };
+        Ok(vec![
+            Effect::Send { conn, msg },
+            Effect::Broadcast(self.status()),
+        ])
+    }
+
+    /// `wid` stopped waiting on approval `id` (no answer in time).
+    pub fn approval_closed(
+        &mut self,
+        wid: WorkerId,
+        conn: ConnId,
+        task: TaskId,
+        id: Uuid,
+    ) -> Vec<Effect> {
+        if !self.workers.get(&wid).is_some_and(|w| w.conn == Some(conn)) {
+            return vec![];
+        }
+        let Some(t) = self
+            .tasks
+            .iter_mut()
+            .find(|t| t.task.id == task && t.worker == Some(wid))
+        else {
+            return vec![];
+        };
+        let before = t.approvals.len();
+        t.approvals.retain(|a| a.id != id);
+        match t.approvals.len() == before {
+            true => vec![],
+            false => vec![Effect::Broadcast(self.status())],
+        }
+    }
+
+    /// `wid`'s permissions changed (an "always" answer saved a rule): show them.
+    pub fn worker_permissions(
+        &mut self,
+        wid: WorkerId,
+        conn: ConnId,
+        permissions: Option<Permissions>,
+    ) -> Vec<Effect> {
+        let Some(w) = self.workers.get_mut(&wid).filter(|w| w.conn == Some(conn)) else {
+            return vec![];
+        };
+        w.info.permissions = permissions;
+        vec![Effect::Broadcast(self.status())]
+    }
+
     /// Ask for a draft of `wid`'s purpose covering its new tools.
     pub fn suggest_purpose(&self, wid: WorkerId) -> Result<Vec<Effect>, String> {
         let w = self.workers.get(&wid).ok_or("unknown worker")?;
@@ -883,6 +1002,11 @@ impl Ledger {
             .copied()
             .filter(|id| !self.tasks.iter().any(|t| t.task.id == *id))
             .collect();
+        // The worker sends its waiting approvals again right after Hello: a full
+        // set, so one that timed out while the socket was down doesn't linger.
+        for t in self.tasks.iter_mut().filter(|t| t.worker == Some(wid)) {
+            t.approvals.clear();
+        }
         let mut effects = self.fail_running(wid, running, "worker restarted");
         // Replies waiting for this worker can't run if it dropped their harness.
         let harnesses = self.workers[&wid].info.harnesses.clone();
@@ -1022,6 +1146,7 @@ impl Ledger {
             } else {
                 TaskStatus::Failed
             };
+            t.approvals.clear();
             // Truncated: the transcript was too long to be a short answer.
             let wanted = t.truncated || summary::wanted(&t.events, t.summary.as_deref());
             if *ok && wanted {
@@ -2424,6 +2549,114 @@ mod tests {
         assert_eq!(attention_of(&l, failed), Attention::Failed);
         l.seen(failed);
         assert_eq!(attention_of(&l, failed), Attention::None);
+    }
+
+    fn approval(summary: &str) -> Approval {
+        Approval {
+            id: Uuid::new_v4(),
+            tool: "Bash".into(),
+            summary: summary.into(),
+            detail: summary.into(),
+            always: Some("commands starting python3".into()),
+        }
+    }
+
+    fn approvals_of(l: &Ledger, task: TaskId) -> Vec<Approval> {
+        l.show(task).unwrap().0.approvals
+    }
+
+    #[test]
+    fn approval_needs_attention_and_a_push_until_answered() {
+        let (mut l, wid, task) = running_setup();
+        let a = approval("Bash: python3 make_crate.py");
+        assert!(
+            l.approval_request(wid, 9, task, a.clone()).is_empty(),
+            "stale conn"
+        );
+        let eff = l.approval_request(wid, 1, task, a.clone());
+        let [Effect::Broadcast(ServerMsg::Status { .. }), Effect::Notify {
+            title,
+            urgent: true,
+            ..
+        }] = &eff[..]
+        else {
+            panic!("{eff:?}")
+        };
+        assert!(title.starts_with("approval needed · "), "{title}");
+        assert!(title.ends_with(": Bash: python3 make_crate.py"), "{title}");
+        assert_eq!(attention_of(&l, task), Attention::Approval);
+        assert_eq!(approvals_of(&l, task), std::slice::from_ref(&a));
+        // A reconnecting worker sends it again: listed once, no second push.
+        assert!(l.approval_request(wid, 1, task, a.clone()).is_empty());
+
+        assert!(l.approve(Uuid::new_v4(), a.id, Decision::Allow).is_err());
+        assert!(l.approve(task, Uuid::new_v4(), Decision::Allow).is_err());
+        let eff = l.approve(task, a.id, Decision::Always).unwrap();
+        let want = OrchMsg::Approval {
+            task,
+            id: a.id,
+            decision: Decision::Always,
+        };
+        assert!(
+            matches!(&eff[..], [Effect::Send { conn: 1, msg }, Effect::Broadcast(_)] if *msg == want)
+        );
+        assert_eq!(attention_of(&l, task), Attention::None);
+        assert!(
+            l.approve(task, a.id, Decision::Allow).is_err(),
+            "answered once"
+        );
+    }
+
+    #[test]
+    fn approvals_close_on_timeout_wait_out_a_disconnect_and_end_with_the_task() {
+        let (mut l, wid, task) = running_setup();
+        let (a, b) = (approval("one"), approval("two"));
+        l.approval_request(wid, 1, task, a.clone());
+        l.approval_request(wid, 1, task, b.clone());
+        assert_eq!(l.approval_closed(wid, 1, task, a.id).len(), 1);
+        assert!(
+            l.approval_closed(wid, 1, task, a.id).is_empty(),
+            "already gone"
+        );
+        assert_eq!(approvals_of(&l, task), std::slice::from_ref(&b));
+        // Worker offline: the answer waits; it asks again on reconnect.
+        l.disconnect(wid, 1);
+        assert!(l
+            .approve(task, b.id, Decision::Deny)
+            .unwrap_err()
+            .contains("offline"));
+        // Reconnected: cleared until the worker sends what still waits.
+        l.connect(wid, info(), &[task], 2, T0);
+        assert!(approvals_of(&l, task).is_empty());
+        assert_eq!(l.approval_request(wid, 2, task, b.clone()).len(), 2);
+        assert_eq!(approvals_of(&l, task), std::slice::from_ref(&b));
+        let summary = None;
+        l.event(wid, 2, task, AgentEvent::Finished { ok: true, summary });
+        assert!(approvals_of(&l, task).is_empty());
+        assert_eq!(attention_of(&l, task), Attention::Unread);
+        assert!(
+            l.approval_request(wid, 2, task, approval("late"))
+                .is_empty(),
+            "not running"
+        );
+    }
+
+    #[test]
+    fn saved_permissions_reach_the_workers_view() {
+        let mut l = Ledger::default();
+        let wid = Uuid::new_v4();
+        l.connect(wid, info(), &[], 1, T0);
+        let p = Some(Permissions {
+            mode: PermissionMode::Ask,
+            commands: vec!["python3".into()],
+            ..Default::default()
+        });
+        assert!(
+            l.worker_permissions(wid, 9, p.clone()).is_empty(),
+            "stale conn"
+        );
+        assert_eq!(l.worker_permissions(wid, 1, p.clone()).len(), 1);
+        assert_eq!(l.workers[&wid].info.permissions, p);
     }
 
     #[test]

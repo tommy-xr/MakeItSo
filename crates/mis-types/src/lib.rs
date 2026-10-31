@@ -19,7 +19,7 @@ mod links;
 pub use links::{github_link, github_links, Checks, Link, LinkKind, PrState, PrStatus};
 pub mod mcp;
 mod permissions;
-pub use permissions::{PermissionMode, Permissions};
+pub use permissions::{Approval, Decision, PermissionMode, Permissions, MAX_APPROVAL_DETAIL};
 
 pub type WorkerId = Uuid;
 pub type TaskId = Uuid;
@@ -235,6 +235,21 @@ pub enum WorkerMsg {
     PurposeFailed {
         why: String,
     },
+    /// A task's agent waits for the user to answer this; sent again after a
+    /// reconnect until answered (`OrchMsg::Approval`) or closed.
+    ApprovalRequest {
+        task: TaskId,
+        approval: Approval,
+    },
+    /// No answer came in time (the agent was told no), or the task ended.
+    ApprovalClosed {
+        task: TaskId,
+        id: Uuid,
+    },
+    /// Its permissions changed: an "always" answer saved a rule to worker.toml.
+    Permissions {
+        permissions: Option<Permissions>,
+    },
     /// Its progress toward the orchestrator's version; sent on change and after Hello.
     Update {
         update: WorkerUpdate,
@@ -287,6 +302,12 @@ pub enum OrchMsg {
     /// Save this purpose (None clears it) in worker.toml, then confirm with
     /// `WorkerMsg::Purpose`.
     SetPurpose { purpose: Option<String> },
+    /// The user's answer to `WorkerMsg::ApprovalRequest`.
+    Approval {
+        task: TaskId,
+        id: Uuid,
+        decision: Decision,
+    },
     /// Reply to `WorkerUpdate::Pending`: nothing more is assigned on this connection, and every
     /// earlier assignment came before this message. The worker may restart once its tasks end.
     UpdateHeld,
@@ -348,6 +369,12 @@ pub enum ClientMsg {
     SuggestPurpose {
         worker: WorkerId,
     },
+    /// Answer an approval the task's agent waits on (`TaskSummary::approvals`).
+    Approve {
+        task: TaskId,
+        id: Uuid,
+        decision: Decision,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -381,6 +408,8 @@ pub enum Attention {
     Limited,
     /// Finished ok; the user hasn't opened it yet.
     Unread,
+    /// Running, and its agent waits for the user to approve a tool call.
+    Approval,
 }
 
 /// What `scripts/mis-up --watch` reports about the orchestrator's next build.
@@ -439,6 +468,9 @@ pub struct TaskSummary {
     /// usage: Unix millis when the first of them frees up.
     #[serde(default)]
     pub blocked_until: Option<u64>,
+    /// Approvals its agent waits on, oldest first; empty unless running.
+    #[serde(default)]
+    pub approvals: Vec<Approval>,
     /// Attached images, served at `/api/images/<id>`.
     #[serde(default)]
     pub images: Vec<Uuid>,
@@ -850,6 +882,7 @@ mod tests {
             links: vec![],
             attention: Attention::None,
             blocked_until: None,
+            approvals: vec![],
             images: vec![],
         }
     }

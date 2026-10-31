@@ -1,12 +1,14 @@
 //! Worker: connects to the orchestrator, advertises its harnesses, runs
 //! assigned tasks through `mis_agent` and streams events back.
 
+mod approvals;
 mod config;
 mod inventory;
 mod mcp;
 mod permissions;
 mod pr;
 mod roots;
+mod rules;
 mod setup;
 mod stats;
 mod update;
@@ -148,13 +150,6 @@ async fn main() -> Result<()> {
     if let Err(e) = config::save_inventory(&path, file, &inventory) {
         tracing::warn!("could not save inventory: {e:#}");
     }
-    let harness_perms: HashMap<&'static str, Permissions> = (perms.iter())
-        .flat_map(|p| {
-            agents
-                .iter()
-                .map(|a| (a.name(), permissions::for_harness(p, a.name(), &inventory)))
-        })
-        .collect();
     let info = WorkerInfo {
         hostname: hostname(),
         os: std::env::consts::OS.into(),
@@ -165,16 +160,24 @@ async fn main() -> Result<()> {
         purpose: cfg.purpose.clone(),
         inventory,
         version: Some(VERSION.into()),
-        permissions: perms,
+        permissions: perms.clone(),
     };
     tracing::info!(?info.harnesses, ?info.models, ?info.roots, "connecting to {}", cfg.url);
     tracing::info!("inventory: {}", info.inventory.brief());
     // PR status reads and purpose confirmations, sent as they come; dropped if
     // the socket dies mid-send.
     let (pr_tx, pr_rx) = mpsc::channel::<WorkerMsg>(64);
+    let approvals = approvals::Approvals::new(
+        perms,
+        pr_tx.clone(),
+        path.clone(),
+        std::env::home_dir(),
+        mis_agent::APPROVAL_WAIT,
+    );
     let ctx = Ctx {
         agents: Arc::new(agents),
-        permissions: Arc::new(harness_perms),
+        approvals: Arc::new(approvals),
+        inventory: Arc::new(info.inventory.clone()),
         roots: Arc::new(roots),
         pr_tx,
         limits: Default::default(),
@@ -283,8 +286,11 @@ fn advertised(
 #[derive(Clone)]
 struct Ctx {
     agents: Arc<Vec<Box<dyn Agent>>>,
-    /// Per harness; empty when worker.toml sets none (see `permissions::effective`).
-    permissions: Arc<HashMap<&'static str, Permissions>>,
+    /// Holds the live permissions (None: see `permissions::effective`); in ask
+    /// mode, where claude's approvals wait for the user.
+    approvals: Arc<approvals::Approvals>,
+    /// For `permissions::for_harness`.
+    inventory: Arc<Inventory>,
     roots: Arc<Vec<PathBuf>>,
     /// Latest limit windows per harness, from runs and polling.
     limits: Arc<Mutex<BTreeMap<String, Vec<LimitWindow>>>>,
@@ -377,6 +383,10 @@ async fn session(
         let update = c.update.state.clone();
         sink.send(text(&WorkerMsg::Update { update })).await?;
     }
+    // A restarted orchestrator lost them; one that kept them ignores the repeat.
+    for msg in ctx.approvals.waiting() {
+        sink.send(text(&msg)).await?;
+    }
     // Heartbeat with stats. The first tick fires at once, so the orchestrator
     // has numbers right after Hello. Sampling (~20ms) runs inline; at one per
     // 15s that stall is negligible.
@@ -398,7 +408,12 @@ async fn session(
                     continue;
                 }
                 Some(msg) = c.pr_rx.recv() => {
-                    sink.send(text(&msg)).await?;
+                    // Queued while offline, then resent after Hello and answered: don't revive it.
+                    let answered = matches!(&msg, WorkerMsg::ApprovalRequest { approval, .. }
+                        if !ctx.approvals.is_waiting(approval.id));
+                    if !answered {
+                        sink.send(text(&msg)).await?;
+                    }
                     continue;
                 }
                 Some((version, exe)) = c.upd_rx.recv() => {
@@ -510,6 +525,17 @@ fn handle_incoming(
                 let tx = ctx.pr_tx.clone();
                 tokio::spawn(async move { tx.send(reply).await });
             }
+            Ok(OrchMsg::Approval { task, id, decision }) => {
+                tracing::info!(%task, %id, ?decision, "answered");
+                if let Some(p) = ctx.approvals.decide(id, decision) {
+                    c.info.permissions = Some(p.clone());
+                    let msg = WorkerMsg::Permissions {
+                        permissions: Some(p),
+                    };
+                    let tx = ctx.pr_tx.clone();
+                    tokio::spawn(async move { tx.send(msg).await });
+                }
+            }
             Err(e) => tracing::warn!("bad message from orchestrator: {e}"),
         },
         Some(Ok(_)) => {}
@@ -561,8 +587,15 @@ async fn run_task(
             }
         },
     };
+    let perms = ctx.approvals.permissions.lock().unwrap().clone();
+    let perms = perms.map(|p| permissions::for_harness(&p, agent.name(), &ctx.inventory));
+    // Only claude can ask; codex in ask mode runs as folders.
+    let ask = perms
+        .as_ref()
+        .is_some_and(|p| p.mode == PermissionMode::Ask)
+        && agent.name() == "claude";
     // Without the server the task still runs, just without its reporting tools.
-    let server = mcp::serve(id, tx.clone())
+    let server = mcp::serve(id, tx.clone(), ask.then(|| ctx.approvals.clone()))
         .await
         .inspect_err(|e| tracing::warn!(%id, "no mcp server: {e}"))
         .ok();
@@ -595,11 +628,12 @@ async fn run_task(
             mcp: server.as_ref().map(|s| &s.mcp),
             resume: task.resume.as_deref(),
             images: &image_paths,
-            permissions: ctx.permissions.get(agent.name()),
+            permissions: perms.as_ref(),
         },
         atx,
     );
     tokio::join!(run, fwd);
+    ctx.approvals.forget(id);
     if !images.is_empty() {
         let _ = std::fs::remove_dir_all(&image_dir);
     }

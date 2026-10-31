@@ -807,6 +807,7 @@ mod tests {
             links: vec![],
             attention: Attention::None,
             blocked_until: None,
+            approvals: vec![],
             images: vec![],
         }
     }
