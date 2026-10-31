@@ -510,12 +510,15 @@ impl App {
     /// `peer` is the TCP peer. None: refused.
     fn authorized(&self, headers: &HeaderMap, peer: IpAddr, access: &Access) -> Option<Scope> {
         let passed = matches!(access, Access::Passed(_));
-        // Behind Access only direct local connections may skip it. cloudflared also
+        // Behind Access only direct local connections may skip it: loopback, or a
+        // private-network peer presenting the full token (a LAN worker). cloudflared also
         // connects from loopback, but always adds Cloudflare's headers. (Any local
         // process can still connect directly, as without Access.)
-        if matches!(access, Access::Failed)
-            && (!peer.to_canonical().is_loopback() || via_cloudflare(headers))
-        {
+        let peer = peer.to_canonical();
+        let full = |t: &String| bearer_from(headers) == Some(t.as_str());
+        let direct =
+            peer.is_loopback() || (private_net(peer) && self.token.as_ref().is_some_and(full));
+        if matches!(access, Access::Failed) && (!direct || via_cloudflare(headers)) {
             return None;
         }
         let origin = match headers.get("origin").map(|v| v.to_str()) {
@@ -587,6 +590,14 @@ enum Access {
     Passed(Identity),
     /// No valid Access JWT.
     Failed,
+}
+
+/// RFC 1918 / link-local IPv4, or unique-local / link-local IPv6: the same LAN.
+fn private_net(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_unique_local() || v6.is_unicast_link_local(),
+    }
 }
 
 /// Request came through Cloudflare's edge (e.g. via cloudflared).
@@ -1272,6 +1283,19 @@ mod tests {
         assert!(ok(&[bearer], mapped_lo, false));
         assert!(!ok(&[], lo, false));
         assert!(!ok(&[bearer], remote, false));
+        // A LAN peer is direct too: token required, Cloudflare headers not allowed.
+        for lan in [
+            "192.168.4.20",
+            "10.0.0.5",
+            "172.16.1.1",
+            "fd00::1",
+            "fe80::1",
+        ] {
+            let lan: IpAddr = lan.parse().unwrap();
+            assert!(ok(&[bearer], lan, false), "{lan}");
+            assert!(!ok(&[], lan, false), "{lan}");
+            assert!(!ok(&[bearer, ("cf-ray", "x")], lan, false), "{lan}");
+        }
         // Through cloudflared (loopback peer, Cloudflare headers): never falls back.
         assert!(!ok(&[bearer, (JWT_HEADER, "bad")], lo, false));
         assert!(!ok(&[bearer, ("cf-ray", "x")], lo, false));
@@ -1284,6 +1308,16 @@ mod tests {
         assert!(open.authorized(&headers(&page), remote, &pass()).is_some());
         assert!(open
             .authorized(&headers(&page), lo, &Access::Failed)
+            .is_none());
+        // A read token is not enough from the LAN.
+        let ro = App::new(Some("s".into())).with_read_tokens(list(&["r"]));
+        let lan: IpAddr = "192.168.4.20".parse().unwrap();
+        let read = headers(&[("authorization", "Bearer r")]);
+        assert!(ro.authorized(&read, lan, &Access::Failed).is_none());
+        assert!(ro.authorized(&read, lo, &Access::Failed).is_some());
+        // Without a token, LAN peers are not trusted.
+        assert!(open
+            .authorized(&headers(&[]), lan, &Access::Failed)
             .is_none());
     }
 
