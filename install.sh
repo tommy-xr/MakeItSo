@@ -1,7 +1,8 @@
 #!/bin/sh
 # Install mis, mis-worker and mis-orchestrator from a GitHub release.
 #   curl -fsSL https://raw.githubusercontent.com/tommy-xr/MakeItSo/main/install.sh | sh
-# Env: MIS_VERSION (tag, default latest), MIS_INSTALL_DIR (default ~/.local/bin),
+# Env: MIS_VERSION (tag, or `edge` for the newest build of main; default latest release),
+#      MIS_INSTALL_DIR (default ~/.local/bin),
 #      MIS_TARBALL (local .tar.gz; skips download).
 set -eu
 
@@ -37,11 +38,20 @@ else
     tag="$(printf '%s\n' "$json" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)"
     [ -n "$tag" ] || die "could not parse latest release tag"
   fi
-  url="https://github.com/$repo/releases/download/$tag/mis-$target.tar.gz"
+  asset="mis-$target.tar.gz"
+  # Edge assets are named by commit, e.g. mis-aarch64-apple-darwin-1a2b3c4.tar.gz.
+  if [ "$tag" = edge ]; then
+    json="$(curl -fsSL "https://github.com/$repo/releases/download/edge/edge.json")" ||
+      die "could not fetch the edge build's edge.json"
+    sha="$(printf '%s\n' "$json" | sed -n 's/.*"sha": *"\([0-9a-f]\{7\}\)[0-9a-f]*".*/\1/p' | head -n 1)"
+    [ -n "$sha" ] || die "could not parse edge.json"
+    asset="mis-$target-$sha.tar.gz"
+  fi
+  url="https://github.com/$repo/releases/download/$tag/$asset"
   echo "Downloading $url"
   tarball="$tmp/mis.tar.gz"
   curl -fsSL -o "$tarball" "$url" ||
-    die "download failed: release $tag or asset mis-$target.tar.gz not found"
+    die "download failed: release $tag or asset $asset not found"
 fi
 
 mkdir "$tmp/x"
