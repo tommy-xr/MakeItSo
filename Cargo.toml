@@ -10,6 +10,7 @@ license = "MIT"
 [workspace.dependencies]
 mis-types = { path = "crates/mis-types" }
 mis-agent = { path = "crates/mis-agent" }
+mis-update = { path = "crates/mis-update" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

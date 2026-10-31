@@ -43,6 +43,9 @@ jobs:
             target: x86_64-pc-windows-msvc
             ext: .exe
     runs-on: ${{ matrix.os }}
+    env:
+      # Marks the binaries as release builds, which may update themselves.
+      MIS_RELEASE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

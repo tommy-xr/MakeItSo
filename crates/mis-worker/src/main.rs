@@ -8,11 +8,12 @@ mod pr;
 mod roots;
 mod setup;
 mod stats;
+mod update;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -26,9 +27,13 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
+/// `0.1.0+abc1234`, with `-dirty` when built from uncommitted changes.
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("MIS_GIT_REV"));
+
 #[derive(Parser)]
 #[command(
     about = "Make It So worker",
+    version = VERSION,
     args_conflicts_with_subcommands = true,
     after_help = "Unset flags fall back to $MIS_STATE_DIR/worker.toml (default ~/.config/mis)."
 )]
@@ -49,6 +54,10 @@ struct Args {
     /// Let agents run tools without permission prompts (required for real work).
     #[arg(long)]
     skip_permissions: bool,
+    /// Don't switch to the orchestrator's version by downloading its signed release build
+    /// (`mis-up` sets MIS_NO_SELF_UPDATE). Builds not made by CI never do.
+    #[arg(long, env = "MIS_NO_SELF_UPDATE", value_parser = clap::builder::FalseyValueParser::new())]
+    no_self_update: bool,
     /// None runs the worker.
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -102,7 +111,20 @@ async fn main() -> Result<()> {
     let access = access_values(&cfg)?;
     let roots = roots::canonical_roots(&cfg.roots)?;
 
-    let (id, _id_lock) = worker_id()?;
+    let (id, id_lock) = worker_id()?;
+    // Before any swap: on Linux a replaced executable's path reads "(deleted)". Resolved, so a
+    // symlinked install swaps the real file.
+    let exe = std::env::current_exe()?.canonicalize()?;
+    mis_update::cleanup(&exe);
+    let source = mis_update::Source::from_env()?;
+    let blocked = mis_update::blocked(
+        args.no_self_update,
+        VERSION,
+        mis_update::CI_BUILD,
+        source.custom,
+    );
+    let updater = update::Updater::new(VERSION, blocked, &source.base, mis_update::TARGET);
+    tracing::info!("mis-worker {VERSION}; {}", updater.describe());
     let agents = mis_agent::available(args.skip_permissions);
     if agents.is_empty() {
         anyhow::bail!("no agent harness found on PATH (need `claude` or `codex`)");
@@ -121,6 +143,7 @@ async fn main() -> Result<()> {
         models: advertised(&agents, &cfg.models),
         purpose: cfg.purpose.clone(),
         inventory,
+        version: Some(VERSION.into()),
     };
     tracing::info!(?info.harnesses, ?info.models, ?info.roots, "connecting to {}", cfg.url);
     tracing::info!("inventory: {}", info.inventory.brief());
@@ -136,6 +159,7 @@ async fn main() -> Result<()> {
     // Events from in-flight tasks queue here while disconnected. Delivery is best
     // effort: an event already written to a socket that then dies is not resent.
     let (ev_tx, ev_rx) = mpsc::channel::<(TaskId, AgentEvent)>(1024);
+    let (upd_tx, upd_rx) = mpsc::channel(1);
     let mut conn = Conn {
         ev_rx,
         pending: None,
@@ -146,17 +170,73 @@ async fn main() -> Result<()> {
         sampler: stats::Sampler::new(ctx.roots.first().cloned().unwrap_or_else(|| "/".into())),
         info,
         config: path,
+        update: updater,
+        source: Arc::new(source),
+        exe: exe.clone(),
+        upd_tx,
+        upd_rx,
     };
 
     loop {
         match session(&cfg, &access, id, &ctx, &ev_tx, &mut conn).await {
-            Ok(()) => tracing::info!("orchestrator closed connection"),
+            Ok(Ended::Restart) => break,
+            Ok(Ended::Closed) => tracing::info!("orchestrator closed connection"),
             Err(e) => tracing::warn!("connection lost: {e:#}"),
         }
         tracing::info!("reconnecting in {:?}", conn.backoff);
         tokio::time::sleep(conn.backoff).await;
         conn.backoff = (conn.backoff * 2).min(Duration::from_secs(30));
     }
+    tracing::info!("restarting on the new build");
+    // The new process takes the id lock (on Windows it starts before this one exits).
+    drop(id_lock);
+    Err(mis_update::restart(&exe))
+}
+
+/// Start downloading the orchestrator's build if one is due; the checked executable comes
+/// back on `upd_rx`.
+fn check_update(c: &mut Conn) {
+    let Some(asset) = c.update.due(Instant::now()) else {
+        return;
+    };
+    let (src, done) = (c.source.clone(), c.upd_tx.clone());
+    tokio::spawn(async move {
+        tracing::info!("updating to {} from {}", asset.version, asset.url);
+        let exe = mis_update::fetch(&src, &asset, "mis-worker").await;
+        let _ = done
+            .send((asset.version, exe.map_err(|e| format!("{e:#}"))))
+            .await;
+    });
+}
+
+/// Swap in a downloaded `version` if the orchestrator still runs it; returns what to report.
+async fn install_update(
+    c: &mut Conn,
+    version: String,
+    exe: std::result::Result<Vec<u8>, String>,
+) -> Option<WorkerUpdate> {
+    if exe.is_ok() && !c.update.wants(&version) {
+        tracing::info!("orchestrator moved on from {version}; not installing it");
+        c.update.abandon();
+        check_update(c);
+        return None;
+    }
+    let (target, v) = (c.exe.clone(), version.clone());
+    let installed = match exe {
+        Ok(exe) => tokio::task::spawn_blocking(move || {
+            mis_update::stage(&target, &exe, "mis-worker", &v)?.install()
+        })
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r)
+        .map_err(|e| format!("{e:#}")),
+        Err(e) => Err(e),
+    };
+    match &installed {
+        Ok(()) => tracing::info!("installed {version}; restarting once no task runs"),
+        Err(e) => tracing::warn!("update to {version} failed: {e}"),
+    }
+    Some(c.update.fetched(&version, installed, Instant::now()))
 }
 
 /// Each agent's models, from discovery unless worker.toml's `[models]` sets
@@ -224,10 +304,24 @@ struct Conn {
     info: WorkerInfo,
     /// worker.toml, where a new purpose is saved.
     config: PathBuf,
+    update: update::Updater,
+    source: Arc<mis_update::Source>,
+    /// This executable, which an update replaces.
+    exe: PathBuf,
+    /// Downloads from `check_update`: version, and its checked executable or why not.
+    upd_tx: mpsc::Sender<(String, std::result::Result<Vec<u8>, String>)>,
+    upd_rx: mpsc::Receiver<(String, std::result::Result<Vec<u8>, String>)>,
+}
+
+/// How a session ended without error.
+enum Ended {
+    Closed,
+    /// A new build is installed and nothing runs: restart into it.
+    Restart,
 }
 
 /// One connection's lifetime: handshake, then forward events and run assignments
-/// until the socket drops. Returns Ok on a clean close from the orchestrator.
+/// until the socket drops or it is time to restart on a new build.
 async fn session(
     cfg: &config::Resolved,
     access: &[(&'static str, HeaderValue)],
@@ -235,7 +329,7 @@ async fn session(
     ctx: &Ctx,
     ev_tx: &mpsc::Sender<(TaskId, AgentEvent)>,
     c: &mut Conn,
-) -> Result<()> {
+) -> Result<Ended> {
     // An assignment carries up to MAX_IMAGES base64 images in one frame.
     let room = Some(MAX_IMAGES * MAX_IMAGE_BYTES * 4 / 3 + (1 << 20));
     let config = WebSocketConfig::default()
@@ -252,6 +346,12 @@ async fn session(
         running,
     }))
     .await?;
+    // The orchestrator forgets update state on reconnect.
+    c.update.connected();
+    if c.update.state != WorkerUpdate::None {
+        let update = c.update.state.clone();
+        sink.send(text(&WorkerMsg::Update { update })).await?;
+    }
     // Heartbeat with stats. The first tick fires at once, so the orchestrator
     // has numbers right after Hello. Sampling (~20ms) runs inline; at one per
     // 15s that stall is negligible.
@@ -260,6 +360,9 @@ async fn session(
     beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
+        if c.update.restart_due(c.running.is_empty()) {
+            return Ok(Ended::Restart);
+        }
         // Resend a stranded event before pulling a new one.
         let next = match c.pending.take() {
             Some(ev) => Some(ev),
@@ -273,7 +376,14 @@ async fn session(
                     sink.send(text(&msg)).await?;
                     continue;
                 }
+                Some((version, exe)) = c.upd_rx.recv() => {
+                    if let Some(update) = install_update(c, version, exe).await {
+                        sink.send(text(&WorkerMsg::Update { update })).await?;
+                    }
+                    continue;
+                }
                 _ = beat.tick() => {
+                    check_update(c);
                     let t = std::time::Instant::now();
                     let mut s = c.sampler.sample();
                     // File reads: off the runtime's threads.
@@ -288,7 +398,7 @@ async fn session(
             },
         };
         let Some((task, event)) = next else {
-            return Ok(());
+            return Ok(Ended::Closed);
         };
         let finished = matches!(event, AgentEvent::Finished { .. });
         if let Err(e) = sink
@@ -318,9 +428,15 @@ fn handle_incoming(
 ) -> Result<()> {
     match msg {
         Some(Ok(Message::Text(t))) => match serde_json::from_str::<OrchMsg>(&t) {
-            Ok(OrchMsg::Welcome { id }) => {
-                tracing::info!(%id, "registered");
+            Ok(OrchMsg::Welcome {
+                id,
+                version,
+                channel,
+            }) => {
+                tracing::info!(%id, ?version, ?channel, "registered");
                 c.backoff = Duration::from_secs(1);
+                c.update.welcome(version, channel);
+                check_update(c);
             }
             Ok(OrchMsg::Assign { task, images }) => {
                 if !c.running.insert(task.id) {
@@ -343,6 +459,7 @@ fn handle_incoming(
                 });
                 c.watches.insert(task, watch.abort_handle());
             }
+            Ok(OrchMsg::UpdateHeld) => c.update.held(),
             Ok(OrchMsg::SetPurpose { purpose }) => {
                 let saved = config::load(&c.config).and_then(|file| {
                     let file = config::Config {
@@ -578,6 +695,16 @@ mod tests {
         ) -> mis_agent::BoxFut<'a> {
             unreachable!()
         }
+    }
+
+    #[test]
+    fn no_self_update_env_takes_1_like_mis_up_sets_it() {
+        for (v, off) in [("1", true), ("true", true), ("0", false), ("", false)] {
+            std::env::set_var("MIS_NO_SELF_UPDATE", v);
+            let args = Args::try_parse_from(["mis-worker"]).unwrap();
+            assert_eq!(args.no_self_update, off, "MIS_NO_SELF_UPDATE={v:?}");
+        }
+        std::env::remove_var("MIS_NO_SELF_UPDATE");
     }
 
     #[test]

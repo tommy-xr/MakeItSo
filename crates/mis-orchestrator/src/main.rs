@@ -66,6 +66,28 @@ struct Args {
         default_value = "https://github.com/tommy-xr/MakeItSo"
     )]
     vapid_subject: String,
+    /// Release channel this build follows: `stable` (tagged releases), `edge` (every merge to
+    /// main) or `off`. Workers switch to this build from it. Default: stable for CI release
+    /// builds, else off (`mis-up` sets off).
+    #[arg(long, env = "MIS_UPDATE_CHANNEL", value_enum)]
+    update_channel: Option<UpdateChannel>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum UpdateChannel {
+    Stable,
+    Edge,
+    Off,
+}
+
+/// The channel to publish to workers; see `--update-channel`.
+fn channel(arg: Option<UpdateChannel>, ci_build: bool) -> Option<mis_types::Channel> {
+    match arg {
+        Some(UpdateChannel::Stable) => Some(mis_types::Channel::Stable),
+        Some(UpdateChannel::Edge) => Some(mis_types::Channel::Edge),
+        Some(UpdateChannel::Off) => None,
+        None => ci_build.then_some(mis_types::Channel::Stable),
+    }
 }
 
 /// `$XDG_STATE_HOME/mis`, else `~/.local/state/mis`; `%LOCALAPPDATA%\mis` on Windows.
@@ -202,7 +224,10 @@ async fn main() -> anyhow::Result<()> {
         args.public_url.as_deref(),
         &origins,
     );
+    let channel = channel(args.update_channel, mis_update::CI_BUILD);
+    tracing::info!(?channel, "update channel");
     let mut app = App::new(args.token)
+        .with_channel(channel)
         .with_read_tokens(args.read_tokens)
         .with_allowed_origins(origins);
     if let Some(gate) = gate {
@@ -265,6 +290,19 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn channel_defaults_to_stable_only_for_ci_builds() {
+        use super::{channel, UpdateChannel};
+        use mis_types::Channel;
+        assert_eq!(channel(None, true), Some(Channel::Stable));
+        assert_eq!(channel(None, false), None);
+        assert_eq!(
+            channel(Some(UpdateChannel::Edge), false),
+            Some(Channel::Edge)
+        );
+        assert_eq!(channel(Some(UpdateChannel::Off), true), None);
+    }
+
     #[test]
     fn quotes_shell_metacharacters() {
         assert_eq!(super::sh_quote("abc"), "'abc'");
