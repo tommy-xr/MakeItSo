@@ -205,6 +205,7 @@
   .caps dl { margin: .5rem 0 0; gap: .125rem .75rem; }
   /* Tools gained since the note was saved; the note's editor on the worker's page. */
   .new { margin: .25rem 0 0; color: var(--warn); overflow-wrap: anywhere; }
+  .ver { margin-top: .25rem; font-size: .875rem; overflow-wrap: anywhere; }
   #note { margin: 1rem 0; }
   #note .row { margin: .5rem 0 0; }
   #note > p:last-child { margin: .375rem 0 0; }
@@ -310,6 +311,7 @@ let ws = null, authNeeded = false, readOnly = false, tasks = [], workers = [], d
 const OFFLINE_MS = 8000;
 let everOpen = false, offline = false, offlineTimer = 0;
 let connMsg = 'connecting…'; // shown in the ticker until the first socket opens
+let orchVersion = ''; // from /api/info; workers on another build are flagged
 let skew = 0; // orchestrator clock minus ours, from the last Status; task times are on its clock
 let from = '#'; // last list view, so a task's back link returns to Workers when opened from there
 // The one submit awaiting its Submitted, as { key, text }: its draft key and what was sent.
@@ -1019,6 +1021,15 @@ function capsLine(w) {
   return d;
 }
 
+// The worker's build, flagged when it isn't the orchestrator's; its self-update progress.
+function versionLine(w) {
+  const v = w.info.version || 'older build', u = w.update || {};
+  if (u.state === 'pending') return el('div', { className: 'ver dim' }, `${v} · restarting into ${u.version}`);
+  if (u.state === 'failed') return el('div', { className: 'ver new' }, `${v} · update to ${u.version} failed: ${u.why}`);
+  if (orchVersion && v !== orchVersion) return el('div', { className: 'ver new' }, `${v} · orchestrator runs ${orchVersion}`);
+  return el('div', { className: 'ver dim' }, v);
+}
+
 function renderWorkers() {
   renderNotify();
   $('fleet').textContent = `${workers.filter((w) => w.online).length}/${workers.length} online`;
@@ -1031,7 +1042,7 @@ function renderWorkers() {
       run ? el('div', { className: 'activity' }, ...dots([clock(run), tokensOf(run), run.activity])) : '',
       w.info.purpose ? el('div', { className: 'purpose' }, w.info.purpose) : '',
       (w.new_tools || []).length ? el('div', { className: 'new' }, `new: ${w.new_tools.join(', ')}`) : '',
-      capsLine(w), meterLine(w), limitRows(w));
+      capsLine(w), meterLine(w), limitRows(w), versionLine(w));
   }));
   if (!workers.length) $('machines').append(el('li', { className: 'dim' }, 'no workers connected'));
 }
@@ -1486,6 +1497,7 @@ function start() {
   info().then((info) => {
     authNeeded = info.auth;
     readOnly = info.scope === 'read';
+    orchVersion = info.version || '';
     $('ver').textContent = [info.version, readOnly && 'read-only'].filter(Boolean).join(' · ');
     if (!push.key) pushStart(info.vapid);
     connect();
