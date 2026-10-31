@@ -142,8 +142,9 @@ CF_ACCESS_CLIENT_SECRET=<secret> mis-worker setup --url wss://mis.example.com \
 ```
 
 Requests with a valid Access JWT need no `MIS_TOKEN`, so the page skips the token prompt. Requests
-without one are rejected unless they come straight from loopback with no Cloudflare headers;
-those still follow `MIS_TOKEN`. So any local process can still connect, as without Access; set
+without one are rejected unless they come straight from loopback, or from a private-network
+address (e.g. a LAN worker at `ws://192.168.x.y:7474`) with `MIS_TOKEN`, with no Cloudflare
+headers; those still follow `MIS_TOKEN`. So any local process can still connect, as without Access; set
 `MIS_TOKEN` too to close that. The JWT is checked when a socket opens, not again while it stays open.
 
 
