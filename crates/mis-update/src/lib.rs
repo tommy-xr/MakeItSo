@@ -92,17 +92,43 @@ pub fn parse_latest(channel: Channel, body: &str) -> Option<String> {
     Release::parse(&v).map(|_| v)
 }
 
-/// Whether `mine` should move to `latest`. Stable only moves to a higher semver (never back);
-/// edge follows its pointer, which CI only moves forward.
+/// Whether `mine` should move to `latest`. Stable only moves to a higher semver. Edge follows
+/// its pointer (CI only moves it forward) to any other build, but never to a lower semver.
 pub fn newer(channel: Channel, mine: &str, latest: &str) -> bool {
     let num = |v: &str| -> Option<Vec<u64>> {
         let r = Release::parse(v)?;
         r.semver.split('.').map(|n| n.parse().ok()).collect()
     };
-    match channel {
-        Channel::Edge => mine != latest && Release::parse(latest).is_some(),
-        Channel::Stable => matches!((num(mine), num(latest)), (Some(m), Some(l)) if l > m),
+    match (num(mine), num(latest)) {
+        (Some(m), Some(l)) => match channel {
+            Channel::Edge => mine != latest && l >= m,
+            Channel::Stable => l > m,
+        },
+        _ => false,
     }
+}
+
+/// Longest a new build may take to answer `--version` or `--self-test`.
+const RUN_LIMIT: Duration = Duration::from_secs(30);
+
+/// `cmd`'s output, or Err if it runs past `limit` (then it is killed). Output past the pipe's
+/// buffer stalls the child into the limit: fine for a version line or a short error.
+fn output_within(
+    cmd: &mut std::process::Command,
+    limit: Duration,
+) -> anyhow::Result<std::process::Output> {
+    use std::process::Stdio;
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let start = std::time::Instant::now();
+    while child.try_wait()?.is_none() {
+        if start.elapsed() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("still running after {limit:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(child.wait_with_output()?)
 }
 
 /// One release tarball and the version it must hold.
@@ -277,10 +303,9 @@ pub fn stage(target: &Path, exe: &[u8], bin: &str, version: &str) -> anyhow::Res
             .with_context(|| format!("writing {}", staged.path.display()))?,
         exe,
     )?;
-    let out = std::process::Command::new(&staged.path)
-        .arg("--version")
-        .output()
-        .with_context(|| format!("running {}", staged.path.display()))?;
+    let mut cmd = std::process::Command::new(&staged.path);
+    let out = output_within(cmd.arg("--version"), RUN_LIMIT)
+        .with_context(|| format!("running {} --version", staged.path.display()))?;
     let said = String::from_utf8_lossy(&out.stdout);
     if !out.status.success() || said.trim() != format!("{bin} {version}") {
         bail!("new {bin} says '{}', want '{bin} {version}'", said.trim());
@@ -291,7 +316,9 @@ pub fn stage(target: &Path, exe: &[u8], bin: &str, version: &str) -> anyhow::Res
 impl Staged {
     /// Run it with `args`; Err unless it exits 0.
     pub fn run_ok(&self, args: &[&std::ffi::OsStr]) -> anyhow::Result<()> {
-        let out = std::process::Command::new(&self.path).args(args).output()?;
+        let mut cmd = std::process::Command::new(&self.path);
+        let out = output_within(cmd.args(args), RUN_LIMIT)
+            .with_context(|| format!("{}", args[0].to_string_lossy()))?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
             bail!("{} failed: {}", args[0].to_string_lossy(), err.trim());
@@ -533,6 +560,22 @@ mod tests {
         assert!(newer(Edge, "0.2.0+aaaaaaa", "0.2.0+bbbbbbb"));
         assert!(!newer(Edge, "0.2.0+aaaaaaa", "0.2.0+aaaaaaa"));
         assert!(!newer(Edge, "0.2.0+aaaaaaa", "junk"));
+        assert!(
+            !newer(Edge, "0.2.0+aaaaaaa", "0.1.0+bbbbbbb"),
+            "edge never to a lower semver"
+        );
+        assert!(newer(Edge, "0.1.0+aaaaaaa", "0.2.0+bbbbbbb"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_child_is_killed_at_the_limit() {
+        let mut cmd = std::process::Command::new("sleep");
+        let err = output_within(cmd.arg("5"), Duration::from_millis(200)).unwrap_err();
+        assert!(err.to_string().contains("still running"), "{err}");
+        let mut cmd = std::process::Command::new("echo");
+        let out = output_within(cmd.arg("hi"), RUN_LIMIT).unwrap();
+        assert_eq!(out.stdout, b"hi\n");
     }
 
     #[test]
