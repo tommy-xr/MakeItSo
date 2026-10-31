@@ -121,27 +121,37 @@ jobs:
           sh release/edge.sh stage dist "$ver" "$GITHUB_SHA"
           echo "SHA7=${ver##*+}" >>"$GITHUB_ENV"
       - name: Publish
+        # bash (not the default) for pipefail; any failed call fails the job.
+        shell: bash
         run: |
-          if ! gh release view edge >/dev/null 2>&1; then
+          if gh release view edge >/dev/null 2>&1; then
+            old=$(gh api "repos/$GH_REPO/git/ref/tags/edge" --jq .object.sha)
+          else
             gh release create edge --prerelease --latest=false --target "$GITHUB_SHA" --title edge \
               --notes "Rolling build of main. Assets are named by commit; edge.json names the newest."
+            old=$GITHUB_SHA
           fi
-          # Assets first, so edge.json never names a missing file.
-          gh release upload edge --clobber dist/*-"$SHA7".tar.gz* dist/SHA256SUMS-"$SHA7"*
-          # Only move forward: a run that finishes after a newer one leaves edge pointing at the newer.
-          old=$(gh release download edge -p edge.json -O - 2>/dev/null | jq -r '.sha // empty' || true)
-          status=ahead
-          if [ -n "$old" ]; then
-            status=$(gh api "repos/$GH_REPO/compare/$old...$GITHUB_SHA" --jq .status || echo ahead)
+          # A build's assets never change once complete (its sums signature, uploaded last, exists):
+          # a re-run must not swap files edge.json may already name.
+          marker=SHA256SUMS-$SHA7.minisig
+          if ! gh release view edge --json assets --jq '.assets[].name' | grep -qxF "$marker"; then
+            gh release upload edge --clobber dist/*-"$SHA7".tar.gz* "dist/SHA256SUMS-$SHA7"
+            gh release upload edge --clobber "dist/$marker"
           fi
-          if [ "$status" = behind ]; then
-            echo "edge is at $old, newer than $GITHUB_SHA; leaving it"
-            cur=$(echo "$old" | cut -c1-7)
-          else
-            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/edge" -f sha="$GITHUB_SHA" -F force=true
-            gh release upload edge --clobber dist/edge.json
-            cur=$SHA7
-          fi
-          gh api "repos/$GH_REPO/releases/tags/edge" | sh release/edge.sh prune 10 "$cur" |
-            while read -r id; do gh api -X DELETE "repos/$GH_REPO/releases/assets/$id"; done
+          # Only move forward: a run that finishes after a newer one leaves edge on the newer.
+          status=$(gh api "repos/$GH_REPO/compare/$old...$GITHUB_SHA" --jq .status)
+          case $status in
+            ahead | identical)
+              gh api -X PATCH "repos/$GH_REPO/git/refs/tags/edge" -f sha="$GITHUB_SHA" -F force=false
+              gh release upload edge --clobber dist/edge.json
+              cur=$SHA7 ;;
+            behind)
+              echo "edge is at $old, newer than $GITHUB_SHA; leaving it"
+              cur=${old::7} ;;
+            *)
+              echo "::error::edge is at $old, $status from $GITHUB_SHA (main rewritten?); move it by hand"
+              exit 1 ;;
+          esac
+          ids=$(gh api "repos/$GH_REPO/releases/tags/edge" | sh release/edge.sh prune 10 "$cur")
+          for id in $ids; do gh api -X DELETE "repos/$GH_REPO/releases/assets/$id"; done
 
