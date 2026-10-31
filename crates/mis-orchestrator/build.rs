@@ -10,7 +10,10 @@ fn git(args: &[&str]) -> Option<String> {
 }
 
 fn main() {
-    let rev = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    // Always 7 chars (not `--short`, which grows with the repo): release assets are named by it.
+    let rev = git(&["rev-parse", "HEAD"])
+        .map(|s| s.chars().take(7).collect())
+        .unwrap_or_else(|| "unknown".into());
     let dirty =
         git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
     let rev = if dirty { format!("{rev}-dirty") } else { rev };

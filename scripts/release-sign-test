@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Local check of the release packaging and signing CI runs (no GitHub calls): builds this checkout,
+# packages it, signs the tag and edge layouts with a throwaway key, verifies with `minisign -V`,
+# checks SHA256SUMS and edge.json, that bad inputs fail, and edge pruning against a fixture.
+# Needs minisign, jq, shasum. Commit first: a dirty build is refused like in CI.
+# Usage: scripts/release-sign-test [work dir]
+set -euo pipefail
+here=$(cd "$(dirname "$0")/.." && pwd)
+W=${1:-$(mktemp -d)}
+export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$here/target}
+rm -rf "$W/dist" "$W/rel" "$W/edge" "$W/keys"; mkdir -p "$W/keys"
+ok() { echo "ok: $*"; }
+fails() { if "$@" >/dev/null 2>&1; then echo "FAIL: expected failure: $*"; exit 1; fi; }
+
+minisign -G -W -p "$W/keys/test.pub" -s "$W/keys/test.key" >/dev/null
+minisign -G -W -p "$W/keys/other.pub" -s "$W/keys/other.key" >/dev/null
+export MINISIGN_PUBLIC_KEY=$W/keys/test.pub
+key=$(cat "$W/keys/test.key")
+
+cargo build -q -p mis-cli -p mis-worker -p mis-orchestrator --manifest-path "$here/Cargo.toml"
+target=$(rustc -vV | sed -n 's/^host: //p')
+sh "$here/release/package.sh" "$CARGO_TARGET_DIR/debug" "$target" "$W/dist"
+ver=$(sh "$here/release/version.sh" "$W/dist/mis-$target.tar.gz")
+sha=${ver##*+}
+[ "$sha" = "$(git -C "$here" rev-parse HEAD | cut -c1-7)" ]
+ok "packaged mis-$target.tar.gz, version $ver"
+
+# Tag layout.
+cp -R "$W/dist" "$W/rel"
+MINISIGN_SECRET_KEY=$key sh "$here/release/sign.sh" "$W/rel" "$ver" SHA256SUMS
+(cd "$W/rel" && ls -1)
+for f in "mis-$target.tar.gz" SHA256SUMS; do
+  minisign -V -p "$W/keys/test.pub" -m "$W/rel/$f" -x "$W/rel/$f.minisig"
+  grep -qxF "trusted comment: mis $ver $f" "$W/rel/$f.minisig"
+done
+(cd "$W/rel" && shasum -a 256 -c SHA256SUMS)
+ok "tag layout signed and verified"
+
+# Failures: no secret, secret not matching the public key, tampered asset, wrong key.
+cp -R "$W/dist" "$W/bad"
+fails env -u MINISIGN_SECRET_KEY sh "$here/release/sign.sh" "$W/bad" "$ver" SHA256SUMS
+fails env MINISIGN_SECRET_KEY= sh "$here/release/sign.sh" "$W/bad" "$ver" SHA256SUMS
+fails env MINISIGN_SECRET_KEY="$(cat "$W/keys/other.key")" sh "$here/release/sign.sh" "$W/bad" "$ver" SHA256SUMS
+rm -rf "$W/bad"
+cp "$W/rel/mis-$target.tar.gz" "$W/tampered.tar.gz"; printf x >>"$W/tampered.tar.gz"
+fails minisign -V -p "$W/keys/test.pub" -m "$W/tampered.tar.gz" -x "$W/rel/mis-$target.tar.gz.minisig"
+fails minisign -V -p "$W/keys/other.pub" -m "$W/rel/mis-$target.tar.gz" -x "$W/rel/mis-$target.tar.gz.minisig"
+ok "unsigned, mismatched key, tampered and wrong-key all refused"
+
+# Edge layout.
+cp -R "$W/dist" "$W/edge"
+fails sh "$here/release/edge.sh" stage "$W/edge" "$ver" 0000000000
+MINISIGN_SECRET_KEY=$key sh "$here/release/edge.sh" stage "$W/edge" "$ver" "$(git -C "$here" rev-parse HEAD)"
+(cd "$W/edge" && ls -1) && jq . "$W/edge/edge.json"
+a=mis-$target-$sha.tar.gz
+minisign -V -p "$W/keys/test.pub" -m "$W/edge/$a" -x "$W/edge/$a.minisig"
+grep -qxF "trusted comment: mis $ver $a" "$W/edge/$a.minisig"
+(cd "$W/edge" && shasum -a 256 -c "SHA256SUMS-$sha")
+jq -e --arg v "$ver" --arg a "$a" '.version == $v and (.assets | index($a)) and (.sha | length) == 40' \
+  "$W/edge/edge.json" >/dev/null
+ok "edge layout signed and verified; edge.json names $a"
+
+# Pruning: 12 builds (4 assets each) + edge.json; keep 10, and the pointer's even when oldest.
+fixture() {
+  jq -n '{assets: ([range(12) as $i | ("aaaaa" + ($i + 10 | tostring)) as $s
+      | ("mis-x86_64-unknown-linux-gnu-\($s).tar.gz", "mis-x86_64-unknown-linux-gnu-\($s).tar.gz.minisig",
+         "SHA256SUMS-\($s)", "SHA256SUMS-\($s).minisig")
+      | {id: ($i * 10), name: ., created_at: "2026-10-\($i + 10)T00:00:00Z"}]
+    + [{id: 999, name: "edge.json", created_at: "2026-10-01T00:00:00Z"}])}'
+}
+got=$(fixture | sh "$here/release/edge.sh" prune 10 aaaaa21 | sort -n | uniq -c | awk '{print $2"x"$1}' | xargs)
+[ "$got" = "0x4 10x4" ] || { echo "FAIL: prune newest: $got"; exit 1; }
+got=$(fixture | sh "$here/release/edge.sh" prune 10 aaaaa10 | sort -n | uniq -c | awk '{print $2"x"$1}' | xargs)
+[ "$got" = "10x4 20x4" ] || { echo "FAIL: prune keeps pointer: $got"; exit 1; }
+ok "prune drops the 2 oldest builds, never the pointer's, never edge.json"
+echo "all ok"
