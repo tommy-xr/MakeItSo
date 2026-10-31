@@ -1,5 +1,7 @@
 //! The worker binary sends the Cloudflare Access service token on its socket
 //! upgrade, takes the secret from env only, and never logs it.
+// The upgrade test is Unix only, leaving its helpers unused elsewhere.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -47,6 +49,8 @@ fn hex(s: &str) -> String {
     s.bytes().map(|b| format!("{b:02x}")).collect()
 }
 
+// Unix only: the fake `claude` is a shell script found via a `:`-separated PATH.
+#[cfg(unix)]
 #[tokio::test]
 #[allow(clippy::result_large_err)] // the handshake callback's signature, not ours
 async fn access_headers_ride_the_upgrade_and_secret_stays_out_of_logs() {

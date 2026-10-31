@@ -481,7 +481,8 @@ mod tests {
         std::fs::create_dir_all(apps.join("Blender.app")).unwrap();
         std::fs::create_dir_all(&bin).unwrap();
         for b in ["blender", "ffmpeg"] {
-            std::fs::write(bin.join(b), "").unwrap();
+            let exe = format!("{b}{}", std::env::consts::EXE_SUFFIX); // `ffmpeg.exe` on Windows
+            std::fs::write(bin.join(exe), "").unwrap();
         }
         let got = find_apps(
             std::slice::from_ref(&apps),
