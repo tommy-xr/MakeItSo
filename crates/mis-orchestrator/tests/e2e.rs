@@ -47,7 +47,7 @@ async fn join(base: &str, id: WorkerId, harness: &str, running: Vec<TaskId>) -> 
         },
     )
     .await;
-    let OrchMsg::Welcome { id: got } = recv(&mut ws).await else {
+    let OrchMsg::Welcome { id: got, .. } = recv(&mut ws).await else {
         panic!()
     };
     assert_eq!(got, id);
@@ -2771,4 +2771,76 @@ async fn read_token_cannot_edit_a_purpose() {
         panic!()
     };
     assert_eq!(message, "read-only token");
+}
+
+#[tokio::test]
+async fn workers_learn_the_version_and_a_pending_update_takes_no_tasks() {
+    let base = start_app(App::new(None).with_channel(Some(Channel::Edge))).await;
+    let wid = uuid::Uuid::new_v4();
+    let (mut worker, _) = connect_async(format!("{base}/ws/worker")).await.unwrap();
+    let hello = WorkerMsg::Hello {
+        id: wid,
+        info: info("claude"),
+        running: vec![],
+    };
+    send(&mut worker, &hello).await;
+    let welcome: OrchMsg = recv(&mut worker).await;
+    assert_eq!(
+        welcome,
+        OrchMsg::Welcome {
+            id: wid,
+            version: Some(mis_orchestrator::VERSION.into()),
+            channel: Some(Channel::Edge),
+        }
+    );
+    let pending = WorkerUpdate::Pending {
+        version: "0.2.0+bbbbbbb".into(),
+    };
+    let update = WorkerMsg::Update {
+        update: pending.clone(),
+    };
+    send(&mut worker, &update).await;
+
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    send(&mut client, &ClientMsg::Subscribe).await;
+    let submit = ClientMsg::Submit {
+        prompt: "hi".into(),
+        cwd: None,
+        harness: Some("claude".into()),
+        model: None,
+        reply_to: None,
+        images: vec![],
+    };
+    send(&mut client, &submit).await;
+    let ServerMsg::Submitted { task } = recv(&mut client).await else {
+        panic!()
+    };
+    send(&mut client, &ClientMsg::Status).await;
+    let status = loop {
+        if let ServerMsg::Status { workers, tasks, .. } = recv(&mut client).await {
+            break (workers, tasks);
+        }
+    };
+    assert_eq!(status.0[0].update, pending);
+    assert_eq!(
+        status.1[0].status,
+        TaskStatus::Queued,
+        "held off the updating worker"
+    );
+    let held: OrchMsg = recv(&mut worker).await;
+    assert_eq!(
+        held,
+        OrchMsg::UpdateHeld,
+        "acknowledged: no more tasks this connection"
+    );
+    let quiet = tokio::time::timeout(std::time::Duration::from_millis(300), worker.next()).await;
+    assert!(quiet.is_err(), "no assignment while its update is pending");
+
+    // Back on its new build (a new connection), it takes the task.
+    drop(worker);
+    let mut worker = join(&base, wid, "claude", vec![]).await;
+    let OrchMsg::Assign { task: assigned, .. } = recv(&mut worker).await else {
+        panic!()
+    };
+    assert_eq!(assigned.id, task);
 }

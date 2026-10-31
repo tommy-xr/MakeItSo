@@ -125,6 +125,7 @@ impl Ledger {
                 generation,
                 stats: None,
                 last_seen: now,
+                update: WorkerUpdate::None,
             };
             l.workers.insert(wid, w);
             effects.push(Effect::StartGrace { wid, generation });

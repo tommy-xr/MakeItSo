@@ -91,6 +91,8 @@ pub struct App {
     ledger_dir: Option<std::path::PathBuf>,
     /// Open once serving, until shut down.
     store: Arc<Mutex<Option<store::Store>>>,
+    /// Where this version's release builds are published, for workers to follow. None: nowhere.
+    channel: Option<Channel>,
 }
 
 impl App {
@@ -121,6 +123,7 @@ impl App {
             images: None,
             ledger_dir: None,
             store: Default::default(),
+            channel: None,
         }
     }
 
@@ -172,6 +175,12 @@ impl App {
     }
 
     /// Accept image uploads and attach them to tasks.
+    /// Tell workers this version's builds are published on `channel`, so they can switch to it.
+    pub fn with_channel(mut self, channel: Option<Channel>) -> Self {
+        self.channel = channel;
+        self
+    }
+
     pub fn with_images(mut self, images: images::Images) -> Self {
         self.images = Some(Arc::new(images));
         self
@@ -961,7 +970,12 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
     if !unknown.is_empty() {
         tracing::warn!(%wid, ?unknown, "worker reports tasks unknown to this orchestrator");
     }
-    if send_json(&mut sock, &OrchMsg::Welcome { id: wid }).await {
+    let welcome = OrchMsg::Welcome {
+        id: wid,
+        version: Some(VERSION.into()),
+        channel: app.channel,
+    };
+    if send_json(&mut sock, &welcome).await {
         loop {
             tokio::select! {
                 out = rx.recv() => match out {
@@ -987,6 +1001,9 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
                     }
                     Some(WorkerMsg::PurposeFailed { why }) => {
                         app.transition(|l| ((), l.purpose_failed(wid, conn, &why)));
+                    }
+                    Some(WorkerMsg::Update { update }) => {
+                        app.transition(|l| ((), l.worker_update(wid, conn, update)));
                     }
                     Some(WorkerMsg::Hello { .. }) => {}
                     None => break,

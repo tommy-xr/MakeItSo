@@ -14,6 +14,7 @@ mis (cli)  --ws-->  mis-orchestrator  <--ws--  mis-worker  --spawns-->  claude -
 - `mis-agent` — `Agent` trait + Claude Code and Codex CLI backends
 - `mis-orchestrator` — worker ledger, task queue, event fan-out
 - `mis-worker` — runs assigned tasks via `mis-agent`
+- `mis-update` — finds, checks (minisign) and installs signed release builds
 - `mis-cli` — `mis status | task | show | tail`
 - `mis-tray` — macOS menu bar / Windows tray app
 
@@ -36,6 +37,12 @@ install dir.
 
 From source: `cargo install --git https://github.com/tommy-xr/MakeItSo mis-worker` (likewise
 `mis-cli`, `mis-orchestrator`).
+
+Updates: a released worker switches to its orchestrator's exact version, downloading that build
+from GitHub Releases, checking its signature against `release/minisign.pub`, and restarting once
+its task ends. The orchestrator tells workers its channel (`--update-channel stable|edge|off`;
+stable for released builds). `--no-self-update` / `MIS_NO_SELF_UPDATE=1` turns it off; builds
+not made by CI never update.
 
 ## Try it
 

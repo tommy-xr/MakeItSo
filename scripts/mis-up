@@ -33,6 +33,9 @@ done
 # A remote worker may have no orchestrator env file.
 # shellcheck source=/dev/null
 if [ $only = 0 ] || [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
+# Binaries here update by rebuilding this repo, never from releases. Env, not flags: older builds
+# (kept for rollback) don't know them.
+export MIS_NO_SELF_UPDATE=1 MIS_UPDATE_CHANNEL=off
 BIND=${MIS_BIND:-127.0.0.1:7474}
 STATE=${MIS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/mis}
 BUILDS=$STATE/builds

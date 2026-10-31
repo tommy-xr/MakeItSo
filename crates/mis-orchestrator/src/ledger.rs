@@ -74,6 +74,8 @@ struct Worker {
     stats: Option<(WorkerStats, u64)>,
     /// Last Hello or Stats; `tick` drops the worker when this gets too old.
     last_seen: Duration,
+    /// Its latest self-update report this connection; Pending takes it off new tasks.
+    update: WorkerUpdate,
 }
 
 /// What a worker's agents have left, kept apart from `Worker` so a reconnect,
@@ -411,6 +413,7 @@ impl Ledger {
                     stats_at: w.stats.as_ref().map(|(_, at)| *at),
                     new_tools: (self.noted.get(id))
                         .map_or(vec![], |old| w.info.inventory.added_since(old)),
+                    update: w.update.clone(),
                 })
                 .collect(),
             tasks: self.tasks.iter().map(|t| self.summary(t)).collect(),
@@ -669,6 +672,26 @@ impl Ledger {
         vec![Effect::Broadcast(self.status())]
     }
 
+    /// `wid` reports its self-update. Pending: it restarts once idle, so it gets no new tasks.
+    pub fn worker_update(
+        &mut self,
+        wid: WorkerId,
+        conn: ConnId,
+        update: WorkerUpdate,
+    ) -> Vec<Effect> {
+        let Some(w) = self.workers.get_mut(&wid).filter(|w| w.conn == Some(conn)) else {
+            return vec![];
+        };
+        let held = matches!(update, WorkerUpdate::Pending { .. });
+        w.update = update;
+        let mut effects = vec![Effect::Broadcast(self.status())];
+        if held {
+            let msg = OrchMsg::UpdateHeld;
+            effects.push(Effect::Send { conn, msg });
+        }
+        effects
+    }
+
     /// `wid` couldn't save the purpose it was sent: tell clients why.
     pub fn purpose_failed(&self, wid: WorkerId, conn: ConnId, why: &str) -> Vec<Effect> {
         if !self.workers.get(&wid).is_some_and(|w| w.conn == Some(conn)) {
@@ -852,6 +875,7 @@ impl Ledger {
                 generation,
                 stats: None,
                 last_seen: now,
+                update: WorkerUpdate::None,
             },
         );
         let unknown = running
@@ -1143,6 +1167,7 @@ impl Ledger {
                 .iter()
                 .filter(|(wid, _)| pin.is_none_or(|p| p == **wid))
                 .filter(|(wid, w)| w.conn.is_some() && !self.is_busy(**wid))
+                .filter(|(_, w)| !matches!(w.update, WorkerUpdate::Pending { .. }))
                 .filter(|(wid, _)| self.exhausted_until(**wid, harness).is_none())
                 .find(|(_, w)| w.info.harnesses.contains(harness))
                 .map(|(wid, w)| (*wid, w.conn.unwrap()));
