@@ -8,6 +8,8 @@
 #                        once no task runs, restart the orchestrator and local worker on it (the
 #                        tunnel stays up). A failed build keeps the running version; an orchestrator
 #                        that exits within 30 s is rolled back. The page's title bar shows which.
+#   mis-up --no-tray     don't start the menu bar app (started by default on macOS, restarted with
+#                        each update; not with --worker-only)
 #   mis-up --worker-only just a worker; other args go to mis-worker (e.g. --url). With --watch a
 #                        remote machine updates the same way, waiting until no task runs anywhere.
 # Other args pass through to mis-orchestrator. Builds $MIS_REPO (default ~/code/make-it-so) only
@@ -17,6 +19,7 @@ set -e
 REPO=${MIS_REPO:-$HOME/code/make-it-so}
 ENV_FILE=$HOME/.config/mis/orchestrator.env
 tunnel=0 worker=0 update=0 watch=0 only=0 url='' pass=''
+tray=0; [ "$(uname -s)" = Darwin ] && tray=1
 while [ $# -gt 0 ]; do
   case $1 in
     --tunnel) tunnel=1 ;;
@@ -24,6 +27,7 @@ while [ $# -gt 0 ]; do
     --update) update=1 ;;
     --watch) watch=1 ;;
     --worker-only) only=1 ;;
+    --no-tray) tray=0 ;;
     --url) url=$2 pass="$pass $1 $2"; shift ;;
     --url=*) url=${1#--url=} pass="$pass $1" ;;
     *) pass="$pass $1" ;;
@@ -49,6 +53,7 @@ if [ $only = 1 ]; then
   case $url in ws*) url=http${url#ws} ;; esac
 else
   bins="mis-orchestrator mis-worker"
+  [ $tray = 1 ] && bins="$bins mis-tray"
   url=http://127.0.0.1:${BIND##*:}
 fi
 
@@ -87,6 +92,11 @@ start() {
     ( sleep 2; exec "$BUILDS/$1/mis-worker" --url "ws://127.0.0.1:${BIND##*:}" --root "$HOME/code" --skip-permissions ) &
     wpid=$!
   fi
+  # The tray reads the URL and token from the env file; older builds (rollback) may lack it.
+  if [ $tray = 1 ] && [ -x "$BUILDS/$1/mis-tray" ]; then
+    "$BUILDS/$1/mis-tray" >/dev/null 2>&1 &
+    trpid=$!
+  fi
 }
 
 # SIGTERM pid $1 and wait for it to exit (the orchestrator saves its ledger); SIGKILL after 10 s.
@@ -99,8 +109,8 @@ stop() {
 }
 
 restart() {
-  stop "$wpid"; stop "$orch"
-  wpid='' orch=''
+  stop "$trpid"; stop "$wpid"; stop "$orch"
+  trpid='' wpid='' orch=''
   start "$1"
 }
 
@@ -177,8 +187,8 @@ fi
 [ $update = 1 ] && git -C "$REPO" pull -q --ff-only
 build || exit 1
 cur=$sha
-tpid='' orch='' wpid='' main=''
-trap 'kill $tpid $orch $wpid 2>/dev/null || true' EXIT
+tpid='' orch='' wpid='' trpid='' main=''
+trap 'kill $tpid $orch $wpid $trpid 2>/dev/null || true' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 if [ $tunnel = 1 ]; then

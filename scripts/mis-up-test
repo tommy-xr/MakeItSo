@@ -42,7 +42,7 @@ touch "$W/.mis-up-test"
 
 env -u XDG_STATE_HOME -u MIS_STATE_DIR -u MIS_URL -u MIS_TOKEN HOME="$W/home" MIS_REPO="$W/repo" \
   MIS_UPDATE_INTERVAL=2 PATH="$W/fake:$PATH" \
-  "$here/scripts/mis-up" --watch --worker --no-planner --no-summary >"$W/mis-up.log" 2>&1 &
+  "$here/scripts/mis-up" --watch --worker --no-tray --no-planner --no-summary >"$W/mis-up.log" 2>&1 &
 sup=$!
 trap 'kill $sup 2>/dev/null || true; wait $sup 2>/dev/null || true' EXIT
 
