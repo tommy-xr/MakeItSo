@@ -2300,7 +2300,7 @@ async fn attached_image_reaches_the_agent_as_a_file() {
         images: &paths,
         ..Default::default()
     };
-    let codex = mis_agent::codex::CodexAgent::default().argv(&assigned.prompt, &opts);
+    let codex = mis_agent::codex::CodexAgent.argv(&assigned.prompt, &opts);
     assert_eq!(
         &codex[codex.len() - 4..],
         ["-i", paths[0].as_str(), "--", "what is this?"]

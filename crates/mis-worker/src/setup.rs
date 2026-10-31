@@ -11,7 +11,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::{self, http::Uri, Message};
 
 use crate::config::{self, Config};
-use crate::{inventory, roots};
+use crate::{inventory, permissions, roots};
 
 /// Each flag answers (and skips) one question.
 #[derive(clap::Args)]
@@ -37,6 +37,22 @@ pub struct SetupArgs {
     /// glTF export". The planner routes matching tasks here. Empty clears it.
     #[arg(long)]
     purpose: Option<String>,
+    /// What agents may do unasked: "folders" (write only in the task's dir and
+    /// --folder dirs; use only --mcp servers and --command prefixes) or "full"
+    /// (anything). Default: folders.
+    #[arg(long, value_parser = ["folders", "full"])]
+    permissions: Option<String>,
+    /// Folder agents may write in (repeatable, comma-separated ok). Default: the roots.
+    #[arg(long = "folder")]
+    folders: Vec<String>,
+    /// MCP server whose tools agents may use (repeatable, comma-separated ok;
+    /// "" for none). Default: every server found.
+    #[arg(long)]
+    mcp: Vec<String>,
+    /// Shell command prefix agents may run, e.g. python3 or "git log"
+    /// (repeatable, comma-separated ok; "" for none). Default: none.
+    #[arg(long = "command")]
+    commands: Vec<String>,
 }
 
 pub async fn run(a: SetupArgs) -> Result<()> {
@@ -95,7 +111,7 @@ pub async fn run(a: SetupArgs) -> Result<()> {
     // Locking the id means setup refuses to run beside a live worker, whose
     // ledger entry this test connection would otherwise replace.
     let (id, _lock) = crate::worker_id()?;
-    let agents = mis_agent::available(false);
+    let agents = mis_agent::available();
     let harnesses: Vec<String> = agents.iter().map(|a| a.name().to_string()).collect();
     let info = WorkerInfo {
         hostname: crate::hostname(),
@@ -170,14 +186,188 @@ pub async fn run(a: SetupArgs) -> Result<()> {
         }
         None => saved.purpose.clone().unwrap_or_default(),
     };
+    let flags = PermissionFlags {
+        mode: a.permissions,
+        folders: a.folders,
+        mcp: a.mcp,
+        commands: a.commands,
+    };
+    let perms = ask_permissions(flags, tty, saved.permissions.as_ref(), &roots, &inventory)?;
+    println!("{}", describe(&perms));
     let cfg = Config {
         purpose: Some(purpose.trim().to_string()).filter(|p| !p.is_empty()),
         inventory: Some(inventory),
+        permissions: Some(perms),
         ..cfg
     };
     config::write(&path, &cfg)?;
     println!("wrote {}", path.display());
     Ok(())
+}
+
+/// Answers to the permission questions, from flags or none.
+struct PermissionFlags {
+    mode: Option<String>,
+    folders: Vec<String>,
+    mcp: Vec<String>,
+    commands: Vec<String>,
+}
+
+/// The `[permissions]` to save: each flag answers one question; on a terminal
+/// the rest are asked, defaulting to the saved value, else folders mode with
+/// the roots, every MCP server found, and no commands.
+fn ask_permissions(
+    f: PermissionFlags,
+    tty: bool,
+    saved: Option<&Permissions>,
+    roots: &[std::path::PathBuf],
+    inv: &Inventory,
+) -> Result<Permissions> {
+    let home = std::env::home_dir();
+    let saved_mode = saved.map_or(PermissionMode::Folders, |p| p.mode);
+    let mode = match f.mode.as_deref() {
+        Some("full") => PermissionMode::Full,
+        Some(_) => PermissionMode::Folders,
+        None if tty => {
+            eprintln!(
+                "Permissions: folders = agents write only in the task's dir and chosen folders, \
+                 and claude runs only the MCP servers and commands you list, plus read-only \
+                 ones (codex runs any command, sandboxed); full = anything, anywhere."
+            );
+            let default = match saved_mode {
+                PermissionMode::Full => "full",
+                PermissionMode::Folders => "folders",
+            };
+            loop {
+                match ask("Mode (folders/full)", Some(default))?.as_str() {
+                    "full" => break PermissionMode::Full,
+                    "folders" => break PermissionMode::Folders,
+                    _ => eprintln!("answer folders or full"),
+                }
+            }
+        }
+        None => saved_mode,
+    };
+    // Names a rule can't hold (e.g. "my.server") are left for the user to see in the inventory.
+    let found_mcp: std::collections::BTreeSet<&String> = (inv.mcp.values().flatten())
+        .filter(|n| {
+            let one = Permissions {
+                mcp: vec![n.to_string()],
+                ..Default::default()
+            };
+            mis_agent::check(&one).is_ok()
+        })
+        .collect();
+    // Full keeps any saved lists, so switching back finds them again.
+    let mut p = saved.cloned().unwrap_or_else(|| Permissions {
+        folders: roots.iter().map(|r| r.display().to_string()).collect(),
+        mcp: found_mcp.into_iter().cloned().collect(),
+        ..Default::default()
+    });
+    p.mode = mode;
+    if mode == PermissionMode::Full {
+        return Ok(p);
+    }
+    // Each list is checked on its own, so a bad answer is asked again.
+    let check = |q: Permissions| permissions::resolve(q, home.as_deref());
+    let folders = ask_list(
+        f.folders,
+        tty,
+        "Folders agents may write",
+        &p.folders,
+        |l| {
+            Ok(check(Permissions {
+                folders: l,
+                ..Default::default()
+            })?
+            .folders)
+        },
+    )?;
+    let mcp = ask_list(f.mcp, tty, "MCP servers agents may use", &p.mcp, |l| {
+        Ok(check(Permissions {
+            mcp: l,
+            ..Default::default()
+        })?
+        .mcp)
+    })?;
+    let found = inventory::commands(inv, mis_agent::which);
+    let label = match found.is_empty() {
+        true => "Commands agents may run, e.g. python3".to_string(),
+        false => format!("Commands agents may run (found: {})", found.join(", ")),
+    };
+    let commands = ask_list(f.commands, tty, &label, &p.commands, |l| {
+        Ok(check(Permissions {
+            commands: l,
+            ..Default::default()
+        })?
+        .commands)
+    })?;
+    Ok(Permissions {
+        mode,
+        folders,
+        mcp,
+        commands,
+    })
+}
+
+/// A comma-separated list: from `flag` when given (one empty value clears),
+/// else asked on a terminal (blank keeps `current`, `-` clears), else
+/// `current`. `check` normalises it; a bad typed answer is asked again.
+fn ask_list(
+    flag: Vec<String>,
+    tty: bool,
+    label: &str,
+    current: &[String],
+    check: impl Fn(Vec<String>) -> Result<Vec<String>>,
+) -> Result<Vec<String>> {
+    let split = |s: &str| -> Vec<String> {
+        (s.split(','))
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect()
+    };
+    if !flag.is_empty() {
+        return check(flag.iter().flat_map(|f| split(f)).collect());
+    }
+    if !tty {
+        return check(current.to_vec());
+    }
+    let shown = match current.is_empty() {
+        true => "none".to_string(),
+        false => current.join(", "),
+    };
+    loop {
+        let list = match line(&format!(
+            "{label}, comma-separated [{shown}] (- for none): "
+        ))?
+        .as_str()
+        {
+            "" => current.to_vec(),
+            "-" => vec![],
+            answer => split(answer),
+        };
+        match check(list) {
+            Ok(l) => return Ok(l),
+            Err(e) => eprintln!("{e:#}"),
+        }
+    }
+}
+
+/// e.g. "permissions: folders /a, /b; mcp blender; commands none".
+fn describe(p: &Permissions) -> String {
+    let list = |v: &[String]| match v.is_empty() {
+        true => "none".to_string(),
+        false => v.join(", "),
+    };
+    match p.mode {
+        PermissionMode::Full => "permissions: full (agents may do anything)".into(),
+        PermissionMode::Folders => format!(
+            "permissions: folders {} (plus each task's dir); mcp {}; commands {}",
+            list(&p.folders),
+            list(&p.mcp),
+            list(&p.commands)
+        ),
+    }
 }
 
 /// One line per part of `Inventory::brief`, e.g. "apps: Blender 4.2.3".
