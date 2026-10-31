@@ -203,7 +203,13 @@ mod tests {
     #[test]
     fn check_refuses_entries_that_widen_or_inject_rules() {
         let ok = Permissions {
-            folders: vec!["/Users/me/assets".into()],
+            // Absolute on this platform: `/Users/…` is relative on Windows.
+            folders: vec![if cfg!(windows) {
+                r"C:\Users\me\assets"
+            } else {
+                "/Users/me/assets"
+            }
+            .into()],
             mcp: vec!["blender".into(), "my-server_2".into()],
             commands: vec!["python3".into(), "git log".into(), "./make.sh".into()],
             ..Default::default()
