@@ -250,6 +250,9 @@ async fn worker_switches_to_the_orchestrators_signed_build() {
         let u = update(&mut ws).await;
         println!("orch| update: {u:?}");
         assert_eq!(u, WorkerUpdate::Pending { version: b.clone() });
+        let held = serde_json::to_string(&OrchMsg::UpdateHeld).unwrap();
+        ws.send(Message::text(held)).await.unwrap();
+        println!("orch| update held");
         let (mut ws, v) = hello(&run.orch).await;
         println!("orch| hello from {v:?}");
         assert_eq!(v.as_deref(), Some(b.as_str()), "back on B");
