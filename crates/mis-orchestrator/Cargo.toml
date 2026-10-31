@@ -25,5 +25,6 @@ uuid.workspace = true
 web-push-native.workspace = true
 
 [dev-dependencies]
+mis-update = { workspace = true, features = ["testing"] }
 tokio-tungstenite.workspace = true
 uuid.workspace = true

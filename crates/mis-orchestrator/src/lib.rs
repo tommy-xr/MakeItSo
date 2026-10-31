@@ -30,6 +30,7 @@ pub mod note;
 pub mod plan;
 pub mod push;
 pub mod scope;
+pub mod self_update;
 pub mod store;
 pub mod summary;
 pub mod tools;
@@ -215,6 +216,22 @@ impl App {
     }
 
     /// Run a ledger transition under the lock, then perform its effects outside it.
+    /// Tasks a restart would interrupt.
+    pub fn running(&self) -> usize {
+        self.ledger().running()
+    }
+
+    /// Show `update` to clients (the page's update chip).
+    pub fn report_update(&self, update: Update) {
+        self.transition(|l| match l.set_update(update) {
+            Ok(effects) => ((), effects),
+            Err(why) => {
+                tracing::warn!("update status: {why}");
+                ((), vec![])
+            }
+        })
+    }
+
     fn transition<R>(&self, f: impl FnOnce(&mut Ledger) -> (R, Vec<Effect>)) -> R {
         let (r, effects) = f(&mut self.ledger());
         self.apply(effects);
@@ -715,6 +732,24 @@ pub async fn serve_until(
         _ = shutdown => {}
     }
     app.close_store();
+    Ok(())
+}
+
+/// `--self-test`: this build can read the task history in `dir` (without taking its lock: the
+/// running orchestrator holds it) and bind a port. Run on a new build before switching to it.
+pub fn self_test(dir: Option<&std::path::Path>) -> anyhow::Result<()> {
+    if let Some(dir) = dir {
+        let path = dir.join(store::LEDGER_FILE);
+        match std::fs::read_to_string(&path) {
+            Ok(json) => {
+                Ledger::restore(&json, |_| None, Duration::ZERO, 0)
+                    .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(anyhow::Error::from(e).context(path.display().to_string())),
+        }
+    }
+    std::net::TcpListener::bind("127.0.0.1:0")?;
     Ok(())
 }
 

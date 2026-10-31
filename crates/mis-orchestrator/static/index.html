@@ -715,7 +715,7 @@ function renderStrip() {
 
 // The supervisor's update report from the last Status: [label, class, show the sha]. Tap toggles the commit subject.
 let update = { state: 'none' };
-const UPDATE = { pending: ['update pending', '', true], failed: ['update failed · build', 'bad', false], rolled_back: ['rolled back', 'warn', true] };
+const UPDATE = { pending: ['update pending', '', true], failed: ['update failed', 'bad', true], rolled_back: ['rolled back', 'warn', true] };
 function renderUpdate() {
   const u = $('upd'), [label, cls, withSha] = UPDATE[update.state] || [];
   u.hidden = !label;

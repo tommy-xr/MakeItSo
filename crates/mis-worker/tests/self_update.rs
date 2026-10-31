@@ -4,110 +4,17 @@
 //! that copy with its version string patched. Unix only: there the restart keeps the pid.
 #![cfg(unix)]
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use mis_types::*;
+use mis_update::testing::*;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
-
-const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../mis-update/tests/fixtures");
-
-/// The built worker's version, if it is a release build (a dirty tree's isn't, and won't update).
-fn version_a() -> Option<String> {
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mis-worker"))
-        .arg("--version")
-        .output()
-        .unwrap();
-    let v = String::from_utf8(out.stdout).unwrap();
-    let v = v.trim().strip_prefix("mis-worker ").unwrap().to_string();
-    mis_update::Release::parse(&v).map(|_| v)
-}
-
-/// `exe` with every copy of version `a` swapped for `b` (same length), runnable.
-fn patched(exe: &[u8], a: &str, b: &str, out: &Path) -> Vec<u8> {
-    assert_eq!(a.len(), b.len());
-    let mut bytes = exe.to_vec();
-    let mut n = 0;
-    let mut i = 0;
-    while let Some(at) = bytes[i..].windows(a.len()).position(|w| w == a.as_bytes()) {
-        bytes[i + at..i + at + a.len()].copy_from_slice(b.as_bytes());
-        i += at + a.len();
-        n += 1;
-    }
-    assert!(n > 0, "version string not found in the binary");
-    write_exe(out, &bytes);
-    // Patching broke the ad-hoc signature macOS requires to run it.
-    if cfg!(target_os = "macos") {
-        let ok = std::process::Command::new("codesign")
-            .args(["-f", "-s", "-"])
-            .arg(out)
-            .status()
-            .unwrap();
-        assert!(ok.success());
-        bytes = std::fs::read(out).unwrap();
-    }
-    bytes
-}
-
-fn write_exe(path: &Path, bytes: &[u8]) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, bytes).unwrap();
-    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-}
-
-fn tar_gz(name: &str, data: &[u8]) -> Vec<u8> {
-    let mut b = tar::Builder::new(flate2::write::GzEncoder::new(
-        Vec::new(),
-        flate2::Compression::fast(),
-    ));
-    let mut h = tar::Header::new_gnu();
-    h.set_size(data.len() as u64);
-    h.set_mode(0o755);
-    h.set_cksum();
-    b.append_data(&mut h, name, data).unwrap();
-    b.into_inner().unwrap().finish().unwrap()
-}
-
-fn sign(key: &str, data: &[u8], comment: &str) -> String {
-    let key = std::fs::read_to_string(format!("{FIXTURES}/{key}")).unwrap();
-    let sk = minisign::SecretKeyBox::from_string(&key)
-        .unwrap()
-        .into_unencrypted_secret_key()
-        .unwrap();
-    minisign::sign(None, &sk, data, Some(comment), None)
-        .unwrap()
-        .into_string()
-}
-
-/// Serves `files` under `/download/edge/`; returns the base URL and the paths asked for.
-async fn release_server(files: HashMap<String, Vec<u8>>) -> (String, Arc<Mutex<Vec<String>>>) {
-    use axum::extract::{Path as UrlPath, State};
-    use axum::http::StatusCode;
-    let hits = Arc::new(Mutex::new(vec![]));
-    let state = (Arc::new(files), hits.clone());
-    type S = (Arc<HashMap<String, Vec<u8>>>, Arc<Mutex<Vec<String>>>);
-    let app = axum::Router::new()
-        .route(
-            "/download/edge/{name}",
-            axum::routing::get(
-                |State((files, hits)): State<S>, UrlPath(name): UrlPath<String>| async move {
-                    hits.lock().unwrap().push(name.clone());
-                    files.get(&name).cloned().ok_or(StatusCode::NOT_FOUND)
-                },
-            ),
-        )
-        .with_state(state);
-    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", l.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(l, app).await });
-    (base, hits)
-}
 
 struct Run {
     dir: PathBuf,
@@ -208,31 +115,21 @@ async fn update(ws: &mut Ws) -> WorkerUpdate {
 
 /// Worker A and a release server holding B's tarball signed with `key`.
 async fn setup(name: &str, key: &str) -> Option<(Run, String, Vec<u8>, Arc<Mutex<Vec<String>>>)> {
-    let Some(a) = version_a() else {
+    let built = std::path::Path::new(env!("CARGO_BIN_EXE_mis-worker"));
+    let Some(a) = release_version(built, "mis-worker") else {
         eprintln!("skipped: this build's version has no clean commit, so it never self-updates");
         return None;
     };
-    let (semver, sha) = a.split_once('+').unwrap();
-    let b = format!(
-        "{semver}+{}",
-        if sha == "bbbbbbb" {
-            "ccccccc"
-        } else {
-            "bbbbbbb"
-        }
-    );
+    let b = other_version(&a);
     let tmp = std::env::temp_dir().join(format!("mis-self-update-b-{}", uuid::Uuid::new_v4()));
-    let exe = std::fs::read(env!("CARGO_BIN_EXE_mis-worker")).unwrap();
-    let b_exe = patched(&exe, &a, &b, &tmp.join("mis-worker"));
+    let b_exe = patched(
+        &std::fs::read(built).unwrap(),
+        &a,
+        &b,
+        &tmp.join("mis-worker"),
+    );
     let _ = std::fs::remove_dir_all(&tmp);
-    let asset = mis_update::asset("", Channel::Edge, &b, mis_update::TARGET).unwrap();
-    let tarball = tar_gz("mis-worker", &b_exe);
-    let sig = sign(key, &tarball, &format!("mis {b} {}", asset.name));
-    let files = HashMap::from([
-        (format!("{}.minisig", asset.name), sig.into_bytes()),
-        (asset.name.clone(), tarball),
-    ]);
-    let (base, hits) = release_server(files).await;
+    let (base, hits) = release_server(edge_release("mis-worker", &b_exe, &b, key)).await;
     println!("A = {a}, B = {b}, release server {base}");
     Some((spawn_a(name, &base).await, b, b_exe, hits))
 }

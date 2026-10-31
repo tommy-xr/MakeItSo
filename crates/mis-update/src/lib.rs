@@ -64,6 +64,73 @@ pub fn blocked(
     }
 }
 
+/// Where to read the newest version on `channel`: edge's `edge.json`, or the signature of the
+/// latest stable release's tarball for `target` (its trusted comment names the version).
+pub fn latest_url(base: &str, channel: Channel, target: &str) -> String {
+    let base = base.trim_end_matches('/');
+    match channel {
+        Channel::Edge => format!("{base}/download/edge/edge.json"),
+        Channel::Stable => format!("{base}/latest/download/mis-{target}.tar.gz.minisig"),
+    }
+}
+
+/// The version named by what `latest_url` serves. Unverified: it only picks what to fetch,
+/// and `verify` binds the tarball to it.
+pub fn parse_latest(channel: Channel, body: &str) -> Option<String> {
+    let v = match channel {
+        Channel::Edge => {
+            let v: serde_json::Value = serde_json::from_str(body).ok()?;
+            v.get("version")?.as_str()?.to_string()
+        }
+        Channel::Stable => {
+            let sig = minisign_verify::Signature::decode(body).ok()?;
+            let mut words = sig.trusted_comment().split(' ');
+            (words.next()? == "mis").then_some(())?;
+            words.next()?.to_string()
+        }
+    };
+    Release::parse(&v).map(|_| v)
+}
+
+/// Whether `mine` should move to `latest`. Stable only moves to a higher semver. Edge follows
+/// its pointer (CI only moves it forward) to any other build, but never to a lower semver.
+pub fn newer(channel: Channel, mine: &str, latest: &str) -> bool {
+    let num = |v: &str| -> Option<Vec<u64>> {
+        let r = Release::parse(v)?;
+        r.semver.split('.').map(|n| n.parse().ok()).collect()
+    };
+    match (num(mine), num(latest)) {
+        (Some(m), Some(l)) => match channel {
+            Channel::Edge => mine != latest && l >= m,
+            Channel::Stable => l > m,
+        },
+        _ => false,
+    }
+}
+
+/// Longest a new build may take to answer `--version` or `--self-test`.
+const RUN_LIMIT: Duration = Duration::from_secs(30);
+
+/// `cmd`'s output, or Err if it runs past `limit` (then it is killed). Output past the pipe's
+/// buffer stalls the child into the limit: fine for a version line or a short error.
+fn output_within(
+    cmd: &mut std::process::Command,
+    limit: Duration,
+) -> anyhow::Result<std::process::Output> {
+    use std::process::Stdio;
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let start = std::time::Instant::now();
+    while child.try_wait()?.is_none() {
+        if start.elapsed() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("still running after {limit:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(child.wait_with_output()?)
+}
+
 /// One release tarball and the version it must hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Asset {
@@ -172,6 +239,16 @@ impl Source {
     }
 }
 
+/// The newest release version on `channel`, if it names one.
+pub async fn latest(src: &Source, channel: Channel, target: &str) -> anyhow::Result<String> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()?;
+    let url = latest_url(&src.base, channel, target);
+    let body = String::from_utf8(get(&http, &url).await?)?;
+    parse_latest(channel, &body).with_context(|| format!("no release version in {url}"))
+}
+
 /// Download `asset` and its signature, check them, and return the executable `bin` inside.
 pub async fn fetch(src: &Source, asset: &Asset, bin: &str) -> anyhow::Result<Vec<u8>> {
     let http = reqwest::Client::builder()
@@ -226,10 +303,9 @@ pub fn stage(target: &Path, exe: &[u8], bin: &str, version: &str) -> anyhow::Res
             .with_context(|| format!("writing {}", staged.path.display()))?,
         exe,
     )?;
-    let out = std::process::Command::new(&staged.path)
-        .arg("--version")
-        .output()
-        .with_context(|| format!("running {}", staged.path.display()))?;
+    let mut cmd = std::process::Command::new(&staged.path);
+    let out = output_within(cmd.arg("--version"), RUN_LIMIT)
+        .with_context(|| format!("running {} --version", staged.path.display()))?;
     let said = String::from_utf8_lossy(&out.stdout);
     if !out.status.success() || said.trim() != format!("{bin} {version}") {
         bail!("new {bin} says '{}', want '{bin} {version}'", said.trim());
@@ -238,6 +314,18 @@ pub fn stage(target: &Path, exe: &[u8], bin: &str, version: &str) -> anyhow::Res
 }
 
 impl Staged {
+    /// Run it with `args`; Err unless it exits 0.
+    pub fn run_ok(&self, args: &[&std::ffi::OsStr]) -> anyhow::Result<()> {
+        let mut cmd = std::process::Command::new(&self.path);
+        let out = output_within(cmd.args(args), RUN_LIMIT)
+            .with_context(|| format!("{}", args[0].to_string_lossy()))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            bail!("{} failed: {}", args[0].to_string_lossy(), err.trim());
+        }
+        Ok(())
+    }
+
     /// Rename it over the running executable, which keeps running from the old file. Windows
     /// can't replace a running exe but can rename it: it moves to `<exe>.old` (deleted by
     /// `cleanup` at the next start) and comes back if the swap fails.
@@ -292,6 +380,9 @@ pub fn restart(exe: &Path) -> anyhow::Error {
         Err(e) => anyhow::Error::from(e).context(format!("starting {}", exe.display())),
     }
 }
+
+#[cfg(feature = "testing")]
+pub mod testing;
 
 #[cfg(test)]
 mod tests {
@@ -416,6 +507,75 @@ mod tests {
             "other target"
         );
         assert!(verify(TEST_PUB, b"tarball", "garbage", &a).is_err());
+    }
+
+    #[test]
+    fn latest_versions_by_channel() {
+        let t = "x86_64-unknown-linux-gnu";
+        assert_eq!(
+            latest_url("http://r/", Channel::Edge, t),
+            "http://r/download/edge/edge.json"
+        );
+        assert_eq!(
+            latest_url("http://r", Channel::Stable, t),
+            format!("http://r/latest/download/mis-{t}.tar.gz.minisig")
+        );
+        let edge = r#"{"sha":"bbbbbbb000","version":"0.2.0+bbbbbbb","assets":[]}"#;
+        assert_eq!(
+            parse_latest(Channel::Edge, edge).as_deref(),
+            Some("0.2.0+bbbbbbb")
+        );
+        assert_eq!(
+            parse_latest(Channel::Edge, r#"{"version":"0.2.0+x-dirty"}"#),
+            None
+        );
+        assert_eq!(parse_latest(Channel::Edge, "<html>"), None);
+        let sig = sign(TEST_KEY, b"t", &format!("mis 0.3.0+ccccccc mis-{t}.tar.gz"));
+        assert_eq!(
+            parse_latest(Channel::Stable, &sig).as_deref(),
+            Some("0.3.0+ccccccc")
+        );
+        assert_eq!(
+            parse_latest(Channel::Stable, &sign(TEST_KEY, b"t", "x 1")),
+            None
+        );
+    }
+
+    #[test]
+    fn stable_only_moves_up_edge_follows_its_pointer() {
+        use Channel::*;
+        assert!(newer(Stable, "0.1.0+aaaaaaa", "0.2.0+bbbbbbb"));
+        assert!(
+            newer(Stable, "0.9.0+aaaaaaa", "0.10.0+bbbbbbb"),
+            "numeric, not text"
+        );
+        assert!(
+            !newer(Stable, "0.2.0+aaaaaaa", "0.1.0+bbbbbbb"),
+            "never down"
+        );
+        assert!(
+            !newer(Stable, "0.2.0+aaaaaaa", "0.2.0+bbbbbbb"),
+            "same release"
+        );
+        assert!(newer(Edge, "0.2.0+aaaaaaa", "0.2.0+bbbbbbb"));
+        assert!(!newer(Edge, "0.2.0+aaaaaaa", "0.2.0+aaaaaaa"));
+        assert!(!newer(Edge, "0.2.0+aaaaaaa", "junk"));
+        assert!(
+            !newer(Edge, "0.2.0+aaaaaaa", "0.1.0+bbbbbbb"),
+            "edge never to a lower semver"
+        );
+        assert!(newer(Edge, "0.1.0+aaaaaaa", "0.2.0+bbbbbbb"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_child_is_killed_at_the_limit() {
+        let mut cmd = std::process::Command::new("sleep");
+        let err = output_within(cmd.arg("5"), Duration::from_millis(200)).unwrap_err();
+        assert!(err.to_string().contains("still running"), "{err}");
+        let mut cmd = std::process::Command::new("echo");
+        let out = output_within(cmd.arg("hi"), RUN_LIMIT).unwrap();
+        assert_eq!(out.stdout, b"hi\n");
     }
 
     #[test]

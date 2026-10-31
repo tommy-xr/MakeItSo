@@ -4,14 +4,22 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Helpers for integration tests that fake a release: see `testing`.
+testing = ["dep:axum", "dep:minisign", "dep:tokio"]
+
 [dependencies]
 mis-types.workspace = true
 anyhow.workspace = true
 flate2 = "1.1"
 minisign-verify = "0.3"
 reqwest.workspace = true
+serde_json.workspace = true
 tar = "0.4"
 tracing.workspace = true
+axum = { workspace = true, optional = true }
+minisign = { version = "0.8", optional = true }
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 minisign = "0.8"
