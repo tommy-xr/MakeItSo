@@ -50,28 +50,32 @@ fn spawn_a(name: &str, releases: &str) -> Run {
         .env("MIS_RELEASE_KEY", format!("{FIXTURES}/test.pub"))
         .env("RUST_LOG", "info,mis_orchestrator=info")
         .env("NO_COLOR", "1")
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    // Logs go to stderr; drain so the pipe never fills.
-    let err = child.stderr.take().unwrap();
-    tokio::spawn(async move {
-        use tokio::io::AsyncBufReadExt;
-        let mut lines = tokio::io::BufReader::new(err).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if !line.starts_with(' ') && !line.is_empty() {
-                println!("orch| {line}");
-            }
-        }
-    });
+    // Logs on stdout, banner on stderr; drain both so neither pipe fills.
+    drain(child.stdout.take().unwrap());
+    drain(child.stderr.take().unwrap());
     Run {
         dir,
         exe,
         child,
         url: format!("http://127.0.0.1:{port}"),
     }
+}
+
+fn drain(out: impl tokio::io::AsyncRead + Unpin + Send + 'static) {
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = tokio::io::BufReader::new(out).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if !line.starts_with(' ') && !line.is_empty() {
+                println!("orch| {line}");
+            }
+        }
+    });
 }
 
 async fn get(url: &str) -> Option<serde_json::Value> {
