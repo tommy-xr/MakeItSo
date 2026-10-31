@@ -101,6 +101,9 @@ pub struct WorkerInfo {
     pub purpose: Option<String>,
     #[serde(default)]
     pub inventory: Inventory,
+    /// Its build, e.g. "0.1.0+1a2b3c4"; None from workers predating it.
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -224,6 +227,31 @@ pub enum WorkerMsg {
     PurposeFailed {
         why: String,
     },
+    /// Its progress toward the orchestrator's version; sent on change and after Hello.
+    Update {
+        update: WorkerUpdate,
+    },
+}
+
+/// Where release builds of a version are published. Stable: the tag `v<semver>`. Edge: every
+/// merge to main, named by commit.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Channel {
+    Stable,
+    Edge,
+}
+
+/// A worker updating itself to its orchestrator's version.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum WorkerUpdate {
+    #[default]
+    None,
+    /// `version` is installed; the worker takes no new tasks and restarts once its own end.
+    Pending { version: String },
+    /// Getting `version` failed; it runs on and retries later.
+    Failed { version: String, why: String },
 }
 
 /// Orchestrator -> worker.
@@ -232,6 +260,12 @@ pub enum WorkerMsg {
 pub enum OrchMsg {
     Welcome {
         id: WorkerId,
+        /// The orchestrator's build; workers that update themselves switch to it.
+        #[serde(default)]
+        version: Option<String>,
+        /// Where builds of `version` are published. None: nowhere workers can fetch them.
+        #[serde(default)]
+        channel: Option<Channel>,
     },
     Assign {
         task: Task,
@@ -241,15 +275,13 @@ pub enum OrchMsg {
     },
     /// Read these PR links of a task this worker ran now, then again while
     /// their checks are pending. Replaces any earlier watch of that task.
-    CheckPrs {
-        task: TaskId,
-        urls: Vec<String>,
-    },
+    CheckPrs { task: TaskId, urls: Vec<String> },
     /// Save this purpose (None clears it) in worker.toml, then confirm with
     /// `WorkerMsg::Purpose`.
-    SetPurpose {
-        purpose: Option<String>,
-    },
+    SetPurpose { purpose: Option<String> },
+    /// Reply to `WorkerUpdate::Pending`: nothing more is assigned on this connection, and every
+    /// earlier assignment came before this message. The worker may restart once its tasks end.
+    UpdateHeld,
 }
 
 /// Client (CLI / voice app) -> orchestrator.
@@ -324,6 +356,9 @@ pub struct WorkerSummary {
     /// Apps and MCP servers it gained since its purpose was last saved.
     #[serde(default)]
     pub new_tools: Vec<String>,
+    /// Its latest `WorkerMsg::Update` this connection.
+    #[serde(default)]
+    pub update: WorkerUpdate,
 }
 
 /// Why a task needs the user, until they open it (`ClientMsg::Seen`).
@@ -569,6 +604,7 @@ mod tests {
                             ..Default::default()
                         },
                     },
+                    version: Some("0.1.0+1a2b3c4".into()),
                 },
             },
             WorkerMsg::Event {
@@ -632,6 +668,40 @@ mod tests {
             let s = serde_json::to_string(&m).unwrap();
             assert_eq!(serde_json::from_str::<WorkerMsg>(&s).unwrap(), m);
         }
+        // Self-update: the version and channel ride Welcome; older orchestrators send neither.
+        for m in [
+            WorkerMsg::Update {
+                update: WorkerUpdate::Pending {
+                    version: "0.2.0+bbbbbbb".into(),
+                },
+            },
+            WorkerMsg::Update {
+                update: WorkerUpdate::Failed {
+                    version: "0.2.0+bbbbbbb".into(),
+                    why: "w".into(),
+                },
+            },
+        ] {
+            let s = serde_json::to_string(&m).unwrap();
+            assert_eq!(serde_json::from_str::<WorkerMsg>(&s).unwrap(), m);
+        }
+        let w = OrchMsg::Welcome {
+            id: Uuid::nil(),
+            version: Some("0.2.0+bbbbbbb".into()),
+            channel: Some(Channel::Edge),
+        };
+        let s = serde_json::to_string(&w).unwrap();
+        assert!(s.contains(r#""channel":"edge""#), "{s}");
+        assert_eq!(serde_json::from_str::<OrchMsg>(&s).unwrap(), w);
+        let old = r#"{"type":"welcome","id":"00000000-0000-0000-0000-000000000000"}"#;
+        assert_eq!(
+            serde_json::from_str::<OrchMsg>(old).unwrap(),
+            OrchMsg::Welcome {
+                id: Uuid::nil(),
+                version: None,
+                channel: None
+            }
+        );
         // Workers predating `roots` still parse.
         let old: WorkerInfo =
             serde_json::from_str(r#"{"hostname":"h","os":"o","arch":"a","harnesses":[]}"#).unwrap();
@@ -787,6 +857,7 @@ mod tests {
             stats: None,
             stats_at: None,
             new_tools: vec![],
+            update: WorkerUpdate::None,
         }
     }
 

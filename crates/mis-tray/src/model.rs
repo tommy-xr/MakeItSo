@@ -223,6 +223,7 @@ mod tests {
             stats: None,
             stats_at: None,
             new_tools: vec![],
+            update: Default::default(),
         }
     }
 
