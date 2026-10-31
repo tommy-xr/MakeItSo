@@ -52,15 +52,14 @@ jobs:
       - run: cargo build --release --workspace --target ${{ matrix.target }}
       - name: Package
         shell: bash
-        run: |
-          mkdir -p dist
-          tar -C target/${{ matrix.target }}/release -czf dist/mis-${{ matrix.target }}.tar.gz \
-            mis${{ matrix.ext }} mis-worker${{ matrix.ext }} mis-orchestrator${{ matrix.ext }}
+        run: sh release/package.sh target/${{ matrix.target }}/release ${{ matrix.target }} dist ${{ matrix.ext }}
       - uses: actions/upload-artifact@v4
         with:
           name: mis-${{ matrix.target }}
           path: dist/*.tar.gz
 
+  # A tag v<version> publishes mis-<target>.tar.gz (what install.sh fetches), each signed, plus
+  # SHA256SUMS. The tag must match the version the binaries report.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
@@ -68,10 +67,91 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+      - name: Sign
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          ver=$(sh release/version.sh dist/mis-x86_64-unknown-linux-gnu.tar.gz)
+          if [ "$GITHUB_REF_NAME" != "v${ver%%+*}" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the binaries' version $ver"
+            exit 1
+          fi
+          sh release/sign.sh dist "$ver" SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/*.minisig
+            dist/SHA256SUMS
+
+  # Every push to main updates the `edge` prerelease: mis-<target>-<sha7>.tar.gz per build (the
+  # newest 10 kept), so a worker can fetch exactly its orchestrator's build, and edge.json naming
+  # the newest.
+  edge:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: edge-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+      - name: Stage and sign
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          ver=$(sh release/version.sh dist/mis-x86_64-unknown-linux-gnu.tar.gz)
+          sh release/edge.sh stage dist "$ver" "$GITHUB_SHA"
+          echo "SHA7=${ver##*+}" >>"$GITHUB_ENV"
+      - name: Publish
+        # bash (not the default) for pipefail; any failed call fails the job.
+        shell: bash
+        run: |
+          if gh release view edge >/dev/null 2>&1; then
+            old=$(gh api "repos/$GH_REPO/git/ref/tags/edge" --jq .object.sha)
+          else
+            gh release create edge --prerelease --latest=false --target "$GITHUB_SHA" --title edge \
+              --notes "Rolling build of main. Assets are named by commit; edge.json names the newest."
+            old=$GITHUB_SHA
+          fi
+          # A build's assets never change once complete (its sums signature, uploaded last, exists):
+          # a re-run must not swap files edge.json may already name.
+          marker=SHA256SUMS-$SHA7.minisig
+          if ! gh release view edge --json assets --jq '.assets[].name' | grep -qxF "$marker"; then
+            gh release upload edge --clobber dist/*-"$SHA7".tar.gz* "dist/SHA256SUMS-$SHA7"
+            gh release upload edge --clobber "dist/$marker"
+          fi
+          # Only move forward: a run that finishes after a newer one leaves edge on the newer.
+          status=$(gh api "repos/$GH_REPO/compare/$old...$GITHUB_SHA" --jq .status)
+          case $status in
+            ahead | identical)
+              gh api -X PATCH "repos/$GH_REPO/git/refs/tags/edge" -f sha="$GITHUB_SHA" -F force=false
+              gh release upload edge --clobber dist/edge.json
+              cur=$SHA7 ;;
+            behind)
+              echo "edge is at $old, newer than $GITHUB_SHA; leaving it"
+              cur=${old::7} ;;
+            *)
+              echo "::error::edge is at $old, $status from $GITHUB_SHA (main rewritten?); move it by hand"
+              exit 1 ;;
+          esac
+          ids=$(gh api "repos/$GH_REPO/releases/tags/edge" | sh release/edge.sh prune 10 "$cur")
+          for id in $ids; do gh api -X DELETE "repos/$GH_REPO/releases/assets/$id"; done
+
