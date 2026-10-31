@@ -40,9 +40,11 @@ From source: `cargo install --git https://github.com/tommy-xr/MakeItSo mis-worke
 
 Updates: a released worker switches to its orchestrator's exact version, downloading that build
 from GitHub Releases, checking its signature against `release/minisign.pub`, and restarting once
-its task ends. The orchestrator tells workers its channel (`--update-channel stable|edge|off`;
-stable for released builds). `--no-self-update` / `MIS_NO_SELF_UPDATE=1` turns it off; builds
-not made by CI never update.
+its task ends (`--no-self-update` / `MIS_NO_SELF_UPDATE=1` turns that off). The orchestrator
+follows `--update-channel stable|edge|off` (stable for released builds): every 5 min it looks for
+a newer release, checks it the same way, runs the new binary's `--self-test`, and once no task
+runs restarts on it. The page's title bar shows a pending or failed update. Builds not made by CI
+never update; `mis-up` turns both off.
 
 ## Try it
 
