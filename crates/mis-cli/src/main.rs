@@ -239,6 +239,7 @@ fn ask_command(
     .map(String::from)
     .to_vec();
     argv.extend(mis_agent::claude::mcp_args(url, &refs));
+    argv.push("--strict-mcp-config".into()); // only the fleet's tools, not this machine's
     argv.extend(["--".into(), question.into()]);
     (argv, env)
 }

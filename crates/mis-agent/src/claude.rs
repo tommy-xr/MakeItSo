@@ -40,7 +40,8 @@ pub fn claude_models(claude_json: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Flags offering `url` as MCP server `MCP_SERVER` and nothing else, sending
+/// Flags offering `url` as MCP server `MCP_SERVER`, alongside the machine's own
+/// MCP servers (e.g. blender), sending
 /// `headers` (values may name env vars as `${VAR}`, which claude expands, so
 /// secrets stay out of argv). Its tools are pre-approved so they work without
 /// `--dangerously-skip-permissions`.
@@ -57,7 +58,6 @@ pub fn mcp_args(url: &str, headers: &[(&str, String)]) -> Vec<String> {
     vec![
         "--mcp-config".into(),
         config.to_string(),
-        "--strict-mcp-config".into(),
         "--allowedTools".into(),
         format!("mcp__{MCP_SERVER}"),
     ]
@@ -548,10 +548,8 @@ mod tests {
             (Some("http"), Some("http://127.0.0.1:9/mcp"))
         );
         assert_eq!(mis["headers"]["Authorization"], "Bearer ${MIS_MCP_TOKEN}");
-        assert_eq!(
-            args[2..],
-            ["--strict-mcp-config", "--allowedTools", "mcp__mis"]
-        );
+        // Not --strict-mcp-config: tasks keep the worker's MCP servers.
+        assert_eq!(args[2..], ["--allowedTools", "mcp__mis"]);
     }
 
     #[test]
