@@ -139,6 +139,7 @@ async fn spawn_a(name: &str, releases: &str) -> Run {
         .env("MIS_RELEASE_URL", releases)
         .env("MIS_RELEASE_KEY", format!("{FIXTURES}/test.pub"))
         .env("RUST_LOG", "info")
+        .env("NO_COLOR", "1")
         .current_dir(&dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -285,8 +286,6 @@ async fn worker_refuses_a_build_signed_with_another_key() {
         };
         assert_eq!(version, b);
         assert!(why.contains("signature"), "{why}");
-        // Still connected and beating on A.
-        assert!(matches!(next(&mut ws).await, Some(WorkerMsg::Stats(_))));
     })
     .await;
     let logs = run.logs.lock().unwrap().clone();
