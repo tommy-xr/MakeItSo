@@ -511,11 +511,13 @@ impl App {
     fn authorized(&self, headers: &HeaderMap, peer: IpAddr, access: &Access) -> Option<Scope> {
         let passed = matches!(access, Access::Passed(_));
         // Behind Access only direct local connections may skip it: loopback, or a
-        // private-network peer holding the token (a LAN worker). cloudflared also
+        // private-network peer presenting the full token (a LAN worker). cloudflared also
         // connects from loopback, but always adds Cloudflare's headers. (Any local
         // process can still connect directly, as without Access.)
         let peer = peer.to_canonical();
-        let direct = peer.is_loopback() || (self.token.is_some() && private_net(peer));
+        let full = |t: &String| bearer_from(headers) == Some(t.as_str());
+        let direct =
+            peer.is_loopback() || (private_net(peer) && self.token.as_ref().is_some_and(full));
         if matches!(access, Access::Failed) && (!direct || via_cloudflare(headers)) {
             return None;
         }
@@ -1307,8 +1309,13 @@ mod tests {
         assert!(open
             .authorized(&headers(&page), lo, &Access::Failed)
             .is_none());
-        // Without a token, LAN peers are not trusted.
+        // A read token is not enough from the LAN.
+        let ro = App::new(Some("s".into())).with_read_tokens(list(&["r"]));
         let lan: IpAddr = "192.168.4.20".parse().unwrap();
+        let read = headers(&[("authorization", "Bearer r")]);
+        assert!(ro.authorized(&read, lan, &Access::Failed).is_none());
+        assert!(ro.authorized(&read, lo, &Access::Failed).is_some());
+        // Without a token, LAN peers are not trusted.
         assert!(open
             .authorized(&headers(&[]), lan, &Access::Failed)
             .is_none());
