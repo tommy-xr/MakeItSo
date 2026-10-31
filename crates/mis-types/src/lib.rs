@@ -18,6 +18,8 @@ pub use inventory::{InstalledApp, Inventory, Machine};
 mod links;
 pub use links::{github_link, github_links, Checks, Link, LinkKind, PrState, PrStatus};
 pub mod mcp;
+mod permissions;
+pub use permissions::{PermissionMode, Permissions};
 
 pub type WorkerId = Uuid;
 pub type TaskId = Uuid;
@@ -104,6 +106,10 @@ pub struct WorkerInfo {
     /// Its build, e.g. "0.1.0+1a2b3c4"; None from workers predating it.
     #[serde(default)]
     pub version: Option<String>,
+    /// worker.toml `[permissions]` as resolved, `full` under `--skip-permissions`;
+    /// None: the harnesses' headless defaults, which deny writes, shell and MCP.
+    #[serde(default)]
+    pub permissions: Option<Permissions>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -191,6 +197,8 @@ pub enum AgentEvent {
 }
 
 /// Worker -> orchestrator.
+// Hello is big but sent once per connection; boxing it isn't worth the churn.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkerMsg {
@@ -605,6 +613,12 @@ mod tests {
                         },
                     },
                     version: Some("0.1.0+1a2b3c4".into()),
+                    permissions: Some(Permissions {
+                        mode: PermissionMode::Folders,
+                        folders: vec!["/assets".into()],
+                        mcp: vec!["blender".into()],
+                        commands: vec!["python3".into()],
+                    }),
                 },
             },
             WorkerMsg::Event {

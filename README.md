@@ -81,8 +81,8 @@ Shows the fleet and the 8 newest tasks; click one to open it in the browser. Wit
 Run once per machine, from the directory tasks should run in:
 
 ```sh
-mis-worker setup                 # asks url, token, roots; test-connects; saves config
-mis-worker --skip-permissions    # then runs from the saved config
+mis-worker setup                 # asks url, token, roots, permissions; test-connects; saves config
+mis-worker                       # then runs from the saved config
 ```
 
 Every question has a flag (`--url`, `--token`, `--cf-access-client-id`, `--root`), so it also runs
@@ -95,7 +95,25 @@ token = "..."
 cf_access_client_id = "..."      # optional, with the secret
 cf_access_client_secret = "..."
 roots = ["/Users/me/code"]       # task --cwd must start under one (not a sandbox); default: cwd
+
+[permissions]                    # what agents may do without asking
+mode = "folders"                 # or "full": anything, anywhere
+folders = ["~/code/game", "~/assets"]  # writable besides the task's dir; default: the roots
+mcp = ["blender"]                # MCP servers whose tools are allowed; default: all found
+commands = ["python3", "git log"]      # claude: command prefixes allowed besides read-only ones; default: none
 ```
+
+Without `[permissions]`, claude and codex run with their headless defaults, which deny writes, MCP
+calls and all but read-only shell commands; the Workers view warns about it. `--skip-permissions` means `mode = "full"`
+whatever the file says (`--permissions`, `--folder`, `--mcp`, `--command` answer setup's questions).
+In folders mode claude gets `--permission-mode acceptEdits`, `--add-dir` per folder,
+`--allowedTools mcp__<server>__* Bash(<command> *)` and its Bash sandbox, so an allowed `python3`
+can't write outside the folders either (network stays open; on Linux the sandbox needs `bubblewrap`
+and `socat`, or claude refuses to start). Anything else is denied. Codex gets its workspace-write
+sandbox with the folders writable and network on, and the listed MCP servers approved; it runs any
+command inside that sandbox. Both may also write a temp dir. Allow rules in your own claude or codex
+config still apply, and MCP servers run outside either sandbox. A claude MCP server loads in tasks
+when it is user-scoped (`claude mcp add -s user`) or set up for the task's directory.
 
 Setup also asks what the machine is for (`--purpose "Blender + blender-mcp; 3D assets"`) and takes an
 inventory: MCP server names per harness (`~/.claude.json`, `.mcp.json` under the roots,

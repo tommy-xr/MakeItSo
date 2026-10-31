@@ -200,6 +200,8 @@
   .worker .task { position: relative; display: inline-block; padding: .625rem .25rem; margin: -.625rem 0; }
   /* Purpose and tools: what the planner routes on. The tools line opens above the row's link. */
   .purpose { margin-top: .25rem; overflow-wrap: anywhere; }
+  .perm { margin-top: .25rem; font-size: .875rem; overflow-wrap: anywhere; }
+  .nw { white-space: nowrap; }
   details.caps { position: relative; margin: 0; border: 0; font-size: .875rem; }
   .caps summary { padding: .625rem 0; margin: -.375rem 0 -.625rem; font: inherit; text-transform: none; letter-spacing: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .caps dl { margin: .5rem 0 0; gap: .125rem .75rem; }
@@ -1029,6 +1031,23 @@ function versionLine(w) {
   if (orchVersion && v !== orchVersion) return el('div', { className: 'ver new' }, `${v} · orchestrator runs ${orchVersion}`);
   return el('div', { className: 'ver dim' }, v);
 }
+// What agents may do unasked (worker.toml [permissions]); older workers send none.
+const permText = (p) => (p.mode === 'full' ? 'full permissions'
+  : `writes: task dir${(p.folders || []).length ? `, ${p.folders.join(', ')}` : ''}`);
+function permLine(w) {
+  const p = w.info.permissions;
+  if (!p) return w.info.harnesses.length ? el('div', { className: 'new' }, 'tools will be denied: run setup or ', el('span', { className: 'nw' }, '--skip-permissions')) : '';
+  return el('div', { className: 'perm dim' }, permText(p));
+}
+const permRows = (w) => {
+  const p = w.info.permissions, list = (v) => (v || []).join(', ') || 'none';
+  if (!p) return [el('dt', {}, 'permissions'), el('dd', { className: 'warn' }, 'none: tools will be denied; run setup or --skip-permissions')];
+  if (p.mode === 'full') return [el('dt', {}, 'permissions'), el('dd', {}, 'full: anything, anywhere')];
+  return [el('dt', {}, 'permissions'), el('dd', {}, `folders: task dir\n${(p.folders || []).join('\n')}`.trim()),
+    el('dt', {}, 'allowed mcp'), el('dd', {}, list(p.mcp)), el('dt', {}, 'commands'),
+    // Codex runs any command, inside a sandbox that only lets it write the folders.
+    el('dd', {}, list(p.commands) + (w.info.harnesses.includes('codex') ? '\ncodex: any, sandboxed' : ''))];
+};
 
 function renderWorkers() {
   renderNotify();
@@ -1042,7 +1061,7 @@ function renderWorkers() {
       run ? el('div', { className: 'activity' }, ...dots([clock(run), tokensOf(run), run.activity])) : '',
       w.info.purpose ? el('div', { className: 'purpose' }, w.info.purpose) : '',
       (w.new_tools || []).length ? el('div', { className: 'new' }, `new: ${w.new_tools.join(', ')}`) : '',
-      capsLine(w), meterLine(w), limitRows(w), versionLine(w));
+      permLine(w), capsLine(w), meterLine(w), limitRows(w), versionLine(w));
   }));
   if (!workers.length) $('machines').append(el('li', { className: 'dim' }, 'no workers connected'));
 }
@@ -1108,7 +1127,8 @@ function renderMachine(id) {
       el('dt', {}, 'machine'), el('dd', {}, machineText(w)),
       el('dt', {}, 'harnesses'), el('dd', {}, w.info.harnesses.join(', ') || '-'),
       ...capRows(w),
-      el('dt', {}, 'roots'), el('dd', {}, (w.info.roots || []).join('\n') || '-')),
+      el('dt', {}, 'roots'), el('dd', {}, (w.info.roots || []).join('\n') || '-'),
+      ...permRows(w)),
     meter(disk === null ? 'disk —' : `disk ${free === null ? '' : `${Math.round(free)} GB free, `}${pct(disk)} used`, disk),
     meter(`cpu ${pct(cpu)}`, cpu),
     meter(`memory ${pct(mem)}`, mem),

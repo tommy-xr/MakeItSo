@@ -77,6 +77,18 @@ const KNOWN: &[Known] = &[
     },
 ];
 
+/// Found apps' executables on PATH, e.g. ["python3", "ffmpeg"]: commands
+/// setup suggests letting agents run.
+pub fn commands(inv: &Inventory, on_path: impl Fn(&str) -> bool) -> Vec<String> {
+    KNOWN
+        .iter()
+        .filter(|k| inv.apps.iter().any(|a| a.name == k.name))
+        .filter_map(|k| k.bin.map(|(b, _)| b))
+        .filter(|b| on_path(b))
+        .map(String::from)
+        .collect()
+}
+
 /// Keys of `v[key]` when it is an object, sorted.
 fn keys(v: &Value, key: &str) -> Vec<String> {
     let mut names: Vec<String> = v
@@ -411,6 +423,20 @@ mod tests {
         assert!(claude_mcp("not json", &roots).is_err());
         let project = r#"{"mcpServers": {"b": {"env": {"K": "sk-live-123"}}, "a": {}}}"#;
         assert_eq!(mcp_json(project).unwrap(), ["a", "b"]);
+    }
+
+    #[test]
+    fn suggests_found_apps_that_are_on_path() {
+        let app = |n: &str| InstalledApp {
+            name: n.into(),
+            version: None,
+        };
+        let inv = Inventory {
+            apps: vec![app("Blender"), app("Xcode"), app("python3"), app("ffmpeg")],
+            ..Default::default()
+        };
+        // Blender.app without `blender` on PATH, and Xcode (no CLI entry), aren't suggested.
+        assert_eq!(commands(&inv, |b| b != "blender"), ["ffmpeg", "python3"]);
     }
 
     #[test]

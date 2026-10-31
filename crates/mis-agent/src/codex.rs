@@ -4,7 +4,7 @@ use anyhow::Context;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use mis_types::{AgentEvent, LimitWindow, TaskId, TASK_ENV};
+use mis_types::{AgentEvent, LimitWindow, PermissionMode, Permissions, TaskId, TASK_ENV};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -13,10 +13,7 @@ use tokio::sync::mpsc;
 use crate::{Agent, BoxFut, RunOpts, MCP_SERVER, MCP_TOKEN_ENV};
 
 #[derive(Default)]
-pub struct CodexAgent {
-    /// Pass `--dangerously-bypass-approvals-and-sandbox`.
-    pub skip_permissions: bool,
-}
+pub struct CodexAgent;
 
 /// Slugs from codex's `models_cache.json` with visibility "list", by priority,
 /// after the default `model` set at the top level of `config.toml` (if any).
@@ -171,6 +168,30 @@ pub fn mcp_args(url: &str) -> Vec<String> {
     .collect()
 }
 
+/// `-c` overrides for `p` (which passed `crate::check`). Folders: the
+/// workspace-write sandbox (cwd plus `folders` writable, network on, as git
+/// push and package installs need it) and `mcp` servers' tools approved;
+/// `exec` refuses any other MCP call. Every `mcp` name must be a server in
+/// codex's config: an override for an unknown one fails codex's config load.
+/// Commands aren't listed: in the sandbox codex runs any.
+pub fn permission_args(p: &Permissions) -> Vec<String> {
+    if p.mode == PermissionMode::Full {
+        return vec!["--dangerously-bypass-approvals-and-sandbox".into()];
+    }
+    let roots = toml::Value::Array(p.folders.iter().map(|f| f.clone().into()).collect());
+    let mut kv = vec![
+        r#"sandbox_mode="workspace-write""#.to_string(),
+        format!("sandbox_workspace_write.writable_roots={roots}"),
+        "sandbox_workspace_write.network_access=true".into(),
+    ];
+    kv.extend(
+        (p.mcp.iter()).map(|s| format!(r#"mcp_servers.{s}.default_tools_approval_mode="approve""#)),
+    );
+    kv.into_iter()
+        .flat_map(|kv| ["-c".to_string(), kv])
+        .collect()
+}
+
 /// Map one `--json` line to zero or more events.
 pub fn parse_line(line: &str) -> Vec<AgentEvent> {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -235,8 +256,8 @@ impl CodexAgent {
             a.push("resume".into());
         }
         a.extend(["--json", "--skip-git-repo-check"].map(String::from));
-        if self.skip_permissions {
-            a.push("--dangerously-bypass-approvals-and-sandbox".into());
+        if let Some(p) = o.permissions {
+            a.extend(permission_args(p));
         }
         // One `=` token, so a model starting with '-' can't be read as a flag.
         if let Some(m) = o.model {
@@ -536,15 +557,17 @@ mod tests {
 
     #[test]
     fn argv_new_and_resumed() {
-        let agent = CodexAgent {
-            skip_permissions: true,
+        let full = Permissions {
+            mode: PermissionMode::Full,
+            ..Default::default()
         };
         let o = RunOpts {
             model: Some("gpt-5"),
+            permissions: Some(&full),
             ..Default::default()
         };
         assert_eq!(
-            agent.argv("hi", &o),
+            CodexAgent.argv("hi", &o),
             [
                 "exec",
                 "--json",
@@ -560,7 +583,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            CodexAgent::default().argv("-more", &o),
+            CodexAgent.argv("-more", &o),
             [
                 "exec",
                 "resume",
@@ -580,7 +603,7 @@ mod tests {
             images: &images,
             ..Default::default()
         };
-        let a = CodexAgent::default().argv("hi", &o);
+        let a = CodexAgent.argv("hi", &o);
         assert_eq!(
             &a[a.len() - 6..],
             ["-i", "/t/a.jpg", "-i", "/t/b.png", "--", "hi"]
@@ -589,10 +612,43 @@ mod tests {
             resume: Some("t-1"),
             ..o
         };
-        let a = CodexAgent::default().argv("hi", &o);
+        let a = CodexAgent.argv("hi", &o);
         assert_eq!(
             &a[a.len() - 7..],
             ["-i", "/t/a.jpg", "-i", "/t/b.png", "--", "t-1", "hi"]
+        );
+    }
+
+    #[test]
+    fn folders_sandbox_writes_to_each_folder_and_approves_listed_servers() {
+        let p = Permissions {
+            mode: PermissionMode::Folders,
+            folders: vec!["/u/game".into(), r#"/u/a "b""#.into()],
+            mcp: vec!["blender".into()],
+            commands: vec!["python3".into()],
+        };
+        let o = RunOpts {
+            resume: Some("t-1"),
+            permissions: Some(&p),
+            ..Default::default()
+        };
+        let a = CodexAgent.argv("hi", &o);
+        assert!(!a.iter().any(|x| x.contains("dangerously")));
+        assert_eq!(
+            a[4..],
+            [
+                "-c",
+                r#"sandbox_mode="workspace-write""#,
+                "-c",
+                r#"sandbox_workspace_write.writable_roots=["/u/game", '/u/a "b"']"#,
+                "-c",
+                "sandbox_workspace_write.network_access=true",
+                "-c",
+                r#"mcp_servers.blender.default_tools_approval_mode="approve""#,
+                "--",
+                "t-1",
+                "hi"
+            ]
         );
     }
 

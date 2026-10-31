@@ -4,6 +4,7 @@
 mod config;
 mod inventory;
 mod mcp;
+mod permissions;
 mod pr;
 mod roots;
 mod setup;
@@ -51,7 +52,8 @@ struct Args {
     /// Default: the current directory.
     #[arg(long = "root", env = "MIS_ROOTS")]
     roots: Vec<String>,
-    /// Let agents run tools without permission prompts (required for real work).
+    /// Let agents use any tool, anywhere: overrides worker.toml `[permissions]`
+    /// with mode = "full".
     #[arg(long)]
     skip_permissions: bool,
     /// Don't switch to the orchestrator's version by downloading its signed release build
@@ -111,6 +113,18 @@ async fn main() -> Result<()> {
     let access = access_values(&cfg)?;
     let roots = roots::canonical_roots(&cfg.roots)?;
 
+    let perms = permissions::effective(cfg.permissions.clone(), args.skip_permissions)
+        .map(|p| permissions::resolve(p, std::env::home_dir().as_deref()))
+        .transpose()?;
+    match &perms {
+        Some(p) => tracing::info!(?p, "permissions"),
+        None => tracing::warn!(
+            "no [permissions] in {}: agents' writes, shell and MCP calls will be denied; \
+             run `mis-worker setup` or pass --skip-permissions",
+            path.display()
+        ),
+    }
+
     let (id, id_lock) = worker_id()?;
     // Before any swap: on Linux a replaced executable's path reads "(deleted)". Resolved, so a
     // symlinked install swaps the real file.
@@ -125,7 +139,7 @@ async fn main() -> Result<()> {
     );
     let updater = update::Updater::new(VERSION, blocked, &source.base, mis_update::TARGET);
     tracing::info!("mis-worker {VERSION}; {}", updater.describe());
-    let agents = mis_agent::available(args.skip_permissions);
+    let agents = mis_agent::available();
     if agents.is_empty() {
         anyhow::bail!("no agent harness found on PATH (need `claude` or `codex`)");
     }
@@ -134,6 +148,13 @@ async fn main() -> Result<()> {
     if let Err(e) = config::save_inventory(&path, file, &inventory) {
         tracing::warn!("could not save inventory: {e:#}");
     }
+    let harness_perms: HashMap<&'static str, Permissions> = (perms.iter())
+        .flat_map(|p| {
+            agents
+                .iter()
+                .map(|a| (a.name(), permissions::for_harness(p, a.name(), &inventory)))
+        })
+        .collect();
     let info = WorkerInfo {
         hostname: hostname(),
         os: std::env::consts::OS.into(),
@@ -144,6 +165,7 @@ async fn main() -> Result<()> {
         purpose: cfg.purpose.clone(),
         inventory,
         version: Some(VERSION.into()),
+        permissions: perms,
     };
     tracing::info!(?info.harnesses, ?info.models, ?info.roots, "connecting to {}", cfg.url);
     tracing::info!("inventory: {}", info.inventory.brief());
@@ -152,6 +174,7 @@ async fn main() -> Result<()> {
     let (pr_tx, pr_rx) = mpsc::channel::<WorkerMsg>(64);
     let ctx = Ctx {
         agents: Arc::new(agents),
+        permissions: Arc::new(harness_perms),
         roots: Arc::new(roots),
         pr_tx,
         limits: Default::default(),
@@ -260,6 +283,8 @@ fn advertised(
 #[derive(Clone)]
 struct Ctx {
     agents: Arc<Vec<Box<dyn Agent>>>,
+    /// Per harness; empty when worker.toml sets none (see `permissions::effective`).
+    permissions: Arc<HashMap<&'static str, Permissions>>,
     roots: Arc<Vec<PathBuf>>,
     /// Latest limit windows per harness, from runs and polling.
     limits: Arc<Mutex<BTreeMap<String, Vec<LimitWindow>>>>,
@@ -570,6 +595,7 @@ async fn run_task(
             mcp: server.as_ref().map(|s| &s.mcp),
             resume: task.resume.as_deref(),
             images: &image_paths,
+            permissions: ctx.permissions.get(agent.name()),
         },
         atx,
     );

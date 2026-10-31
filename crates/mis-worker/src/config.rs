@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use mis_types::Inventory;
+use mis_types::{Inventory, Permissions};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_URL: &str = "ws://127.0.0.1:7474";
@@ -24,9 +24,14 @@ pub struct Config {
     pub models: BTreeMap<String, Vec<String>>,
     /// What this machine is for, in the user's words; sent to the planner.
     pub purpose: Option<String>,
+    /// What agents may do unasked; None leaves the harnesses' headless defaults.
+    pub permissions: Option<Permissions>,
     /// Last inventory taken; rewritten on each start when it changes.
     pub inventory: Option<Inventory>,
 }
+
+/// Keys `[permissions]` takes: a typo must not silently drop a rule.
+const PERMISSION_KEYS: [&str; 4] = ["mode", "folders", "mcp", "commands"];
 
 /// Settings the worker runs with.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +44,8 @@ pub struct Resolved {
     pub roots: Vec<PathBuf>,
     pub models: BTreeMap<String, Vec<String>>,
     pub purpose: Option<String>,
+    /// As written in the file (folders unresolved).
+    pub permissions: Option<Permissions>,
 }
 
 /// `cli` beats `file` beats defaults (`DEFAULT_URL`, roots = `[cwd]`). The
@@ -62,6 +69,7 @@ pub fn merge(cli: Config, file: Config, cwd: PathBuf) -> Resolved {
         roots,
         models: file.models,
         purpose: file.purpose,
+        permissions: file.permissions,
     }
 }
 
@@ -69,14 +77,30 @@ pub fn merge(cli: Config, file: Config, cwd: PathBuf) -> Resolved {
 pub fn load(path: &Path) -> anyhow::Result<Config> {
     match std::fs::read_to_string(path) {
         // Message only: toml's Display quotes the offending line, which may be a secret.
-        Ok(s) => toml::from_str(&s).map_err(|e| {
-            let line = e.span().map_or(0, |r| s[..r.start].lines().count().max(1));
-            anyhow::anyhow!(
-                "reading {}: {} (line {line})",
-                path.display(),
-                e.message().trim()
-            )
-        }),
+        Ok(s) => {
+            let cfg: Config = toml::from_str(&s).map_err(|e| {
+                let line = e.span().map_or(0, |r| s[..r.start].lines().count().max(1));
+                anyhow::anyhow!(
+                    "reading {}: {} (line {line})",
+                    path.display(),
+                    e.message().trim()
+                )
+            })?;
+            let table: toml::Table = toml::from_str(&s)?;
+            let keys = table.get("permissions").and_then(|p| p.as_table());
+            if let Some(k) = keys
+                .into_iter()
+                .flatten()
+                .map(|(k, _)| k)
+                .find(|k| !PERMISSION_KEYS.contains(&k.as_str()))
+            {
+                anyhow::bail!(
+                    "reading {}: unknown key `{k}` in [permissions]",
+                    path.display()
+                );
+            }
+            Ok(cfg)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
@@ -256,5 +280,28 @@ mod tests {
     #[test]
     fn rejects_unknown_keys() {
         assert!(toml::from_str::<Config>("root = [\"/x\"]").is_err());
+        let dir = std::env::temp_dir().join(format!("mis-cfg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("worker.toml");
+        std::fs::write(&path, "[permissions]\nfolder = [\"/x\"]\n").unwrap();
+        let e = format!("{:#}", load(&path).unwrap_err());
+        assert!(e.contains("unknown key `folder` in [permissions]"), "{e}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn permissions_roundtrip_with_folders_default() {
+        let cfg: Config = toml::from_str(
+            "[permissions]\nfolders = [\"~/assets\"]\nmcp = [\"blender\"]\ncommands = [\"python3\"]\n",
+        )
+        .unwrap();
+        let p = cfg.permissions.clone().unwrap();
+        assert_eq!(p.mode, mis_types::PermissionMode::Folders);
+        assert_eq!(p.folders, ["~/assets"]);
+        let s = toml::to_string(&cfg).unwrap();
+        assert!(s.contains("mode = \"folders\""), "{s}");
+        assert_eq!(toml::from_str::<Config>(&s).unwrap(), cfg);
+        let r = merge(Config::default(), cfg, "/cwd".into());
+        assert_eq!(r.permissions, Some(p));
     }
 }

@@ -1,7 +1,7 @@
 //! Claude Code backend: `claude -p <prompt> --output-format stream-json --verbose`.
 
 use anyhow::Context;
-use mis_types::{AgentEvent, LimitWindow, TaskId, TASK_ENV};
+use mis_types::{AgentEvent, LimitWindow, PermissionMode, Permissions, TaskId, TASK_ENV};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -13,8 +13,6 @@ use crate::{Agent, BoxFut, RunOpts, MCP_SERVER, MCP_TOKEN_ENV};
 
 #[derive(Default)]
 pub struct ClaudeAgent {
-    /// Pass `--dangerously-skip-permissions` so tool calls don't block headless.
-    pub skip_permissions: bool,
     /// Extra CLI flags, e.g. `--tools ""` for a tool-less planner call.
     pub extra_args: Vec<String>,
 }
@@ -40,12 +38,10 @@ pub fn claude_models(claude_json: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Flags offering `url` as MCP server `MCP_SERVER`, alongside the machine's own
-/// MCP servers (e.g. blender), sending
+/// `--mcp-config` JSON offering `url` as MCP server `MCP_SERVER`, sending
 /// `headers` (values may name env vars as `${VAR}`, which claude expands, so
-/// secrets stay out of argv). Its tools are pre-approved so they work without
-/// `--dangerously-skip-permissions`.
-pub fn mcp_args(url: &str, headers: &[(&str, String)]) -> Vec<String> {
+/// secrets stay out of argv).
+fn mcp_config(url: &str, headers: &[(&str, String)]) -> String {
     let headers: serde_json::Map<_, _> = headers
         .iter()
         .map(|(k, v)| (k.to_string(), v.clone().into()))
@@ -55,12 +51,44 @@ pub fn mcp_args(url: &str, headers: &[(&str, String)]) -> Vec<String> {
         "url": url,
         "headers": headers,
     }}});
+    config.to_string()
+}
+
+/// Flags offering `url` (see `mcp_config`) as the only MCP server, its tools
+/// pre-approved so they work without `--dangerously-skip-permissions`.
+pub fn mcp_args(url: &str, headers: &[(&str, String)]) -> Vec<String> {
     vec![
         "--mcp-config".into(),
-        config.to_string(),
+        mcp_config(url, headers),
+        "--strict-mcp-config".into(),
         "--allowedTools".into(),
         format!("mcp__{MCP_SERVER}"),
     ]
+}
+
+/// Folders mode's Bash sandbox: an allowed command (say `python3 -c ...`) can
+/// write only the cwd, the folders and a temp dir, enforced by the OS; network
+/// stays open. No unsandboxed retry, and no run at all where the sandbox can't
+/// start (Linux without bubblewrap). Allowed commands still need their rule.
+const SANDBOX: &str = r#"{"sandbox":{"enabled":true,"failIfUnavailable":true,"allowUnsandboxedCommands":false,"autoAllowBashIfSandboxed":false,"network":{"allowedDomains":["*"]}}}"#;
+
+/// Flags for `p` (which passed `crate::check`). Folders: edits auto-accepted
+/// in the cwd and each folder, shell commands sandboxed to them (`SANDBOX`);
+/// `allowed` gets each MCP server's tools and each command prefix. Anything
+/// else is denied, as nobody can answer a prompt.
+fn permission_args(p: &Permissions, allowed: &mut Vec<String>) -> Vec<String> {
+    if p.mode == PermissionMode::Full {
+        return vec!["--dangerously-skip-permissions".into()];
+    }
+    let mut a: Vec<String> = ["--permission-mode", "acceptEdits", "--settings", SANDBOX]
+        .map(String::from)
+        .to_vec();
+    for f in &p.folders {
+        a.extend(["--add-dir".into(), f.clone()]);
+    }
+    allowed.extend(p.mcp.iter().map(|s| format!("mcp__{s}__*")));
+    allowed.extend(p.commands.iter().map(|c| format!("Bash({c} *)")));
+    a
 }
 
 /// Map one stream-json line to zero or more events, without token usage
@@ -233,14 +261,24 @@ impl ClaudeAgent {
         let mut a: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose"]
             .map(String::from)
             .to_vec();
-        if self.skip_permissions {
-            a.push("--dangerously-skip-permissions".into());
-        }
-        a.extend(self.extra_args.iter().cloned());
+        let mut allowed = vec![];
         if let Some(m) = o.mcp {
             let auth = format!("Bearer ${{{MCP_TOKEN_ENV}}}");
-            a.extend(mcp_args(&m.url, &[("Authorization", auth)]));
+            a.extend([
+                "--mcp-config".into(),
+                mcp_config(&m.url, &[("Authorization", auth)]),
+            ]);
+            allowed.push(format!("mcp__{MCP_SERVER}"));
         }
+        if let Some(p) = o.permissions {
+            a.extend(permission_args(p, &mut allowed));
+        }
+        // One list: each value is its own argv entry, as rules may hold spaces.
+        if !allowed.is_empty() {
+            a.push("--allowedTools".into());
+            a.extend(allowed);
+        }
+        a.extend(self.extra_args.iter().cloned());
         // One `=` token each, so a value starting with '-' can't be read as a flag.
         if let Some(m) = o.model {
             a.push(format!("--model={m}"));
@@ -548,19 +586,27 @@ mod tests {
             (Some("http"), Some("http://127.0.0.1:9/mcp"))
         );
         assert_eq!(mis["headers"]["Authorization"], "Bearer ${MIS_MCP_TOKEN}");
-        // Not --strict-mcp-config: tasks keep the worker's MCP servers.
-        assert_eq!(args[2..], ["--allowedTools", "mcp__mis"]);
+        // `mis ask`: only the fleet's server. Tasks use `mcp_config` without the flag.
+        assert_eq!(
+            args[2..],
+            ["--strict-mcp-config", "--allowedTools", "mcp__mis"]
+        );
     }
 
     #[test]
     fn argv_resumes_and_keeps_prompt_last() {
         let agent = ClaudeAgent {
-            skip_permissions: true,
             extra_args: vec!["--max-turns".into(), "1".into()],
+        };
+        let full = Permissions {
+            mode: PermissionMode::Full,
+            folders: vec!["/ignored".into()],
+            ..Default::default()
         };
         let o = RunOpts {
             model: Some("haiku"),
             resume: Some("s-1"),
+            permissions: Some(&full),
             ..Default::default()
         };
         assert_eq!(
@@ -583,6 +629,56 @@ mod tests {
         let plain = ClaudeAgent::default().argv("hi", &RunOpts::default());
         assert!(!plain.iter().any(|a| a.starts_with("--resume")));
         assert_eq!(plain.last().unwrap(), "hi");
+    }
+
+    #[test]
+    fn folders_accept_edits_in_each_dir_and_allow_listed_tools_only() {
+        let p = Permissions {
+            mode: PermissionMode::Folders,
+            folders: vec!["/u/game".into(), "/u/my assets".into()],
+            mcp: vec!["blender".into()],
+            commands: vec!["python3".into(), "git log".into()],
+        };
+        let mcp = crate::Mcp {
+            url: "http://127.0.0.1:9/mcp".into(),
+            token: "t".into(),
+        };
+        let o = RunOpts {
+            mcp: Some(&mcp),
+            permissions: Some(&p),
+            ..Default::default()
+        };
+        let a = ClaudeAgent::default().argv("hi", &o);
+        // The user's own MCP servers (e.g. blender) load beside ours.
+        assert!(!a.iter().any(|x| x == "--strict-mcp-config"));
+        assert!(!a.iter().any(|x| x.contains("dangerously")));
+        assert_eq!(
+            a[6..],
+            [
+                "--permission-mode",
+                "acceptEdits",
+                "--settings",
+                SANDBOX,
+                "--add-dir",
+                "/u/game",
+                "--add-dir",
+                "/u/my assets",
+                "--allowedTools",
+                "mcp__mis",
+                "mcp__blender__*",
+                "Bash(python3 *)",
+                "Bash(git log *)",
+                "--",
+                "hi"
+            ]
+        );
+        // Unset: only our own server's tools are allowed.
+        let o = RunOpts {
+            mcp: Some(&mcp),
+            ..Default::default()
+        };
+        let a = ClaudeAgent::default().argv("hi", &o);
+        assert_eq!(a[6..], ["--allowedTools", "mcp__mis", "--", "hi"]);
     }
 
     #[test]

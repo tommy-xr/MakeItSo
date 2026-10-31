@@ -127,7 +127,6 @@ fn one_shot_claude(model: &str, extra: &[&str]) -> std::sync::Arc<mis_agent::cla
         "1",
     ];
     std::sync::Arc::new(mis_agent::claude::ClaudeAgent {
-        skip_permissions: false,
         extra_args: base.iter().chain(extra).map(|s| s.to_string()).collect(),
     })
 }

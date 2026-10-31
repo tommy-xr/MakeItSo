@@ -4,7 +4,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
-use mis_types::{AgentEvent, ImageFile, ImageKind, LimitWindow, TaskId};
+use mis_types::{AgentEvent, ImageFile, ImageKind, LimitWindow, Permissions, TaskId};
 use tokio::sync::mpsc;
 
 pub mod claude;
@@ -41,6 +41,9 @@ pub struct RunOpts<'a> {
     pub resume: Option<&'a str>,
     /// Absolute paths of images attached to the prompt.
     pub images: &'a [String],
+    /// What tools may do unasked; must pass `check`. None leaves the harness's
+    /// headless default, which denies writes, shell and MCP.
+    pub permissions: Option<&'a Permissions>,
 }
 
 pub trait Agent: Send + Sync {
@@ -126,18 +129,48 @@ pub fn write_images(dir: &Path, images: &[ImageFile]) -> anyhow::Result<Vec<Stri
 }
 
 /// Agents whose CLI is on PATH.
-pub fn available(skip_permissions: bool) -> Vec<Box<dyn Agent>> {
+pub fn available() -> Vec<Box<dyn Agent>> {
     let mut v: Vec<Box<dyn Agent>> = Vec::new();
     if which("claude") {
-        v.push(Box::new(claude::ClaudeAgent {
-            skip_permissions,
-            extra_args: vec![],
-        }));
+        v.push(Box::new(claude::ClaudeAgent::default()));
     }
     if which("codex") {
-        v.push(Box::new(codex::CodexAgent { skip_permissions }));
+        v.push(Box::new(codex::CodexAgent));
     }
     v
+}
+
+/// Err naming the first entry that can't become a permission rule: folders
+/// must be absolute and not `/`; MCP server names are `[A-Za-z0-9_-]+` (they
+/// become `mcp__<name>__*` and TOML keys); commands are plain words, e.g.
+/// "python3" or "git log".
+pub fn check(p: &Permissions) -> Result<(), String> {
+    for f in &p.folders {
+        let path = Path::new(f);
+        if !path.is_absolute() || path.parent().is_none() {
+            return Err(format!("folder {f:?}: must be an absolute path below /"));
+        }
+    }
+    let word = |c: char| c.is_ascii_alphanumeric() || "-_".contains(c);
+    for s in &p.mcp {
+        if s.is_empty() || !s.chars().all(word) {
+            return Err(format!("mcp server {s:?}: use letters, digits, - and _"));
+        }
+    }
+    for c in &p.commands {
+        let plain = |ch: char| word(ch) || "./:=@+ ".contains(ch);
+        if c.trim() != c
+            || c.is_empty()
+            || c.starts_with('-')
+            || c.contains("  ")
+            || !c.chars().all(plain)
+        {
+            return Err(format!(
+                "command {c:?}: use words like \"python3\" or \"git log\""
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn home() -> Result<PathBuf, String> {
@@ -162,6 +195,46 @@ pub fn which(bin: &str) -> bool {
 mod tests {
     use super::*;
     use base64ct::{Base64, Encoding};
+
+    #[test]
+    fn check_refuses_entries_that_widen_or_inject_rules() {
+        let ok = Permissions {
+            folders: vec!["/Users/me/assets".into()],
+            mcp: vec!["blender".into(), "my-server_2".into()],
+            commands: vec!["python3".into(), "git log".into(), "./make.sh".into()],
+            ..Default::default()
+        };
+        assert_eq!(check(&ok), Ok(()));
+        let bad = |p: Permissions| check(&p).unwrap_err();
+        for f in ["/", "assets", "~/assets", ""] {
+            bad(Permissions {
+                folders: vec![f.into()],
+                ..Default::default()
+            });
+        }
+        for s in ["", "*", "a__*", "blender)", "a.b", "a b"] {
+            bad(Permissions {
+                mcp: vec![s.into()],
+                ..Default::default()
+            });
+        }
+        for c in [
+            "",
+            "*",
+            "git *",
+            "rm -rf /;",
+            "python3 (x)",
+            " python3",
+            "-x",
+            "a,b",
+            "a  b",
+        ] {
+            bad(Permissions {
+                commands: vec![c.into()],
+                ..Default::default()
+            });
+        }
+    }
 
     #[test]
     fn writes_images_by_sniffed_kind_and_refuses_others() {
