@@ -2827,6 +2827,12 @@ async fn workers_learn_the_version_and_a_pending_update_takes_no_tasks() {
         TaskStatus::Queued,
         "held off the updating worker"
     );
+    let held: OrchMsg = recv(&mut worker).await;
+    assert_eq!(
+        held,
+        OrchMsg::UpdateHeld,
+        "acknowledged: no more tasks this connection"
+    );
     let quiet = tokio::time::timeout(std::time::Duration::from_millis(300), worker.next()).await;
     assert!(quiet.is_err(), "no assignment while its update is pending");
 

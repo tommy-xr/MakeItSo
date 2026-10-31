@@ -8,9 +8,6 @@ use mis_update::Asset;
 
 /// A version that failed is tried again after this.
 pub const RETRY_AFTER: Duration = Duration::from_secs(3600);
-/// Restart no sooner than this after announcing Pending, so an assignment already sent lands
-/// first (the orchestrator stops assigning once it hears Pending).
-pub const SETTLE: Duration = Duration::from_secs(2);
 
 pub struct Updater {
     mine: String,
@@ -25,8 +22,11 @@ pub struct Updater {
     fetching: bool,
     /// A version that failed, and when it may be tried again.
     failed: Option<(String, Instant)>,
-    /// When the new build was installed (announced Pending); restart once idle after SETTLE.
-    installed: Option<Instant>,
+    /// The new build is in place (announced Pending).
+    installed: bool,
+    /// This connection's orchestrator acknowledged Pending (`OrchMsg::UpdateHeld`): every task
+    /// it will send here has arrived.
+    held: bool,
 }
 
 impl Updater {
@@ -40,7 +40,8 @@ impl Updater {
             state: WorkerUpdate::None,
             fetching: false,
             failed: None,
-            installed: None,
+            installed: false,
+            held: false,
         }
     }
 
@@ -52,11 +53,7 @@ impl Updater {
     /// self-update is on, nothing is in flight or installed, and this version isn't backing off.
     pub fn due(&mut self, now: Instant) -> Option<Asset> {
         let (theirs, channel) = self.orch.as_ref()?;
-        if self.blocked.is_some()
-            || self.fetching
-            || self.installed.is_some()
-            || *theirs == self.mine
-        {
+        if self.blocked.is_some() || self.fetching || self.installed || *theirs == self.mine {
             return None;
         }
         if (self.failed.as_ref()).is_some_and(|(v, until)| v == theirs && now < *until) {
@@ -65,6 +62,16 @@ impl Updater {
         let asset = mis_update::asset(&self.base, (*channel)?, theirs, &self.target)?;
         self.fetching = true;
         Some(asset)
+    }
+
+    /// A download of `version` finished: install it only if the orchestrator still runs it.
+    pub fn wants(&self, version: &str) -> bool {
+        self.blocked.is_none() && self.orch.as_ref().is_some_and(|(v, _)| v == version)
+    }
+
+    /// A download was dropped unused.
+    pub fn abandon(&mut self) {
+        self.fetching = false;
     }
 
     /// A fetch and install of `version` ended; returns the state to report.
@@ -77,7 +84,7 @@ impl Updater {
         self.fetching = false;
         self.state = match result {
             Ok(()) => {
-                self.installed = Some(now);
+                self.installed = true;
                 WorkerUpdate::Pending {
                     version: version.into(),
                 }
@@ -93,14 +100,18 @@ impl Updater {
         self.state.clone()
     }
 
-    /// When to look again for a restart, if one is coming.
-    pub fn restart_at(&self) -> Option<Instant> {
-        self.installed.map(|t| t + SETTLE)
+    /// A new connection: its orchestrator hasn't acknowledged anything yet.
+    pub fn connected(&mut self) {
+        self.held = false;
     }
 
-    /// Restart now: a new build is installed, settled, and no task runs here.
-    pub fn restart_due(&self, idle: bool, now: Instant) -> bool {
-        idle && self.restart_at().is_some_and(|t| now >= t)
+    pub fn held(&mut self) {
+        self.held = true;
+    }
+
+    /// Restart now: a new build is installed, the orchestrator sends no more tasks, and none runs.
+    pub fn restart_due(&self, idle: bool) -> bool {
+        self.installed && self.held && idle
     }
 
     /// Logged once at startup.
@@ -188,10 +199,11 @@ mod tests {
     }
 
     #[test]
-    fn restarts_once_installed_settled_and_idle() {
+    fn restarts_once_installed_held_and_idle() {
         let now = Instant::now();
         let mut u = on();
-        assert!(!u.restart_due(true, now));
+        u.held();
+        assert!(!u.restart_due(true), "nothing installed");
         u.welcome(Some(B.into()), Some(Channel::Edge));
         u.due(now).unwrap();
         assert_eq!(
@@ -203,8 +215,26 @@ mod tests {
             None,
             "installed: nothing more to fetch"
         );
-        assert!(!u.restart_due(true, now), "settling");
-        assert!(!u.restart_due(false, now + SETTLE), "a task runs");
-        assert!(u.restart_due(true, now + SETTLE));
+        u.connected();
+        assert!(
+            !u.restart_due(true),
+            "new connection: tasks may still be on the way"
+        );
+        u.held();
+        assert!(!u.restart_due(false), "a task runs");
+        assert!(u.restart_due(true));
+    }
+
+    #[test]
+    fn a_download_the_orchestrator_moved_on_from_is_dropped() {
+        let now = Instant::now();
+        let mut u = on();
+        u.welcome(Some(B.into()), Some(Channel::Edge));
+        u.due(now).unwrap();
+        assert!(u.wants(B));
+        u.welcome(Some("0.3.0+ccccccc".into()), Some(Channel::Edge));
+        assert!(!u.wants(B));
+        u.abandon();
+        assert_eq!(u.due(now).unwrap().version, "0.3.0+ccccccc");
     }
 }

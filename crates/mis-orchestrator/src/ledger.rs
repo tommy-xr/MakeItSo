@@ -682,8 +682,14 @@ impl Ledger {
         let Some(w) = self.workers.get_mut(&wid).filter(|w| w.conn == Some(conn)) else {
             return vec![];
         };
+        let held = matches!(update, WorkerUpdate::Pending { .. });
         w.update = update;
-        vec![Effect::Broadcast(self.status())]
+        let mut effects = vec![Effect::Broadcast(self.status())];
+        if held {
+            let msg = OrchMsg::UpdateHeld;
+            effects.push(Effect::Send { conn, msg });
+        }
+        effects
     }
 
     /// `wid` couldn't save the purpose it was sent: tell clients why.

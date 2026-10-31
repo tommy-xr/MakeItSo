@@ -1,6 +1,6 @@
 //! Finds, checks and installs signed release builds of the Make It So binaries.
 //! Core (pure): version parsing, which asset holds a version, signature check, extraction.
-//! Shell: `fetch` (HTTP), `install` (swap the running executable), `restart`.
+//! Shell: `fetch` (HTTP), `stage` + `Staged::install` (swap the running executable), `restart`.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -196,44 +196,86 @@ async fn get(http: &reqwest::Client, url: &str) -> anyhow::Result<Vec<u8>> {
     Ok(body)
 }
 
-/// Replace the running executable with `exe` (the bytes of `bin`), after checking that it runs
-/// and reports `version`. Atomic: a rename on Unix; on Windows `self-replace` moves the locked
-/// file aside first.
-pub fn install(exe: &[u8], bin: &str, version: &str) -> anyhow::Result<()> {
-    let dir = private_dir()?;
-    let result = (|| {
-        let path = dir.join(exe_name(bin));
-        std::fs::write(&path, exe)?;
-        #[cfg(unix)]
-        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
-        let out = std::process::Command::new(&path)
-            .arg("--version")
-            .output()?;
-        let said = String::from_utf8_lossy(&out.stdout);
-        if !out.status.success() || said.trim() != format!("{bin} {version}") {
-            bail!("new {bin} says '{}', want '{bin} {version}'", said.trim());
-        }
-        self_replace::self_replace(&path).context("replacing the executable")
-    })();
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+/// A new executable written beside the one it replaces, checked to run and report its version.
+/// Dropped without `install`, it is deleted.
+pub struct Staged {
+    pub path: PathBuf,
+    target: PathBuf,
 }
 
-/// A fresh temp dir only this user can enter.
-fn private_dir() -> anyhow::Result<PathBuf> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let dir = std::env::temp_dir().join(format!("mis-update-{}-{nanos}", std::process::id()));
-    let mut b = std::fs::DirBuilder::new();
+/// Write `exe` (the bytes of `bin`) next to `target`, the running executable, and check that it
+/// says `<bin> <version>` to `--version`.
+pub fn stage(target: &Path, exe: &[u8], bin: &str, version: &str) -> anyhow::Result<Staged> {
+    let dir = target.parent().context("executable has no folder")?;
+    let staged = Staged {
+        path: dir.join(format!(
+            ".{bin}.update-{}{}",
+            std::process::id(),
+            std::env::consts::EXE_SUFFIX
+        )),
+        target: target.into(),
+    };
+    let mut f = std::fs::OpenOptions::new();
+    f.write(true).create_new(true);
     #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
-    b.create(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
-    Ok(dir)
+    std::os::unix::fs::OpenOptionsExt::mode(&mut f, 0o755);
+    let _ = std::fs::remove_file(&staged.path); // left by a crash of this pid's predecessor
+    std::io::Write::write_all(
+        &mut f
+            .open(&staged.path)
+            .with_context(|| format!("writing {}", staged.path.display()))?,
+        exe,
+    )?;
+    let out = std::process::Command::new(&staged.path)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("running {}", staged.path.display()))?;
+    let said = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() || said.trim() != format!("{bin} {version}") {
+        bail!("new {bin} says '{}', want '{bin} {version}'", said.trim());
+    }
+    Ok(staged)
 }
 
-/// Run `exe` (captured at startup: on Linux the path of a replaced executable reads
+impl Staged {
+    /// Rename it over the running executable, which keeps running from the old file. Windows
+    /// can't replace a running exe but can rename it: it moves to `<exe>.old` (deleted by
+    /// `cleanup` at the next start) and comes back if the swap fails.
+    pub fn install(self) -> anyhow::Result<()> {
+        #[cfg(windows)]
+        {
+            let old = old_path(&self.target);
+            let _ = std::fs::remove_file(&old);
+            std::fs::rename(&self.target, &old).context("moving the running exe aside")?;
+            if let Err(e) = std::fs::rename(&self.path, &self.target) {
+                let _ = std::fs::rename(&old, &self.target);
+                return Err(anyhow::Error::from(e).context("swapping in the new exe"));
+            }
+        }
+        #[cfg(not(windows))]
+        std::fs::rename(&self.path, &self.target).context("swapping in the new executable")?;
+        Ok(())
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(windows)]
+fn old_path(exe: &Path) -> PathBuf {
+    exe.with_extension("old")
+}
+
+/// Delete what a Windows swap left behind (`<exe>.old`); a no-op elsewhere.
+pub fn cleanup(_exe: &Path) {
+    #[cfg(windows)]
+    let _ = std::fs::remove_file(old_path(_exe));
+}
+
+/// Run `exe` (resolved at startup: on Linux the path of a replaced executable reads
 /// "(deleted)") with this process's arguments in its place: exec on Unix; on Windows spawn it
 /// and exit. Returns only on failure.
 pub fn restart(exe: &Path) -> anyhow::Error {

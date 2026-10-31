@@ -279,6 +279,9 @@ pub enum OrchMsg {
     /// Save this purpose (None clears it) in worker.toml, then confirm with
     /// `WorkerMsg::Purpose`.
     SetPurpose { purpose: Option<String> },
+    /// Reply to `WorkerUpdate::Pending`: nothing more is assigned on this connection, and every
+    /// earlier assignment came before this message. The worker may restart once its tasks end.
+    UpdateHeld,
 }
 
 /// Client (CLI / voice app) -> orchestrator.

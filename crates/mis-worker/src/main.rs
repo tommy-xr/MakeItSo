@@ -56,7 +56,7 @@ struct Args {
     skip_permissions: bool,
     /// Don't switch to the orchestrator's version by downloading its signed release build
     /// (`mis-up` sets MIS_NO_SELF_UPDATE). Builds not made by CI never do.
-    #[arg(long, env = "MIS_NO_SELF_UPDATE")]
+    #[arg(long, env = "MIS_NO_SELF_UPDATE", value_parser = clap::builder::FalseyValueParser::new())]
     no_self_update: bool,
     /// None runs the worker.
     #[command(subcommand)]
@@ -112,8 +112,10 @@ async fn main() -> Result<()> {
     let roots = roots::canonical_roots(&cfg.roots)?;
 
     let (id, id_lock) = worker_id()?;
-    // Before any swap: on Linux a replaced executable's path reads "(deleted)".
-    let exe = std::env::current_exe()?;
+    // Before any swap: on Linux a replaced executable's path reads "(deleted)". Resolved, so a
+    // symlinked install swaps the real file.
+    let exe = std::env::current_exe()?.canonicalize()?;
+    mis_update::cleanup(&exe);
     let source = mis_update::Source::from_env()?;
     let blocked = mis_update::blocked(
         args.no_self_update,
@@ -170,6 +172,7 @@ async fn main() -> Result<()> {
         config: path,
         update: updater,
         source: Arc::new(source),
+        exe: exe.clone(),
         upd_tx,
         upd_rx,
     };
@@ -190,33 +193,50 @@ async fn main() -> Result<()> {
     Err(mis_update::restart(&exe))
 }
 
-/// Download, check and install `asset`, then report how it went.
-async fn get_update(
-    src: Arc<mis_update::Source>,
-    asset: mis_update::Asset,
-    done: mpsc::Sender<(String, std::result::Result<(), String>)>,
-) {
-    tracing::info!("updating to {} from {}", asset.version, asset.url);
-    let result = async {
-        let exe = mis_update::fetch(&src, &asset, "mis-worker").await?;
-        let version = asset.version.clone();
-        tokio::task::spawn_blocking(move || mis_update::install(&exe, "mis-worker", &version))
-            .await?
-    }
-    .await
-    .map_err(|e: anyhow::Error| format!("{e:#}"));
-    match &result {
-        Ok(()) => tracing::info!("installed {}; restarting once no task runs", asset.version),
-        Err(e) => tracing::warn!("update to {} failed: {e}", asset.version),
-    }
-    let _ = done.send((asset.version, result)).await;
+/// Start downloading the orchestrator's build if one is due; the checked executable comes
+/// back on `upd_rx`.
+fn check_update(c: &mut Conn) {
+    let Some(asset) = c.update.due(Instant::now()) else {
+        return;
+    };
+    let (src, done) = (c.source.clone(), c.upd_tx.clone());
+    tokio::spawn(async move {
+        tracing::info!("updating to {} from {}", asset.version, asset.url);
+        let exe = mis_update::fetch(&src, &asset, "mis-worker").await;
+        let _ = done
+            .send((asset.version, exe.map_err(|e| format!("{e:#}"))))
+            .await;
+    });
 }
 
-/// Start fetching the orchestrator's build if one is due.
-fn check_update(c: &mut Conn) {
-    if let Some(asset) = c.update.due(Instant::now()) {
-        tokio::spawn(get_update(c.source.clone(), asset, c.upd_tx.clone()));
+/// Swap in a downloaded `version` if the orchestrator still runs it; returns what to report.
+async fn install_update(
+    c: &mut Conn,
+    version: String,
+    exe: std::result::Result<Vec<u8>, String>,
+) -> Option<WorkerUpdate> {
+    if exe.is_ok() && !c.update.wants(&version) {
+        tracing::info!("orchestrator moved on from {version}; not installing it");
+        c.update.abandon();
+        check_update(c);
+        return None;
     }
+    let (target, v) = (c.exe.clone(), version.clone());
+    let installed = match exe {
+        Ok(exe) => tokio::task::spawn_blocking(move || {
+            mis_update::stage(&target, &exe, "mis-worker", &v)?.install()
+        })
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r)
+        .map_err(|e| format!("{e:#}")),
+        Err(e) => Err(e),
+    };
+    match &installed {
+        Ok(()) => tracing::info!("installed {version}; restarting once no task runs"),
+        Err(e) => tracing::warn!("update to {version} failed: {e}"),
+    }
+    Some(c.update.fetched(&version, installed, Instant::now()))
 }
 
 /// Each agent's models, from discovery unless worker.toml's `[models]` sets
@@ -286,9 +306,11 @@ struct Conn {
     config: PathBuf,
     update: update::Updater,
     source: Arc<mis_update::Source>,
-    /// Results of `get_update`: version, and why it failed.
-    upd_tx: mpsc::Sender<(String, std::result::Result<(), String>)>,
-    upd_rx: mpsc::Receiver<(String, std::result::Result<(), String>)>,
+    /// This executable, which an update replaces.
+    exe: PathBuf,
+    /// Downloads from `check_update`: version, and its checked executable or why not.
+    upd_tx: mpsc::Sender<(String, std::result::Result<Vec<u8>, String>)>,
+    upd_rx: mpsc::Receiver<(String, std::result::Result<Vec<u8>, String>)>,
 }
 
 /// How a session ended without error.
@@ -325,6 +347,7 @@ async fn session(
     }))
     .await?;
     // The orchestrator forgets update state on reconnect.
+    c.update.connected();
     if c.update.state != WorkerUpdate::None {
         let update = c.update.state.clone();
         sink.send(text(&WorkerMsg::Update { update })).await?;
@@ -337,12 +360,9 @@ async fn session(
     beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
-        if c.update.restart_due(c.running.is_empty(), Instant::now()) {
+        if c.update.restart_due(c.running.is_empty()) {
             return Ok(Ended::Restart);
         }
-        let restart_at = (c.update.restart_at())
-            .filter(|_| c.running.is_empty())
-            .map(tokio::time::Instant::from_std);
         // Resend a stranded event before pulling a new one.
         let next = match c.pending.take() {
             Some(ev) => Some(ev),
@@ -356,13 +376,12 @@ async fn session(
                     sink.send(text(&msg)).await?;
                     continue;
                 }
-                Some((version, result)) = c.upd_rx.recv() => {
-                    let update = c.update.fetched(&version, result, Instant::now());
-                    sink.send(text(&WorkerMsg::Update { update })).await?;
+                Some((version, exe)) = c.upd_rx.recv() => {
+                    if let Some(update) = install_update(c, version, exe).await {
+                        sink.send(text(&WorkerMsg::Update { update })).await?;
+                    }
                     continue;
                 }
-                _ = tokio::time::sleep_until(restart_at.unwrap_or_else(tokio::time::Instant::now)),
-                    if restart_at.is_some() => continue,
                 _ = beat.tick() => {
                     check_update(c);
                     let t = std::time::Instant::now();
@@ -440,6 +459,7 @@ fn handle_incoming(
                 });
                 c.watches.insert(task, watch.abort_handle());
             }
+            Ok(OrchMsg::UpdateHeld) => c.update.held(),
             Ok(OrchMsg::SetPurpose { purpose }) => {
                 let saved = config::load(&c.config).and_then(|file| {
                     let file = config::Config {
@@ -675,6 +695,16 @@ mod tests {
         ) -> mis_agent::BoxFut<'a> {
             unreachable!()
         }
+    }
+
+    #[test]
+    fn no_self_update_env_takes_1_like_mis_up_sets_it() {
+        for (v, off) in [("1", true), ("true", true), ("0", false), ("", false)] {
+            std::env::set_var("MIS_NO_SELF_UPDATE", v);
+            let args = Args::try_parse_from(["mis-worker"]).unwrap();
+            assert_eq!(args.no_self_update, off, "MIS_NO_SELF_UPDATE={v:?}");
+        }
+        std::env::remove_var("MIS_NO_SELF_UPDATE");
     }
 
     #[test]
