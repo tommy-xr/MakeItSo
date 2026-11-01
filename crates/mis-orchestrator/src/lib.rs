@@ -17,7 +17,7 @@ use axum::{Json, Router};
 use futures_util::StreamExt;
 use mis_types::*;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// `0.1.0+abc1234`, with `-dirty` when built from uncommitted changes.
 pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("MIS_GIT_REV"));
@@ -43,6 +43,8 @@ const SUMMARY_TIMEOUT: Duration = Duration::from_secs(60);
 const SAVE_EVERY: Duration = Duration::from_secs(1);
 /// How often tasks past `ledger::persist::KEEP_MS` are forgotten.
 const FORGET_EVERY: Duration = Duration::from_secs(3600);
+/// How long a worker may take to answer an `OrchMsg::Query`.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 use access::Identity;
 use access_gate::{AccessGate, JWT_HEADER};
@@ -50,11 +52,18 @@ use ledger::{ConnId, Effect, Ledger};
 use mis_agent::Agent;
 use scope::Scope;
 
+/// A query's connection, and who waits for its answer.
+type Waiting = (ConnId, oneshot::Sender<Answer>);
+
 #[derive(Clone)]
 pub struct App {
     ledger: Arc<Mutex<Ledger>>,
     conns: Arc<Mutex<HashMap<ConnId, mpsc::UnboundedSender<OrchMsg>>>>,
     next_conn: Arc<AtomicU64>,
+    /// Queries awaiting a worker's `Answer`, by request id.
+    queries: Arc<Mutex<HashMap<u64, Waiting>>>,
+    next_req: Arc<AtomicU64>,
+    query_timeout: Duration,
     events: broadcast::Sender<ServerMsg>,
     token: Option<String>,
     /// Tokens that may look (status, transcripts, MCP) but not act.
@@ -103,6 +112,9 @@ impl App {
             ledger: Default::default(),
             conns: Default::default(),
             next_conn: Default::default(),
+            queries: Default::default(),
+            next_req: Default::default(),
+            query_timeout: QUERY_TIMEOUT,
             events: broadcast::channel(256).0,
             token,
             read_tokens: Vec::new(),
@@ -148,6 +160,12 @@ impl App {
     /// Override the client ping interval (tests use short values).
     pub fn with_ping_every(mut self, every: Duration) -> Self {
         self.ping_every = every;
+        self
+    }
+
+    /// Override how long workers may take to answer queries (tests use short values).
+    pub fn with_query_timeout(mut self, timeout: Duration) -> Self {
+        self.query_timeout = timeout;
         self
     }
 
@@ -494,7 +512,43 @@ impl App {
 
     fn close_conn(&self, wid: WorkerId, conn: ConnId) {
         self.conns.lock().unwrap().remove(&conn);
+        // Its unanswered queries fail at once rather than time out.
+        self.queries.lock().unwrap().retain(|_, (c, _)| *c != conn);
         self.transition(|l| ((), l.disconnect(wid, conn)));
+    }
+
+    /// Ask worker `wid` and wait for its answer. Err: the HTTP status and why.
+    async fn ask(&self, wid: WorkerId, query: Query) -> Result<Answer, (StatusCode, &'static str)> {
+        let conn = match self.ledger().worker_conn(wid) {
+            None => return Err((StatusCode::NOT_FOUND, "unknown worker")),
+            Some(None) => return Err((StatusCode::SERVICE_UNAVAILABLE, "worker offline")),
+            Some(Some(conn)) => conn,
+        };
+        let req = self.next_req.fetch_add(1, Ordering::Relaxed) + 1;
+        let (tx, rx) = oneshot::channel();
+        self.queries.lock().unwrap().insert(req, (conn, tx));
+        let msg = OrchMsg::Query { req, query };
+        let sent = (self.conns.lock().unwrap().get(&conn)).is_some_and(|c| c.send(msg).is_ok());
+        if !sent {
+            // Dropping the sender makes `rx` fail at once.
+            self.queries.lock().unwrap().remove(&req);
+        }
+        let got = tokio::time::timeout(self.query_timeout, rx).await;
+        self.queries.lock().unwrap().remove(&req);
+        match got {
+            Ok(Ok(answer)) => Ok(answer),
+            Ok(Err(_)) => Err((StatusCode::SERVICE_UNAVAILABLE, "worker disconnected")),
+            Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "worker didn't answer in time")),
+        }
+    }
+
+    /// Hand `answer` to whoever waits on `req`, if `conn` is the connection asked.
+    fn answered(&self, conn: ConnId, req: u64, answer: Answer) {
+        let mut queries = self.queries.lock().unwrap();
+        if queries.get(&req).is_some_and(|(c, _)| *c == conn) {
+            let (_, tx) = queries.remove(&req).expect("checked");
+            let _ = tx.send(answer);
+        }
     }
 
     async fn access_check(&self, headers: &HeaderMap) -> Access {
@@ -697,6 +751,7 @@ pub fn router(app: App) -> Router {
         .route("/api/upload", post(upload))
         .route("/api/images/{id}", get(image))
         .route("/api/update", get(update_status).post(set_update))
+        .route("/api/workers/{id}/sessions", get(sessions))
         .with_state(app)
 }
 
@@ -943,6 +998,23 @@ async fn image(
     }
 }
 
+/// Worker `id`'s Claude and Codex sessions, newest first: read from its disk
+/// now, never kept here. Read-only, like transcripts.
+async fn sessions(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<WorkerId>,
+) -> Response {
+    if !app.admit(&headers, peer, "/api/workers/sessions").await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match app.ask(id, Query::ListSessions).await {
+        Ok(Answer::Sessions { sessions }) => Json(sessions).into_response(),
+        Err(why) => why.into_response(),
+    }
+}
+
 async fn ws_worker(
     ws: WebSocketUpgrade,
     State(app): State<App>,
@@ -1049,6 +1121,7 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
                     Some(WorkerMsg::Permissions { permissions }) => {
                         app.transition(|l| ((), l.worker_permissions(wid, conn, permissions)));
                     }
+                    Some(WorkerMsg::Answer { req, answer }) => app.answered(conn, req, answer),
                     Some(WorkerMsg::Hello { .. }) => {}
                     None => break,
                 }

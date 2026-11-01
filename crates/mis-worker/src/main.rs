@@ -9,6 +9,7 @@ mod permissions;
 mod pr;
 mod roots;
 mod rules;
+mod sessions;
 mod setup;
 mod stats;
 mod update;
@@ -536,6 +537,16 @@ fn handle_incoming(
                     tokio::spawn(async move { tx.send(msg).await });
                 }
             }
+            Ok(OrchMsg::Query { req, query }) => {
+                let tx = ctx.pr_tx.clone();
+                tokio::spawn(async move {
+                    // File reads: off the runtime's threads.
+                    let answer = tokio::task::spawn_blocking(move || answer(query)).await;
+                    if let Ok(answer) = answer {
+                        let _ = tx.send(WorkerMsg::Answer { req, answer }).await;
+                    }
+                });
+            }
             Err(e) => tracing::warn!("bad message from orchestrator: {e}"),
         },
         Some(Ok(_)) => {}
@@ -543,6 +554,16 @@ fn handle_incoming(
         None => anyhow::bail!("orchestrator closed connection"),
     }
     Ok(())
+}
+
+fn answer(query: Query) -> Answer {
+    match query {
+        Query::ListSessions => {
+            let (claude, codex) = sessions::roots();
+            let sessions = sessions::list(&claude, &codex, unix_ms());
+            Answer::Sessions { sessions }
+        }
+    }
 }
 
 async fn run_task(

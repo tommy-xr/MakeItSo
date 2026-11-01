@@ -664,6 +664,11 @@ impl Ledger {
         }
     }
 
+    /// `wid`'s live connection: None if unknown, Some(None) while offline.
+    pub fn worker_conn(&self, wid: WorkerId) -> Option<Option<ConnId>> {
+        self.workers.get(&wid).map(|w| w.conn)
+    }
+
     /// Have online worker `wid` save `purpose` (blank clears); it confirms with
     /// `worker_purpose`, which updates what clients see.
     pub fn set_purpose(&self, wid: WorkerId, purpose: &str) -> Result<Vec<Effect>, String> {

@@ -20,6 +20,8 @@ pub use links::{github_link, github_links, Checks, Link, LinkKind, PrState, PrSt
 pub mod mcp;
 mod permissions;
 pub use permissions::{Approval, Decision, PermissionMode, Permissions, MAX_APPROVAL_DETAIL};
+mod sessions;
+pub use sessions::{Answer, Query, Session};
 
 pub type WorkerId = Uuid;
 pub type TaskId = Uuid;
@@ -254,6 +256,11 @@ pub enum WorkerMsg {
     Update {
         update: WorkerUpdate,
     },
+    /// Reply to `OrchMsg::Query` `req`.
+    Answer {
+        req: u64,
+        answer: Answer,
+    },
 }
 
 /// Where release builds of a version are published. Stable: the tag `v<semver>`. Edge: every
@@ -311,6 +318,8 @@ pub enum OrchMsg {
     /// Reply to `WorkerUpdate::Pending`: nothing more is assigned on this connection, and every
     /// earlier assignment came before this message. The worker may restart once its tasks end.
     UpdateHeld,
+    /// Answer with `WorkerMsg::Answer` carrying the same `req`.
+    Query { req: u64, query: Query },
 }
 
 /// Client (CLI / voice app) -> orchestrator.
@@ -798,6 +807,27 @@ mod tests {
         assert_eq!(serde_json::from_str::<OrchMsg>(&s).unwrap(), check);
         let s = serde_json::to_string(&ClientMsg::Status).unwrap();
         assert_eq!(s, r#"{"type":"status"}"#);
+        let q = OrchMsg::Query {
+            req: 3,
+            query: Query::ListSessions,
+        };
+        let s = serde_json::to_string(&q).unwrap();
+        assert_eq!(
+            s,
+            r#"{"type":"query","req":3,"query":{"type":"list_sessions"}}"#
+        );
+        let a = WorkerMsg::Answer {
+            req: 3,
+            answer: Answer::Sessions {
+                sessions: vec![Session {
+                    harness: "codex".into(),
+                    id: "s".into(),
+                    ..Default::default()
+                }],
+            },
+        };
+        let s = serde_json::to_string(&a).unwrap();
+        assert_eq!(serde_json::from_str::<WorkerMsg>(&s).unwrap(), a);
         // Summaries from orchestrators predating timing/tokens/activity still parse.
         let old: TaskSummary = serde_json::from_str(
             r#"{"id":"00000000-0000-0000-0000-000000000000","prompt":"p","status":"done",

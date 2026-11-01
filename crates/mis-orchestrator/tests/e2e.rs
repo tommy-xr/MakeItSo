@@ -2844,3 +2844,60 @@ async fn workers_learn_the_version_and_a_pending_update_takes_no_tasks() {
     };
     assert_eq!(assigned.id, task);
 }
+
+#[tokio::test]
+async fn sessions_are_asked_of_the_worker_on_demand() {
+    let app = App::new(None).with_query_timeout(std::time::Duration::from_millis(300));
+    let base = start_app(app).await;
+    let unknown = http_get(
+        &base,
+        &format!("/api/workers/{}/sessions", WorkerId::new_v4()),
+    )
+    .await;
+    assert!(unknown.starts_with("HTTP/1.1 404"), "{unknown}");
+
+    let wid = WorkerId::new_v4();
+    let mut worker = join(&base, wid, "claude", vec![]).await;
+    let path = format!("/api/workers/{wid}/sessions");
+    let get = tokio::spawn({
+        let (base, path) = (base.clone(), path.clone());
+        async move { http_get(&base, &path).await }
+    });
+    let OrchMsg::Query { req, query } = recv(&mut worker).await else {
+        panic!("expected a query")
+    };
+    assert_eq!(query, Query::ListSessions);
+    let session = Session {
+        harness: "codex".into(),
+        id: "s-1".into(),
+        title: Some("rename the crate".into()),
+        updated_ms: 7,
+        ..Default::default()
+    };
+    let sessions = vec![session];
+    // A wrong request id is ignored; the right one answers.
+    let wrong = Answer::Sessions { sessions: vec![] };
+    send(
+        &mut worker,
+        &WorkerMsg::Answer {
+            req: req + 1,
+            answer: wrong,
+        },
+    )
+    .await;
+    let answer = Answer::Sessions {
+        sessions: sessions.clone(),
+    };
+    send(&mut worker, &WorkerMsg::Answer { req, answer }).await;
+    let got = get.await.unwrap();
+    assert!(got.starts_with("HTTP/1.1 200"), "{got}");
+    let body = got.split("\r\n\r\n").nth(1).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Vec<Session>>(body).unwrap(),
+        sessions
+    );
+
+    // Unanswered: 504 once the timeout passes.
+    let silent = http_get(&base, &path).await;
+    assert!(silent.starts_with("HTTP/1.1 504"), "{silent}");
+}
