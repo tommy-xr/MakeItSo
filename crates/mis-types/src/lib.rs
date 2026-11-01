@@ -258,7 +258,7 @@ pub enum WorkerMsg {
     },
     /// Reply to `OrchMsg::Query` `req`.
     Answer {
-        req: u64,
+        req: Uuid,
         answer: Answer,
     },
 }
@@ -319,7 +319,7 @@ pub enum OrchMsg {
     /// earlier assignment came before this message. The worker may restart once its tasks end.
     UpdateHeld,
     /// Answer with `WorkerMsg::Answer` carrying the same `req`.
-    Query { req: u64, query: Query },
+    Query { req: Uuid, query: Query },
 }
 
 /// Client (CLI / voice app) -> orchestrator.
@@ -808,16 +808,16 @@ mod tests {
         let s = serde_json::to_string(&ClientMsg::Status).unwrap();
         assert_eq!(s, r#"{"type":"status"}"#);
         let q = OrchMsg::Query {
-            req: 3,
+            req: Uuid::nil(),
             query: Query::ListSessions,
         };
         let s = serde_json::to_string(&q).unwrap();
         assert_eq!(
             s,
-            r#"{"type":"query","req":3,"query":{"type":"list_sessions"}}"#
+            r#"{"type":"query","req":"00000000-0000-0000-0000-000000000000","query":{"type":"list_sessions"}}"#
         );
         let a = WorkerMsg::Answer {
-            req: 3,
+            req: Uuid::nil(),
             answer: Answer::Sessions {
                 sessions: vec![Session {
                     harness: "codex".into(),

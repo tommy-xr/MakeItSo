@@ -10,7 +10,7 @@ use mis_types::{first_line, Session};
 use serde_json::Value;
 
 /// Most sessions listed.
-pub const MAX_SESSIONS: usize = 50;
+const MAX_SESSIONS: usize = 50;
 /// Codex writes ~150 KB of instructions (more with images) before the first prompt.
 const HEAD_BYTES: u64 = 1 << 20;
 /// Claude appends its generated titles as the session goes on.
@@ -21,8 +21,8 @@ const TITLE_CHARS: usize = 120;
 
 /// What one file's lines say so far; fed head lines, then tail lines.
 #[derive(Debug, Default)]
-pub struct Head {
-    pub id: String,
+struct Head {
+    id: String,
     cwd: Option<String>,
     /// First real user prompt.
     prompt: Option<String>,
@@ -38,7 +38,7 @@ pub struct Head {
 
 impl Head {
     /// Seeded with the id the file name gives.
-    pub fn new(id: String) -> Self {
+    fn new(id: String) -> Self {
         Self {
             id,
             ..Default::default()
@@ -46,12 +46,12 @@ impl Head {
     }
 
     /// The head has everything it needs; the tail can still add titles.
-    pub fn done(&self) -> bool {
+    fn done(&self) -> bool {
         self.skip || (self.cwd.is_some() && self.prompt.is_some() && self.model.is_some())
     }
 
     /// None: nothing to list (no cwd and no title, or skipped).
-    pub fn finish(self, harness: &str, updated_ms: u64, now_ms: u64) -> Option<Session> {
+    fn finish(self, harness: &str, updated_ms: u64, now_ms: u64) -> Option<Session> {
         let title = self.custom_title.or(self.auto_title).or(self.prompt);
         if self.skip || (self.cwd.is_none() && title.is_none()) {
             return None;
@@ -85,7 +85,7 @@ fn typed(s: &str) -> Option<String> {
 }
 
 /// One line of a Claude transcript. Unparseable lines (a cut-off last one) are skipped.
-pub fn claude_line(h: &mut Head, line: &str) {
+fn claude_line(h: &mut Head, line: &str) {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
         return;
     };
@@ -114,12 +114,11 @@ pub fn claude_line(h: &mut Head, line: &str) {
             } else if h.prompt.is_none() && v["isMeta"] != true {
                 h.prompt = match &msg["content"] {
                     Value::String(s) => typed(s),
-                    // The first text block; tool results come as other block types.
+                    // The first typed text block; tool results come as other block types.
                     Value::Array(blocks) => blocks
                         .iter()
-                        .find(|b| b["type"] == "text")
-                        .and_then(|b| b["text"].as_str())
-                        .and_then(typed),
+                        .filter(|b| b["type"] == "text")
+                        .find_map(|b| b["text"].as_str().and_then(typed)),
                     _ => None,
                 };
             }
@@ -129,7 +128,7 @@ pub fn claude_line(h: &mut Head, line: &str) {
 }
 
 /// One line of a Codex rollout.
-pub fn codex_line(h: &mut Head, line: &str) {
+fn codex_line(h: &mut Head, line: &str) {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
         return;
     };
@@ -175,7 +174,7 @@ fn feed(r: impl Read, mut f: impl FnMut(&str) -> bool) -> u64 {
 
 /// One session file: up to `head` bytes from its start, then its last `tail` bytes
 /// unless the head already covered them.
-pub fn read_file(
+fn read_file(
     harness: &str,
     path: &Path,
     (head, tail): (u64, u64),
@@ -201,8 +200,9 @@ pub fn read_file(
     });
     let from = used.max(len.saturating_sub(tail));
     if from < len && file.seek(SeekFrom::Start(from)).is_ok() {
-        // A first line cut mid-way fails to parse and is skipped.
-        feed(&mut file, |l| {
+        // A first line cut mid-way fails to parse and is skipped. Stop at the old end:
+        // a live session may be appending.
+        feed((&mut file).take(len - from), |l| {
             line(&mut h, l);
             false
         });
@@ -240,11 +240,9 @@ fn mtime_ms(meta: &std::fs::Metadata) -> u64 {
 /// `CODEX_HOME` (default `~/.codex`), as they look them up.
 pub fn roots() -> (PathBuf, PathBuf) {
     let home = std::env::home_dir().unwrap_or_default();
-    let dir = |var, default| std::env::var_os(var).map_or(home.join(default), PathBuf::from);
-    (
-        dir("CLAUDE_CONFIG_DIR", ".claude"),
-        dir("CODEX_HOME", ".codex"),
-    )
+    let claude = std::env::var_os("CLAUDE_CONFIG_DIR").map_or(home.join(".claude"), PathBuf::from);
+    let codex = mis_agent::codex::codex_home().unwrap_or_default();
+    (claude, codex)
 }
 
 /// The newest `MAX_SESSIONS` sessions under both roots, newest first. Claude
@@ -293,7 +291,7 @@ mod tests {
             r#"{"type":"user","message":{"content":"<command-name>/clear</command-name>"}}"#,
             r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
             r#"{"type":"user","isSidechain":true,"message":{"content":"subagent prompt"}}"#,
-            r#"{"type":"user","entrypoint":"cli","message":{"content":[{"type":"text","text":"  fix the build\nthen test"}]}}"#,
+            r#"{"type":"user","entrypoint":"cli","message":{"content":[{"type":"text","text":"<ide_opened_file>a.rs</ide_opened_file>"},{"type":"text","text":"  fix the build\nthen test"}]}}"#,
             r#"{"type":"assistant","message":{"model":"<synthetic>"}}"#,
             r#"{"type":"assistant","message":{"model":"claude-opus"}}"#,
             r#"{"type":"user","message":{"content":"later prompt"}}"#,

@@ -149,7 +149,7 @@ fn newest_rollout(sessions: &Path) -> Option<PathBuf> {
 }
 
 /// `CODEX_HOME`, default `~/.codex`.
-fn codex_home() -> Result<PathBuf, String> {
+pub fn codex_home() -> Result<PathBuf, String> {
     std::env::var_os("CODEX_HOME")
         .map_or_else(|| crate::home().map(|h| h.join(".codex")), |d| Ok(d.into()))
 }

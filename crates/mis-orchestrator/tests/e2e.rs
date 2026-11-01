@@ -2875,16 +2875,6 @@ async fn sessions_are_asked_of_the_worker_on_demand() {
         ..Default::default()
     };
     let sessions = vec![session];
-    // A wrong request id is ignored; the right one answers.
-    let wrong = Answer::Sessions { sessions: vec![] };
-    send(
-        &mut worker,
-        &WorkerMsg::Answer {
-            req: req + 1,
-            answer: wrong,
-        },
-    )
-    .await;
     let answer = Answer::Sessions {
         sessions: sessions.clone(),
     };
@@ -2900,4 +2890,19 @@ async fn sessions_are_asked_of_the_worker_on_demand() {
     // Unanswered: 504 once the timeout passes.
     let silent = http_get(&base, &path).await;
     assert!(silent.starts_with("HTTP/1.1 504"), "{silent}");
+    let OrchMsg::Query { .. } = recv(&mut worker).await else {
+        panic!("expected the unanswered query")
+    };
+
+    // Disconnected mid-query: 503 at once, not after the timeout.
+    let get = tokio::spawn({
+        let (base, path) = (base.clone(), path.clone());
+        async move { http_get(&base, &path).await }
+    });
+    let OrchMsg::Query { .. } = recv(&mut worker).await else {
+        panic!("expected a query")
+    };
+    drop(worker);
+    let gone = get.await.unwrap();
+    assert!(gone.starts_with("HTTP/1.1 503"), "{gone}");
 }

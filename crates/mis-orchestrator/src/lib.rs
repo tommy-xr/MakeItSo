@@ -61,8 +61,7 @@ pub struct App {
     conns: Arc<Mutex<HashMap<ConnId, mpsc::UnboundedSender<OrchMsg>>>>,
     next_conn: Arc<AtomicU64>,
     /// Queries awaiting a worker's `Answer`, by request id.
-    queries: Arc<Mutex<HashMap<u64, Waiting>>>,
-    next_req: Arc<AtomicU64>,
+    queries: Arc<Mutex<HashMap<uuid::Uuid, Waiting>>>,
     query_timeout: Duration,
     events: broadcast::Sender<ServerMsg>,
     token: Option<String>,
@@ -113,7 +112,6 @@ impl App {
             conns: Default::default(),
             next_conn: Default::default(),
             queries: Default::default(),
-            next_req: Default::default(),
             query_timeout: QUERY_TIMEOUT,
             events: broadcast::channel(256).0,
             token,
@@ -524,18 +522,18 @@ impl App {
             Some(None) => return Err((StatusCode::SERVICE_UNAVAILABLE, "worker offline")),
             Some(Some(conn)) => conn,
         };
-        let req = self.next_req.fetch_add(1, Ordering::Relaxed) + 1;
+        // Unique across restarts: a worker may deliver an old answer after reconnecting.
+        let req = uuid::Uuid::new_v4();
         let (tx, rx) = oneshot::channel();
         self.queries.lock().unwrap().insert(req, (conn, tx));
+        let _forget = Forget(&self.queries, req);
         let msg = OrchMsg::Query { req, query };
         let sent = (self.conns.lock().unwrap().get(&conn)).is_some_and(|c| c.send(msg).is_ok());
         if !sent {
             // Dropping the sender makes `rx` fail at once.
             self.queries.lock().unwrap().remove(&req);
         }
-        let got = tokio::time::timeout(self.query_timeout, rx).await;
-        self.queries.lock().unwrap().remove(&req);
-        match got {
+        match tokio::time::timeout(self.query_timeout, rx).await {
             Ok(Ok(answer)) => Ok(answer),
             Ok(Err(_)) => Err((StatusCode::SERVICE_UNAVAILABLE, "worker disconnected")),
             Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "worker didn't answer in time")),
@@ -543,7 +541,7 @@ impl App {
     }
 
     /// Hand `answer` to whoever waits on `req`, if `conn` is the connection asked.
-    fn answered(&self, conn: ConnId, req: u64, answer: Answer) {
+    fn answered(&self, conn: ConnId, req: uuid::Uuid, answer: Answer) {
         let mut queries = self.queries.lock().unwrap();
         if queries.get(&req).is_some_and(|(c, _)| *c == conn) {
             let (_, tx) = queries.remove(&req).expect("checked");
@@ -627,6 +625,15 @@ impl App {
             }
             Some(_) => None,
         }
+    }
+}
+
+/// Drops a query's waiter however `ask` ends, also when the HTTP client goes away mid-wait.
+struct Forget<'a>(&'a Mutex<HashMap<uuid::Uuid, Waiting>>, uuid::Uuid);
+
+impl Drop for Forget<'_> {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().remove(&self.1);
     }
 }
 
