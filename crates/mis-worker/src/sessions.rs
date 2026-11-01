@@ -11,12 +11,15 @@ use serde_json::Value;
 
 /// Most sessions listed.
 const MAX_SESSIONS: usize = 50;
+/// Most files read for one list, so asking for interactive sessions only stays cheap
+/// where headless runs dominate.
+const MAX_SCANNED: usize = 1000;
 /// Codex writes ~150 KB of instructions (more with images) before the first prompt.
 const HEAD_BYTES: u64 = 1 << 20;
 /// Claude appends its generated titles as the session goes on.
 const TAIL_BYTES: u64 = 64 << 10;
 /// Written this recently: likely still running.
-const ACTIVE_MS: u64 = 2 * 60 * 1000;
+pub(crate) const ACTIVE_MS: u64 = 2 * 60 * 1000;
 const TITLE_CHARS: usize = 120;
 
 /// What one file's lines say so far; fed head lines, then tail lines.
@@ -78,7 +81,7 @@ fn text(v: &Value) -> Option<String> {
 
 /// Text the user typed, not what the harness injected under the user's role:
 /// `<command-name>`, `<system-reminder>`, `<environment_context>`, AGENTS.md, interrupts.
-fn typed(s: &str) -> Option<String> {
+pub(crate) fn typed(s: &str) -> Option<String> {
     let s = s.trim();
     let injected = ["<", "[Request interrupted", "# AGENTS.md instructions"];
     (!s.is_empty() && !injected.iter().any(|p| s.starts_with(p))).then(|| s.to_string())
@@ -157,7 +160,7 @@ fn codex_line(h: &mut Head, line: &str) {
 }
 
 /// Feed `r`'s lines to `f` until it's exhausted or `f` says stop; returns bytes consumed.
-fn feed(r: impl Read, mut f: impl FnMut(&str) -> bool) -> u64 {
+pub(crate) fn feed(r: impl Read, mut f: impl FnMut(&str) -> bool) -> u64 {
     let mut r = BufReader::new(r);
     let (mut buf, mut used) = (Vec::new(), 0);
     loop {
@@ -173,11 +176,12 @@ fn feed(r: impl Read, mut f: impl FnMut(&str) -> bool) -> u64 {
 }
 
 /// One session file: up to `head` bytes from its start, then its last `tail` bytes
-/// unless the head already covered them.
+/// unless the head already covered them. None for a headless one unless `headless`.
 fn read_file(
     harness: &str,
     path: &Path,
     (head, tail): (u64, u64),
+    headless: bool,
     updated_ms: u64,
     now_ms: u64,
 ) -> Option<Session> {
@@ -194,10 +198,14 @@ fn read_file(
     let mut h = Head::new(id);
     let mut file = File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
+    let unwanted = |h: &Head| h.headless && !headless;
     let used = feed((&mut file).take(head), |l| {
         line(&mut h, l);
-        h.done()
+        h.done() || unwanted(&h)
     });
+    if unwanted(&h) {
+        return None;
+    }
     let from = used.max(len.saturating_sub(tail));
     if from < len && file.seek(SeekFrom::Start(from)).is_ok() {
         // A first line cut mid-way fails to parse and is skipped. Stop at the old end:
@@ -211,7 +219,7 @@ fn read_file(
 }
 
 /// `*.jsonl` files exactly `depth` directories below `dir`, with their mtimes.
-fn jsonl_at(dir: &Path, depth: usize) -> Vec<(u64, PathBuf)> {
+pub(crate) fn jsonl_at(dir: &Path, depth: usize) -> Vec<(u64, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return vec![];
     };
@@ -228,7 +236,7 @@ fn jsonl_at(dir: &Path, depth: usize) -> Vec<(u64, PathBuf)> {
     out
 }
 
-fn mtime_ms(meta: &std::fs::Metadata) -> u64 {
+pub(crate) fn mtime_ms(meta: &std::fs::Metadata) -> u64 {
     let since = meta
         .modified()
         .ok()
@@ -245,9 +253,10 @@ pub fn roots() -> (PathBuf, PathBuf) {
     (claude, codex)
 }
 
-/// The newest `MAX_SESSIONS` sessions under both roots, newest first. Claude
-/// subagents live a level deeper (`<id>/subagents/`) and aren't listed.
-pub fn list(claude: &Path, codex: &Path, now_ms: u64) -> Vec<Session> {
+/// The newest `MAX_SESSIONS` sessions under both roots, newest first; headless ones
+/// (`claude -p`, `codex exec`) only if `headless`. Claude subagents live a level
+/// deeper (`<id>/subagents/`) and aren't listed.
+pub fn list(claude: &Path, codex: &Path, headless: bool, now_ms: u64) -> Vec<Session> {
     let claude = jsonl_at(&claude.join("projects"), 1)
         .into_iter()
         .map(|f| ("claude", f));
@@ -258,7 +267,8 @@ pub fn list(claude: &Path, codex: &Path, now_ms: u64) -> Vec<Session> {
     files.sort_by_key(|(_, (at, _))| std::cmp::Reverse(*at));
     files
         .into_iter()
-        .filter_map(|(h, (at, p))| read_file(h, &p, (HEAD_BYTES, TAIL_BYTES), at, now_ms))
+        .take(MAX_SCANNED)
+        .filter_map(|(h, (at, p))| read_file(h, &p, (HEAD_BYTES, TAIL_BYTES), headless, at, now_ms))
         .take(MAX_SESSIONS)
         .collect()
 }
@@ -396,10 +406,10 @@ mod tests {
         );
         std::fs::write(&path, body).unwrap();
         // Head ends inside the padding, tail starts after the prompt: only the title is seen.
-        let s = read_file("claude", &path, (100, 400), 0, 0).unwrap();
+        let s = read_file("claude", &path, (100, 400), true, 0, 0).unwrap();
         assert_eq!((s.title.as_deref(), s.cwd), (Some("Tail title"), None));
         // A head long enough reaches the prompt and its cwd.
-        let s = read_file("claude", &path, (1 << 20, 400), 0, 0).unwrap();
+        let s = read_file("claude", &path, (1 << 20, 400), true, 0, 0).unwrap();
         assert_eq!(
             (s.title.as_deref(), s.cwd.as_deref()),
             (Some("Tail title"), Some("/w"))
@@ -422,7 +432,7 @@ mod tests {
         let day = codex.join("sessions").join("2026").join("11").join("01");
         std::fs::create_dir_all(&day).unwrap();
         let id = "019a0000-0000-7000-8000-000000000001";
-        let meta = r#"{"type":"session_meta","payload":{"cwd":"/r"}}"#;
+        let meta = r#"{"type":"session_meta","payload":{"cwd":"/r","originator":"codex_exec"}}"#;
         std::fs::write(
             day.join(format!("rollout-2026-11-01T10-00-00-{id}.jsonl")),
             meta,
@@ -440,7 +450,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
-        let got = list(&claude, &codex, now);
+        let got = list(&claude, &codex, true, now);
         let ids: Vec<_> = got
             .iter()
             .map(|s| (s.harness.as_str(), s.id.as_str()))
@@ -448,8 +458,12 @@ mod tests {
         assert_eq!(ids, [("codex", id), ("claude", "c1")]);
         assert!(got[0].active && !got[1].active);
         assert_eq!(got[1].title.as_deref(), Some("claude task"));
+        // Interactive only: the `codex exec` run is left out.
+        let got = list(&claude, &codex, false, now);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "c1");
         // Missing roots list nothing.
-        assert!(list(&claude.join("none"), &codex.join("none"), now).is_empty());
+        assert!(list(&claude.join("none"), &codex.join("none"), true, now).is_empty());
         for d in [claude, codex] {
             std::fs::remove_dir_all(d).unwrap();
         }

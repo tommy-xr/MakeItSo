@@ -21,7 +21,7 @@ pub mod mcp;
 mod permissions;
 pub use permissions::{Approval, Decision, PermissionMode, Permissions, MAX_APPROVAL_DETAIL};
 mod sessions;
-pub use sessions::{Answer, Query, Session};
+pub use sessions::{Answer, Query, Role, Session, Turn};
 
 pub type WorkerId = Uuid;
 pub type TaskId = Uuid;
@@ -809,12 +809,12 @@ mod tests {
         assert_eq!(s, r#"{"type":"status"}"#);
         let q = OrchMsg::Query {
             req: Uuid::nil(),
-            query: Query::ListSessions,
+            query: Query::ListSessions { headless: false },
         };
         let s = serde_json::to_string(&q).unwrap();
         assert_eq!(
             s,
-            r#"{"type":"query","req":"00000000-0000-0000-0000-000000000000","query":{"type":"list_sessions"}}"#
+            r#"{"type":"query","req":"00000000-0000-0000-0000-000000000000","query":{"type":"list_sessions","headless":false}}"#
         );
         let a = WorkerMsg::Answer {
             req: Uuid::nil(),

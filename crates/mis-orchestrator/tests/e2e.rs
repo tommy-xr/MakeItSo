@@ -2860,13 +2860,13 @@ async fn sessions_are_asked_of_the_worker_on_demand() {
     let mut worker = join(&base, wid, "claude", vec![]).await;
     let path = format!("/api/workers/{wid}/sessions");
     let get = tokio::spawn({
-        let (base, path) = (base.clone(), path.clone());
+        let (base, path) = (base.clone(), format!("{path}?headless=true"));
         async move { http_get(&base, &path).await }
     });
     let OrchMsg::Query { req, query } = recv(&mut worker).await else {
         panic!("expected a query")
     };
-    assert_eq!(query, Query::ListSessions);
+    assert_eq!(query, Query::ListSessions { headless: true });
     let session = Session {
         harness: "codex".into(),
         id: "s-1".into(),
@@ -2905,4 +2905,76 @@ async fn sessions_are_asked_of_the_worker_on_demand() {
     drop(worker);
     let gone = get.await.unwrap();
     assert!(gone.starts_with("HTTP/1.1 503"), "{gone}");
+}
+
+#[tokio::test]
+async fn a_session_transcript_is_read_from_the_worker() {
+    let base = start().await;
+    let wid = WorkerId::new_v4();
+    let mut worker = join(&base, wid, "claude", vec![]).await;
+    let id = uuid::Uuid::new_v4();
+    let bad = http_get(
+        &base,
+        &format!("/api/workers/{wid}/sessions/claude/..%2F..%2Fetc"),
+    )
+    .await;
+    assert!(bad.starts_with("HTTP/1.1 400"), "{bad}");
+
+    let path = format!("/api/workers/{wid}/sessions/claude/{id}?limit=5");
+    let get = tokio::spawn({
+        let base = base.clone();
+        async move { http_get(&base, &path).await }
+    });
+    let OrchMsg::Query { req, query } = recv(&mut worker).await else {
+        panic!("expected a query")
+    };
+    let harness = "claude".to_string();
+    assert_eq!(
+        query,
+        Query::ReadSession {
+            harness,
+            id,
+            limit: 5
+        }
+    );
+    let answer = Answer::Transcript {
+        turns: vec![Turn {
+            role: Role::Tool,
+            text: "Bash: ls".into(),
+            at: None,
+        }],
+        more: true,
+        updated_ms: 7,
+        active: false,
+    };
+    send(
+        &mut worker,
+        &WorkerMsg::Answer {
+            req,
+            answer: answer.clone(),
+        },
+    )
+    .await;
+    let got = get.await.unwrap();
+    assert!(got.starts_with("HTTP/1.1 200"), "{got}");
+    let body = got.split("\r\n\r\n").nth(1).unwrap();
+    assert_eq!(serde_json::from_str::<Answer>(body).unwrap(), answer);
+
+    // Not on the worker's disk: 404.
+    let path = format!("/api/workers/{wid}/sessions/codex/{id}");
+    let get = tokio::spawn({
+        let base = base.clone();
+        async move { http_get(&base, &path).await }
+    });
+    let OrchMsg::Query { req, query } = recv(&mut worker).await else {
+        panic!("expected a query")
+    };
+    assert!(
+        matches!(query, Query::ReadSession { limit: 30, .. }),
+        "default limit"
+    );
+    let answer = Answer::NotFound;
+    send(&mut worker, &WorkerMsg::Answer { req, answer }).await;
+    let got = get.await.unwrap();
+    assert!(got.starts_with("HTTP/1.1 404"), "{got}");
 }

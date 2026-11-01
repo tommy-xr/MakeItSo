@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::{ConnectInfo, Path, Query as Params, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -759,6 +759,10 @@ pub fn router(app: App) -> Router {
         .route("/api/images/{id}", get(image))
         .route("/api/update", get(update_status).post(set_update))
         .route("/api/workers/{id}/sessions", get(sessions))
+        .route(
+            "/api/workers/{id}/sessions/{harness}/{session}",
+            get(session),
+        )
         .with_state(app)
 }
 
@@ -1005,6 +1009,13 @@ async fn image(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct ListParams {
+    /// Also list `claude -p` / `codex exec` runs.
+    #[serde(default)]
+    headless: bool,
+}
+
 /// Worker `id`'s Claude and Codex sessions, newest first: read from its disk
 /// now, never kept here. Read-only, like transcripts.
 async fn sessions(
@@ -1012,12 +1023,50 @@ async fn sessions(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<WorkerId>,
+    Params(p): Params<ListParams>,
 ) -> Response {
     if !app.admit(&headers, peer, "/api/workers/sessions").await {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    match app.ask(id, Query::ListSessions).await {
+    let query = Query::ListSessions {
+        headless: p.headless,
+    };
+    match app.ask(id, query).await {
         Ok(Answer::Sessions { sessions }) => Json(sessions).into_response(),
+        Ok(_) => StatusCode::BAD_GATEWAY.into_response(),
+        Err(why) => why.into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ReadParams {
+    limit: Option<usize>,
+}
+
+/// Turns sent when `?limit=` is absent, and most allowed.
+const TURNS: usize = 30;
+const MAX_TURNS: usize = 200;
+
+/// The last turns of one session on worker `wid`, read from its disk now. `session`
+/// must be a UUID (400 otherwise), so it can't name a path.
+async fn session(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path((wid, harness, id)): Path<(WorkerId, String, uuid::Uuid)>,
+    Params(p): Params<ReadParams>,
+) -> Response {
+    if !app.admit(&headers, peer, "/api/workers/sessions").await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let limit = p.limit.unwrap_or(TURNS).clamp(1, MAX_TURNS);
+    match app
+        .ask(wid, Query::ReadSession { harness, id, limit })
+        .await
+    {
+        Ok(t @ Answer::Transcript { .. }) => Json(t).into_response(),
+        Ok(Answer::NotFound) => (StatusCode::NOT_FOUND, "unknown session").into_response(),
+        Ok(_) => StatusCode::BAD_GATEWAY.into_response(),
         Err(why) => why.into_response(),
     }
 }
