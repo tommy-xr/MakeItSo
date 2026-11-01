@@ -4,16 +4,15 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use mis_types::{first_line, Answer, Role, Turn};
+use mis_types::{first_line, Answer, Role, Turn, MAX_TURNS};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::sessions::{feed, jsonl_at, mtime_ms, typed, ACTIVE_MS};
+use crate::rules;
+use crate::sessions::{active, feed, jsonl_at, mtime_ms, typed};
 
 /// Bytes read from the end of the file; older turns are reported as `more`.
 const WINDOW: u64 = 2 << 20;
-/// Most turns sent, whatever was asked.
-const MAX_TURNS: usize = 200;
 /// A message's text, clipped.
 const TEXT_CHARS: usize = 2000;
 /// A tool call or result: one line.
@@ -33,58 +32,36 @@ fn turn(role: Role, text: String, at: &Value) -> Turn {
     Turn { role, text, at }
 }
 
-/// `name: arg`, the arg being the input field that says most (a command, a path), else its JSON.
-fn call(name: &str, input: &Value) -> String {
-    let keys = [
-        "command",
-        "cmd",
-        "file_path",
-        "path",
-        "pattern",
-        "url",
-        "query",
-        "description",
-        "prompt",
-    ];
-    let arg = match input {
-        Value::String(s) => s.clone(),
-        Value::Object(o) => keys
-            .iter()
-            .filter_map(|k| o.get(*k))
-            .find_map(|v| match v {
-                Value::String(s) => Some(s.clone()),
-                // codex: `"cmd": ["bash", "-lc", "ls"]`.
-                Value::Array(a) => Some(
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                ),
-                _ => None,
-            })
-            .unwrap_or_else(|| input.to_string()),
-        _ => input.to_string(),
+/// A Codex call: `shell: bash -lc ls`, `apply_patch: *** Begin Patch`; else as the approval cards say it.
+fn codex_call(name: &str, input: &Value) -> String {
+    let arg = match (input, &input["cmd"]) {
+        (Value::String(s), _) | (_, Value::String(s)) => s.clone(),
+        (_, Value::Array(a)) => {
+            let words: Vec<_> = a.iter().filter_map(Value::as_str).collect();
+            words.join(" ")
+        }
+        _ => return rules::summary(name, input, None),
     };
     first_line(&format!("{name}: {arg}"), TOOL_CHARS)
 }
 
-/// `→ first line` of a tool's output: a string, or text blocks.
-fn result(out: &Value, error: bool) -> String {
-    let text = match out {
-        Value::String(s) => s.clone(),
-        Value::Array(blocks) => blocks
-            .iter()
-            .filter_map(|b| b["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    };
+/// `→ first line` of a tool's output; `✗` when it failed.
+fn result(text: &str, error: bool) -> String {
     let mark = if error { "✗" } else { "→" };
     first_line(&format!("{mark} {}", text.trim_start()), TOOL_CHARS)
 }
 
+/// Text the user typed, or any the agent wrote; None for injected or blank text.
+fn said(role: Role, s: &str) -> Option<String> {
+    match role {
+        Role::User => typed(s),
+        _ => Some(s.trim().to_string()).filter(|s| !s.is_empty()),
+    }
+    .map(|s| clip(&s, TEXT_CHARS))
+}
+
 /// Turns on one line of a Claude transcript: typed prompts, replies, tool calls and results.
-/// Meta, sidechain, injected and thinking content is left out.
+/// Meta, sidechain, compaction-summary, injected and thinking content is left out.
 pub fn claude_turns(line: &str) -> Vec<Turn> {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
         return vec![];
@@ -94,18 +71,14 @@ pub fn claude_turns(line: &str) -> Vec<Turn> {
         Some("assistant") => Role::Assistant,
         _ => return vec![],
     };
-    if v["isMeta"] == true || v["isSidechain"] == true {
+    if v["isMeta"] == true || v["isSidechain"] == true || v["isCompactSummary"] == true {
         return vec![];
     }
     let at = &v["timestamp"];
-    let said = |s: &str| match role {
-        Role::User => typed(s),
-        _ => Some(s.trim().to_string()).filter(|s| !s.is_empty()),
-    };
     let blocks = match &v["message"]["content"] {
         Value::String(s) => {
-            return said(s)
-                .map(|s| turn(role, clip(&s, TEXT_CHARS), at))
+            return said(role, s)
+                .map(|s| turn(role, s, at))
                 .into_iter()
                 .collect()
         }
@@ -115,13 +88,16 @@ pub fn claude_turns(line: &str) -> Vec<Turn> {
     blocks
         .iter()
         .filter_map(|b| match b["type"].as_str()? {
-            "text" => said(b["text"].as_str()?).map(|s| turn(role, clip(&s, TEXT_CHARS), at)),
-            "tool_use" => Some(turn(Role::Tool, call(b["name"].as_str()?, &b["input"]), at)),
-            "tool_result" => Some(turn(
-                Role::Tool,
-                result(&b["content"], b["is_error"] == true),
-                at,
-            )),
+            "text" => said(role, b["text"].as_str()?).map(|s| turn(role, s, at)),
+            "tool_use" => {
+                let home = std::env::home_dir();
+                let call = rules::summary(b["name"].as_str()?, &b["input"], home.as_deref());
+                Some(turn(Role::Tool, call, at))
+            }
+            "tool_result" => {
+                let out = mis_agent::claude::tool_result_text(&b["content"]);
+                Some(turn(Role::Tool, result(&out, b["is_error"] == true), at))
+            }
             _ => None,
         })
         .collect()
@@ -147,12 +123,8 @@ pub fn codex_turns(line: &str) -> Vec<Turn> {
             let parts = p["content"].as_array().into_iter().flatten();
             parts
                 .filter(|c| c["type"] == kind)
-                .filter_map(|c| c["text"].as_str())
-                .filter_map(|s| match role {
-                    Role::User => typed(s),
-                    _ => Some(s.trim().to_string()).filter(|s| !s.is_empty()),
-                })
-                .map(|s| turn(role, clip(&s, TEXT_CHARS), at))
+                .filter_map(|c| said(role, c["text"].as_str()?))
+                .map(|s| turn(role, s, at))
                 .collect()
         }
         Some("function_call") => {
@@ -163,16 +135,24 @@ pub fn codex_turns(line: &str) -> Vec<Turn> {
             let name = p["name"].as_str().unwrap_or("tool");
             vec![turn(
                 Role::Tool,
-                call(name, &args.unwrap_or(Value::Null)),
+                codex_call(name, &args.unwrap_or(Value::Null)),
                 at,
             )]
         }
         Some("custom_tool_call") => {
             let name = p["name"].as_str().unwrap_or("tool");
-            vec![turn(Role::Tool, call(name, &p["input"]), at)]
+            vec![turn(Role::Tool, codex_call(name, &p["input"]), at)]
         }
         Some("function_call_output" | "custom_tool_call_output") => {
-            vec![turn(Role::Tool, result(&p["output"], false), at)]
+            let out = mis_agent::claude::tool_result_text(&p["output"]);
+            // Scripts report status first: `Script completed\nWall time 6.6 seconds\nOutput:\n…`.
+            let body = out.split_once("Output:\n").map(|(_, b)| b);
+            let body = body.filter(|b| !b.trim().is_empty()).unwrap_or(&out);
+            vec![turn(
+                Role::Tool,
+                result(body, out.starts_with("Script failed")),
+                at,
+            )]
         }
         _ => vec![],
     }
@@ -257,7 +237,7 @@ pub fn read(
         turns,
         more: dropped || from > 0,
         updated_ms,
-        active: now_ms.saturating_sub(updated_ms) < ACTIVE_MS,
+        active: active(updated_ms, now_ms),
     }
 }
 
@@ -283,7 +263,8 @@ mod tests {
                 r#"{"type":"user","message":{"content":"<command-name>/clear</command-name>"}}"#,
                 r#"{"type":"user","timestamp":"2026-11-01T10:00:00Z","message":{"content":"fix the build"}}"#,
                 r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"}]}}"#,
-                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo build\n--release","description":"Build"}}]}}"#,
+                r#"{"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued"}}"#,
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo build","description":"Build"}}]}}"#,
                 r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"\nerror[E0308]: mismatched types\nmore"}]}}"#,
                 r#"{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":[{"type":"text","text":"denied"}]}]}}"#,
                 r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"subagent"}]}}"#,
@@ -317,7 +298,8 @@ mod tests {
                 r#"{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"cmd\":[\"bash\",\"-lc\",\"ls\"]}"}}"#,
                 r#"{"type":"response_item","payload":{"type":"function_call_output","output":"Cargo.toml\nsrc"}}"#,
                 r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\n..."}}"#,
-                r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","output":[{"type":"input_text","text":"Done"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","output":[{"type":"input_text","text":"Script completed\nWall time 1 seconds\nOutput:\n"},{"type":"input_text","text":"Done"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","output":[{"type":"input_text","text":"Script failed\nOutput:\n"}]}}"#,
                 r#"{"type":"event_msg","payload":{"type":"agent_message","message":"dup"}}"#,
                 r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Renamed."}]}}"#,
             ],
@@ -330,6 +312,7 @@ mod tests {
                 (Role::Tool, "→ Cargo.toml"),
                 (Role::Tool, "apply_patch: *** Begin Patch"),
                 (Role::Tool, "→ Done"),
+                (Role::Tool, "✗ Script failed"),
                 (Role::Assistant, "Renamed."),
             ]
         );
@@ -346,7 +329,7 @@ mod tests {
         assert_eq!(t.text.chars().count(), TEXT_CHARS + 1);
         assert!(t.text.ends_with('…'));
         let call = format!(
-            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Read","input":{{"file_path":"{}"}}}}]}}}}"#,
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Grep","input":{{"pattern":"{}"}}}}]}}}}"#,
             "a".repeat(500)
         );
         assert_eq!(claude_turns(&call)[0].text.chars().count(), TOOL_CHARS);

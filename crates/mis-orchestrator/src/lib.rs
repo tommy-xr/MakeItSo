@@ -1043,9 +1043,8 @@ struct ReadParams {
     limit: Option<usize>,
 }
 
-/// Turns sent when `?limit=` is absent, and most allowed.
+/// Turns sent when `?limit=` is absent.
 const TURNS: usize = 30;
-const MAX_TURNS: usize = 200;
 
 /// The last turns of one session on worker `wid`, read from its disk now. `session`
 /// must be a UUID (400 otherwise), so it can't name a path.

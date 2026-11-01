@@ -19,7 +19,7 @@ const HEAD_BYTES: u64 = 1 << 20;
 /// Claude appends its generated titles as the session goes on.
 const TAIL_BYTES: u64 = 64 << 10;
 /// Written this recently: likely still running.
-pub(crate) const ACTIVE_MS: u64 = 2 * 60 * 1000;
+const ACTIVE_MS: u64 = 2 * 60 * 1000;
 const TITLE_CHARS: usize = 120;
 
 /// What one file's lines say so far; fed head lines, then tail lines.
@@ -34,7 +34,9 @@ struct Head {
     auto_title: Option<String>,
     /// Latest seen.
     model: Option<String>,
-    headless: bool,
+    /// From how it was started (the first entrypoint/originator seen): a later
+    /// `claude -p --resume` doesn't make an interactive session headless.
+    headless: Option<bool>,
     /// Not worth listing (a Codex subagent's thread).
     skip: bool,
 }
@@ -66,10 +68,15 @@ impl Head {
             title: title.map(|t| first_line(&t, TITLE_CHARS)),
             model: self.model,
             updated_ms,
-            active: now_ms.saturating_sub(updated_ms) < ACTIVE_MS,
-            interactive: !self.headless,
+            active: active(updated_ms, now_ms),
+            interactive: self.headless != Some(true),
         })
     }
+}
+
+/// Written in the last `ACTIVE_MS`.
+pub(crate) fn active(updated_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(updated_ms) < ACTIVE_MS
 }
 
 fn text(v: &Value) -> Option<String> {
@@ -80,11 +87,20 @@ fn text(v: &Value) -> Option<String> {
 }
 
 /// Text the user typed, not what the harness injected under the user's role:
-/// `<command-name>`, `<system-reminder>`, `<environment_context>`, AGENTS.md, interrupts.
+/// tagged blocks (`<command-name>`, `<system-reminder>`, `<environment_context>`,
+/// `<INSTRUCTIONS>`, `<image …>`), AGENTS.md, interrupts. `<div> overflows` is typed.
 pub(crate) fn typed(s: &str) -> Option<String> {
     let s = s.trim();
-    let injected = ["<", "[Request interrupted", "# AGENTS.md instructions"];
-    (!s.is_empty() && !injected.iter().any(|p| s.starts_with(p))).then(|| s.to_string())
+    let injected = ["[Request interrupted", "# AGENTS.md instructions"];
+    let tag = s.strip_prefix('<').map(|t| {
+        let name = t
+            .split(|c: char| c == '>' || c.is_whitespace())
+            .next()
+            .unwrap_or("");
+        name.contains(['-', '_']) || name == "image" || name.chars().all(|c| c.is_ascii_uppercase())
+    });
+    let skip = s.is_empty() || tag == Some(true) || injected.iter().any(|p| s.starts_with(p));
+    (!skip).then(|| s.to_string())
 }
 
 /// One line of a Claude transcript. Unparseable lines (a cut-off last one) are skipped.
@@ -105,8 +121,8 @@ fn claude_line(h: &mut Head, line: &str) {
                 h.cwd = text(&v["cwd"]);
             }
             // `cli`; `sdk-cli` and the like for `claude -p` and SDK runs.
-            if let Some(e) = v["entrypoint"].as_str() {
-                h.headless = e.starts_with("sdk");
+            if let (None, Some(e)) = (h.headless, v["entrypoint"].as_str()) {
+                h.headless = Some(e.starts_with("sdk"));
             }
             let msg = &v["message"];
             if kind == "assistant" {
@@ -114,7 +130,7 @@ fn claude_line(h: &mut Head, line: &str) {
                 if let Some(m) = text(&msg["model"]).filter(|m| !m.starts_with('<')) {
                     h.model = Some(m);
                 }
-            } else if h.prompt.is_none() && v["isMeta"] != true {
+            } else if h.prompt.is_none() && v["isMeta"] != true && v["isCompactSummary"] != true {
                 h.prompt = match &msg["content"] {
                     Value::String(s) => typed(s),
                     // The first typed text block; tool results come as other block types.
@@ -142,7 +158,7 @@ fn codex_line(h: &mut Head, line: &str) {
                 h.id = id;
             }
             h.cwd = text(&p["cwd"]).or(h.cwd.take());
-            h.headless = p["originator"] == "codex_exec";
+            h.headless = Some(p["originator"] == "codex_exec");
             h.skip = p["source"].get("subagent").is_some();
         }
         Some("turn_context") => h.model = text(&p["model"]).or(h.model.take()),
@@ -198,7 +214,7 @@ fn read_file(
     let mut h = Head::new(id);
     let mut file = File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
-    let unwanted = |h: &Head| h.headless && !headless;
+    let unwanted = |h: &Head| h.headless == Some(true) && !headless;
     let used = feed((&mut file).take(head), |l| {
         line(&mut h, l);
         h.done() || unwanted(&h)
@@ -332,6 +348,25 @@ mod tests {
         ]);
         let s = h.finish("claude", 0, 0).unwrap();
         assert_eq!((s.title.as_deref(), s.interactive), (Some("Mine"), false));
+    }
+
+    #[test]
+    fn headless_is_how_it_started_and_tags_are_told_from_html() {
+        let cli = r#"{"type":"user","cwd":"/w","entrypoint":"cli","message":{"content":"<div> overflows"}}"#;
+        let resumed = r#"{"type":"user","entrypoint":"sdk-cli","message":{"content":"x"}}"#;
+        let s = claude(&[cli, resumed]).finish("claude", 0, 0).unwrap();
+        assert!(s.interactive);
+        assert_eq!(s.title.as_deref(), Some("<div> overflows"));
+        let tags = [
+            "<command-name>/clear</command-name>",
+            "<system-reminder>x</system-reminder>",
+            "<environment_context>",
+            "<INSTRUCTIONS>",
+            "<image name=[Image #1]>",
+        ];
+        for t in tags {
+            assert_eq!(typed(t), None, "{t}");
+        }
     }
 
     #[test]

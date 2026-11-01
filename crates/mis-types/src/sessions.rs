@@ -48,13 +48,15 @@ pub enum Role {
     Tool,
 }
 
+/// Most turns `Query::ReadSession` returns.
+pub const MAX_TURNS: usize = 200;
+
 /// One entry of a session's transcript, clipped for a phone.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Turn {
     pub role: Role,
     pub text: String,
     /// When it was written, as the harness recorded it (RFC 3339).
-    #[serde(default)]
     pub at: Option<String>,
 }
 

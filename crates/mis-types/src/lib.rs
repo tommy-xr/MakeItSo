@@ -21,7 +21,7 @@ pub mod mcp;
 mod permissions;
 pub use permissions::{Approval, Decision, PermissionMode, Permissions, MAX_APPROVAL_DETAIL};
 mod sessions;
-pub use sessions::{Answer, Query, Role, Session, Turn};
+pub use sessions::{Answer, Query, Role, Session, Turn, MAX_TURNS};
 
 pub type WorkerId = Uuid;
 pub type TaskId = Uuid;

@@ -2860,13 +2860,13 @@ async fn sessions_are_asked_of_the_worker_on_demand() {
     let mut worker = join(&base, wid, "claude", vec![]).await;
     let path = format!("/api/workers/{wid}/sessions");
     let get = tokio::spawn({
-        let (base, path) = (base.clone(), format!("{path}?headless=true"));
+        let (base, path) = (base.clone(), path.clone());
         async move { http_get(&base, &path).await }
     });
     let OrchMsg::Query { req, query } = recv(&mut worker).await else {
         panic!("expected a query")
     };
-    assert_eq!(query, Query::ListSessions { headless: true });
+    assert_eq!(query, Query::ListSessions { headless: false });
     let session = Session {
         harness: "codex".into(),
         id: "s-1".into(),
@@ -2888,11 +2888,12 @@ async fn sessions_are_asked_of_the_worker_on_demand() {
     );
 
     // Unanswered: 504 once the timeout passes.
-    let silent = http_get(&base, &path).await;
+    let silent = http_get(&base, &format!("{path}?headless=true")).await;
     assert!(silent.starts_with("HTTP/1.1 504"), "{silent}");
-    let OrchMsg::Query { .. } = recv(&mut worker).await else {
+    let OrchMsg::Query { query, .. } = recv(&mut worker).await else {
         panic!("expected the unanswered query")
     };
+    assert_eq!(query, Query::ListSessions { headless: true });
 
     // Disconnected mid-query: 503 at once, not after the timeout.
     let get = tokio::spawn({

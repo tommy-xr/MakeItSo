@@ -1099,11 +1099,13 @@ function capsLine(w) {
 
 // Sessions on a worker's disk, fetched each time its line is opened; kept across Status redraws.
 // Each is { list } once loaded, { error } if not, missing while loading.
-const sessOpen = new Set(), sessLists = new Map();
+const sessOpen = new Set(), sessLists = new Map(), sessAsked = new Map(); // id -> latest request, so a stale reply is dropped
 let showHeadless = false; // `claude -p` / `codex exec` runs: most sessions, rarely the ones wanted
 const folder = (p) => (p || '').split(/[\\/]/).filter(Boolean).pop() || '';
 const redrawWorkers = () => route().view === 'workers' && renderWorkers();
 async function loadSessions(id) {
+  const ask = {};
+  sessAsked.set(id, ask);
   sessLists.delete(id);
   redrawWorkers();
   let got;
@@ -1111,6 +1113,7 @@ async function loadSessions(id) {
     const r = await fetch(`/api/workers/${id}/sessions${showHeadless ? '?headless=true' : ''}`, { headers: authHeaders() });
     got = r.ok ? { list: await r.json() } : { error: (await r.text()) || `error ${r.status}` };
   } catch { got = { error: 'couldn’t reach the orchestrator' }; }
+  if (sessAsked.get(id) !== ask) return;
   sessLists.set(id, got);
   redrawWorkers();
 }
@@ -1142,7 +1145,7 @@ function sessionsLine(w) {
 // One session's transcript (`#session/<worker>/<harness>/<id>`): fetched on open, then every
 // REFRESH_MS while the session is active and in view. Nothing is kept once the view closes.
 const REFRESH_MS = 5000;
-let sess = null; // { key, got: transcript | { error } | null, timer }
+let sess = null; // { key, got: transcript | { error } | null, drawn: the `got` on screen, timer }
 function closeSession() {
   if (sess) clearTimeout(sess.timer);
   sess = null;
@@ -1161,9 +1164,10 @@ async function loadTranscript(s) {
   if (s.got.active) s.timer = setTimeout(() => loadTranscript(s), REFRESH_MS);
 }
 function renderSession(key) {
+  if (!everOpen) return; // fetch once connected, with the token in place
   if (!sess || sess.key !== key) {
     closeSession();
-    sess = { key, got: null, timer: 0 };
+    sess = { key, got: null, drawn: null, timer: 0 };
     $('turns').replaceChildren();
     loadTranscript(sess);
   }
@@ -1178,16 +1182,19 @@ function renderSession(key) {
     $('session-state').textContent = got ? got.error : 'reading…';
     return;
   }
+  $('session-state').className = got.error ? 'bad' : 'dim';
+  $('session-state').textContent = got.error || (live ? 'refreshing while active' : '');
+  // Status redraws come often; rebuild the turns only when they changed.
+  if (sess.drawn === got) return;
+  sess.drawn = got;
   // Stay pinned to the newest turn if the reader was there.
   const atEnd = innerHeight + scrollY >= document.documentElement.scrollHeight - 80 || !$('turns').childElementCount;
-  const time = (at) => (at ? new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '');
+  const time = (at) => (at ? new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) : '');
   $('turns').replaceChildren(...(got.more ? [el('li', { className: 'dim' }, 'earlier turns not shown')] : []),
     ...got.turns.map((t) => el('li', { className: t.role },
       t.role === 'tool' ? '' : el('div', { className: 'who' }, ...dots([t.role, time(t.at)])),
       el('div', { className: 'txt' }, t.text))));
   if (!got.turns.length) $('turns').append(el('li', { className: 'dim' }, 'no turns yet'));
-  $('session-state').className = got.error ? 'bad' : 'dim';
-  $('session-state').textContent = got.error || (live ? 'refreshing while active' : '');
   if (atEnd) scrollTo(0, document.documentElement.scrollHeight);
 }
 
