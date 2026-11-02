@@ -27,6 +27,41 @@ fn clip(s: &str, max: usize) -> String {
     }
 }
 
+/// `s` without ANSI/VT control sequences, e.g. the colors in logged tool output: CSI
+/// (`ESC [ … final`, or 8-bit `U+009B … final`), strings such as OSC (`ESC ] … BEL` or
+/// `… ESC \`) and DCS, and other escapes (`ESC =`, `ESC ( B`). One cut off at the end is dropped.
+fn plain(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars();
+    // CSI parameters and intermediates run up to a final byte in `@`..=`~`.
+    let csi = |it: &mut std::str::Chars| it.find(|c| ('@'..='~').contains(c));
+    while let Some(c) = it.next() {
+        match c {
+            '\x1b' => match it.next() {
+                Some('[') => _ = csi(&mut it),
+                // OSC, DCS, SOS, PM, APC: a string, up to BEL or `ESC \`.
+                Some(']' | 'P' | 'X' | '^' | '_') => {
+                    while let Some(c) = it.next() {
+                        if c == '\x07' || c == '\u{9c}' {
+                            break;
+                        }
+                        if c == '\x1b' {
+                            it.next();
+                            break;
+                        }
+                    }
+                }
+                // `ESC ( B` and the like: intermediates, then a final byte.
+                Some(' '..='/') => _ = it.find(|c| ('0'..='~').contains(c)),
+                _ => {}
+            },
+            '\u{9b}' => _ = csi(&mut it),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn turn(role: Role, text: String, at: &Value) -> Turn {
     let at = at.as_str().map(String::from);
     Turn { role, text, at }
@@ -48,11 +83,12 @@ fn codex_call(name: &str, input: &Value) -> String {
 /// `→ first line` of a tool's output; `✗` when it failed.
 fn result(text: &str, error: bool) -> String {
     let mark = if error { "✗" } else { "→" };
-    first_line(&format!("{mark} {}", text.trim_start()), TOOL_CHARS)
+    first_line(&format!("{mark} {}", plain(text).trim_start()), TOOL_CHARS)
 }
 
 /// Text the user typed, or any the agent wrote; None for injected or blank text.
 fn said(role: Role, s: &str) -> Option<String> {
+    let s = &plain(s);
     match role {
         Role::User => typed(s),
         _ => Some(s.trim().to_string()).filter(|s| !s.is_empty()),
@@ -319,6 +355,39 @@ mod tests {
             ]
         );
         assert_eq!(turns[0].at.as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn escape_sequences_are_stripped() {
+        let cases = [
+            (
+                "\x1b[2m2026-11-01T10:00:00Z\x1b[0m \x1b[32m INFO\x1b[0m ready",
+                "2026-11-01T10:00:00Z  INFO ready",
+            ),
+            ("\x1b[38;2;153;153;153mdim\x1b[39m", "dim"),
+            (
+                "\x1b]8;;https://x.example\x1b\\link\x1b]8;;\x1b\\ \x1b]0;title\x07done",
+                "link done",
+            ),
+            ("\u{9b}1mbold\u{9b}0m", "bold"),
+            (
+                "before\x1bP1;2|payload\x1b\\after \x1b_apc\x07!",
+                "beforeafter !",
+            ),
+            ("cut \x1bPno end", "cut "),
+            ("\x1b]0;8-bit end\u{9c}kept", "kept"),
+            ("\x1b=keypad \x1b(Bascii", "keypad ascii"),
+            ("cut \x1b[38;5", "cut "),
+            ("plain é text", "plain é text"),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(plain(raw), want, "{raw:?}");
+        }
+        // In a transcript: tool output and messages.
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"\u001b[2m10:00\u001b[0m \u001b[32mINFO\u001b[0m started"}]}}"#;
+        assert_eq!(claude_turns(line)[0].text, "→ 10:00 INFO started");
+        let line = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"\u001b[1mDone\u001b[0m."}]}}"#;
+        assert_eq!(codex_turns(line)[0].text, "Done.");
     }
 
     #[test]
