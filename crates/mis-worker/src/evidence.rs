@@ -103,7 +103,8 @@ pub fn draft(args: &Value, title: String, read: Reader) -> Result<EvidenceDraft,
 }
 
 /// A table from a `.csv`, `.json` or `.md` file or inline `rows`, header
-/// first; `before`/`after` name its baseline and new columns.
+/// first; `before`/`after` name its baseline and new columns, by default the
+/// columns named so.
 fn table(args: &Value, read: Reader) -> Result<Table, String> {
     let cells = match (args["path"].as_str(), &args["rows"]) {
         (Some(p), Value::Null) => {
@@ -125,7 +126,7 @@ fn table(args: &Value, read: Reader) -> Result<Table, String> {
     let mut cells = cells.into_iter();
     let header = cells.next().ok_or("the table is empty")?;
     let col = |k: &str| match args[k].as_str() {
-        None => Ok(None),
+        None => Ok(header.iter().position(|h| h.trim().eq_ignore_ascii_case(k))),
         Some(name) => (header.iter().position(|h| h.trim() == name.trim()))
             .map(Some)
             .ok_or(format!("no column named {name}")),
@@ -382,6 +383,10 @@ mod tests {
         let rows = json!([["n", "ms"], ["a", 1.5]]);
         let t = table_of(json!({"kind": "table", "rows": rows, "after": "ms"}), files);
         assert_eq!((t.rows[0][1].num, t.after), (Some(1.5), Some(1)));
+        // Columns named before/after are the hints unless others are named.
+        let rows = json!([["case", "Before", "after"], ["a", 2, 1]]);
+        let t = table_of(json!({"kind": "table", "rows": rows}), files);
+        assert_eq!((t.before, t.after), (Some(1), Some(2)));
         for (args, why) in [
             (
                 json!({"kind": "table", "path": "b.txt"}),
