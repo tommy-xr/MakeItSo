@@ -666,7 +666,7 @@ impl Ledger {
                 ..to
             };
             let harness = p.task.harness.clone();
-            let (id, effects) = self.send_to_session_with(wid, harness, text, to, images)?;
+            let (id, effects) = self.send_to_session(wid, harness, text, to, images)?;
             let t = self.tasks.iter_mut().find(|t| t.task.id == id);
             t.expect("just added").parent = Some(parent);
             return Ok((id, effects));
@@ -708,16 +708,6 @@ impl Ledger {
     /// pinned there that continues it (or a copy). A worker that can't deliver into an
     /// open session continues it once closed instead. Err if `wid` is offline or lacks `harness`.
     pub fn send_to_session(
-        &mut self,
-        wid: WorkerId,
-        harness: String,
-        text: String,
-        to: SendTo,
-    ) -> Result<(TaskId, Vec<Effect>), String> {
-        self.send_to_session_with(wid, harness, text, to, vec![])
-    }
-
-    fn send_to_session_with(
         &mut self,
         wid: WorkerId,
         harness: String,
@@ -1209,16 +1199,14 @@ impl Ledger {
             .filter(|(_, w)| now.saturating_sub(w.last_seen) > stale_after)
             .filter_map(|(wid, w)| Some((*wid, w.conn?)))
             .collect();
-        let mut effects: Vec<Effect> = (stale.into_iter())
+        stale
+            .into_iter()
             .flat_map(|(wid, conn)| {
                 let mut effects = self.disconnect(wid, conn);
                 effects.push(Effect::Close { conn });
                 effects
             })
-            .collect();
-        // A message waiting for its codex session to go quiet waits on the clock.
-        effects.extend(self.schedule());
-        effects
+            .collect()
     }
 
     /// Grace period ended. Drops the worker and fails its tasks unless it came back.
@@ -1303,13 +1291,16 @@ impl Ledger {
             t.status = TaskStatus::Cancelled;
             t.approvals.clear();
         }
-        if let AgentEvent::Delivered { msg_id, held } = &event {
+        let delivered = matches!(event, AgentEvent::Delivered { .. });
+        if let AgentEvent::Delivered { msg_id, read, held } = &event {
             t.status = TaskStatus::Delivered;
             t.approvals.clear();
+            // The worker's part is over; the answer, if any, comes later.
+            t.finished_at = Some(now);
             t.delivery = Some(Delivery {
                 msg_id: msg_id.clone(),
                 held: *held,
-                read: false,
+                read: *read,
                 at: now,
             });
         }
@@ -1321,6 +1312,10 @@ impl Ledger {
         effects.extend(summarize);
         effects.extend(check);
         effects.extend(notify);
+        // Its worker may have reported the answer already, before this.
+        if delivered && self.live.contains_key(&wid) {
+            effects.extend(self.follow(wid, false).0);
+        }
         effects.extend(self.schedule());
         effects
     }
@@ -1386,7 +1381,8 @@ impl Ledger {
             .find(|t| t.task.id == task)
             .ok_or(NotCancelled::Unknown)?;
         match t.status {
-            s if s.finished() => Err(NotCancelled::Finished(s)),
+            // Already in its session: nothing can take it back.
+            s if s.finished() || s == TaskStatus::Delivered => Err(NotCancelled::Finished(s)),
             TaskStatus::Running => {
                 let conn = (t.worker)
                     .and_then(|w| self.workers.get(&w)?.conn)
@@ -3245,10 +3241,10 @@ mod tests {
             mode: SendMode::InPlace,
         };
         assert!(l
-            .send_to_session(wid, "codex".into(), "hi".into(), to.clone())
+            .send_to_session(wid, "codex".into(), "hi".into(), to.clone(), vec![])
             .is_err());
         let (task, eff) = l
-            .send_to_session(wid, "claude".into(), "hi".into(), to.clone())
+            .send_to_session(wid, "claude".into(), "hi".into(), to.clone(), vec![])
             .unwrap();
         // Only its own worker holds the session, though another is idle too.
         assert_eq!(assigned(&eff), vec![(1, task)]);

@@ -33,7 +33,8 @@ const SESSION_ENV: [&str; 8] = [
 pub struct Sent {
     /// Claude's id for the message; the target's transcript records it.
     pub msg_id: String,
-    /// The message as the helper passed it, to check against what was asked.
+    /// Whom and what the helper sent, to check against what was asked.
+    pub to: String,
     pub text: String,
 }
 
@@ -76,31 +77,40 @@ pub fn argv(to: &str, text: &str, fence: &str) -> Vec<String> {
 /// Reads the helper's stream-json for its `SendMessage` call and that call's result.
 #[derive(Default)]
 pub struct Parser {
-    /// The call's tool_use id and message.
-    call: Option<(String, String)>,
+    /// The call's tool_use id, recipient and message.
+    call: Option<(String, String, String)>,
 }
 
 impl Parser {
     /// Some once `SendMessage` returned: what it sent, or why it didn't.
     pub fn line(&mut self, line: &str) -> Option<Result<Sent, String>> {
         let v: Value = serde_json::from_str(line).ok()?;
+        // It ended before SendMessage returned: claude says why (not logged in, say).
+        if v["type"] == "result" {
+            let why = v["result"].as_str().filter(|r| !r.trim().is_empty());
+            let why = why.map_or_else(
+                || "the helper ended without sending it".into(),
+                |r| r.replace('\n', " "),
+            );
+            return Some(Err(why));
+        }
         let blocks = v["message"]["content"].as_array()?;
         for b in blocks {
             match (v["type"].as_str(), b["type"].as_str()) {
                 (Some("assistant"), Some("tool_use"))
                     if b["name"] == "SendMessage" && self.call.is_none() =>
                 {
+                    let s = |k: &str| b["input"][k].as_str().unwrap_or_default().to_string();
                     let id = b["id"].as_str().unwrap_or_default().to_string();
-                    let text = b["input"]["message"].as_str().unwrap_or_default();
-                    self.call = Some((id, text.to_string()));
+                    self.call = Some((id, s("to"), s("message")));
                 }
                 (Some("user"), Some("tool_result")) => {
-                    let (id, text) = self.call.as_ref()?;
+                    let (id, to, text) = self.call.as_ref()?;
                     if b["tool_use_id"].as_str() != Some(id) {
                         continue;
                     }
                     let content = crate::claude::tool_result_text(&b["content"]);
-                    return Some(outcome(&content, text));
+                    return Some(outcome(&content, to, text));
                 }
                 _ => {}
             }
@@ -110,12 +120,13 @@ impl Parser {
 }
 
 /// `SendMessage`'s result, `{"success":true,"msg_id":…}` or `{"success":false,"message":…}`.
-fn outcome(content: &str, text: &str) -> Result<Sent, String> {
+fn outcome(content: &str, to: &str, text: &str) -> Result<Sent, String> {
     let r: Value = serde_json::from_str(content)
         .map_err(|_| format!("SendMessage said: {}", mis_types::first_line(content, 200)))?;
     match (r["success"].as_bool(), r["msg_id"].as_str()) {
         (Some(true), Some(id)) => Ok(Sent {
             msg_id: id.to_string(),
+            to: to.to_string(),
             text: text.to_string(),
         }),
         _ => Err(r["message"]
@@ -152,10 +163,16 @@ pub async fn send(to: &str, text: &str) -> Result<Sent, String> {
         }
         Err("the helper ended without sending it".into())
     };
+    // The text may name another session; it must not steer the send there.
+    let check = |s: Sent| match s.to == to {
+        true => Ok(s),
+        false => Err(format!("the helper sent it to {:?} instead", s.to)),
+    };
     // Dropping `child` stops it: nothing it says after the send matters.
     tokio::time::timeout(WAIT, read)
         .await
         .unwrap_or_else(|_| Err(format!("no send within {}s", WAIT.as_secs())))
+        .and_then(check)
 }
 
 #[cfg(test)]
@@ -182,6 +199,7 @@ mod tests {
             p.line(&result(ok)),
             Some(Ok(Sent {
                 msg_id: "m-1".into(),
+                to: "demo-fd".into(),
                 text: "fix the build\nplease".into()
             }))
         );
@@ -203,6 +221,14 @@ mod tests {
         assert_eq!(
             p.line(&result("not json")).unwrap().unwrap_err(),
             "SendMessage said: not json"
+        );
+        // Ended without the call: claude's reason.
+        let mut p = Parser::default();
+        let end =
+            r#"{"type":"result","is_error":true,"result":"Not logged in · Please run /login"}"#;
+        assert_eq!(
+            p.line(end),
+            Some(Err("Not logged in · Please run /login".into()))
         );
     }
 

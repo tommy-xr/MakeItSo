@@ -154,7 +154,8 @@ pub struct LiveSession {
     pub name: Option<String>,
     pub cwd: Option<String>,
     pub model: Option<String>,
-    /// A live claude process holds it. Codex records no such thing: always false.
+    /// A live claude process holds it. Codex records no such thing: written in the last
+    /// couple of minutes (`Session::active`), so it may be.
     pub open: bool,
     pub state: LiveState,
     /// What it waits on, in claude's words (`permission prompt`, `dialog open`).

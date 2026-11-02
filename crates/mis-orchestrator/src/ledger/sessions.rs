@@ -18,8 +18,6 @@ pub struct Live {
 
 /// A delivered message is followed this long for its answer; after, it stays delivered.
 const FOLLOW_MS: u64 = 24 * 3600 * 1000;
-/// A codex session written this recently may be open in a terminal: a message waits.
-const CODEX_QUIET_MS: u64 = 2 * 60 * 1000;
 
 /// What a session's latest report says of a message delivered into it.
 #[derive(Debug, PartialEq)]
@@ -29,20 +27,24 @@ enum Next {
     /// In its conversation.
     Read,
     Answered(String),
-    /// It was held and no longer is, and never arrived: declined, or expired.
+    /// It was held, the session is back at rest with no dialog, and it never arrived:
+    /// declined, or expired. (A busy one may yet take an approved message in.)
     Declined,
     /// It closed before taking the message in: continue it in place.
     Resend,
 }
 
-/// Pure: what `s` says of delivery `d`.
+/// Pure: what `s` says of delivery `d`. Read once, its absence later means only that it
+/// scrolled out of what the worker reads.
 fn next(d: &super::Delivery, s: &LiveSession) -> Next {
+    let busy = matches!(s.state, LiveState::Working | LiveState::Stalled);
     match s.delivered.iter().find(|x| x.msg_id == d.msg_id) {
         Some(Delivered { reply: Some(r), .. }) => Next::Answered(r.clone()),
         Some(_) if d.read => Next::Wait,
         Some(_) => Next::Read,
-        None if d.held && s.waiting_for.is_none() => Next::Declined,
-        None if !d.read && !s.open => Next::Resend,
+        None if d.read => Next::Wait,
+        None if !s.open => Next::Resend,
+        None if d.held && s.waiting_for.is_none() && !busy => Next::Declined,
         None => Next::Wait,
     }
 }
@@ -76,7 +78,7 @@ impl Ledger {
         let host = w.info.hostname.clone();
         let sessions = sessions.into_iter().take(MAX_LIVE).collect();
         self.live.insert(wid, Live { host, sessions });
-        let (mut effects, changed) = self.follow(wid);
+        let (mut effects, changed) = self.follow(wid, true);
         effects.extend(self.schedule());
         if changed {
             effects.push(Effect::Broadcast(self.status()));
@@ -86,8 +88,9 @@ impl Ledger {
 
     /// Move `wid`'s delivered messages on by what its latest report says of their sessions:
     /// answered (done, with the answer as summary), declined (failed), or sent again in
-    /// place when the session closed before taking it in. True if one moved on unannounced.
-    fn follow(&mut self, wid: WorkerId) -> (Vec<Effect>, bool) {
+    /// place when the session closed before taking it in. Only a report newer than the
+    /// delivery may say it never arrived (`settle`). True if one moved on unannounced.
+    pub(super) fn follow(&mut self, wid: WorkerId, settle: bool) -> (Vec<Effect>, bool) {
         let (now, live) = (self.now_ms, &self.live[&wid]);
         let mut effects = vec![];
         let mut changed = false;
@@ -105,6 +108,7 @@ impl Ledger {
             }
             let (ok, summary) = match next(d, s) {
                 Next::Wait => continue,
+                Next::Declined | Next::Resend if !settle => continue,
                 Next::Read => {
                     (d.read, d.held, changed) = (true, false, true);
                     continue;
@@ -142,7 +146,7 @@ impl Ledger {
     }
 
     /// `t` messages a codex session that may be open (mid-turn, or written in the last
-    /// `CODEX_QUIET_MS`): it waits in the queue until that session goes quiet.
+    /// couple of minutes, as its worker reports): it waits in the queue until it goes quiet.
     pub(super) fn session_busy(&self, t: &TaskEntry) -> bool {
         let (Some(to), Some(wid)) = (&t.task.send_to, t.pin) else {
             return false;
@@ -157,10 +161,7 @@ impl Ledger {
             .map(|l| &l.sessions[..])
             .unwrap_or_default();
         sessions.iter().any(|s| {
-            s.harness == "codex"
-                && s.id == id
-                && (s.state == LiveState::Working
-                    || self.now_ms.saturating_sub(s.updated_ms) < CODEX_QUIET_MS)
+            s.harness == "codex" && s.id == id && (s.open || s.state == LiveState::Working)
         })
     }
 
@@ -335,6 +336,7 @@ mod tests {
                 "claude".into(),
                 "add a test\nplease".into(),
                 to(orig, SendMode::Fork),
+                vec![],
             )
             .unwrap();
         // It ran in a copy and answered.
@@ -391,7 +393,8 @@ mod tests {
             title: None,
             mode: SendMode::Fork,
         };
-        let (mut task, _) = (l.send_to_session(w, "claude".into(), "m0".into(), to)).unwrap();
+        let (mut task, _) =
+            (l.send_to_session(w, "claude".into(), "m0".into(), to, vec![])).unwrap();
         // Each message runs in a copy of the last one's copy.
         for i in 1..=12 {
             let session = Some(Uuid::new_v4().to_string());
@@ -415,8 +418,9 @@ mod tests {
         assert_eq!(l.sessions()[0].messages.len(), 13);
     }
 
-    /// A worker that delivers, with a claude message to session `s` delivered as `m1`.
-    fn delivered(held: bool) -> (Ledger, WorkerId, Uuid, TaskId) {
+    /// A worker that delivers, with a claude message to session `s` sent as `m1`; `event`
+    /// ends it on the worker (None: still running).
+    fn sent(event: Option<(bool, bool)>) -> (Ledger, WorkerId, Uuid, TaskId) {
         let mut l = Ledger {
             now_ms: 1_000,
             ..Default::default()
@@ -431,12 +435,20 @@ mod tests {
             title: None,
             mode: SendMode::Deliver,
         };
+        let text = "add a test".into();
         let (task, _) = l
-            .send_to_session(w, "claude".into(), "add a test".into(), to)
+            .send_to_session(w, "claude".into(), text, to, vec![])
             .unwrap();
-        let msg_id = "m1".to_string();
-        l.event(w, 1, task, AgentEvent::Delivered { msg_id, held });
+        if let Some((read, held)) = event {
+            let msg_id = "m1".to_string();
+            l.event(w, 1, task, AgentEvent::Delivered { msg_id, read, held });
+        }
         (l, w, s, task)
+    }
+
+    /// Delivered into its inbox (not yet read), or held.
+    fn delivered(held: bool) -> (Ledger, WorkerId, Uuid, TaskId) {
+        sent(Some((false, held)))
     }
 
     fn open(s: Uuid, delivered: Vec<Delivered>) -> LiveSession {
@@ -446,6 +458,13 @@ mod tests {
             open: true,
             delivered,
             ..Default::default()
+        }
+    }
+
+    fn closed(s: Uuid) -> LiveSession {
+        LiveSession {
+            open: false,
+            ..open(s, vec![])
         }
     }
 
@@ -480,25 +499,50 @@ mod tests {
             (TaskStatus::Done, "done".into(), Some("Added one.".into()))
         );
         // The usual push for a finished task, once.
-        assert!(eff
-            .iter()
-            .any(|e| matches!(e, Effect::Notify { title, .. } if title == "done · add a test")));
+        let pushed = |eff: &[Effect]| {
+            eff.iter()
+                .any(|e| matches!(e, Effect::Notify { title, .. } if title == "done · add a test"))
+        };
+        assert!(pushed(&eff));
         assert!(at(&mut l, vec![msg(Some("Added one."))]).is_empty());
         assert!(l.sessions()[0].messages[0].answered);
+        // Already in the session: it can't be cancelled.
+        let (mut l, _, _, task) = delivered(false);
+        let refused = super::super::NotCancelled::Finished(TaskStatus::Delivered);
+        assert_eq!(l.cancel(task).err(), Some(refused));
+        // Answered before the worker said it delivered: done as soon as it does.
+        let (mut l, w, s, task) = sent(None);
+        l.live_sessions(w, 1, vec![open(s, vec![msg(Some("Done already."))])]);
+        assert_eq!(status(&l, task).0, TaskStatus::Running);
+        let ev = AgentEvent::Delivered {
+            msg_id: "m1".into(),
+            read: true,
+            held: false,
+        };
+        assert!(pushed(&l.event(w, 1, task, ev)));
+        assert_eq!(status(&l, task).2.as_deref(), Some("Done already."));
     }
 
     #[test]
     fn a_held_message_waits_for_approval_and_fails_if_declined() {
         let (mut l, w, s, task) = delivered(true);
         assert_eq!(status(&l, task).1, "waiting for approval in the terminal");
-        let held = |why: Option<&str>| LiveSession {
+        let at = |state, why: Option<&str>| LiveSession {
+            state,
             waiting_for: why.map(String::from),
             ..open(s, vec![])
         };
-        l.live_sessions(w, 1, vec![held(Some("permission prompt"))]);
+        l.live_sessions(
+            w,
+            1,
+            vec![at(LiveState::Waiting, Some("permission prompt"))],
+        );
         assert!(l.sessions()[0].messages[0].held);
-        // The dialog gone and the message never in: declined (or expired).
-        l.live_sessions(w, 1, vec![held(None)]);
+        // Approved while busy: in its inbox until its next tool round.
+        l.live_sessions(w, 1, vec![at(LiveState::Working, None)]);
+        assert_eq!(status(&l, task).0, TaskStatus::Delivered);
+        // At rest, no dialog, and it never arrived: declined (or expired).
+        l.live_sessions(w, 1, vec![at(LiveState::Idle, None)]);
         let (st, _, why) = status(&l, task);
         assert_eq!(
             (st, why.as_deref()),
@@ -509,68 +553,71 @@ mod tests {
         l.live_sessions(w, 1, vec![open(s, vec![msg(None)])]);
         assert_eq!(status(&l, task).1, "delivered");
         assert!(!l.sessions()[0].messages[0].held);
+        // The terminal closed on it: not declined, continued in place.
+        let (mut l, w, s, task) = delivered(true);
+        l.live_sessions(w, 1, vec![closed(s)]);
+        assert_eq!(status(&l, task).0, TaskStatus::Running);
     }
 
     #[test]
     fn a_session_closed_before_taking_it_in_is_continued_in_place() {
         let (mut l, w, s, task) = delivered(false);
-        let closed = |d| LiveSession {
-            open: false,
-            ..open(s, d)
-        };
-        let eff = l.live_sessions(w, 1, vec![closed(vec![])]);
+        let eff = l.live_sessions(w, 1, vec![closed(s)]);
         // Sent again, now to a closed session: the worker continues it in place.
         assert!(matches!(&eff[..], [Effect::Assign { task: t, .. }, _] if t.id == task));
         assert_eq!(status(&l, task).0, TaskStatus::Running);
-        // Closed after it read it: it stays delivered, however long.
-        let (mut l, w, s, task) = delivered(false);
-        l.live_sessions(w, 1, vec![open(s, vec![msg(None)])]);
-        assert!(l
-            .live_sessions(w, 1, vec![closed(vec![msg(None)])])
-            .is_empty());
-        assert!(l.live_sessions(w, 1, vec![closed(vec![])]).is_empty());
-        assert_eq!(status(&l, task).0, TaskStatus::Delivered);
+        // Read, then gone from what the worker reads (scrolled out) and closed: it stays
+        // delivered, however long, and isn't sent twice.
+        for (read, seen) in [(false, true), (true, false)] {
+            let (mut l, w, s, task) = sent(Some((read, false)));
+            if seen {
+                l.live_sessions(w, 1, vec![open(s, vec![msg(None)])]);
+            }
+            assert!(l.live_sessions(w, 1, vec![closed(s)]).is_empty());
+            assert_eq!(status(&l, task).0, TaskStatus::Delivered);
+        }
         // Answered after a day: no longer followed.
+        let (mut l, w, s, task) = sent(Some((true, false)));
         l.now_ms += 24 * 3600 * 1000;
         l.live_sessions(w, 1, vec![open(s, vec![msg(Some("late"))])]);
         assert_eq!(status(&l, task).0, TaskStatus::Delivered);
+        // Kept like a finished task, then swept.
+        l.now_ms += 40 * 24 * 3600 * 1000;
+        assert_eq!(l.sweep().0, [task]);
     }
 
     #[test]
     fn a_message_to_a_busy_codex_session_waits_until_it_goes_quiet() {
-        let mut l = Ledger {
-            now_ms: 10 * 60 * 1000,
-            ..Default::default()
-        };
+        let mut l = Ledger::default();
         let w = Uuid::new_v4();
         let mut i = info("studio");
         i.deliver = true;
         l.connect(w, i, &[], 1, NOW);
         let s = Uuid::new_v4();
-        let codex = |state, ago: u64| LiveSession {
+        let codex = |state, open| LiveSession {
             harness: "codex".into(),
             id: s.to_string(),
             state,
-            updated_ms: 10 * 60 * 1000 - ago,
+            open,
             ..Default::default()
         };
-        l.live_sessions(w, 1, vec![codex(LiveState::Working, 1_000)]);
+        l.live_sessions(w, 1, vec![codex(LiveState::Working, true)]);
         let to = SendTo {
             session: s,
             title: None,
             mode: SendMode::Deliver,
         };
+        let text = "rename it".into();
         let (task, eff) = l
-            .send_to_session(w, "codex".into(), "rename it".into(), to)
+            .send_to_session(w, "codex".into(), text, to, vec![])
             .unwrap();
         assert!(eff.is_empty(), "held in the queue, not on the worker");
         // Its turn ended, but it was written a moment ago: maybe still open.
         assert!(l
-            .live_sessions(w, 1, vec![codex(LiveState::Idle, 1_000)])
+            .live_sessions(w, 1, vec![codex(LiveState::Idle, true)])
             .is_empty());
-        // Quiet for two minutes: the next tick sends it, to be continued in place.
-        l.now_ms += 2 * 60 * 1000;
-        let eff = l.tick(NOW, Duration::from_secs(3600));
+        // Quiet, by its worker's clock: sent, to be continued in place.
+        let eff = l.live_sessions(w, 1, vec![codex(LiveState::Idle, false)]);
         assert!(matches!(&eff[..], [Effect::Assign { task: t, .. }] if t.id == task));
     }
 
@@ -585,7 +632,7 @@ mod tests {
             mode: SendMode::Deliver,
         };
         let (_, eff) = l
-            .send_to_session(w, "claude".into(), "hi".into(), to)
+            .send_to_session(w, "claude".into(), "hi".into(), to, vec![])
             .unwrap();
         let [Effect::Assign { task, .. }] = &eff[..] else {
             panic!("{eff:?}")

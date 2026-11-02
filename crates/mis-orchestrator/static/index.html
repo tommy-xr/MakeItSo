@@ -377,7 +377,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .msg.user.card .body { border-left: 2px solid var(--accent); }
   .msg.working .body { color: var(--run); font-family: var(--mono); font-size: .875rem; }
   .msg .note { display: block; margin-top: .25rem; padding-left: .875rem; font: .75rem/1.4 var(--mono); color: var(--dim); }
-  .msg .note.bad { color: var(--bad); }
+  .msg .note.bad { color: var(--bad); } .msg .note.warn { color: var(--warn); }
   /* Rendered markdown. */
   .md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }
   .md p, .md ul, .md ol, .md pre, .md blockquote { margin: 0 0 .75rem; }
@@ -1105,7 +1105,9 @@ const placement = (t) => [t.harness, t.model, t.worker && hostOf(t.worker)].filt
 // Why a task needs the user, most urgent first: [rank, label].
 const ATTENTION = { approval: [-1, 'needs you: approval'], failed: [0, 'needs you'], limited: [1, 'needs you: usage limit'], unread: [2, 'needs you: unread'] };
 // Needs you, then working, then the rest.
-const rank = (t) => ATTENTION[t.attention]?.[0] ?? (['planning', 'queued', 'running', 'delivered'].includes(t.status) ? 3 : 4);
+const rank = (t) => ATTENTION[t.attention]?.[0] ?? (['planning', 'queued', 'running'].includes(t.status) || awaited(t) ? 3 : 4);
+// Delivered into a session and followed there for its answer (a day).
+const awaited = (t) => t.status === 'delivered' && Date.now() + skew - (t.finished_at || 0) < 864e5;
 // Threads, each followed by its replies (oldest first), nested: [depth, task]. A thread ranks as its
 // most urgent task, then by its newest task. A reply whose parent isn't in `list` starts its own thread.
 function threaded(list) {
@@ -1283,8 +1285,8 @@ const LIVE_STATE = { working: 'working', waiting: 'waiting for you', stalled: 's
 const liveKey = (s) => `${s.worker}/${s.harness}/${s.id}`;
 const liveChip = (state) => el('span', { className: `chip st-${state}` }, LIVE_STATE[state] || state);
 // Where a message to a session is: queued → delivering → delivered (or held in its terminal) → answered.
-const sayState = (status, held, why) => ({ running: 'delivering', delivered: held ? 'waiting for approval in the terminal' : 'delivered',
-  done: 'answered', failed: `failed${why ? `: ${snippet(why)}` : ''}` }[status] || status);
+const sayState = (status, held) => ({ running: 'delivering', delivered: held ? 'waiting for approval in the terminal' : 'delivered',
+  done: 'answered' }[status] || status);
 // A live session: name and age; state, what it waits on, machine, harness; its last line. Then the latest you sent it,
 // each opening its task: a reply sent to a copy is only there.
 function liveRow(s, now) {
@@ -1501,7 +1503,7 @@ function drawConvo(box, items, open, more, working) {
     // md() escapes all of the text before adding its own tags.
     if (x.role === 'assistant') { body.classList.add('md'); body.innerHTML = mdCached(x.text); } else body.textContent = x.text;
     const card = x === reply || (x === latest[0] && x.role === 'user');
-    const note = x.note ? el('a', { className: `note${x.note.bad ? ' bad' : ''}`, href: `#task/${x.note.task}` }, x.note.label) : '';
+    const note = x.note ? el('a', { className: `note ${x.note.tone}`, href: `#task/${x.note.task}` }, x.note.label) : '';
     return [el('div', { className: `msg ${x.role}${card ? ' card' : ''}` },
       el('div', { className: 'who' }, ...dots([x.role === 'user' ? 'you' : x.who || 'agent', x.time])), body, note)];
   };
@@ -1775,7 +1777,7 @@ async function loadTranscript(s) {
 const IDLE_REFRESH_MS = 30000;
 // A message to this session awaits its answer, which lands in the transcript.
 const messaging = (key) => tasks.some((t) => t.send_to && key.endsWith(`/${t.harness}/${t.send_to.session}`)
-  && ['queued', 'running', 'delivered'].includes(t.status));
+  && (['queued', 'running'].includes(t.status) || awaited(t)));
 // What's known of a session: its live row, else its listing on the Workers view.
 const sessionInfo = (key) => feed.find((s) => liveKey(s) === key)
   || ((sessLists.get(key.split('/')[0]) || {}).list || []).find((x) => x.id === key.split('/')[2]) || {};
@@ -1811,10 +1813,11 @@ function renderSession(key) {
   sess.drawn = got;
   sess.sig = sig;
   const time = (at) => (at ? new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) : '');
-  const items = got.turns.map((t) => ({ role: t.role, text: t.text, call: t.role === 'tool' && !/^[→✗] /.test(t.text), key: `${t.at}|${t.text}`, who: harness, time: time(t.at) }));
+  const items = got.turns.map((t) => ({ role: t.role, text: t.text, call: t.role === 'tool' && !/^[→✗] /.test(t.text), key: `${t.at}|${t.text}`, who: harness, time: time(t.at), at: Date.parse(t.at) }));
   // Each message you sent: its state under its turn (the newest message takes the newest such turn), or, not in the
   // transcript yet, a turn of its own at the end.
-  const same = (x, m) => x.role === 'user' && !x.note && x.text.trim().slice(0, 200) === m.text.slice(0, 200);
+  // Its text, written after it was sent (a minute's slack for the worker's clock): "yes" twice isn't one turn.
+  const same = (x, m) => x.role === 'user' && !x.note && x.text.trim().slice(0, 200) === m.text.slice(0, 200) && !(x.at < m.at - 6e4);
   const unseen = [...mine].reverse().filter((m) => {
     const at = items.findLast((x) => same(x, m));
     if (at) at.note = m;
@@ -1828,14 +1831,18 @@ function renderSession(key) {
   placeConvo(`session/${key}`, `${items.length}|${last.key}`, bottom, $('turns'));
 }
 
-// Messages sent to session `key`, oldest first, each with where it is (`label`). `pending` until answered; a failed
-// one only while it's the latest. One just sent shows as queued before its task is listed.
+// Messages sent to session `key` (`<worker>/<harness>/<id>`; a queued one has no worker yet), oldest first, each with
+// where it is (`label`). `pending` until answered; a failed one only while it's the latest. One just sent shows as
+// queued before its task is listed.
 function sentHere(key) {
-  const sent = tasks.filter((t) => t.send_to && sendKey(t) === key).sort((a, b) => a.started_at - b.started_at);
-  const out = sent.map((t, i) => ({ task: t.id, text: t.prompt.trim(), label: sayState(t.status, t.activity !== 'delivered', t.summary),
-    bad: t.status === 'failed', pending: !isFinished(t) || (t.status === 'failed' && i === sent.length - 1) }));
+  const [, harness, id] = key.split('/');
+  const sent = tasks.filter((t) => t.send_to && t.harness === harness && t.send_to.session === id).sort((a, b) => a.started_at - b.started_at);
+  const label = (t) => (t.status === 'failed' ? `failed${t.summary ? `: ${snippet(t.summary)}` : ''}` : t.status === 'delivered' ? t.activity : sayState(t.status));
+  const out = sent.map((t, i) => ({ task: t.id, text: t.prompt.trim(), at: t.started_at, label: label(t),
+    tone: t.status === 'failed' ? 'bad' : t.activity === 'waiting for approval in the terminal' ? 'warn' : '',
+    pending: !isFinished(t) || (t.status === 'failed' && i === sent.length - 1) }));
   const just = saying && saying.key === key && saying.sent;
-  if (just && !out.some((m) => m.task === just.task)) out.push({ ...just, label: 'queued', bad: false, pending: true });
+  if (just && !out.some((m) => m.task === just.task)) out.push({ ...just, at: Date.now() + skew, label: 'queued', tone: '', pending: true });
   return out;
 }
 

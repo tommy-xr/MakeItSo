@@ -95,12 +95,12 @@ pub async fn deliver(
         let got = first_line(&sent.text, 120);
         return fail(format!("sent to {name}, but changed on the way: “{got}”"));
     }
-    let delivered = |held| AgentEvent::Delivered {
+    let delivered = |read, held| AgentEvent::Delivered {
         msg_id: sent.msg_id.clone(),
+        read,
         held,
     };
     let deadline = tokio::time::Instant::now() + CONFIRM;
-    let mut held = false;
     while tokio::time::Instant::now() < deadline {
         let (p, c, i, msg) = (
             path.clone(),
@@ -111,9 +111,12 @@ pub async fn deliver(
         let t = text.to_string();
         let (got, waiting) = tokio::task::spawn_blocking(move || {
             let got = seen(&appended(&p, start), &msg, &t);
-            // A hold shows in its terminal as a dialog: the process says it waits.
+            // A hold shows in its terminal as a dialog: the process says what it waits on,
+            // as the live feed reports it (`LiveSession::waiting_for`).
             let procs = live::claude_procs(&c, live::alive);
-            let waiting = procs.get(&i).and_then(|p| p.status.as_deref()) == Some("waiting");
+            let p = procs.get(&i);
+            let waiting = p
+                .is_some_and(|p| p.status.as_deref() == Some("waiting") && p.waiting_for.is_some());
             (got, waiting)
         })
         .await
@@ -123,19 +126,16 @@ pub async fn deliver(
                 let got = first_line(&body, 120);
                 return fail(format!("delivered to {name}, but as “{got}”"));
             }
-            Some(Seen::Read(_) | Seen::Queued) => return delivered(false),
-            Some(Seen::Held) if waiting => return delivered(true),
-            Some(Seen::Held) => held = true,
-            None => {}
+            Some(Seen::Read(_)) => return delivered(true, false),
+            Some(Seen::Queued) => return delivered(false, false),
+            Some(Seen::Held) if waiting => return delivered(false, true),
+            Some(Seen::Held) | None => {}
         }
         tokio::time::sleep(RECHECK).await;
     }
-    match held {
-        true => delivered(true),
-        false => fail(format!(
-            "sent to {name}, but it hasn't shown up in that session"
-        )),
-    }
+    fail(format!(
+        "sent to {name}, but it hasn't shown up in that session"
+    ))
 }
 
 #[cfg(test)]

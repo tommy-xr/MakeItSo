@@ -1324,7 +1324,7 @@ async fn message(
             Err((StatusCode::SERVICE_UNAVAILABLE, "worker offline".into())),
             vec![],
         ),
-        Some(Some(_)) => match l.send_to_session(wid, harness, m.text, to) {
+        Some(Some(_)) => match l.send_to_session(wid, harness, m.text, to, vec![]) {
             Ok((id, effects)) => (Ok(id), effects),
             Err(why) => (Err((StatusCode::BAD_REQUEST, why)), vec![]),
         },

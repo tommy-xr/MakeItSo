@@ -226,10 +226,12 @@ pub enum AgentEvent {
     /// The user cancelled the task: it ends with this in place of `Finished`.
     Cancelled,
     /// The message reached its open session (`SendMode::Deliver`), the worker's part
-    /// done: it ends the run like `Finished`. `held`: the session's terminal holds it
-    /// for the user's approval.
+    /// done: it ends the run like `Finished`. `read`: already in its conversation (else
+    /// in its inbox until its next tool round). `held`: its terminal holds it for the
+    /// user's approval.
     Delivered {
         msg_id: String,
+        read: bool,
         held: bool,
     },
 }
@@ -908,10 +910,14 @@ mod tests {
         assert_eq!(s, r#"{"type":"cancelled"}"#);
         let delivered = AgentEvent::Delivered {
             msg_id: "m1".into(),
+            read: false,
             held: true,
         };
         let s = serde_json::to_string(&delivered).unwrap();
-        assert_eq!(s, r#"{"type":"delivered","msg_id":"m1","held":true}"#);
+        assert_eq!(
+            s,
+            r#"{"type":"delivered","msg_id":"m1","read":false,"held":true}"#
+        );
         let mode = serde_json::to_string(&SendMode::Deliver).unwrap();
         assert_eq!(mode, r#""deliver""#);
         let draft = ServerMsg::PurposeDraft {

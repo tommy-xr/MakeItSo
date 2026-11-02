@@ -644,10 +644,7 @@ async fn session_cwd(
         match (to.mode, open) {
             (SendMode::Fork, _) | (_, false) => break (cwd, model),
             (SendMode::InPlace, true) => {
-                return Err(
-                    "the session is open right now; send to a copy, or queue until it closes"
-                        .into(),
-                )
+                return Err("the session is open right now; send again once it closes".into())
             }
             (SendMode::WhenClosed | SendMode::Deliver, true) if Instant::now() >= deadline => {
                 return Err(format!(
@@ -669,9 +666,11 @@ async fn session_cwd(
     Ok((roots::resolve_cwd(&ctx.roots, Some(&cwd))?, model))
 }
 
-/// Deliver `task` into claude session `session` if a terminal holds it open: the event
-/// that ends the task. None when it isn't open (or isn't claude's): continue it in place.
+/// Deliver `task` into claude session `session` if a terminal holds it open, under a
+/// peer name: the event that ends the task. None otherwise (closed, codex, or no name to
+/// send to): it is continued in place once it may be.
 async fn deliver_open(
+    ctx: &Ctx,
     task: &Task,
     session: uuid::Uuid,
     images: bool,
@@ -683,21 +682,26 @@ async fn deliver_open(
     let id = session.to_string();
     let looked = tokio::task::spawn_blocking(move || {
         let (claude, codex) = sessions::roots();
-        let proc = live::claude_procs(&claude, live::alive).remove(&id)?;
-        let path = transcript::find(&claude, &codex, "claude", session);
-        Some((claude, path, proc.name, id))
+        let name = live::claude_procs(&claude, live::alive).remove(&id)?.name?;
+        let path = transcript::find(&claude, &codex, "claude", session)?;
+        let cwd = sessions::read_one("claude", &path, unix_ms())?.cwd;
+        Some((claude, path, name, id, cwd))
     });
-    let (claude, path, name, id) = looked.await.ok()??;
-    let fail = |why: &str| {
-        let summary = Some(why.into());
+    let (claude, path, name, id, cwd) = looked.await.ok()??;
+    let fail = |why: String| {
+        let summary = Some(why);
         Some(AgentEvent::Finished { ok: false, summary })
     };
-    if images {
-        return fail("images can't go into a session open in a terminal; send the text alone");
+    // Like any task here: only in a folder under the worker's roots.
+    let cwd = cwd.ok_or_else(|| "the session doesn't record its folder".to_string());
+    if let Err(why) = cwd.and_then(|c| roots::resolve_cwd(&ctx.roots, Some(&c))) {
+        return fail(why);
     }
-    let (Some(path), Some(name)) = (path, name) else {
-        return fail("the open session has no transcript or peer name to send to");
-    };
+    if images {
+        return fail(
+            "images can't go into a session open in a terminal; send the text alone".into(),
+        );
+    }
     let started = AgentEvent::Started {
         session: Some(id.clone()),
         model: None,
@@ -778,7 +782,7 @@ async fn run(
         return;
     };
     if let Some(to) = (task.send_to.as_ref()).filter(|to| to.mode == SendMode::Deliver) {
-        if let Some(ev) = deliver_open(&task, to.session, !images.is_empty(), tx).await {
+        if let Some(ev) = deliver_open(ctx, &task, to.session, !images.is_empty(), tx).await {
             let _ = tx.send((id, ev)).await;
             return;
         }
