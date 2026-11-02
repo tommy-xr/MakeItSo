@@ -1,5 +1,6 @@
 use clap::Parser;
 use mis_orchestrator::access_gate::AccessGate;
+use mis_orchestrator::evidence;
 use mis_orchestrator::images::Images;
 use mis_orchestrator::push::Push;
 use mis_orchestrator::{access, normalize_origins, App};
@@ -55,7 +56,8 @@ struct Args {
     cf_access_certs_url: Option<String>,
     /// Holds task history (`ledger.json`, `transcripts/`; tasks are kept 30 days
     /// after they end), the push notification key and subscriptions, and uploaded
-    /// images (`images/`, deleted after a week). Default: ~/.local/state/mis
+    /// images (`images/`, deleted after a week) and evidence files agents attach
+    /// (`evidence/`, deleted after 30 days). Default: ~/.local/state/mis
     /// (%LOCALAPPDATA%\mis on Windows).
     #[arg(long, env = "MIS_STATE_DIR")]
     state_dir: Option<std::path::PathBuf>,
@@ -301,10 +303,14 @@ async fn main() -> anyhow::Result<()> {
                 Ok(images) => app = app.with_images(images),
                 Err(e) => tracing::warn!("image attachments off: {e:#}"),
             }
+            match evidence::Store::open(dir.join("evidence")) {
+                Ok(store) => app = app.with_evidence(store),
+                Err(e) => tracing::warn!("evidence files off: {e:#}"),
+            }
         }
         None => tracing::warn!(
             "no --state-dir and no home dir: task history is lost on restart; \
-             push notifications and image attachments off"
+             push notifications, image attachments and evidence files off"
         ),
     }
     if args.no_planner {

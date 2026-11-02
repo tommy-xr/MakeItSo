@@ -4,6 +4,7 @@
 mod approvals;
 mod config;
 mod deliver;
+mod evidence;
 mod feed;
 mod inventory;
 mod live;
@@ -525,7 +526,14 @@ async fn session(
             }))
             .await
         {
-            c.pending = Some((task, event));
+            // A file too big for an older orchestrator's frames would fail on every
+            // reconnect: it is dropped, not resent.
+            match event {
+                AgentEvent::Artifact(d) => {
+                    tracing::warn!(%task, "evidence {:?} not sent: {e}", d.title)
+                }
+                event => c.pending = Some((task, event)),
+            }
             return Err(e.into());
         }
         if finished {
@@ -860,7 +868,11 @@ async fn run(
         .is_some_and(|p| p.mode == PermissionMode::Ask)
         && agent.name() == "claude";
     // Without the server the task still runs, just without its reporting tools.
-    let server = mcp::serve(id, tx.clone(), ask.then(|| ctx.approvals.clone()))
+    let files = evidence::Files {
+        cwd: PathBuf::from(&cwd),
+        roots: ctx.roots.clone(),
+    };
+    let server = mcp::serve(id, tx.clone(), ask.then(|| ctx.approvals.clone()), files)
         .await
         .inspect_err(|e| tracing::warn!(%id, "no mcp server: {e}"))
         .ok();

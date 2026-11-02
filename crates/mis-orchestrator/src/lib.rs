@@ -24,6 +24,7 @@ pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("MIS_GIT_
 
 pub mod access;
 pub mod access_gate;
+pub mod evidence;
 pub mod images;
 pub mod ledger;
 pub mod note;
@@ -48,6 +49,8 @@ const FORGET_EVERY: Duration = Duration::from_secs(3600);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often routine files are re-read and due ones started.
 pub const ROUTINE_EVERY: Duration = Duration::from_secs(30);
+/// Largest frame a worker may send: a compare's two images, base64, plus slack.
+const WORKER_FRAME: usize = 2 * mis_types::evidence::MAX_FILE_BYTES.div_ceil(3) * 4 + (1 << 20);
 
 use access::Identity;
 use access_gate::{AccessGate, JWT_HEADER};
@@ -99,6 +102,8 @@ pub struct App {
     push: Option<Arc<push::Push>>,
     /// Uploaded images. None: attachments are off.
     images: Option<Arc<images::Images>>,
+    /// Files agents attach as evidence. None: they are refused.
+    evidence: Option<Arc<evidence::Store>>,
     /// Where the ledger is saved. None: task history is lost on restart.
     ledger_dir: Option<std::path::PathBuf>,
     /// Open once serving, until shut down.
@@ -141,6 +146,7 @@ impl App {
             access: None,
             push: None,
             images: None,
+            evidence: None,
             ledger_dir: None,
             store: Default::default(),
             channel: None,
@@ -212,6 +218,12 @@ impl App {
 
     pub fn with_images(mut self, images: images::Images) -> Self {
         self.images = Some(Arc::new(images));
+        self
+    }
+
+    /// Keep and serve the files agents attach as evidence.
+    pub fn with_evidence(mut self, store: evidence::Store) -> Self {
+        self.evidence = Some(Arc::new(store));
         self
     }
 
@@ -430,21 +442,58 @@ impl App {
         }
     }
 
-    /// Delete week-old images now and every `SWEEP_EVERY`.
+    /// Delete week-old images and month-old evidence now and every `SWEEP_EVERY`.
     fn spawn_image_sweep(&self) {
-        let Some(store) = self.images.clone() else {
+        let (images, evidence) = (self.images.clone(), self.evidence.clone());
+        if images.is_none() && evidence.is_none() {
             return;
-        };
+        }
         tokio::spawn(async move {
             let mut every = tokio::time::interval(images::SWEEP_EVERY);
             loop {
                 every.tick().await;
-                let gone = store.sweep(std::time::SystemTime::now());
+                let now = std::time::SystemTime::now();
+                let gone = images.as_ref().map_or(0, |s| s.sweep(now));
                 if gone > 0 {
                     tracing::info!(gone, "swept old images");
                 }
+                let gone = evidence.as_ref().map_or(0, |s| s.sweep(now));
+                if gone > 0 {
+                    tracing::info!(gone, "swept old evidence files");
+                }
             }
         });
+    }
+
+    /// Check and store a file the agent of `task` attached, then list it on the
+    /// task; one refused becomes a note saying why. Decoding and writing run off
+    /// the runtime; the caller awaits it, so the worker's later events wait too.
+    async fn attach(&self, wid: WorkerId, conn: ConnId, task: TaskId, draft: EvidenceDraft) {
+        let title = draft.title.clone();
+        let Some(held) = self.ledger().attached(wid, conn, task).map(<[_]>::to_vec) else {
+            return;
+        };
+        let store = self.evidence.clone();
+        let stored = tokio::task::spawn_blocking(move || match store {
+            None => Err("evidence files are off".to_string()),
+            Some(store) => evidence::check(draft, &held).and_then(|checked| {
+                let ids = (checked.files.iter())
+                    .map(|(kind, bytes)| store.store(*kind, bytes))
+                    .collect::<std::io::Result<Vec<_>>>()
+                    .map_err(|e| {
+                        tracing::warn!(%task, "storing evidence: {e}");
+                        "couldn't store it".to_string()
+                    })?;
+                Ok(checked.evidence(uuid::Uuid::new_v4(), ids, unix_ms()))
+            }),
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("checking it failed: {e}")));
+        if let Err(why) = &stored {
+            tracing::warn!(%task, "evidence {title:?} refused: {why}");
+        }
+        let stored = stored.map_err(|why| (title, why));
+        self.transition(|l| ((), l.add_evidence(wid, conn, task, stored)));
     }
 
     /// Restore the saved ledger, if it has a dir. Unusable: serve without
@@ -836,6 +885,7 @@ pub fn router(app: App) -> Router {
         .route("/mcp", post(mcp))
         .route("/api/upload", post(upload))
         .route("/api/images/{id}", get(image))
+        .route("/api/evidence/{id}", get(evidence_file))
         .route("/api/update", get(update_status).post(set_update))
         .route("/api/tasks/{id}/cancel", post(cancel))
         .route("/api/routines", get(routines))
@@ -1190,6 +1240,32 @@ async fn image(
     }
 }
 
+/// An evidence file, as stored: its sniffed type, never sniffed again by the
+/// browser, and never run as a page (no scripts, styles or frames load).
+async fn evidence_file(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+) -> Response {
+    if !app.admit(&headers, peer, "/api/evidence").await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match app.evidence.as_ref().and_then(|s| s.read(id)) {
+        Some((kind, bytes)) => (
+            [
+                (header::CONTENT_TYPE, kind.content_type()),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                (header::CONTENT_SECURITY_POLICY, "default-src 'none'"),
+                (header::CONTENT_DISPOSITION, "inline"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct ListParams {
     /// Also list `claude -p` / `codex exec` runs.
@@ -1376,7 +1452,8 @@ async fn ws_worker(
     if app.admit_scope(&headers, peer, "/ws/worker").await != Some(Scope::Full) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    ws.on_upgrade(move |sock| worker_conn(sock, app))
+    ws.max_frame_size(WORKER_FRAME)
+        .on_upgrade(move |sock| worker_conn(sock, app))
         .into_response()
 }
 
@@ -1442,6 +1519,9 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
                     None => break, // closed by `Effect::Close`
                 },
                 incoming = recv_json::<WorkerMsg>(&mut sock) => match incoming {
+                    Some(WorkerMsg::Event { task, event: AgentEvent::Artifact(draft) }) => {
+                        app.attach(wid, conn, task, draft).await;
+                    }
                     Some(WorkerMsg::Event { task, event }) => {
                         app.transition(|l| ((), l.event(wid, conn, task, event)));
                     }

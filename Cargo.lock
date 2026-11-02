@@ -2016,8 +2016,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64ct",
  "clap",
  "futures-util",
+ "libc",
  "mis-agent",
  "mis-orchestrator",
  "mis-types",
