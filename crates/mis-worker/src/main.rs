@@ -458,10 +458,10 @@ async fn session(
                         let procs = live::claude_procs(&claude, live::alive);
                         let mut feed = feed.lock().unwrap();
                         let all = feed.poll(&claude, &codex, &procs, unix_ms());
-                        feed.changed(all)
+                        (feed.changed(all), feed.parsed)
                     });
-                    let changed = changed.await.ok().flatten();
-                    tracing::debug!(took = ?t.elapsed(), changed = changed.is_some(), "live sessions read");
+                    let (changed, parsed) = changed.await.unwrap_or_default();
+                    tracing::debug!(took = ?t.elapsed(), parsed, changed = changed.is_some(), "live sessions read");
                     if let Some(sessions) = changed {
                         let msg = text(&WorkerMsg::LiveSessions { sessions });
                         tracing::debug!(bytes = msg.len(), "sending live sessions");

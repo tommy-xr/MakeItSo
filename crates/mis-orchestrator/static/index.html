@@ -1207,7 +1207,7 @@ function sessionRow(w, s, now) {
       ...dots([folder(s.cwd), s.model, ago(now - s.updated_ms), !s.interactive && 'headless']))));
 }
 function sessionsLine(w) {
-  if (!w.online) return '';
+  if (!w.online || readOnly) return ''; // sessions need full access
   const open = sessOpen.has(w.id), got = sessLists.get(w.id), now = Date.now() + skew;
   const body = !got ? el('p', {}, 'reading…') : got.error ? el('p', { className: 'bad' }, got.error)
     : got.list.length ? el('ul', {}, ...got.list.map((s) => sessionRow(w, s, now))) : el('p', {}, 'no sessions found');
