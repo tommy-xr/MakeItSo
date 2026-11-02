@@ -102,19 +102,17 @@ pub fn claude_turns(line: &str) -> Vec<Turn> {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
         return vec![];
     };
+    let at = &v["timestamp"];
+    // A message MIS delivered is the user's, as they wrote it.
+    if let Some(p) = crate::sessions::mis_peer(&v) {
+        let said = said(Role::User, p.body);
+        return said.map(|s| turn(Role::User, s, at)).into_iter().collect();
+    }
     let role = match v["type"].as_str() {
         Some("user") => Role::User,
         Some("assistant") => Role::Assistant,
         _ => return vec![],
     };
-    let at = &v["timestamp"];
-    // A message MIS delivered is the user's, as they wrote it.
-    if let Some(p) = crate::sessions::mis_peer(&v) {
-        return said(role, p.body)
-            .map(|s| turn(role, s, at))
-            .into_iter()
-            .collect();
-    }
     if v["isMeta"] == true || v["isSidechain"] == true || v["isCompactSummary"] == true {
         return vec![];
     }
@@ -318,6 +316,7 @@ mod tests {
                 // A message MIS delivered reads as the user's own; another session's doesn't.
                 r#"{"type":"user","isMeta":true,"origin":{"kind":"peer","msg_id":"m1","name":"mis-phone","body":"and docs"},"message":{"content":"<cross-session-message>and docs</cross-session-message>"}}"#,
                 r#"{"type":"user","isMeta":true,"origin":{"kind":"peer","msg_id":"m2","name":"a-peer","body":"hi"},"message":{"content":"<cross-session-message>hi</cross-session-message>"}}"#,
+                r#"{"type":"attachment","attachment":{"type":"queued_command","origin":{"kind":"peer","msg_id":"m3","name":"mis-phone","body":"and a test"}}}"#,
                 "cut off {\"type\":\"user",
             ],
         );
@@ -330,6 +329,7 @@ mod tests {
                 (Role::Tool, "✗ denied"),
                 (Role::Assistant, "Fixed it."),
                 (Role::User, "and docs"),
+                (Role::User, "and a test"),
             ]
         );
         assert_eq!(turns[0].at.as_deref(), Some("2026-11-01T10:00:00Z"));

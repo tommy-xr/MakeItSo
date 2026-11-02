@@ -32,7 +32,7 @@ struct Facts {
 enum Parsed {
     /// Listed if it has facts (None: nothing to show yet); re-read once its
     /// (len, mtime) changes.
-    Seen((u64, u64), Option<Facts>),
+    Seen((u64, u64), Option<Box<Facts>>),
     /// Headless for good: never read again, however it grows.
     Headless,
 }
@@ -219,7 +219,7 @@ fn read(
         last: r.last,
         delivered: r.delivered,
     };
-    Parsed::Seen(key, Some(facts))
+    Parsed::Seen(key, Some(Box::new(facts)))
 }
 
 #[cfg(test)]

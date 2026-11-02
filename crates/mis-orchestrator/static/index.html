@@ -146,7 +146,6 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   /* 16px: iOS zooms the page into smaller fields. */
   #opts select, #opts input { font-size: 1rem; }
   #opts input { min-height: 2.75rem; padding: 0 .75rem; width: 100%; }
-  #say-queue { min-height: 2.25rem; padding: 0 .625rem; font-size: .6875rem; }
   /* Menu: a sheet from the right over a dimmed page; Escape, a backdrop tap or ✕ close it. */
   #menu { inset: 0; margin: 0 0 0 auto; width: min(19rem, 86vw); max-width: none; height: 100%; max-height: none; padding: 0; border: 0; border-left: 1px solid var(--line); color: var(--fg); background: var(--bg); box-shadow: 0 0 24px var(--glow); }
   #menu::backdrop { background: rgba(0, 0, 0, .55); }
@@ -338,6 +337,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .sd { flex: none; box-sizing: border-box; width: .5rem; height: .5rem; border-radius: 50%; background: var(--s); }
   .sd.queued, .sd.planning { background: none; border: 1.5px solid var(--dim); }
   .sd.running { box-shadow: 0 0 6px var(--glow); }
+  .sd.delivered { background: none; border: 1.5px solid var(--accent); }
   .sd.att-failed { --s: var(--bad); } .sd.att-limited, .sd.att-approval { --s: var(--warn); } .sd.att-unread { --s: var(--accent); }
   .sd[class*=att-] { background: var(--s); border: 0; box-shadow: 0 0 6px var(--s); }
   .rows li.reply > a { padding-left: 1rem; }
@@ -376,6 +376,8 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .msg.card .body { padding: .75rem .875rem; border: 1px solid var(--rule); background: var(--field); }
   .msg.user.card .body { border-left: 2px solid var(--accent); }
   .msg.working .body { color: var(--run); font-family: var(--mono); font-size: .875rem; }
+  .msg .note { display: block; margin-top: .25rem; padding-left: .875rem; font: .75rem/1.4 var(--mono); color: var(--dim); }
+  .msg .note.bad { color: var(--bad); }
   /* Rendered markdown. */
   .md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }
   .md p, .md ul, .md ol, .md pre, .md blockquote { margin: 0 0 .75rem; }
@@ -496,7 +498,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
     <div class="box"><textarea id="reply-text" rows="1" aria-label="reply" placeholder="Reply in this thread…" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><button id="send-reply" class="go" aria-label="Reply" title="Reply"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg></button></div>
   </form>
   <form id="say" class="composer" hidden>
-    <div class="ctx"><p id="say-open" class="warn" hidden></p><button type="button" id="say-queue" title="Holds this worker until the session closes (up to 15 min)" hidden>Queue until closed</button><p id="say-state" hidden></p></div>
+    <div class="ctx"><p id="say-open" class="dim" hidden></p><p id="say-state" hidden></p></div>
     <div class="box"><textarea id="say-text" rows="1" aria-label="message" placeholder="Message this session…" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><button id="say-send" class="go" aria-label="Send" title="Send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg></button></div>
   </form>
 </footer>
@@ -1103,7 +1105,7 @@ const placement = (t) => [t.harness, t.model, t.worker && hostOf(t.worker)].filt
 // Why a task needs the user, most urgent first: [rank, label].
 const ATTENTION = { approval: [-1, 'needs you: approval'], failed: [0, 'needs you'], limited: [1, 'needs you: usage limit'], unread: [2, 'needs you: unread'] };
 // Needs you, then working, then the rest.
-const rank = (t) => ATTENTION[t.attention]?.[0] ?? (['planning', 'queued', 'running'].includes(t.status) ? 3 : 4);
+const rank = (t) => ATTENTION[t.attention]?.[0] ?? (['planning', 'queued', 'running', 'delivered'].includes(t.status) ? 3 : 4);
 // Threads, each followed by its replies (oldest first), nested: [depth, task]. A thread ranks as its
 // most urgent task, then by its newest task. A reply whose parent isn't in `list` starts its own thread.
 function threaded(list) {
@@ -1280,13 +1282,16 @@ function threadRows(th, now) {
 const LIVE_STATE = { working: 'working', waiting: 'waiting for you', stalled: 'stalled?', shell: 'in shell', idle: 'idle' };
 const liveKey = (s) => `${s.worker}/${s.harness}/${s.id}`;
 const liveChip = (state) => el('span', { className: `chip st-${state}` }, LIVE_STATE[state] || state);
+// Where a message to a session is: queued → delivering → delivered (or held in its terminal) → answered.
+const sayState = (status, held, why) => ({ running: 'delivering', delivered: held ? 'waiting for approval in the terminal' : 'delivered',
+  done: 'answered', failed: `failed${why ? `: ${snippet(why)}` : ''}` }[status] || status);
 // A live session: name and age; state, what it waits on, machine, harness; its last line. Then the latest you sent it,
 // each opening its task: a reply sent to a copy is only there.
 function liveRow(s, now) {
   const you = s.messages.slice(-2).map((m) => {
     const t = tasks.find((x) => x.id === m.task);
     return el('a', { className: 'you', href: `#task/${m.task}` }, t ? statusDot(t) : '',
-      el('span', { className: 'one' }, `you: ${m.text} · ${m.answered ? `answered ${span(now - ((t && t.finished_at) || m.at))}` : m.status}`));
+      el('span', { className: 'one' }, `you: ${m.text} · ${m.answered ? `answered ${span(now - ((t && t.finished_at) || m.at))}` : sayState(m.status, m.held)}`));
   });
   return el('li', { className: `sr${s.online ? '' : ' off'}` }, el('a', { href: `#session/${liveKey(s)}` },
     el('div', { className: 'r1' }, el('strong', { className: 'one' }, s.name || s.title || short(s.id)), el('span', { className: 'r2' }, span(now - s.updated_ms))),
@@ -1496,8 +1501,9 @@ function drawConvo(box, items, open, more, working) {
     // md() escapes all of the text before adding its own tags.
     if (x.role === 'assistant') { body.classList.add('md'); body.innerHTML = mdCached(x.text); } else body.textContent = x.text;
     const card = x === reply || (x === latest[0] && x.role === 'user');
+    const note = x.note ? el('a', { className: `note${x.note.bad ? ' bad' : ''}`, href: `#task/${x.note.task}` }, x.note.label) : '';
     return [el('div', { className: `msg ${x.role}${card ? ' card' : ''}` },
-      el('div', { className: 'who' }, ...dots([x.role === 'user' ? 'you' : x.who || 'agent', x.time])), body)];
+      el('div', { className: 'who' }, ...dots([x.role === 'user' ? 'you' : x.who || 'agent', x.time])), body, note)];
   };
   const nodes = [];
   if (earlier.length) {
@@ -1767,9 +1773,9 @@ async function loadTranscript(s) {
   s.timer = setTimeout(() => loadTranscript(s), s.got.active || messaging(s.key) ? REFRESH_MS : IDLE_REFRESH_MS);
 }
 const IDLE_REFRESH_MS = 30000;
-// A message to this session is queued or running: its reply lands in the transcript.
+// A message to this session awaits its answer, which lands in the transcript.
 const messaging = (key) => tasks.some((t) => t.send_to && key.endsWith(`/${t.harness}/${t.send_to.session}`)
-  && ['queued', 'running'].includes(t.status));
+  && ['queued', 'running', 'delivered'].includes(t.status));
 // What's known of a session: its live row, else its listing on the Workers view.
 const sessionInfo = (key) => feed.find((s) => liveKey(s) === key)
   || ((sessLists.get(key.split('/')[0]) || {}).list || []).find((x) => x.id === key.split('/')[2]) || {};
@@ -1799,38 +1805,58 @@ function renderSession(key) {
   if (!readOnly && !document.hidden && !got.error) for (const t of tasks) {
     if (t.attention === 'unread' && t.send_to && t.send_to.mode !== 'fork' && sendKey(t) === key) send({ type: 'seen', task: t.id });
   }
-  // Status redraws come often; rebuild the turns only when they changed.
-  if (sess.drawn === got) return;
+  // Status redraws come often; rebuild the turns only when they or your messages' states changed.
+  const mine = sentHere(key), sig = JSON.stringify(mine);
+  if (sess.drawn === got && sess.sig === sig) return;
   sess.drawn = got;
-  if (!got.turns.length) { $('turns').replaceChildren(el('p', { className: 'dim' }, 'no turns yet')); return; }
-  const bottom = atBottom();
+  sess.sig = sig;
   const time = (at) => (at ? new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) : '');
   const items = got.turns.map((t) => ({ role: t.role, text: t.text, call: t.role === 'tool' && !/^[→✗] /.test(t.text), key: `${t.at}|${t.text}`, who: harness, time: time(t.at) }));
+  // Each message you sent: its state under its turn (the newest message takes the newest such turn), or, not in the
+  // transcript yet, a turn of its own at the end.
+  const same = (x, m) => x.role === 'user' && !x.note && x.text.trim().slice(0, 200) === m.text.slice(0, 200);
+  const unseen = [...mine].reverse().filter((m) => {
+    const at = items.findLast((x) => same(x, m));
+    if (at) at.note = m;
+    return !at && m.pending;
+  });
+  items.push(...unseen.reverse().map((m) => ({ role: 'user', text: m.text, key: `sent|${m.task}`, note: m })));
+  if (!items.length) { $('turns').replaceChildren(el('p', { className: 'dim' }, 'no turns yet')); return; }
+  const bottom = atBottom();
   drawConvo($('turns'), items, sess.open, got.more, '');
   const last = items[items.length - 1];
   placeConvo(`session/${key}`, `${items.length}|${last.key}`, bottom, $('turns'));
 }
 
-// The session's composer. Not open: the message continues the session itself. Open
-// (a terminal holds it), it mustn't be: send to a copy (default), or queue until it closes.
-let saying = null; // { key, sent: task id | null, error, busy: a send in flight } for the composer's last send
+// Messages sent to session `key`, oldest first, each with where it is (`label`). `pending` until answered; a failed
+// one only while it's the latest. One just sent shows as queued before its task is listed.
+function sentHere(key) {
+  const sent = tasks.filter((t) => t.send_to && sendKey(t) === key).sort((a, b) => a.started_at - b.started_at);
+  const out = sent.map((t, i) => ({ task: t.id, text: t.prompt.trim(), label: sayState(t.status, t.activity !== 'delivered', t.summary),
+    bad: t.status === 'failed', pending: !isFinished(t) || (t.status === 'failed' && i === sent.length - 1) }));
+  const just = saying && saying.key === key && saying.sent;
+  if (just && !out.some((m) => m.task === just.task)) out.push({ ...just, label: 'queued', bad: false, pending: true });
+  return out;
+}
+
+// The session's composer: one Send, always into the session itself. Open in a claude terminal, the message goes
+// straight in; otherwise the session is continued where it is, once it's quiet (codex) or closed (older workers).
+let saying = null; // { key, sent: { task, text } | null, error, busy: a send in flight } for the composer's last send
 function renderSay(got) {
-  const [, harness] = sess.key.split('/');
+  const [wid, harness] = sess.key.split('/');
   if (!saying || saying.key !== sess.key) { saying = { key: sess.key, sent: null, error: '', busy: false }; $('say-text').value = ''; }
   // Sends once the transcript is read.
-  $('say-send').disabled = $('say-queue').disabled = !got || !got.turns || saying.busy;
-  const open = !!(got && got.open);
+  $('say-send').disabled = !got || !got.turns || saying.busy;
+  const open = !!(got && got.open), w = workers.find((x) => x.id === wid), live = w && w.info.deliver;
   // Codex records no open terminals: only a recent write counts.
-  $('say-open').hidden = !open && harness !== 'codex';
-  $('say-open').textContent = !open ? 'Codex can’t tell if it’s open · ↑ continues it'
-    : `${harness === 'claude' ? 'Open in a terminal' : 'May be open (written < 2 min ago)'} · ↑ sends a copy`;
-  $('say-send').ariaLabel = $('say-send').title = open ? 'Send to a copy' : 'Send';
-  $('say-queue').hidden = !open;
-  $('say-state').hidden = !saying.sent && !saying.error;
-  $('say-state').className = saying.error ? 'bad' : 'dim';
-  $('say-state').replaceChildren(saying.error || (saying.sent ? el('a', { href: `#task/${saying.sent}` }, `sent as task ${short(saying.sent)}`) : ''));
+  $('say-open').hidden = !open;
+  $('say-open').textContent = harness === 'codex' ? 'May be open (written < 2 min ago) · goes in once it’s quiet'
+    : live ? 'Open in a terminal · goes straight in' : 'Open in a terminal · goes in once it closes (this worker is older)';
+  $('say-state').hidden = !saying.error;
+  $('say-state').className = 'bad';
+  $('say-state').textContent = saying.error;
 }
-async function sayTo(mode) {
+async function sayTo() {
   const text = $('say-text').value.trim();
   if (!text || !sess || saying.busy) return;
   micOff();
@@ -1840,10 +1866,11 @@ async function sayTo(mode) {
   try {
     const r = await fetch(`/api/workers/${wid}/sessions/${harness}/${id}/messages`, {
       method: 'POST', headers: { ...authHeaders(), 'content-type': 'application/json' },
-      body: JSON.stringify({ text, mode, title: listed.title || null }) });
+      body: JSON.stringify({ text, mode: 'deliver', title: listed.title || null }) });
     if (r.ok) {
-      Object.assign(s, { sent: (await r.json()).task, error: '' });
+      Object.assign(s, { sent: { task: (await r.json()).task, text }, error: '' });
       if (saying === s) { $('say-text').value = ''; fit($('say-text')); }
+      if (sess) renderSession(sess.key); // your bubble, queued
       // Follow the reply as it is written.
       if (sess) { clearTimeout(sess.timer); const t = sess; t.timer = setTimeout(() => loadTranscript(t), REFRESH_MS); }
     }
@@ -1852,8 +1879,7 @@ async function sayTo(mode) {
   s.busy = false;
   if (sess && saying === s) renderSay(sess.got);
 }
-$('say').addEventListener('submit', (e) => { e.preventDefault(); sayTo(sess && sess.got && sess.got.open ? 'fork' : 'in_place'); });
-$('say-queue').addEventListener('click', () => sayTo('when_closed'));
+$('say').addEventListener('submit', (e) => { e.preventDefault(); sayTo(); });
 
 // The worker's build, flagged when it isn't the orchestrator's; its self-update progress.
 function versionLine(w) {

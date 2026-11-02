@@ -193,6 +193,15 @@ mod tests {
             seen(&approved, "m1", "fix it"),
             Some(Seen::Read("fix it".into()))
         );
+        // Taken in mid-turn, beside a tool result.
+        let absorbed = serde_json::json!({"type": "attachment", "attachment": {
+            "type": "queued_command", "origin": {"kind": "peer", "msg_id": "m1",
+                "name": PEER_NAME, "body": "fix it"}}});
+        let mid = lines(&[enqueue(PEER_NAME, "fix it"), absorbed.to_string()]);
+        assert_eq!(
+            seen(&mid, "m1", "fix it"),
+            Some(Seen::Read("fix it".into()))
+        );
         // A cut-off last line is skipped.
         assert_eq!(
             seen(&format!("{queued}{{\"type\":"), "m1", "fix it"),

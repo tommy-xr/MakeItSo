@@ -164,6 +164,15 @@ fn claude_line(h: &mut Head, line: &str) {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
         return;
     };
+    if let Some(p) = mis_peer(&v) {
+        let d = Delivered {
+            msg_id: p.msg_id.into(),
+            reply: None,
+        };
+        h.delivered.push((p.from.into(), d));
+        let over = h.delivered.len().saturating_sub(MAX_DELIVERED);
+        h.delivered.drain(..over);
+    }
     match v["type"].as_str() {
         Some("custom-title") => h.custom_title = text(&v["customTitle"]).or(h.custom_title.take()),
         Some("ai-title") => h.auto_title = text(&v["aiTitle"]).or(h.auto_title.take()),
@@ -176,15 +185,6 @@ fn claude_line(h: &mut Head, line: &str) {
         Some(kind @ ("user" | "assistant")) => {
             if v["isSidechain"] == true {
                 return;
-            }
-            if let Some(p) = mis_peer(&v) {
-                let d = Delivered {
-                    msg_id: p.msg_id.into(),
-                    reply: None,
-                };
-                h.delivered.push((p.from.into(), d));
-                let over = h.delivered.len().saturating_sub(MAX_DELIVERED);
-                h.delivered.drain(..over);
             }
             claude_turn(h, kind, &v);
             if h.cwd.is_none() {
@@ -216,7 +216,8 @@ fn claude_line(h: &mut Head, line: &str) {
 }
 
 /// A message MIS delivered (`PEER_NAME`), as the session it went to records it: a meta
-/// user turn whose `origin` names the sender and holds the text as sent.
+/// user turn, or (taken in mid-turn, beside a tool result) a `queued_command` attachment,
+/// whose `origin` names the sender and holds the text as sent.
 pub(crate) struct Peer<'a> {
     pub msg_id: &'a str,
     /// The sender's address, which a reply is sent to.
@@ -225,8 +226,12 @@ pub(crate) struct Peer<'a> {
 }
 
 pub(crate) fn mis_peer(v: &Value) -> Option<Peer<'_>> {
-    let o = &v["origin"];
-    let mis = v["type"] == "user" && o["kind"] == "peer" && o["name"] == PEER_NAME;
+    let o = match v["type"].as_str()? {
+        "user" => &v["origin"],
+        "attachment" if v["attachment"]["type"] == "queued_command" => &v["attachment"]["origin"],
+        _ => return None,
+    };
+    let mis = o["kind"] == "peer" && o["name"] == PEER_NAME && v["isSidechain"] != true;
     mis.then_some(())?;
     Some(Peer {
         msg_id: o["msg_id"].as_str()?,
@@ -789,13 +794,16 @@ mod tests {
         assert_eq!((turn, typed), (TurnEnd::Unknown, None));
         let answered = [("m1".to_string(), Some("Added one.".to_string()))];
         assert_eq!(got(&[&m1, reply]).0, answered);
-        // Mid-turn: text before a tool call doesn't answer it, the reply does.
+        // Mid-turn it's taken in beside a tool result, as an attachment. Text before a
+        // tool call doesn't answer it, the reply does.
+        let absorbed = serde_json::json!({"type": "attachment", "attachment": {
+            "type": "queued_command", "origin": {"kind": "peer", "from": "uds:/tmp/m1.sock",
+                "msg_id": "m1", "name": PEER_NAME, "body": "add a test"}, "isMeta": true}})
+        .to_string();
         let before = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Running it."}],"stop_reason":"tool_use"}}"#;
-        assert_eq!(
-            got(&[prompt, call, &m1, before]).0,
-            [("m1".to_string(), None)]
-        );
-        assert_eq!(got(&[prompt, call, &m1, before, reply]).0, answered);
+        let mid = [prompt, call, &absorbed, before];
+        assert_eq!(got(&mid).0, [("m1".to_string(), None)]);
+        assert_eq!(got(&[&mid[..], &[reply]].concat()).0, answered);
         // Answered by a message back to its sender (MIS isn't there to hear it).
         let back = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"SendMessage","input":{"to":"uds:/tmp/m1.sock","message":"Done: added it."}}],"stop_reason":"tool_use"}}"#;
         let elsewhere = back.replace("m1.sock", "m9.sock");
