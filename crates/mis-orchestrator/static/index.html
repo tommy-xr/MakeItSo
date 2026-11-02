@@ -119,8 +119,9 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .shot .x { position: absolute; top: .25rem; right: .25rem; width: 1.5rem; height: 1.5rem; min-height: 0; padding: 0; border-radius: 50%; background: rgba(0, 0, 0, .6); color: #fff; font: .75rem/1 var(--sans); }
   #shots-view { margin-top: .5rem; }
   /* Composer dock: pinned to the bottom of every view, inside the safe area; lifted by --kb over an iOS keyboard.
-     Each view shows its own form (new task, reply, message a session); the page pads its foot by the dock's height. */
-  #dock { position: fixed; z-index: 2; left: 0; right: 0; bottom: 0; --pad: .75rem; padding: 1rem max(var(--pad), env(safe-area-inset-right, 0px)) calc(.75rem + env(safe-area-inset-bottom, 0px)) max(var(--pad), env(safe-area-inset-left, 0px)); background: linear-gradient(transparent, var(--bg) 1rem); transform: translateY(calc(-1 * var(--kb, 0px))); }
+     Each view shows its own form (new task, reply, message a session); the page pads its foot by the dock's height.
+     Content fades out over the top 30% of it, ending within its top padding, so a solid band sits above the hint and chip. */
+  #dock { position: fixed; z-index: 2; left: 0; right: 0; bottom: 0; --pad: .75rem; padding: 2rem max(var(--pad), env(safe-area-inset-right, 0px)) calc(.75rem + env(safe-area-inset-bottom, 0px)) max(var(--pad), env(safe-area-inset-left, 0px)); background: linear-gradient(transparent, var(--bg) min(30%, 1.25rem)); transform: translateY(calc(-1 * var(--kb, 0px))); }
   /* Above a keyboard the home indicator is covered, so its inset is wasted room. */
   #dock.kb { padding-bottom: .5rem; }
   @media (min-width: 64rem) { #dock { --pad: 1.5rem; } }
