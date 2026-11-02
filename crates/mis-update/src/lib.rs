@@ -20,6 +20,12 @@ pub const CI_BUILD: bool = option_env!("MIS_RELEASE").is_some();
 /// Bigger downloads are refused; a release tarball is tens of MB.
 const MAX_BYTES: usize = 256 << 20;
 
+/// The CI run that built this binary (CI sets `MIS_RUN`). Runs number main's pushes in order,
+/// so it orders edge builds without guessing from commit hashes.
+pub fn build_run() -> Option<u64> {
+    option_env!("MIS_RUN")?.parse().ok()
+}
+
 /// A release build's version, `0.1.0+1a2b3c4`: semver plus the first 7 hex chars of its commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
@@ -78,10 +84,7 @@ pub fn latest_url(base: &str, channel: Channel, target: &str) -> String {
 /// and `verify` binds the tarball to it.
 pub fn parse_latest(channel: Channel, body: &str) -> Option<String> {
     let v = match channel {
-        Channel::Edge => {
-            let v: serde_json::Value = serde_json::from_str(body).ok()?;
-            v.get("version")?.as_str()?.to_string()
-        }
+        Channel::Edge => return parse_edge(body).map(|h| h.version),
         Channel::Stable => {
             let sig = minisign_verify::Signature::decode(body).ok()?;
             let mut words = sig.trusted_comment().split(' ');
@@ -90,6 +93,23 @@ pub fn parse_latest(channel: Channel, body: &str) -> Option<String> {
         }
     };
     Release::parse(&v).map(|_| v)
+}
+
+/// The newest edge build, as edge.json names it. Unverified, like `parse_latest`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgeHead {
+    pub version: String,
+    /// The CI run that published it (see `build_run`); None in an edge.json from before CI
+    /// recorded it.
+    pub run: Option<u64>,
+}
+
+pub fn parse_edge(body: &str) -> Option<EdgeHead> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let version = v.get("version")?.as_str()?.to_string();
+    Release::parse(&version)?;
+    let run = v.get("run").and_then(|r| r.as_u64());
+    Some(EdgeHead { version, run })
 }
 
 /// Whether `mine` should move to `latest`. Stable only moves to a higher semver. Edge follows
@@ -241,12 +261,29 @@ impl Source {
 
 /// The newest release version on `channel`, if it names one.
 pub async fn latest(src: &Source, channel: Channel, target: &str) -> anyhow::Result<String> {
+    let url = latest_url(&src.base, channel, target);
+    let body = get_text(&url).await?;
+    parse_latest(channel, &body).with_context(|| format!("no release version in {url}"))
+}
+
+/// What edge.json names now.
+pub async fn edge_head(src: &Source) -> anyhow::Result<EdgeHead> {
+    let url = latest_url(&src.base, Channel::Edge, TARGET);
+    let body = get_text(&url).await?;
+    parse_edge(&body).with_context(|| format!("no edge build in {url}"))
+}
+
+async fn get_text(url: &str) -> anyhow::Result<String> {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()?;
-    let url = latest_url(&src.base, channel, target);
-    let body = String::from_utf8(get(&http, &url).await?)?;
-    parse_latest(channel, &body).with_context(|| format!("no release version in {url}"))
+    Ok(String::from_utf8(get(&http, url).await?)?)
+}
+
+/// `e` (from `fetch`) is a 404: that build isn't published, or not yet.
+pub fn unpublished(e: &anyhow::Error) -> bool {
+    let status = e.downcast_ref::<reqwest::Error>().and_then(|e| e.status());
+    status == Some(reqwest::StatusCode::NOT_FOUND)
 }
 
 /// Download `asset` and its signature, check them, and return the executable `bin` inside.
@@ -530,6 +567,19 @@ mod tests {
             None
         );
         assert_eq!(parse_latest(Channel::Edge, "<html>"), None);
+        let head = |version: &str, run| EdgeHead {
+            version: version.into(),
+            run,
+        };
+        assert_eq!(
+            parse_edge(edge),
+            Some(head("0.2.0+bbbbbbb", None)),
+            "no run yet"
+        );
+        assert_eq!(
+            parse_edge(r#"{"version":"0.2.0+bbbbbbb","run":42}"#),
+            Some(head("0.2.0+bbbbbbb", Some(42)))
+        );
         let sig = sign(TEST_KEY, b"t", &format!("mis 0.3.0+ccccccc mis-{t}.tar.gz"));
         assert_eq!(
             parse_latest(Channel::Stable, &sig).as_deref(),
