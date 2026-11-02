@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-<meta name="theme-color" content="#050A12">
+<meta name="theme-color" content="#0E1217" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#F7F6F2" media="(prefers-color-scheme: light)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="manifest" href="/manifest.webmanifest">
@@ -15,386 +16,462 @@
 // A theme chosen in the menu overrides the system's; set before first paint.
 try { const t = localStorage.getItem('mis-theme'); if (t) document.documentElement.dataset.theme = t; } catch {}</script>
 <style>
-  /* Theme: every colour and face is a token here; a new theme redefines this block. Grid: near-black blue ground,
-     thin cyan edges that glow, orange for warnings and limits, red for failures. Daylight grid for light schemes. */
-  :root { color-scheme: dark; --bg: #050A12; --field: #0B1826; --fg: #D9F6FF; --dim: #7C9AAE; --line: #3A6A88; --rule: #17324A;
-    --accent: #6FF3FF; --glow: rgba(111, 243, 255, .4); --grid: rgba(111, 243, 255, .045); --run: #6FF3FF; --ok: #7DFFB6; --warn: #FF9A3C; --bad: #FF5A4E;
-    /* Idle dot: dim accent, still 3:1 on the ground. */
-    --idle: color-mix(in srgb, var(--accent) 45%, var(--bg));
-    --arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M0 0h10L5 6z' fill='%23D9F6FF'/%3E%3C/svg%3E");
+  /* Theme: every colour and face is a token here; a new theme redefines this block. Soft: a dark slate ground, grouped
+     rounded cards, tinted pills; cyan for work, amber for waiting, red for failures. */
+  :root { color-scheme: dark; --bg: #0E1217; --card: #151A21; --raised: #1A2029; --composer: #1A2029; --bubble: #1F2731; --code: #10151B;
+    --sep: #222A35; --hover: #1C232C; --seg-on: #2A3340; --track: #2A3340;
+    --fg: #E7ECF2; --fg2: #C9D2DC; --soft: #AEB8C4; --dim: #8D99A8; --faint: #6C7785;
+    --accent: #5EE6F2; --on-accent: #062026; --link: #7FE9F4; --run: #5EE6F2; --ok: #5FD49A; --warn: #F2B05E; --bad: #F2726B;
+    /* Pill tints (background) and their text, per tone. */
+    --t-run: #0F2A2E; --f-run: #7FE9F4; --t-warn: #33270F; --t-bad: #2A1719; --f-bad: #F28B82; --t-ok: #172A22; --t-n: #222A35; --edge-warn: #6B5221;
+    --ring: rgba(94, 230, 242, .18); --shadow: 0 6px 24px rgba(0, 0, 0, .35); --scrim: rgba(0, 0, 0, .5);
     --mono: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace;
-    /* Labels: a squared geometric face where the system has one; no web fonts, so the page works offline. */
-    --display: "Eurostile", "DIN Alternate", "Bahnschrift", ui-sans-serif, system-ui, sans-serif;
-    /* Prose: what people and agents wrote, in the system's reading face. */
-    --prose: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; }
+    /* No web fonts, so the page works offline. */
+    --sans: -apple-system, system-ui, "Segoe UI", Inter, Roboto, "Helvetica Neue", sans-serif; }
   /* Light: the system's choice unless the menu picked Dark; or picked Light. A media query can't be OR'd with a
      selector, so the tokens appear twice: keep both in sync. :where keeps `html.vr` winning. */
   @media (prefers-color-scheme: light) {
-    :root:where(:not([data-theme=dark])) { color-scheme: light; --bg: #EAF3F7; --field: #FFFFFF; --fg: #0B2233; --dim: #4A6577; --line: #6A889B; --rule: #C3D6E0;
-      --accent: #00687A; --glow: rgba(0, 104, 122, .18); --grid: rgba(0, 104, 122, .06); --run: #00687A; --ok: #1F6B45; --warn: #9A4800; --bad: #B3261E;
-      --idle: color-mix(in srgb, var(--accent) 70%, var(--bg));
-      --arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M0 0h10L5 6z' fill='%230B2233'/%3E%3C/svg%3E"); }
+    :root:where(:not([data-theme=dark])) { color-scheme: light; --bg: #F7F6F2; --card: #FFFFFF; --raised: #EDEBE5; --composer: #FFFFFF; --bubble: #ECEAE4; --code: #F2F0EB;
+      --sep: #E7E4DD; --hover: #F0EEE9; --seg-on: #FFFFFF; --track: #D6D3CB;
+      --fg: #1D1C1A; --fg2: #44413C; --soft: #57534D; --dim: #6B675F; --faint: #8C877E;
+      --accent: #0E7C89; --on-accent: #FFFFFF; --link: #0B6B77; --run: #0E7C89; --ok: #2F7D4F; --warn: #A35A00; --bad: #C23B30;
+      --t-run: #DDF0F2; --f-run: #0B6470; --t-warn: #FBEBD3; --t-bad: #FBE4E1; --f-bad: #B3261E; --t-ok: #E1F1E6; --t-n: #ECEAE4; --edge-warn: #DDB074;
+      --ring: rgba(14, 124, 137, .16); --shadow: 0 4px 18px rgba(30, 25, 15, .1), 0 1px 3px rgba(30, 25, 15, .06); --scrim: rgba(20, 18, 14, .32); }
   }
-  :root:where([data-theme=light]) { color-scheme: light; --bg: #EAF3F7; --field: #FFFFFF; --fg: #0B2233; --dim: #4A6577; --line: #6A889B; --rule: #C3D6E0;
-    --accent: #00687A; --glow: rgba(0, 104, 122, .18); --grid: rgba(0, 104, 122, .06); --run: #00687A; --ok: #1F6B45; --warn: #9A4800; --bad: #B3261E;
-    --idle: color-mix(in srgb, var(--accent) 70%, var(--bg));
-    --arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M0 0h10L5 6z' fill='%230B2233'/%3E%3C/svg%3E"); }
-  /* Faint grid lines behind everything. */
-  html { min-height: 100%; background: linear-gradient(90deg, var(--grid) 1px, transparent 0) 0 0 / 3rem 3rem, linear-gradient(var(--grid) 1px, transparent 0) 0 0 / 3rem 3rem, var(--bg); }
-  body { --pad: 1.25rem; box-sizing: border-box; margin: 0 auto; max-width: 46rem; min-height: 100svh; padding: 0 var(--pad) calc(var(--dock, 0px) + var(--kb, 0px) + 1.5rem); color: var(--fg); font: 1rem/1.55 var(--mono); }
-  @media (min-width: 64rem) { body { --pad: 2.5rem; border-inline: 1px solid var(--rule); } }
-  /* Title strip: dot, wordmark, needs-you badge and menu; then the ticker of live work; then the light-cycle line. */
-  .strip { position: relative; margin: 0 calc(-1 * var(--pad)) 1.25rem; padding: calc(1rem + env(safe-area-inset-top, 0px)) var(--pad) 0; background: linear-gradient(var(--field), transparent); }
-  .top { display: flex; flex-wrap: wrap; align-items: center; gap: .625rem; }
-  .title { font: 700 1rem/1 var(--display); text-transform: uppercase; letter-spacing: .16em; white-space: nowrap; color: var(--accent); text-shadow: 0 0 10px var(--glow); }
-  /* Connection and work: dim = idle, bright with glow = working, hollow = reconnecting, warn = offline or no workers,
-     warn with glow = the mic is listening. */
-  .dot { flex: none; box-sizing: border-box; width: .625rem; height: .625rem; border-radius: 50%; background: var(--accent); }
-  .dot.rest { background: var(--idle); }
-  .dot.work { box-shadow: 0 0 3px 1px var(--glow), 0 0 10px var(--glow); }
-  .dot.hollow { background: none; border: 2px solid var(--dim); }
+  :root:where([data-theme=light]) { color-scheme: light; --bg: #F7F6F2; --card: #FFFFFF; --raised: #EDEBE5; --composer: #FFFFFF; --bubble: #ECEAE4; --code: #F2F0EB;
+    --sep: #E7E4DD; --hover: #F0EEE9; --seg-on: #FFFFFF; --track: #D6D3CB;
+    --fg: #1D1C1A; --fg2: #44413C; --soft: #57534D; --dim: #6B675F; --faint: #8C877E;
+    --accent: #0E7C89; --on-accent: #FFFFFF; --link: #0B6B77; --run: #0E7C89; --ok: #2F7D4F; --warn: #A35A00; --bad: #C23B30;
+    --t-run: #DDF0F2; --f-run: #0B6470; --t-warn: #FBEBD3; --t-bad: #FBE4E1; --f-bad: #B3261E; --t-ok: #E1F1E6; --t-n: #ECEAE4; --edge-warn: #DDB074;
+    --ring: rgba(14, 124, 137, .16); --shadow: 0 4px 18px rgba(30, 25, 15, .1), 0 1px 3px rgba(30, 25, 15, .06); --scrim: rgba(20, 18, 14, .32); }
+  html { min-height: 100%; background: var(--bg); -webkit-tap-highlight-color: transparent; }
+  body { --pad: .75rem; box-sizing: border-box; margin: 0 auto; max-width: 46rem; min-height: 100svh; padding: 0 var(--pad) calc(var(--dock, 0px) + var(--kb, 0px) + 1.5rem); color: var(--fg); font: 1rem/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+  @media (min-width: 64rem) { body { --pad: 1.5rem; } }
+  /* Header: logo and name, limit gauges, needs-you pill and menu; under it, what's running. */
+  .strip { position: relative; margin: 0 calc(-1 * var(--pad)) .25rem; padding: calc(.625rem + env(safe-area-inset-top, 0px)) calc(var(--pad) - .25rem) .25rem calc(var(--pad) + .375rem); }
+  .top { display: flex; align-items: center; gap: .625rem; min-height: 2.75rem; }
+  .logo { flex: none; width: 1.375rem; height: 1.375rem; }
+  .title { font: 600 1.0625rem/1 var(--sans); white-space: nowrap; color: var(--fg); }
+  .status { display: flex; align-items: center; gap: .5rem; min-height: 1.75rem; font-size: .8125rem; color: var(--dim); }
+  /* Connection and work: dim = idle, cyan with a ring = working, hollow = reconnecting, amber = offline or no workers
+     or the mic is listening. */
+  .dot { flex: none; box-sizing: border-box; width: .4375rem; height: .4375rem; border-radius: 50%; background: var(--accent); }
+  .dot.rest { background: var(--faint); }
+  .dot.work { box-shadow: 0 0 0 3px var(--ring); animation: breathe 2s ease-in-out infinite; }
+  .dot.hollow { background: none; border: 1.5px solid var(--dim); }
   .dot.down { background: var(--warn); }
-  .dot.listen { background: var(--warn); box-shadow: 0 0 10px var(--warn); }
-  /* Needs-you badge and menu button at the row's right end. */
-  .end { display: flex; gap: .5rem; margin-left: auto; }
-  #menu-btn { display: grid; place-items: center; width: 2.75rem; padding: 0; }
-  #menu-btn svg { width: 1.25rem; height: 1.25rem; }
-  /* Needs you: the count, lit in the most urgent kind's colour (its .att class); a tap opens that task. */
-  #need { margin: 0; display: inline-flex; align-items: center; gap: .375rem; min-height: 2.75rem; padding: 0 .625rem; border: 1px solid var(--a); color: var(--a); text-decoration: none; font: 600 .8125rem/1 var(--display); letter-spacing: .1em; box-shadow: 0 0 8px color-mix(in srgb, var(--a) 35%, transparent); }
-  #need::before { content: "●"; font-size: .75em; text-shadow: 0 0 6px var(--a); }
-  /* Limit gauges: the fullest fresh window per harness. They grow into the room left beside the badge and menu from zero,
-     and the negative margin cancels their gap, so showing them never starts a new line (a narrow screen clips
-     them). They stretch to the row's height for a taller tap target (it opens Workers) without setting it. */
-  .gauges { flex: 1 1 0; align-self: stretch; min-width: 0; margin-left: -.625rem; display: flex; justify-content: flex-end; align-items: center; gap: .375rem; overflow: hidden; text-decoration: none; }
-  .gz { display: inline-flex; align-items: flex-end; gap: 3px; font: 600 .5625rem/1 var(--display); color: var(--dim); --b: var(--accent); }
-  .gz i { width: 5px; height: 12px; background: linear-gradient(to top, var(--b) var(--v, 0%), var(--rule) 0); }
+  .dot.listen { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 25%, transparent); }
+  @keyframes breathe { 50% { box-shadow: 0 0 0 5px var(--ring); } }
+  .end { display: flex; align-items: center; gap: .25rem; margin-left: auto; }
+  /* Icon buttons: no box, a soft fill on hover and press. */
+  :is(.ibtn, .box button[type=button]) { display: grid; place-items: center; flex: none; width: 2.5rem; height: 2.5rem; min-height: 0; padding: 0; border: 0; border-radius: .75rem; background: transparent; color: var(--fg2); }
+  .ibtn svg, .box svg { width: 1.25rem; height: 1.25rem; }
+  @media (hover: hover) { :is(.ibtn, .box button[type=button]):hover { background: var(--hover); } }
+  :is(.ibtn, .box button[type=button]):active { background: var(--hover); }
+  /* Needs you: the count in a pill tinted the most urgent kind's colour (its .att class); a tap opens that task. */
+  #need { margin: 0; display: inline-flex; align-items: center; gap: .375rem; height: 2rem; padding: 0 .75rem; border-radius: 999px; background: color-mix(in srgb, var(--a) 14%, var(--bg)); color: var(--a); text-decoration: none; font: 600 .8125rem/1 var(--sans); }
+  #need::before { content: ""; width: .4375rem; height: .4375rem; border-radius: 50%; background: currentColor; }
+  /* Limit gauges: the fullest fresh window per harness. They grow into the room left beside the pill and menu from zero,
+     so showing them never starts a new line (a narrow screen clips them). A tap opens Workers. */
+  .gauges { flex: 1 1 0; align-self: stretch; min-width: 0; display: flex; justify-content: flex-end; align-items: center; gap: .375rem; overflow: hidden; text-decoration: none; }
+  .gz { display: inline-flex; align-items: flex-end; gap: 3px; font: 600 .625rem/1 var(--sans); color: var(--dim); --b: var(--accent); }
+  .gz i { width: 5px; height: 12px; border-radius: 2px; background: linear-gradient(to top, var(--b) var(--v, 0%), var(--sep) 0); }
   .gz.warn { --b: var(--warn); } .gz.crit { --b: var(--bad); }
-  #ticker { display: flex; align-items: center; min-height: 2.75rem; color: var(--dim); text-decoration: none; overflow-wrap: anywhere; }
+  #ticker { flex: 0 1 auto; min-width: 0; color: inherit; text-decoration: none; overflow-wrap: anywhere; }
   /* One line while work runs; the activity is the part the ellipsis cuts. */
-  #ticker.run, #ticker.ask { white-space: pre; overflow: hidden; color: var(--run); } #ticker.ask { color: var(--warn); }
-  #ticker .act { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  #ticker.run, #ticker.ask { display: flex; white-space: pre; overflow: hidden; } #ticker.ask { color: var(--warn); }
+  #ticker .act { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--soft); }
   #ticker.warn { color: var(--warn); } #ticker.bad { color: var(--bad); } #ticker.note, #ticker.need { color: var(--fg); }
   #ticker[href]::after { content: " ›"; white-space: pre; }
-  /* Light cycle: a short bright segment rides the line while work runs; still when idle or offline. */
-  .cycle { position: relative; height: 2px; margin: 0 calc(-1 * var(--pad)); background: var(--rule); overflow: hidden; }
-  /* Idle: no ticker, so the top row needs room above the line. */
-  #ticker[hidden] + .cycle { margin-top: 1rem; }
-  .cycle.run::after { content: ""; position: absolute; inset: 0 auto 0 0; width: 34%; background: linear-gradient(90deg, transparent, var(--accent)); animation: ride 4s linear infinite; }
-  /* Update from `mis-up --watch`: a tag riding the line's right end, out of the flow so it never moves the strip.
-     The ::after widens the tap target (tap shows the commit subject). `.strip` outranks the button[type=button] rule. */
-  .strip .upd { position: absolute; min-height: 0; right: var(--pad); bottom: 1px; transform: translateY(50%); max-width: calc(100% - 2 * var(--pad)); box-sizing: border-box; padding: .1875rem .4375rem; color: var(--accent); background: var(--bg); border: 1px solid currentColor; box-shadow: 0 0 6px var(--glow); font: 600 .5625rem/1 var(--display); letter-spacing: .12em; text-transform: uppercase; }
-  .upd::after { content: ""; position: absolute; inset: -.875rem -.5rem; }
+  /* Update from `mis-up --watch`: a pill at the status line's right end; the ticker shrinks for it.
+     The ::after widens the tap target (tap shows the commit subject). */
+  .strip .upd { position: relative; flex: 0 1 auto; min-width: 3rem; min-height: 0; height: auto; margin-left: auto; max-width: 60%; box-sizing: border-box; padding: .1875rem .5rem; border-radius: 999px; color: var(--f-run); background: var(--t-run); font: 600 .6875rem/1.2 var(--sans); }
+  .upd::after { content: ""; position: absolute; inset: -.75rem -.5rem; }
   .upd span { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-  .upd code { font: inherit; font-family: var(--mono); letter-spacing: 0; text-transform: none; }
-  .strip .upd.bad { color: var(--bad); box-shadow: none; } .strip .upd.warn { color: var(--warn); box-shadow: none; }
-  @keyframes ride { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
-  @media (prefers-reduced-motion: reduce) { .cycle.run::after { display: none; } }
+  .upd code { font-family: var(--mono); }
+  .strip .upd.bad { color: var(--f-bad); background: var(--t-bad); } .strip .upd.warn { color: var(--warn); background: var(--t-warn); }
   /* Offline for a while: the last view stays, dimmed. */
   body.stale main { opacity: .6; }
   p { margin: 0 0 .75rem; }
-  a { color: inherit; }
+  a { color: var(--link); }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  textarea, input, select, button { font: inherit; color: var(--fg); background: var(--field); border: 1px solid var(--line); border-radius: 0; box-sizing: border-box; }
+  textarea, input, select, button { font: inherit; color: var(--fg); background: var(--card); border: 1px solid var(--sep); border-radius: .75rem; box-sizing: border-box; }
   textarea, input[type=password] { display: block; width: 100%; padding: .625rem .75rem; }
   textarea { min-height: 6.5rem; resize: vertical; }
   ::placeholder { color: var(--dim); opacity: 1; }
-  textarea:focus, input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 10px var(--glow); }
-  select, button { min-height: 2.75rem; padding: 0 1rem; }
-  select { appearance: none; padding-right: 2.5rem; background: var(--field) var(--arrow) right .875rem center / .625rem .375rem no-repeat; }
-  button { background: var(--accent); color: var(--bg); border-color: var(--accent); font: 600 .875rem var(--display); text-transform: uppercase; letter-spacing: .14em; cursor: pointer; }
-  button:active { box-shadow: 0 0 0 3px var(--glow), 0 0 12px var(--glow); }
-  button[type=button] { background: none; color: var(--fg); border-color: var(--line); }
-  .row { display: flex; gap: .5rem; margin: .5rem 0 1.5rem; }
-  .row button { flex: 1; }
+  textarea:focus, input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
+  select, button { min-height: 2.5rem; padding: 0 1rem; }
+  select { appearance: none; padding-right: 2.25rem; background: var(--card) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238D99A8' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E") right .875rem center / .625rem .375rem no-repeat; }
+  /* Buttons: soft and rounded. A submit is the filled one; type=button ones are quiet. */
+  button { border: 0; background: var(--accent); color: var(--on-accent); font: 600 .875rem var(--sans); cursor: pointer; transition: background-color .15s, opacity .15s, transform .1s; }
+  button:active { transform: scale(.97); }
+  /* :where keeps it below any class, so quiet buttons restyle freely. */
+  button:where([type=button]) { background: var(--t-n); color: var(--fg); }
+  .row { display: flex; flex-wrap: wrap; gap: .5rem; margin: .5rem 0 1.5rem; }
   #speak { flex: none; }
-  .clip { display: grid; place-items: center; width: 2.75rem; padding: 0; }
-  .clip svg { width: 1.25rem; height: 1.25rem; }
+  #speak.on { background: var(--t-run); color: var(--f-run); }
   /* Attached photos: fixed squares, so loading never reflows; dim with a spinner until uploaded. */
   .shots { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 .5rem; }
-  .shot { position: relative; flex: none; width: 4rem; height: 4rem; border: 1px solid var(--line); background: var(--field); }
+  .shot { position: relative; flex: none; width: 4rem; height: 4rem; border-radius: .75rem; overflow: hidden; background: var(--raised); }
   .shot img { display: block; width: 100%; height: 100%; object-fit: cover; }
   .shot.busy img { opacity: .35; }
   .shot.busy::after { content: ""; position: absolute; inset: 0; margin: auto; width: 1.25rem; height: 1.25rem; border: 2px solid var(--accent); border-right-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; }
-  .shot .x { position: absolute; top: 0; right: 0; width: 1.75rem; height: 1.75rem; min-height: 0; padding: 0; border: 0; background: color-mix(in srgb, var(--bg) 70%, transparent); color: var(--fg); font: 1rem/1 var(--mono); letter-spacing: 0; }
+  .shot .x { position: absolute; top: .25rem; right: .25rem; width: 1.5rem; height: 1.5rem; min-height: 0; padding: 0; border-radius: 50%; background: rgba(0, 0, 0, .6); color: #fff; font: .75rem/1 var(--sans); }
   #shots-view { margin-top: .5rem; }
   /* Composer dock: pinned to the bottom of every view, inside the safe area; lifted by --kb over an iOS keyboard.
      Each view shows its own form (new task, reply, message a session); the page pads its foot by the dock's height. */
-  #dock { position: fixed; z-index: 2; left: 0; right: 0; bottom: 0; --pad: 1.25rem; padding: .5rem max(var(--pad), env(safe-area-inset-right, 0px)) calc(.5rem + env(safe-area-inset-bottom, 0px)) max(var(--pad), env(safe-area-inset-left, 0px)); background: var(--bg); border-top: 1px solid var(--rule); transform: translateY(calc(-1 * var(--kb, 0px))); }
+  #dock { position: fixed; z-index: 2; left: 0; right: 0; bottom: 0; --pad: .75rem; padding: 1rem max(var(--pad), env(safe-area-inset-right, 0px)) calc(.75rem + env(safe-area-inset-bottom, 0px)) max(var(--pad), env(safe-area-inset-left, 0px)); background: linear-gradient(transparent, var(--bg) 1rem); transform: translateY(calc(-1 * var(--kb, 0px))); }
   /* Above a keyboard the home indicator is covered, so its inset is wasted room. */
   #dock.kb { padding-bottom: .5rem; }
-  @media (min-width: 64rem) { #dock { --pad: 2.5rem; } }
+  @media (min-width: 64rem) { #dock { --pad: 1.5rem; } }
   .composer { max-width: calc(46rem - 2 * var(--pad)); margin: 0 auto; }
-  /* One bordered box: [attach] text [mic] [send]; buttons stay at the foot as the text grows to six lines. */
-  .box { position: relative; display: flex; align-items: flex-end; border: 1px solid var(--line); background: var(--field); }
-  .box:focus-within, form.listening .box { border-color: var(--accent); box-shadow: 0 0 10px var(--glow); }
-  .box textarea { flex: 1; min-width: 0; min-height: 2.75rem; max-height: calc(6 * 1.55rem + 1.25rem); padding: .625rem .5rem; border: 0; background: none; resize: none; overflow-y: auto; }
+  /* One rounded pill: [attach] text [mic] [send]; buttons stay at the foot as the text grows to six lines. */
+  .box { position: relative; display: flex; align-items: flex-end; gap: .125rem; padding: .375rem; border-radius: 1.625rem; background: var(--composer); box-shadow: var(--shadow); transition: box-shadow .15s; }
+  .box:focus-within, form.listening .box { box-shadow: var(--shadow), 0 0 0 2px var(--ring); }
+  .box textarea { flex: 1; min-width: 0; min-height: 2.5rem; max-height: calc(6 * 1.5rem + 1.25rem); padding: .5rem .25rem; border: 0; border-radius: 0; background: none; resize: none; overflow-y: auto; }
   .box textarea:focus { box-shadow: none; }
-  .box .clip, .box .mic { flex: none; }
-  :where(.box) button[type=button] { border-color: transparent; }
-  .box .go { flex: none; display: grid; place-items: center; width: 2.75rem; padding: 0; }
-  .go svg { width: 1.25rem; height: 1.25rem; }
-  /* Above the box: the harness chip, a reply's error, a session's open-terminal choice. */
-  .ctx { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .75rem; margin: 0 0 .5rem; font-size: .8125rem; overflow-wrap: anywhere; }
+  .box .go { flex: none; display: grid; place-items: center; width: 2.5rem; height: 2.5rem; min-height: 0; padding: 0; border-radius: 50%; }
+  .go svg { width: 1.125rem; height: 1.125rem; }
+  button.go:disabled { opacity: .35; }
+  /* Above the pill: the harness chip, a reply's error, a session's delivery note. */
+  .ctx { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .75rem; margin: 0 .25rem .5rem; font-size: .8125rem; overflow-wrap: anywhere; }
   .ctx p { flex: 1 1 10rem; margin: 0; }
   .ctx:not(:has(> :not([hidden]))) { display: none; }
   /* Harness/model chip; its ::after widens the tap target. The popover opens above it. */
-  #opt { position: relative; max-width: 100%; min-height: 0; height: 1.75rem; padding: 0 .5rem; border-color: var(--rule); color: var(--dim); font: 600 .75rem/1 var(--mono); letter-spacing: 0; text-transform: none; }
+  #opt { position: relative; max-width: 100%; min-height: 0; height: 1.75rem; padding: 0 .625rem; border-radius: 999px; background: var(--raised); color: var(--soft); font: 500 .75rem/1 var(--sans); }
   #opt span { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   #opt::after { content: ""; position: absolute; inset: -.5rem -.25rem; }
-  #opt[aria-expanded=true] { color: var(--accent); border-color: var(--accent); }
-  #opts { position: absolute; z-index: 1; left: 0; bottom: calc(100% + .375rem); display: grid; gap: .5rem; width: min(20rem, 100%); box-sizing: border-box; padding: .625rem; border: 1px solid var(--line); background: var(--bg); box-shadow: 0 0 14px var(--glow); }
+  #opt[aria-expanded=true] { color: var(--fg); background: var(--seg-on); }
+  #opts { position: absolute; z-index: 1; left: 0; bottom: calc(100% + .375rem); display: grid; gap: .5rem; width: min(20rem, 100%); box-sizing: border-box; padding: .625rem; border-radius: 1rem; background: var(--card); box-shadow: var(--shadow); animation: rise .15s ease-out; }
   /* 16px: iOS zooms the page into smaller fields. */
   #opts select, #opts input { font-size: 1rem; }
-  #opts input { min-height: 2.75rem; padding: 0 .75rem; width: 100%; }
+  #opts input { min-height: 2.5rem; padding: 0 .75rem; width: 100%; }
+  @keyframes rise { from { opacity: 0; transform: translateY(.25rem); } }
   /* Menu: a sheet from the right over a dimmed page; Escape, a backdrop tap or ✕ close it. */
-  #menu { inset: 0; margin: 0 0 0 auto; width: min(19rem, 86vw); max-width: none; height: 100%; max-height: none; padding: 0; border: 0; border-left: 1px solid var(--line); color: var(--fg); background: var(--bg); box-shadow: 0 0 24px var(--glow); }
-  #menu::backdrop { background: rgba(0, 0, 0, .55); }
-  #menu[open] { animation: slide .16s ease-out; }
+  #menu { inset: 0; margin: 0 0 0 auto; width: min(18rem, 86vw); max-width: none; height: 100%; max-height: none; padding: 0; border: 0; color: var(--fg); background: var(--card); box-shadow: -12px 0 40px rgba(0, 0, 0, .3); }
+  #menu::backdrop { background: var(--scrim); }
+  #menu[open] { animation: slide .15s ease-out; }
+  #menu[open]::backdrop { animation: fade .15s ease-out; }
   @keyframes slide { from { transform: translateX(100%); } }
-  @media (prefers-reduced-motion: reduce) { #menu[open] { animation: none; } }
-  .sheet { display: flex; flex-direction: column; gap: 1.25rem; box-sizing: border-box; min-height: 100%; padding: calc(1rem + env(safe-area-inset-top, 0px)) calc(1.25rem + env(safe-area-inset-right, 0px)) calc(1rem + env(safe-area-inset-bottom, 0px)) 1.25rem; }
-  .sheet-top { display: flex; align-items: center; justify-content: space-between; }
-  #menu-close { width: 2.75rem; padding: 0; font: 1.1rem/1 var(--mono); letter-spacing: 0; }
-  #menu nav { display: grid; border-top: 1px solid var(--rule); }
-  #menu nav a { display: flex; align-items: center; min-height: 3rem; padding: 0 .75rem; border-bottom: 1px solid var(--rule); text-decoration: none; font: 600 .875rem var(--display); text-transform: uppercase; letter-spacing: .14em; color: var(--dim); }
-  #menu nav a[aria-current=page] { color: var(--bg); background: var(--accent); box-shadow: 0 0 10px var(--glow); }
-  #menu fieldset { margin: 0; padding: 0; border: 0; }
-  #menu legend { padding: 0 0 .375rem; color: var(--dim); font: 600 .75rem var(--display); text-transform: uppercase; letter-spacing: .14em; }
-  /* Theme: three segments; the checked one lit. */
-  .seg { display: flex; border: 1px solid var(--line); }
-  .seg label { flex: 1; display: grid; place-items: center; min-height: 2.75rem; cursor: pointer; font: 600 .75rem var(--display); text-transform: uppercase; letter-spacing: .12em; color: var(--dim); }
-  .seg label + label { border-left: 1px solid var(--line); }
+  @keyframes fade { from { opacity: 0; } }
+  .sheet { display: flex; flex-direction: column; gap: .25rem; box-sizing: border-box; min-height: 100%; padding: calc(.75rem + env(safe-area-inset-top, 0px)) calc(1rem + env(safe-area-inset-right, 0px)) calc(1rem + env(safe-area-inset-bottom, 0px)) 1rem; }
+  .sheet-top { display: flex; align-items: center; justify-content: space-between; padding: 0 0 .75rem .5rem; }
+  #menu nav { display: grid; gap: .125rem; }
+  #menu nav a { display: flex; align-items: center; min-height: 2.75rem; padding: 0 .75rem; border-radius: .75rem; text-decoration: none; font-size: .9375rem; color: var(--fg2); }
+  @media (hover: hover) { #menu nav a:hover { background: var(--hover); } }
+  #menu nav a[aria-current=page] { color: var(--fg); background: var(--bubble); font-weight: 500; }
+  #menu fieldset { margin: 1.25rem 0 0; padding: 0; border: 0; }
+  #menu legend { padding: 0 .5rem .5rem; color: var(--dim); font: 600 .75rem var(--sans); }
+  /* Theme: three segments on a track; the checked one raised. */
+  .seg { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .25rem; padding: .25rem; border-radius: .75rem; background: var(--bg); }
+  .seg label { display: grid; place-items: center; min-height: 2.25rem; border-radius: .5625rem; cursor: pointer; font: 500 .8125rem var(--sans); color: var(--dim); transition: background-color .15s, color .15s; }
   .seg input { position: absolute; opacity: 0; pointer-events: none; }
-  .seg label:has(:checked) { color: var(--bg); background: var(--accent); }
-  .seg label:has(:focus-visible) { outline: 2px solid var(--accent); outline-offset: -4px; }
-  .sheet-foot { margin-top: auto; font-size: .8125rem; overflow-wrap: anywhere; }
+  .seg label:has(:checked) { color: var(--fg); background: var(--seg-on); box-shadow: 0 1px 2px rgba(0, 0, 0, .15); }
+  .seg label:has(:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .sheet-foot { margin-top: auto; padding: 0 .5rem; font-size: .75rem; color: var(--faint); overflow-wrap: anywhere; }
+  #ver { font-family: var(--mono); }
   #shots-view a { display: block; width: 100%; height: 100%; }
   /* No scroll, selection or callout under a held finger. */
-  .mic { display: grid; place-items: center; width: 2.75rem; padding: 0; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
-  .mic svg { width: 1.25rem; height: 1.25rem; }
+  .mic { touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
   button:disabled { opacity: .5; cursor: default; }
-  /* Listening / speaking: lit edge. */
-  .mic[aria-pressed=true], #speak.on { color: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--glow), 0 0 12px var(--glow); }
-  /* Recording: warn fill. A finger hides it, so the box glows, the dot turns warn and the recording bar shows above the box. */
-  .mic[data-mic=live] { background: var(--warn); border-color: var(--warn); color: var(--bg); box-shadow: 0 0 12px var(--warn); }
-  /* Recording bar laid over the space above the box, so nothing moves under the finger: ✕, a pulse running along a row of dots, the label. */
-  .recbar { position: absolute; z-index: 1; left: -1px; right: -1px; bottom: calc(100% + .5rem); display: flex; align-items: center; gap: .5rem; min-width: 0; box-sizing: border-box; height: 2.75rem; padding-right: .5rem; border: 1px solid var(--accent); background: var(--field); }
-  .recbar .x { flex: none; width: 2.75rem; height: 100%; min-height: 0; padding: 0; border: 0; color: var(--dim); font: 1.1rem/1 var(--mono); }
+  /* Listening: a tinted mic. Recording: amber fill. A finger hides it, so the pill rings and the recording bar shows above. */
+  .box .mic[aria-pressed=true] { color: var(--f-run); background: var(--t-run); }
+  .box .mic[data-mic=live] { background: var(--warn); color: var(--bg); }
+  /* Recording bar laid over the space above the pill, so nothing moves under the finger: ✕, a pulse running along a row of dots, the label. */
+  .recbar { position: absolute; z-index: 1; left: 0; right: 0; bottom: calc(100% + .5rem); display: flex; align-items: center; gap: .5rem; min-width: 0; box-sizing: border-box; height: 2.75rem; padding-right: .875rem; border-radius: 999px; background: var(--composer); box-shadow: var(--shadow); animation: rise .15s ease-out; }
+  .box .recbar .x { flex: none; width: 2.75rem; height: 100%; min-height: 0; padding: 0; border-radius: 999px; background: none; color: var(--dim); font: 1rem/1 var(--sans); }
   .recbar .dots { flex: 1; min-width: 0; display: flex; justify-content: space-between; align-items: center; padding: 0 .25rem; overflow: hidden; }
   .recbar .dots i { width: .375rem; height: .375rem; border-radius: 50%; background: var(--accent); opacity: .25; animation: pulse 1.4s ease-in-out infinite; animation-delay: calc(var(--i) * 90ms); }
-  @keyframes pulse { 0%, 60%, 100% { opacity: .25; transform: scale(1); } 30% { opacity: 1; transform: scale(1.35); box-shadow: 0 0 6px var(--glow); } }
-  /* The labels share one grid cell, so the box is as wide as the longest and the dots never resize. */
-  .recbar .label { flex: none; display: grid; font: 600 .72rem/1.1 var(--display); letter-spacing: .1em; text-transform: uppercase; color: var(--accent); text-align: right; white-space: nowrap; }
+  @keyframes pulse { 0%, 60%, 100% { opacity: .25; transform: scale(1); } 30% { opacity: 1; transform: scale(1.35); } }
+  /* The labels share one grid cell, so the bar is as wide as the longest and the dots never resize. */
+  .recbar .label { flex: none; display: grid; padding: 0; font: 600 .8125rem/1.1 var(--sans); color: var(--accent); text-align: right; white-space: nowrap; }
   .recbar .label span { grid-area: 1 / 1; visibility: hidden; }
   .recbar[data-say=start] .start, .recbar[data-say=send] .send, .recbar[data-say=tap] .tap, .recbar[data-say=cancel] .cancel { visibility: visible; }
-  /* Not hearing yet: the dots wait. Cancel armed: red ✕, edge, label and dots; the pulse stops. */
+  /* Not hearing yet: the dots wait. Cancel armed: red ✕, label and dots; the pulse stops. */
   .recbar[data-say=start] .dots i { animation-play-state: paused; }
-  .recbar[data-say=cancel] { border-color: var(--bad); }
-  .recbar[data-say=cancel] .x { color: var(--bg); background: var(--bad); }
+  .box .recbar[data-say=cancel] .x { color: var(--on-accent); background: var(--bad); }
   .recbar[data-say=cancel] .label { color: var(--bad); }
   .recbar[data-say=cancel] .dots i { background: var(--bad); animation-play-state: paused; opacity: .35; }
-  @media (prefers-reduced-motion: reduce) { .recbar .dots i { animation: none; opacity: .6; } }
-  .toggle { display: flex; align-items: center; gap: .5rem; min-height: 2.75rem; margin: 0; }
-  .toggle input { width: 1.25rem; height: 1.25rem; margin: 0; accent-color: var(--accent); }
-  #notify-row { margin: 0 0 .5rem; }
+  /* Toggles: a switch. */
+  .toggle { display: flex; align-items: center; gap: .75rem; min-height: 2.75rem; margin: 0; cursor: pointer; }
+  .toggle input { flex: none; appearance: none; position: relative; width: 2.5rem; height: 1.5rem; min-height: 0; margin: 0; padding: 0; border: 0; border-radius: 999px; background: var(--track); cursor: pointer; transition: background-color .15s; }
+  .toggle input::before { content: ""; position: absolute; top: .125rem; left: .125rem; width: 1.25rem; height: 1.25rem; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .3); transition: transform .15s; }
+  .toggle input:checked { background: var(--accent); }
+  .toggle input:checked::before { transform: translateX(1rem); }
+  .toggle input:disabled { opacity: .5; }
+  .toggle input:focus { box-shadow: none; }
+  #menu .toggle { justify-content: space-between; flex-direction: row-reverse; margin-top: 1rem; padding: 0 .5rem; font-size: .9375rem; }
+  #notify-row { margin: .5rem .375rem; }
   .dim { color: var(--dim); }
-  #fleet { padding-bottom: .75rem; }
+  #fleet { padding: .5rem .375rem .75rem; font-size: .8125rem; }
   ul { list-style: none; margin: 0; padding: 0; }
-  li { border-top: 1px solid var(--rule); }
-  li.dim { padding: 1rem 0; }
-  li > a { display: block; padding: 1rem 0; text-decoration: none; }
-  .queued { --s: var(--dim); } .running { --s: var(--run); } .done { --s: var(--ok); } .failed { --s: var(--bad); } .cancelled { --s: var(--dim); }
+  /* Grouped lists: rounded cards with hairlines inset past the status dot. */
+  .rows, #routine-list, #machines, #wbody > ul { background: var(--card); border-radius: 1rem; overflow: hidden; }
+  .rows > li, #routine-list > li, #machines > li, #wbody > ul > li { position: relative; }
+  .rows > li + li::before, #routine-list > li + li::before, #machines > li + li::before, #wbody > ul > li + li::before { content: ""; position: absolute; top: 0; left: 2.25rem; right: 0; height: 1px; background: var(--sep); }
+  li.dim { padding: .875rem; }
+  li > a { display: block; padding: .75rem .875rem; color: inherit; text-decoration: none; transition: background-color .15s; }
+  @media (hover: hover) { li > a:hover, .more:hover { background: var(--hover); } }
+  li > a:active { background: var(--hover); }
+  /* Status colours (--s) and their pill tints (--t, text --tf). */
+  /* A chip's own tone defaults to neutral, so it never takes the tone of the row it sits in. */
+  :where(.chip) { --t: var(--t-n); --tf: var(--soft); }
+  .queued, .planning, .cancelled, .offline { --s: var(--dim); --t: var(--t-n); --tf: var(--soft); }
+  .running, .busy, .delivered { --s: var(--run); --t: var(--t-run); --tf: var(--f-run); }
+  .done, .idle { --s: var(--ok); --t: var(--t-ok); --tf: var(--ok); }
+  .failed { --s: var(--bad); --t: var(--t-bad); --tf: var(--f-bad); }
+  .paused { --s: var(--warn); --t: var(--t-warn); --tf: var(--warn); }
   /* Cancelled rows step back: the user ended them, nothing to look at. */
   li.cancelled > a { opacity: .6; }
-  /* Cancel: a red outline, then an in-page confirm. */
-  button[type=button].danger { color: var(--bad); border-color: var(--bad); }
-  #cancel-confirm { margin: 1rem 0; padding: .75rem; border: 1px solid var(--bad); }
+  /* Cancel: a red tint, then an in-page confirm. */
+  button[type=button].danger { color: var(--f-bad); background: var(--t-bad); }
+  #cancel-confirm { margin: 1rem 0; padding: .875rem; border-radius: 1rem; background: var(--card); }
   #cancel-confirm p { margin: 0; }
   #cancel-confirm .row { margin-bottom: 0; }
-  .busy { --s: var(--run); } .idle { --s: var(--ok); } .offline { --s: var(--dim); } .paused { --s: var(--warn); }
-  /* Needs you: a lit dot before the status, red failed, orange usage limit, cyan unread. A glyph, so it stays inline (see .chip). */
-  .att { margin-right: .375em; font-size: .75em; color: var(--a); text-shadow: 0 0 6px var(--a); }
+  #cancel > .row { margin: 1rem 0; }
+  /* Needs you: a lit dot before the status, red failed, amber usage limit or approval, cyan unread. A glyph, so it stays inline. */
+  .att { margin-right: .375em; font-size: .75em; color: var(--a); }
   .att.failed { --a: var(--bad); } .att.limited { --a: var(--warn); } .att.unread { --a: var(--accent); } .att.approval { --a: var(--warn); }
+  #need.att { font-size: .8125rem; margin: 0; }
+  #need.failed { color: var(--f-bad); background: var(--t-bad); } #need.unread { color: var(--f-run); background: var(--t-run); }
+  #need.limited, #need.approval { background: var(--t-warn); }
   /* A tool call the agent waits on: what it wants, then the answers. */
-  .appr { margin: 1rem 0; padding: .75rem; border: 1px solid var(--warn); }
-  .appr .what { margin: .25rem 0 .5rem; overflow-wrap: anywhere; font-weight: 600; }
-  .appr .row { margin: .5rem 0 0; }
+  .appr { margin: 1rem 0; padding: .875rem; border-radius: 1rem; background: var(--card); box-shadow: inset 3px 0 0 var(--warn); }
+  .appr > .dim { font-size: .8125rem; }
+  .appr .what { margin: .25rem 0 .5rem; overflow-wrap: anywhere; font: 500 .875rem/1.45 var(--mono); }
+  .appr .row { margin: .75rem 0 0; }
+  .appr .row button { min-height: 2.25rem; padding: 0 1rem; border-radius: .625rem; font-size: .8125rem; }
+  /* Always: the quiet third answer. */
+  .appr .row button:nth-child(3) { background: none; color: var(--dim); }
   .appr p { margin: .375rem 0 0; font-size: .8125rem; overflow-wrap: anywhere; }
-  .appr details { margin: 0 0 .5rem; border: 0; }
+  .appr details { margin: 0 0 .5rem; }
   .appr details summary { padding: .25rem 0; }
-  .appr pre { margin: 0; max-height: 12rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8125rem; }
-  /* Status outlined in its colour. */
-  /* Inline, not inline-block: WebKit adds a stray ellipsis to line-clamped text holding an inline-block. */
-  .chip { margin-right: .5em; padding: .0625em .375em; border: 1px solid; color: var(--s); font: 600 .75em var(--display); text-transform: uppercase; letter-spacing: .1em; }
+  .appr pre { margin: 0; max-height: 12rem; overflow: auto; padding: .5rem .625rem; border-radius: .5rem; background: var(--code); white-space: pre-wrap; overflow-wrap: anywhere; font: .75rem/1.45 var(--mono); }
+  /* Status in a tinted pill. Inline, not inline-block: WebKit adds a stray ellipsis to line-clamped text holding an inline-block. */
+  .chip { margin-right: .5em; padding: .125em .625em; border-radius: 999px; background: var(--t); color: var(--tf); font: 600 .6875rem/1.6 var(--sans); white-space: nowrap; }
   pre { margin: 0; font: inherit; white-space: pre-wrap; word-break: break-word; }
   .head, .meta, dd { overflow-wrap: anywhere; }
-  .answer { margin: .5rem 0 0; padding-left: .875rem; border-left: 2px solid var(--accent); box-shadow: -6px 0 8px -6px var(--glow); color: var(--accent); }
+  .answer { margin: .375rem 0 0; color: var(--soft); font: .875rem/1.45 var(--sans); }
   /* List rows: prompt to 2 lines, answer preview to 3; tap for the rest. */
   .clamp2, .clamp3 { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
   .clamp2 { -webkit-line-clamp: 2; } .clamp3 { -webkit-line-clamp: 3; }
-  .sub { margin-top: .125rem; }
-  .activity { margin-top: .125rem; color: var(--run); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sub { margin-top: .125rem; font-size: .8125rem; }
+  .activity { margin-top: .125rem; color: var(--link); font: .75rem/1.5 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* Replies sit under their parent, indented per level. */
-  li.reply > a { padding-left: calc(var(--depth) * 1.25rem); }
-  .thread { display: block; margin: .25rem 0; }
+  li.reply > a { padding-left: calc(.875rem + var(--depth) * 1.25rem); }
+  .thread { display: block; margin: .25rem 0; padding: .375rem 0; font-size: .875rem; text-decoration: none; }
   .bad { color: var(--bad); }
-  .back { display: inline-flex; align-items: center; min-height: 2.75rem; padding: 0 1rem; border: 1px solid var(--line); text-decoration: none; }
+  .back { display: grid; place-items: center; flex: none; width: 2.5rem; height: 2.5rem; border-radius: .75rem; color: var(--fg2); text-decoration: none; }
+  .back svg { width: 1.375rem; height: 1.375rem; }
+  @media (hover: hover) { .back:hover { background: var(--hover); } }
   /* Evidence: one row per item; kind, text, verdict (tests), chevron (links) in aligned columns. */
-  #evidence { margin: 0 0 1rem; }
-  #evidence h3 { margin: 0 0 .25rem; }
+  #evidence { margin: 1.25rem 0 1rem; }
   .evh { display: flex; align-items: center; justify-content: space-between; }
-  .evh h3 { margin: 0; }
-  #refresh-ev { width: 2.75rem; padding: 0; border: 0; color: var(--accent); font-size: 1.25rem; letter-spacing: 0; }
+  .evh h3 { margin: 0; padding: 0 .375rem; }
+  #refresh-ev { width: 2.5rem; min-height: 2.5rem; padding: 0; background: none; color: var(--link); font-size: 1.125rem; }
   #refresh-ev:disabled { animation: spin 1s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  .evl li:last-child { border-bottom: 1px solid var(--rule); }
-  .evl li > * { display: grid; grid-template-columns: 4rem minmax(0, 1fr) minmax(1rem, auto) 1rem; gap: 0 .5rem; align-items: center; min-height: 2.75rem; padding: 0; }
-  .evl .k { font: 600 .6875rem/1 var(--display); letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
-  .evl .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .evl { background: var(--card); border-radius: 1rem; overflow: hidden; }
+  .evl li + li { border-top: 1px solid var(--sep); }
+  .evl li > * { display: grid; grid-template-columns: 3.5rem minmax(0, 1fr) minmax(1rem, auto) 1rem; gap: 0 .5rem; align-items: center; min-height: 2.75rem; padding: 0 .875rem; }
+  .evl .k { font: 600 .6875rem/1 var(--sans); color: var(--dim); }
+  .evl .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: .9375rem; }
   /* A row that can't be opened shows all of its text. */
   .evl div .t { white-space: normal; overflow-wrap: anywhere; padding: .5rem 0; }
-  .evl .v { white-space: nowrap; text-align: right; }
+  .evl .v { white-space: nowrap; text-align: right; font-size: .8125rem; }
   .sub .ok { color: var(--ok); } .sub .run { color: var(--run); }
-  .evl .v.ok { color: var(--ok); } .evl .v.run { color: var(--run); } .evl .v.merged { color: var(--accent); } .evl .v.dim { color: var(--dim); }
+  .evl .v.ok { color: var(--ok); } .evl .v.run { color: var(--run); } .evl .v.merged { color: var(--link); } .evl .v.dim { color: var(--dim); } .evl .v.bad { color: var(--bad); }
   /* A PR's failing checks and age, under its text. */
-  .evl li > :has(.s) { padding: .5rem 0; }
+  .evl li > :has(.s) { padding-top: .5rem; padding-bottom: .5rem; }
   .evl .s { grid-column: 2 / -1; font-size: .8125rem; color: var(--dim); overflow-wrap: anywhere; }
-  .evl .go { color: var(--accent); text-align: right; }
+  .evl .go { color: var(--dim); text-align: right; }
   .meta { margin: .25rem 0; }
-  dl { display: grid; grid-template-columns: auto 1fr; gap: .25rem 1rem; margin: 1rem 0; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: .375rem 1rem; margin: 1rem 0; font-size: .875rem; }
   dt { color: var(--dim); }
   dd { margin: 0; white-space: pre-line; }
-  details { margin-top: 1.5rem; border-top: 1px solid var(--rule); }
+  details { margin-top: .75rem; }
   details + details { margin-top: 0; }
-  summary { padding: .625rem 0; color: var(--dim); cursor: pointer; font: 600 .8125rem var(--display); text-transform: uppercase; letter-spacing: .14em; }
-  #log { color: var(--dim); }
+  summary { display: flex; align-items: center; gap: .375rem; min-height: 2.25rem; color: var(--dim); cursor: pointer; font: 500 .8125rem var(--sans); list-style: none; }
+  summary::-webkit-details-marker { display: none; }
+  summary::after { content: ""; width: .375rem; height: .375rem; margin-left: .125rem; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(45deg) translateY(-2px); transition: transform .15s; }
+  details[open] > summary::after { transform: rotate(-135deg) translate(-1px, -1px); }
+  #log { padding: .625rem .75rem; border-radius: .75rem; background: var(--code); color: var(--soft); font: .75rem/1.5 var(--mono); }
+  #ids { font-family: var(--mono); font-size: .75rem; }
   /* Workers: the whole row opens the worker; the busy task's id is its own link on top. */
-  li.worker { position: relative; padding: 1rem 0; }
-  .worker .open { text-decoration: none; }
+  li.worker, li.routine { padding: .875rem .875rem .875rem 2.25rem; font-size: .875rem; }
+  .worker .head, .routine .head { font-size: 1rem; }
+  /* Their status dot, in the inset the hairlines leave. */
+  li.worker::after, li.routine::after { content: ""; position: absolute; left: .875rem; top: 1.4375rem; width: .5rem; height: .5rem; border-radius: 50%; background: var(--s, var(--faint)); }
+  .worker .open { color: var(--fg); font-weight: 600; text-decoration: none; }
   .worker .open::after { content: ""; position: absolute; inset: 0; }
-  .worker .task { position: relative; display: inline-block; padding: .625rem .25rem; margin: -.625rem 0; }
+  .worker .task { position: relative; display: inline-block; padding: .625rem .25rem; margin: -.625rem 0; font: .8125rem var(--mono); }
+  .worker > :not(.head) { margin-top: .25rem; }
   /* Routines: name and status, schedule, placement, then Run now / Pause. */
-  li.routine { padding: 1rem 0; }
-  .routine .row { margin: .5rem 0 0; }
+  .routine .row { margin: .75rem 0 0; }
+  .routine .row button { min-height: 2.25rem; padding: 0 .875rem; border-radius: .625rem; font-size: .8125rem; }
   .routine .err { margin-top: .25rem; overflow-wrap: anywhere; }
-  /* Mode: report dim, dry run orange, live filled red so it can't be missed. */
-  .chip.mode-report { --s: var(--dim); } .chip.mode-dry_run { --s: var(--warn); }
-  .chip.mode-live { --s: var(--bad); background: var(--bad); border-color: var(--bad); color: var(--bg); box-shadow: 0 0 8px var(--bad); }
-  .golive { margin: .5rem 0 0; padding: .75rem; border: 1px solid var(--bad); }
+  .routine strong { font-weight: 600; }
+  /* Mode: report quiet, dry run amber, live filled red so it can't be missed. */
+  .chip.mode-dry_run { --t: var(--t-warn); --tf: var(--warn); }
+  .chip.mode-live { background: var(--bad); color: #fff; }
+  .golive { margin: .75rem 0 0; padding: .75rem; border-radius: .75rem; background: var(--t-bad); }
   .golive p { margin: 0; overflow-wrap: anywhere; }
   .golive .row { margin: .5rem 0 0; }
   /* Purpose and tools: what the planner routes on. The tools line opens above the row's link. */
-  .purpose { margin-top: .25rem; overflow-wrap: anywhere; }
-  .perm { margin-top: .25rem; font-size: .875rem; overflow-wrap: anywhere; }
+  .purpose { margin-top: .25rem; color: var(--soft); overflow-wrap: anywhere; }
+  .perm { margin-top: .25rem; font-size: .8125rem; overflow-wrap: anywhere; }
   .nw { white-space: nowrap; }
-  details.caps { position: relative; margin: 0; border: 0; font-size: .875rem; }
-  .caps summary { padding: .625rem 0; margin: -.375rem 0 -.625rem; font: inherit; text-transform: none; letter-spacing: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .caps dl { margin: .5rem 0 0; gap: .125rem .75rem; }
-  /* Sessions on the worker's disk: harness, title, then folder · model · age; headless runs dimmed. */
-  .sess ul { margin: .25rem 0 0; }
-  .sess li { padding: .5rem 0; color: var(--fg); }
+  details.caps { position: relative; margin: 0; font-size: .8125rem; }
+  .caps summary { min-height: 2.25rem; margin: -.25rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; line-height: 2.25rem; }
+  .caps summary::after { display: inline-block; vertical-align: middle; margin-left: .5rem; }
+  .caps dl { margin: .5rem 0 0; gap: .125rem .75rem; font-size: .8125rem; }
+  /* Sessions on the worker's disk: title, then folder · model · age; headless runs dimmed. */
+  .sess ul { margin: .25rem 0 0; border-radius: .75rem; background: var(--bg); overflow: hidden; }
+  .sess li + li { border-top: 1px solid var(--sep); }
+  .sess li { color: var(--fg); }
   .sess li.headless { color: var(--dim); }
   .sess p { margin: .25rem 0 0; }
-  .sess li > a { display: block; padding: 0; text-decoration: none; color: inherit; }
-  .sess .toggle { margin: 0; min-height: 2.75rem; }
-  .chip.claude { --s: var(--accent); } .chip.codex { --s: var(--fg); }
-  .live { margin-right: .375em; font-size: .75em; color: var(--ok); text-shadow: 0 0 6px var(--ok); }
+  .sess li > a { padding: .5rem .625rem; font-size: .875rem; }
+  .sess .toggle { margin: 0; min-height: 2.75rem; font-size: .8125rem; }
+  .live { margin-right: .375em; font-size: .75em; color: var(--ok); }
   /* Tools gained since the note was saved; the note's editor on the worker's page. */
   .new { margin: .25rem 0 0; color: var(--warn); overflow-wrap: anywhere; }
-  .ver { margin-top: .25rem; font-size: .875rem; overflow-wrap: anywhere; }
+  .ver { margin-top: .25rem; font-size: .8125rem; overflow-wrap: anywhere; }
   #note { margin: 1rem 0; }
+  #note textarea { min-height: 5rem; }
   #note .row { margin: .5rem 0 0; }
-  #note > p:last-child { margin: .375rem 0 0; }
-  #machine h2 { margin: 1.5rem 0 0; font-size: 1rem; }
-  h3 { margin: 2rem 0 .5rem; font: 600 .8125rem var(--display); text-transform: uppercase; letter-spacing: .14em; color: var(--dim); }
-  /* Meters: grey when fine or unknown, orange from 75%, red from 90%. */
+  #note > p:last-child { margin: .375rem 0 0; font-size: .8125rem; }
+  #machine h2 { display: flex; align-items: center; gap: .5rem; margin: .25rem 0 0; font-size: 1.25rem; font-weight: 600; }
+  #machine h2 .chip { font-size: .75rem; }
+  .mtop { display: flex; align-items: center; gap: .25rem; margin-left: -.5rem; }
+  /* Section labels: small grey sentence case. */
+  h3 { margin: 1.5rem 0 .5rem; padding: 0 .375rem; font: 600 .75rem/1.4 var(--sans); color: var(--dim); }
+  /* Meters: grey when fine or unknown, amber from 75%, red from 90%. */
   .warn { color: var(--warn); } .crit { color: var(--bad); }
-  .meter { margin-top: .375rem; --b: var(--line); }
+  .meter { margin-top: .5rem; font-size: .875rem; --b: var(--dim); }
   .meter.warn { --b: var(--warn); } .meter.crit { --b: var(--bad); }
-  .bar { display: block; height: .1875rem; margin-top: .25rem; background: linear-gradient(var(--b), var(--b)) 0 0 / var(--v, 0%) 100% no-repeat, var(--rule); }
+  .bar { display: block; height: .25rem; margin-top: .25rem; border-radius: 999px; background: linear-gradient(var(--b), var(--b)) 0 0 / var(--v, 0%) 100% no-repeat, var(--sep); }
   .off .meter, .off .meters span { color: var(--dim); --b: var(--dim); }
-  /* Usage limits: a row per window, accent fill, warn from 75%, bad from 90%; old readings dimmed. */
-  .lims { margin-top: .5rem; font-size: .875rem; }
-  .lim { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr) 2.75rem 6rem; gap: .5rem; align-items: center; --b: var(--accent); }
+  /* Usage limits: a row per window, accent fill, amber from 75%, red from 90%; old readings dimmed. */
+  .lims { margin-top: .5rem; font-size: .8125rem; }
+  .lim { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr) 2.75rem 5.5rem; gap: .5rem; align-items: center; --b: var(--accent); }
   .lim .bar { margin: 0; height: .375rem; }
   .lim .v { text-align: right; }
   .lim.warn { --b: var(--warn); } .lim.crit { --b: var(--bad); }
   .lim.stale, .off .lim { color: var(--dim); --b: var(--dim); }
-  #clear { display: inline-block; padding: .625rem 0; }
-  /* Home: section labels, then compact rows: dot + title, meta, a dim one-line summary. */
+  #clear { display: inline-block; padding: .625rem 0; color: var(--dim); }
+  /* Home: section labels, then grouped rows: dot + title, meta, a one-line summary. */
   .sec { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
-  .sec h3 { margin: 1.5rem 0 .25rem; }
-  .sec a { display: inline-flex; align-items: center; min-height: 2.75rem; color: var(--accent); font-size: .8125rem; text-decoration: none; }
-  .rows li > a { padding: .625rem 0; }
+  .sec h3 { margin: 1.25rem 0 .5rem; }
+  .sec a { display: inline-flex; align-items: center; min-height: 2.25rem; padding-right: .375rem; color: var(--link); font-size: .8125rem; text-decoration: none; }
   .one { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-  .r1 { display: flex; align-items: center; gap: .5rem; }
-  .r1 .one { flex: 1; min-width: 0; font-family: var(--prose); }
+  .r1 { display: flex; align-items: center; gap: .75rem; }
+  .r1 .one { flex: 1; min-width: 0; font-size: .9375rem; font-weight: 500; }
   .r2 { font-size: .8125rem; color: var(--dim); }
-  .r3 { font: .875rem/1.4 var(--prose); color: var(--dim); }
-  .r3.activity { margin: 0; font-family: var(--mono); font-size: .8125rem; color: var(--run); }
-  .rows .r2, .rows .r3 { padding-left: 1rem; }
-  /* Status dot: the state's colour; hollow while waiting to run; lit when it needs you. */
+  .r3 { font-size: .8125rem; line-height: 1.4; color: var(--soft); }
+  .r3.activity { margin: .125rem 0 0; font: .75rem/1.5 var(--mono); color: var(--link); }
+  .rows .r2, .rows .r3 { padding-left: 1.25rem; }
+  /* Status dot: the state's colour; hollow while waiting to run; ringed while running; lit when it needs you. */
   .sd { flex: none; box-sizing: border-box; width: .5rem; height: .5rem; border-radius: 50%; background: var(--s); }
   .sd.queued, .sd.planning { background: none; border: 1.5px solid var(--dim); }
-  .sd.running { box-shadow: 0 0 6px var(--glow); }
+  .sd.running, .sd.st-working { box-shadow: 0 0 0 3px var(--ring); }
   .sd.delivered { background: none; border: 1.5px solid var(--accent); }
   .sd.att-failed { --s: var(--bad); } .sd.att-limited, .sd.att-approval { --s: var(--warn); } .sd.att-unread { --s: var(--accent); }
-  .sd[class*=att-] { background: var(--s); border: 0; box-shadow: 0 0 6px var(--s); }
-  .rows li.reply > a { padding-left: 1rem; }
+  .sd[class*=att-] { background: var(--s); border: 0; }
+  .rows li.reply > a { padding-left: 2.125rem; }
   /* A thread's replies, folded under its first task. */
-  .more { display: flex; align-items: center; gap: .5rem; width: 100%; min-height: 2.75rem; margin: -.375rem 0 .25rem; padding: 0 0 0 1rem; border: 0; background: none; color: var(--dim); font: .8125rem var(--mono); letter-spacing: 0; text-transform: none; text-align: left; }
+  .more { display: flex; align-items: center; gap: .625rem; width: 100%; min-height: 2.5rem; margin: -.5rem 0 0; padding: 0 .875rem 0 2.125rem; border-radius: 0; background: none; color: var(--dim); font: .8125rem var(--sans); text-align: left; }
+  .more:active { transform: none; background: var(--hover); }
   .more .one { flex: 1; min-width: 0; }
-  /* Live sessions: name and age, state chip and where, the last line it wrote, then what you sent it. */
-  .sr > a { padding: .625rem 0; }
-  .sr .r1 { justify-content: space-between; }
-  .sr .r1 strong { font: 600 1rem var(--prose); }
-  .sr .r2 { margin-top: .125rem; }
-  .sr .r2, .sr .r3, .sr .you { padding-left: 0; }
-  .sr a.you { display: flex; align-items: center; gap: .5rem; min-height: 2.25rem; margin-top: -.375rem; font-size: .8125rem; color: var(--accent); text-decoration: none; }
+  /* Live sessions: name, state pill and age; where; the last line it wrote; then what you sent it. */
+  .sr .r1 strong { flex: 0 1 auto; font-size: .9375rem; font-weight: 500; }
+  .sr .r1 .chip { flex: none; margin: 0; }
+  .sr .r1 .age { margin-left: auto; padding-left: .5rem; font-size: .8125rem; color: var(--dim); white-space: nowrap; }
+  .sr .r2 { margin-top: .0625rem; }
+  .sr a.you { display: flex; align-items: center; gap: .5rem; min-height: 2rem; margin-top: -.5rem; padding: 0 .875rem .375rem 2.125rem; font-size: .8125rem; color: var(--link); }
   .sr a.you .one { flex: 1; min-width: 0; }
   .sr.off > a { opacity: .55; }
-  .st-working { --s: var(--run); } .st-waiting { --s: var(--warn); } .st-stalled { --s: var(--bad); } .st-shell { --s: var(--fg); } .st-idle, .st-active { --s: var(--dim); }
+  .st-working { --s: var(--run); --t: var(--t-run); --tf: var(--f-run); } .st-waiting { --s: var(--warn); --t: var(--t-warn); --tf: var(--warn); }
+  .st-shell { --s: var(--fg2); } .st-idle, .st-active { --s: var(--faint); }
+  /* Stalled: maybe stuck, so an amber outline rather than a fill. */
+  .st-stalled { --s: var(--warn); }
+  .chip.st-stalled { background: none; color: var(--warn); box-shadow: inset 0 0 0 1px var(--edge-warn); }
+  .sd.st-stalled { background: none; border: 1.5px solid var(--warn); }
   .r2 .why { color: var(--warn); }
+  /* Skeletons stand in while a view loads: grey bars with a slow sheen. */
+  .skel { display: grid; gap: .625rem; padding: .875rem; }
+  .skel i { display: block; height: .75rem; border-radius: 999px; background: linear-gradient(90deg, var(--sep) 30%, var(--hover) 50%, var(--sep) 70%) 0 0 / 300% 100%; animation: sheen 1.4s ease-in-out infinite; }
+  .skel i:nth-child(3n + 1) { width: 62%; height: .875rem; } .skel i:nth-child(3n + 2) { width: 40%; } .skel i:nth-child(3n) { width: 84%; margin-bottom: .5rem; }
+  .rows.skel, .convo .skel { background: var(--card); border-radius: 1rem; }
+  @keyframes sheen { from { background-position: 100% 0; } to { background-position: 0 0; } }
   /* Conversation views: a sticky head, then the turns. */
-  .chead { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: .75rem; margin: 0 calc(-1 * var(--pad)); padding: .5rem var(--pad); background: var(--bg); border-bottom: 1px solid var(--rule); }
-  .chead .back { flex: none; padding: 0 .875rem; }
+  .chead { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: .25rem; margin: 0 calc(-1 * var(--pad)); padding: .375rem calc(var(--pad) - .25rem) .375rem calc(var(--pad) - .5rem); background: var(--bg); border-bottom: 1px solid var(--sep); }
   .chead > div { flex: 1; min-width: 0; }
-  .chead .ttl { font: 600 1rem/1.3 var(--prose); }
-  .chead .r2 { margin-top: .125rem; }
-  .convo { padding-top: .5rem; }
-  /* `.toolrun`, not `.run`: the progress line takes `.run` while work runs. */
-  .fold, .toolrun { display: block; width: 100%; min-height: 2.75rem; padding: 0; border: 0; border-bottom: 1px dashed var(--rule); background: none; color: var(--dim); font: .8125rem var(--mono); letter-spacing: 0; text-transform: none; text-align: left; }
-  .toolrun { min-height: 2.25rem; border: 0; }
-  .fold[aria-expanded=true] { color: var(--accent); }
-  .earlier { padding-bottom: .5rem; border-bottom: 1px dashed var(--rule); }
-  .calls { margin: 0 0 .5rem 1.25rem; font-size: .75rem; color: var(--dim); overflow-wrap: anywhere; }
-  .calls div { padding: .125rem 0; }
-  .msg { margin: .75rem 0; }
-  .msg .who { font-size: .75rem; color: var(--dim); }
-  .msg .body { font: 1rem/1.55 var(--prose); overflow-wrap: anywhere; }
-  .msg.user .body { white-space: pre-wrap; padding-left: .875rem; border-left: 2px solid var(--accent); color: var(--accent); }
-  .msg.card .body { padding: .75rem .875rem; border: 1px solid var(--rule); background: var(--field); }
-  .msg.user.card .body { border-left: 2px solid var(--accent); }
-  .msg.working .body { color: var(--run); font-family: var(--mono); font-size: .875rem; }
-  .msg .note { display: block; margin-top: .25rem; padding-left: .875rem; font: .75rem/1.4 var(--mono); color: var(--dim); }
-  .msg .note.bad { color: var(--bad); } .msg .note.warn { color: var(--warn); }
+  .chead .ttl { display: flex; align-items: center; gap: .5rem; min-width: 0; font: 600 1rem/1.35 var(--sans); }
+  .chead .ttl > span:first-child { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .chead .ttl .chip { flex: none; margin: 0; }
+  .chead .r2 { margin-top: .0625rem; font-size: .75rem; }
+  .convo { padding: 1rem .25rem 0; }
+  /* `.toolrun`, not `.run`: the status line takes `.run` while work runs. */
+  .fold { display: flex; align-items: center; gap: .5rem; min-height: 2rem; margin: 0 auto 1rem; padding: 0 .875rem; border-radius: 999px; background: var(--raised); color: var(--soft); font: 500 .8125rem var(--sans); }
+  .toolrun { display: flex; align-items: center; gap: .625rem; width: 100%; min-height: 2.5rem; margin: .25rem 0 .75rem; padding: .5rem .75rem; border-radius: .75rem; background: var(--card); color: var(--soft); font: .8125rem var(--sans); text-align: left; }
+  .toolrun:active, .fold:active { transform: none; filter: brightness(1.15); }
+  .toolrun svg { flex: none; width: 1rem; height: 1rem; }
+  .toolrun .one { flex: 1; min-width: 0; }
+  .toolrun b { color: var(--fg); font-weight: 500; }
+  .toolrun .chev { flex: none; transition: transform .15s; }
+  .toolrun[aria-expanded=true] .chev { transform: rotate(180deg); }
+  .earlier { opacity: .85; margin-bottom: 1.25rem; }
+  .calls { margin: -.375rem 0 .875rem; padding: .625rem .75rem; border-radius: .75rem; background: var(--code); color: var(--fg2); font: .75rem/1.6 var(--mono); overflow-wrap: anywhere; }
+  .calls .out { color: var(--dim); }
+  .enter { animation: rise .15s ease-out; }
+  .msg { margin: 0 0 1rem; }
+  .msg .body { font-size: 1rem; line-height: 1.55; overflow-wrap: anywhere; }
+  /* You: right-aligned bubbles; the agent: plain prose. */
+  .msg.user { display: flex; flex-direction: column; align-items: flex-end; }
+  .msg.user .body { max-width: 85%; box-sizing: border-box; padding: .625rem .875rem; border-radius: 1.125rem 1.125rem .375rem 1.125rem; background: var(--bubble); white-space: pre-wrap; font-size: .9375rem; line-height: 1.4; }
+  .msg.working .body { display: flex; align-items: center; gap: .625rem; color: var(--dim); font: .8125rem/1.5 var(--mono); }
+  .msg.working .body::before { content: ""; flex: none; width: .5rem; height: .5rem; border-radius: 50%; background: var(--run); box-shadow: 0 0 0 3px var(--ring); animation: breathe 2s ease-in-out infinite; }
+  /* Under your bubble: where your message is. */
+  .msg .note { display: block; margin-top: .25rem; padding: 0 .25rem; font-size: .75rem; color: var(--dim); text-decoration: none; }
+  .msg .note::first-letter { text-transform: uppercase; }
+  .msg .note.bad { color: var(--bad); } .msg .note.warn { color: var(--warn); } .msg .note.ok { color: var(--ok); }
+  /* Under the latest reply: copy it, or retry your message. */
+  .acts { display: flex; gap: .125rem; margin: -.625rem 0 1rem -.5rem; }
+  .acts { align-items: center; }
+  .acts .ibtn svg { width: 1.0625rem; height: 1.0625rem; }
+  .acts .when { padding-left: .375rem; font-size: .75rem; color: var(--faint); }
   /* Rendered markdown. */
   .md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }
-  .md p, .md ul, .md ol, .md pre, .md blockquote { margin: 0 0 .75rem; }
-  .md :is(h1, h2, h3, h4, h5, h6) { margin: 1rem 0 .5rem; font: 600 1.0625rem/1.3 var(--prose); color: var(--fg); text-transform: none; letter-spacing: 0; }
-  .md h1 { font-size: 1.25rem; } .md h2 { font-size: 1.125rem; } .md :is(h4, h5, h6) { font-size: 1rem; color: var(--dim); }
-  .md ul, .md ol { padding-left: 1.25rem; } .md ul { list-style: disc; } .md ol { list-style: decimal; }
+  .md p, .md ul, .md ol, .md pre, .md blockquote, .md .code { margin: 0 0 .75rem; }
+  .md :is(h1, h2, h3, h4, h5, h6) { margin: 1.25rem 0 .5rem; padding: 0; font: 600 1.0625rem/1.3 var(--sans); color: var(--fg); }
+  .md h1 { font-size: 1.25rem; } .md h2 { font-size: 1.125rem; } .md :is(h4, h5, h6) { font-size: 1rem; color: var(--soft); }
+  .md ul, .md ol { padding-left: 1.375rem; } .md ul { list-style: disc; } .md ol { list-style: decimal; }
   .md ul ul { list-style: circle; }
-  .md li { border: 0; margin: .125rem 0; } .md li > :is(ul, ol) { margin: .125rem 0 0; }
-  .md a { color: var(--accent); }
-  .md code { padding: 0 .25em; font: .875em var(--mono); background: color-mix(in srgb, var(--rule) 55%, transparent); }
-  .md pre { padding: .625rem .75rem; overflow-x: auto; white-space: pre; word-break: normal; border: 1px solid var(--rule); background: var(--bg); font: .8125rem/1.45 var(--mono); }
+  .md li { margin: .25rem 0; } .md li > :is(ul, ol) { margin: .25rem 0 0; }
+  .md a { color: var(--link); }
+  .md code { padding: .0625rem .3125rem; border-radius: .375rem; font: .8125em var(--mono); background: var(--raised); }
+  .md pre { padding: .75rem; overflow-x: auto; white-space: pre; word-break: normal; border-radius: .75rem; background: var(--code); font: .75rem/1.6 var(--mono); }
   .md pre code { padding: 0; font: inherit; background: none; }
-  .md blockquote { padding-left: .75rem; border-left: 2px solid var(--line); color: var(--dim); }
-  .md hr { border: 0; border-top: 1px solid var(--rule); }
+  /* Code blocks: a header with the language and Copy over the code. */
+  .md .code { border-radius: .75rem; background: var(--code); overflow: hidden; }
+  .md .code pre { margin: 0; padding-top: 0; border-radius: 0; }
+  .code-h { display: flex; align-items: center; justify-content: space-between; padding: .25rem .25rem .25rem .75rem; font-size: .75rem; color: var(--dim); }
+  .code-h button { min-height: 0; height: 1.75rem; padding: 0 .625rem; border-radius: .5rem; background: none; color: var(--soft); font: 500 .75rem var(--sans); }
+  @media (hover: hover) { .code-h button:hover { background: var(--hover); } }
+  .md blockquote { padding-left: .875rem; border-left: 3px solid var(--sep); color: var(--soft); }
+  .md hr { border: 0; border-top: 1px solid var(--sep); }
   /* Jump to latest: shown when the conversation grew while scrolled up. */
-  #latest { position: fixed; z-index: 2; left: 50%; bottom: calc(var(--dock, 0px) + var(--kb, 0px) + .75rem); transform: translateX(-50%); min-height: 2.25rem; padding: 0 .875rem; background: var(--bg); color: var(--accent); border-color: var(--accent); box-shadow: 0 0 10px var(--glow); font-size: .75rem; }
+  #latest { position: fixed; z-index: 2; left: 50%; bottom: calc(var(--dock, 0px) + var(--kb, 0px) + .5rem); transform: translateX(-50%); min-height: 2rem; padding: 0 .875rem; border-radius: 999px; background: var(--card); color: var(--fg); box-shadow: var(--shadow); font-size: .8125rem; animation: rise .15s ease-out; }
+  /* A passing note at the top, e.g. a copied resume command. */
+  #toast { position: fixed; z-index: 3; top: calc(4rem + env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%); max-width: calc(100vw - 2rem); box-sizing: border-box; padding: .5rem .75rem; border-radius: .625rem; background: var(--seg-on); color: var(--fg); box-shadow: var(--shadow); font: .75rem/1.4 var(--mono); overflow-wrap: anywhere; animation: rise .15s ease-out; }
   [hidden] { display: none !important; }
+  /* Reduced motion: nothing slides, fades or pulses; busy spinners still turn, and the recording dots stay readable. */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after, ::backdrop { animation: none !important; transition: none !important; }
+    .shot.busy::after, #refresh-ev:disabled { animation: spin 1s linear infinite !important; }
+    .recbar .dots i { opacity: .6; }
+  }
   /* VR panels: bigger type, secondary text pulled toward the foreground. */
   html.vr { font-size: 22px; --dim: color-mix(in srgb, var(--fg) 85%, var(--bg)); }
 </style>
@@ -402,20 +479,18 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
 <body>
 <header class="strip">
   <div class="top">
-    <span id="dot" class="dot hollow" role="img" aria-label="connecting" title="connecting"></span>
+    <svg class="logo" viewBox="0 0 18 18" aria-hidden="true"><rect x="1" y="3" width="6" height="12" rx="1" fill="var(--accent)"/><path d="M9 3h5l2 2-2 2H9z" fill="var(--accent)"/><path d="M9 8h5l2 2-2 2H9z" fill="#F2A65E"/></svg>
     <span class="title">Make It So</span>
     <a id="gauges" class="gauges" href="#workers" hidden></a>
     <span class="end"><a id="need" hidden></a>
-    <button type="button" id="menu-btn" aria-label="Menu" aria-haspopup="dialog" aria-expanded="false" aria-controls="menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button></span>
+    <button type="button" id="menu-btn" class="ibtn" aria-label="Menu" aria-haspopup="dialog" aria-expanded="false" aria-controls="menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button></span>
   </div>
-  <a id="ticker">connecting…</a>
-  <div id="cycle" class="cycle" aria-hidden="true"></div>
-  <button type="button" id="upd" class="upd" aria-expanded="false" hidden><span></span></button>
+  <div class="status"><span id="dot" class="dot hollow" role="img" aria-label="connecting" title="connecting"></span><a id="ticker">Connecting…</a><button type="button" id="upd" class="upd" aria-expanded="false" hidden><span></span></button></div>
 </header>
 
 <dialog id="menu" aria-label="Menu">
   <div class="sheet">
-    <div class="sheet-top"><span class="title">Make It So</span><button type="button" id="menu-close" aria-label="Close menu">✕</button></div>
+    <div class="sheet-top"><span class="title">Make It So</span><button type="button" id="menu-close" class="ibtn" aria-label="Close menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
     <nav aria-label="Views">
       <a href="#" data-view="list">Home</a>
       <a href="#routines" data-view="routines">Routines</a>
@@ -426,8 +501,8 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
       <label><input type="radio" name="theme" value="dark">Dark</label>
       <label><input type="radio" name="theme" value="light">Light</label>
     </div></fieldset>
-    <label class="toggle" hidden><input type="checkbox" id="autoread"> Auto-read answers</label>
-    <div class="sheet-foot dim"><a href="#" id="clear" hidden>disconnect / clear token</a><div id="ver"></div></div>
+    <label class="toggle" hidden><input type="checkbox" id="autoread"> Read answers aloud</label>
+    <div class="sheet-foot dim"><a href="#" id="clear" hidden>Disconnect and clear token</a><div id="ver"></div></div>
   </div>
 </dialog>
 
@@ -437,14 +512,16 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   <div class="row"><button>Connect</button></div>
 </form>
 
+<div id="skel" class="rows skel" aria-busy="true" aria-label="Loading"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+
 <main id="list" hidden></main>
 
 <main id="detail" hidden>
-  <div class="chead"><a href="#" class="back" aria-label="Back">←</a><div id="task-head"></div></div>
+  <div class="chead"><a href="#" class="back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a><div id="task-head"></div></div>
   <div id="task-convo" class="convo"></div>
   <section id="approvals" hidden></section>
-  <div class="row" hidden><button type="button" id="speak">speak</button></div>
-  <section id="evidence" hidden><div class="evh"><h3>evidence</h3><button type="button" id="refresh-ev" aria-label="Refresh PR status" hidden>↻</button></div><ul class="evl"></ul></section>
+  <div class="row" hidden><button type="button" id="speak">Speak</button></div>
+  <section id="evidence" hidden><div class="evh"><h3>Evidence</h3><button type="button" id="refresh-ev" aria-label="Refresh PR status" hidden>↻</button></div><ul class="evl"></ul></section>
   <div id="shots-view" class="shots" hidden></div>
   <div id="thread" class="meta dim"></div>
   <div id="cancel" hidden>
@@ -455,8 +532,8 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
     </div>
     <p id="cancel-state" class="dim" hidden></p>
   </div>
-  <details><summary>transcript</summary><pre id="log"></pre></details>
-  <details><summary>ids</summary><dl id="ids"></dl></details>
+  <details><summary>Transcript</summary><pre id="log"></pre></details>
+  <details><summary>IDs</summary><dl id="ids"></dl></details>
 </main>
 
 <main id="routines" hidden>
@@ -464,20 +541,21 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
 </main>
 
 <main id="workers" hidden>
-  <label class="toggle" id="notify-row" hidden><input type="checkbox" id="notify"> notify me <span id="notify-state" class="dim"></span></label>
+  <label class="toggle" id="notify-row" hidden><input type="checkbox" id="notify"> Notify me <span id="notify-state" class="dim"></span></label>
   <div id="fleet" class="dim"></div>
   <ul id="machines"></ul>
 </main>
 
 <main id="session" hidden>
-  <div class="chead"><a href="#workers" class="back" aria-label="Back">←</a><div id="session-head"></div></div>
+  <div class="chead"><a href="#workers" class="back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a><div id="session-head"></div><button type="button" id="resume" class="ibtn" aria-label="Copy resume command" title="Copy resume command"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 9l3 3-3 3M12 15h5"/></svg></button></div>
   <div id="turns" class="convo"></div>
   <p id="session-state" class="dim"></p>
 </main>
-<button type="button" id="latest" hidden>↓ latest</button>
+<button type="button" id="latest" hidden>↓ Latest</button>
+<div id="toast" role="status" hidden></div>
 
 <main id="machine" hidden>
-  <p><a href="#workers" class="back">← back</a></p>
+  <div class="mtop"><a href="#workers" class="back" aria-label="Back to workers"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a></div>
   <div id="wbody"></div>
 </main>
 
@@ -485,21 +563,21 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   <form id="new" class="composer">
     <div id="shots" class="shots" hidden></div>
     <div class="ctx">
-      <button type="button" id="opt" aria-expanded="false" aria-controls="opts"><span>auto ▾</span></button>
+      <button type="button" id="opt" aria-expanded="false" aria-controls="opts"><span>Auto · any machine ▾</span></button>
       <div id="opts" role="group" aria-label="Harness and model" hidden>
-        <select id="harness" aria-label="harness"><option value="">auto</option></select>
-        <input id="model" aria-label="model" placeholder="model (optional)" autocapitalize="off" autocorrect="off" spellcheck="false">
+        <select id="harness" aria-label="harness"><option value="">Auto</option></select>
+        <input id="model" aria-label="model" placeholder="Model (optional)" autocapitalize="off" autocorrect="off" spellcheck="false">
       </div>
     </div>
-    <div class="box"><button type="button" id="clip" class="clip" aria-label="Attach photos"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M20 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.4 8.4a1.7 1.7 0 0 1-2.4-2.4l7.7-7.7"/></svg></button><input type="file" id="pick" accept="image/*" multiple hidden><textarea id="prompt" rows="1" aria-label="new task" placeholder="New task…" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><button id="send" class="go" aria-label="Submit" title="Submit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg></button></div>
+    <div class="box"><button type="button" id="clip" class="clip" aria-label="Attach photos"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><input type="file" id="pick" accept="image/*" multiple hidden><textarea id="prompt" rows="1" aria-label="new task" placeholder="Start a task or ask anything" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button><button id="send" class="go" aria-label="Submit" title="Submit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button></div>
   </form>
   <form id="reply" class="composer" hidden>
     <div class="ctx"><p id="reply-error" class="bad" hidden></p></div>
-    <div class="box"><textarea id="reply-text" rows="1" aria-label="reply" placeholder="Reply in this thread…" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><button id="send-reply" class="go" aria-label="Reply" title="Reply"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg></button></div>
+    <div class="box"><textarea id="reply-text" rows="1" aria-label="reply" placeholder="Reply in this thread…" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button><button id="send-reply" class="go" aria-label="Reply" title="Reply"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button></div>
   </form>
   <form id="say" class="composer" hidden>
     <div class="ctx"><p id="say-open" class="dim" hidden></p><p id="say-state" hidden></p></div>
-    <div class="box"><textarea id="say-text" rows="1" aria-label="message" placeholder="Message this session…" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><button id="say-send" class="go" aria-label="Send" title="Send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg></button></div>
+    <div class="box"><textarea id="say-text" rows="1" aria-label="message" placeholder="Message this session" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button><button id="say-send" class="go" aria-label="Send" title="Send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button></div>
   </form>
 </footer>
 
@@ -524,6 +602,18 @@ let wantNew = false; // `#new` was opened: focus the new-task field once it show
 // A reply's Submitted opens the new task.
 let pending = null;
 let replyFor = null; // thread whose draft the reply field holds
+// Fields clear on send; a send that didn't go through puts its text back, ahead of anything typed since.
+function restore(field, text) {
+  if (field.value.includes(text)) return; // already there, e.g. its draft came back with the view
+  field.value = field.value.trim() ? `${text}\n\n${field.value}` : text;
+  keepDraft(field);
+  fit(field);
+}
+function unsend() {
+  const p = pending, f = p && (p.key === 'draft:new' ? $('prompt') : p.key === replyDraft(replyFor) && $('reply-text'));
+  pending = null;
+  if (f) restore(f, p.text);
+}
 const mine = new Set(); // tasks this page submitted; auto-read speaks only these
 // Photos for the new task: downscaled here (phone shots are ~4 MB), uploaded on pick, sent as ids.
 // Each is { url: preview object URL, id: upload id once stored }.
@@ -599,10 +689,11 @@ function mdBlocks(lines, depth = 0) {
     let m;
     if (!l.trim()) { i++; continue; }
     if ((m = l.match(MD_FENCE))) {
-      const body = [];
+      // The info string's first word labels the block; it is escaped text, kept only if it looks like a language.
+      const lang = l.trim().slice(3).trim().split(' ')[0], body = [];
       for (i++; i < lines.length && !lines[i].trim().startsWith(m[1]); i++) body.push(lines[i]);
       i++;
-      out.push(`<pre><code>${body.join('\n')}</code></pre>`);
+      out.push(`<pre${/^[\w+#.-]{1,20}$/.test(lang) ? ` data-lang="${lang}"` : ''}><code>${body.join('\n')}</code></pre>`);
     } else if ((m = l.match(MD_HEAD))) {
       out.push(`<h${m[1].length}>${mdInline(m[2])}</h${m[1].length}>`);
       i++;
@@ -673,7 +764,8 @@ function eventLine(e) {
 }
 
 const short = (id) => id.slice(0, 8);
-const chip = (s) => el('span', { className: `chip ${s}` }, s);
+const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+const chip = (s) => el('span', { className: `chip ${s}` }, cap(s));
 // Worker stats are optional; anything that isn't a number is unknown (null).
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const pct = (v) => (v === null ? '—' : `${Math.round(v)}%`);
@@ -745,7 +837,7 @@ const hasNewText = (base, text) => text.trim() !== '' && text.trim() !== base.tr
 const barSay = (s) => (s.armed ? 'cancel' : !s.live ? 'start' : s.held ? 'send' : 'tap');
 
 // The dictation session, at most one: { r, btn, form, field, draft, base, live, held, armed, send, stopping, dead, timer, tickerH }.
-// `tickerH`: the ticker's height when it began (0 = hidden), kept while dictating.
+// `tickerH`: the ticker's height when it began, kept while dictating.
 let rec = null;
 function micShow(s) {
   const on = rec === s && !s.stopping, state = on ? (s.live ? 'live' : 'starting') : '';
@@ -781,7 +873,7 @@ function micEnd(s) {
 function micStart(btn, held) {
   hush(); // else the mic hears the readback
   const form = btn.closest('form'), field = form.querySelector('textarea'), r = new Recognition();
-  const tk = $('ticker'), tickerH = tk.hidden ? 0 : tk.offsetHeight;
+  const tk = $('ticker'), tickerH = tk.offsetHeight;
   const s = rec = { r, btn, form, field, draft: field.value, base: field.value.trimEnd(), live: false, held, armed: false, send: false, stopping: false, dead: false, timer: 0, tickerH };
   Object.assign(r, { lang: navigator.language, interimResults: true });
   r.onresult = (e) => {
@@ -898,7 +990,7 @@ for (const btn of document.querySelectorAll('.mic')) {
 // Readback: one utterance at a time, from the speak button or auto-read.
 const synth = window.speechSynthesis;
 let utterance = null;
-function speakState() { $('speak').textContent = utterance ? '● stop' : 'speak'; $('speak').classList.toggle('on', !!utterance); }
+function speakState() { $('speak').textContent = utterance ? 'Stop' : 'Speak'; $('speak').classList.toggle('on', !!utterance); }
 function say(text) {
   synth.cancel();
   const u = utterance = new SpeechSynthesisUtterance(text);
@@ -969,7 +1061,7 @@ function ticker() {
   if (running.length) {
     const newest = running.reduce((a, t) => ((t.started_at || 0) >= (a.started_at || 0) ? t : a));
     const act = (newest.activity || '').replace(/^status: /, '');
-    const parts = dots([`● ${running.length} running`, act && el('span', { className: 'act' }, act),
+    const parts = dots([`${running.length} running`, act && el('span', { className: 'act' }, act),
       planning && `+${planning} planning`, queued && `+${queued} queued`]);
     return { parts, cls: 'run', open: newest.id };
   }
@@ -1009,7 +1101,7 @@ function renderNeed() {
 }
 
 // Dot, then the ticker: a flash wins, then the connection until a socket has opened, then offline, then work.
-// The dot alone says idle (or listening); an idle ticker collapses.
+// Idle, the ticker says the dot's word (idle, listening).
 function renderStrip() {
   const live = ws && ws.readyState === WebSocket.OPEN, trying = ws || retryTimer, work = ticker();
   const [cls, label] = rec && rec.live && !rec.stopping ? ['listen', 'listening']
@@ -1022,15 +1114,16 @@ function renderStrip() {
     : !everOpen ? { parts: [connMsg], cls: '' }
     : offline ? { parts: [`offline · retrying${authNeeded ? ' (wrong token?)' : ''}`], cls: 'warn' }
     : work;
+  // Idle: the dot's word. Sentence case: the line may start with a lower-case message.
+  const parts = t.parts.length ? [...t.parts] : [label];
+  if (typeof parts[0] === 'string') parts[0] = cap(parts[0]);
   const tk = $('ticker');
-  tk.replaceChildren(...t.parts);
+  tk.replaceChildren(...parts);
   // While dictating the ticker keeps its height, so nothing moves under the finger.
   const keep = rec && rec.tickerH;
-  tk.hidden = rec ? !keep : !t.parts.length;
   Object.assign(tk.style, { height: keep ? `${keep}px` : '', overflow: keep ? 'hidden' : '' });
   tk.className = t.cls;
   if (t.open) tk.href = `#task/${t.open}`; else tk.removeAttribute('href');
-  $('cycle').classList.toggle('run', everOpen && !offline && tasks.some((x) => x.status === 'running'));
   renderGauges();
   renderNeed();
   renderUpdate();
@@ -1038,7 +1131,7 @@ function renderStrip() {
 
 // The supervisor's update report from the last Status: [label, class, show the sha]. Tap toggles the commit subject.
 let update = { state: 'none' };
-const UPDATE = { pending: ['update pending', '', true], failed: ['update failed', 'bad', true], rolled_back: ['rolled back', 'warn', true] };
+const UPDATE = { pending: ['Update pending', '', true], failed: ['Update failed', 'bad', true], rolled_back: ['Rolled back', 'warn', true] };
 function renderUpdate() {
   const u = $('upd'), [label, cls, withSha] = UPDATE[update.state] || [];
   u.hidden = !label;
@@ -1070,6 +1163,8 @@ function render() {
   const live = ws && ws.readyState === WebSocket.OPEN;
   const views = { list: renderList, detail: renderDetail, routines: renderRoutines, workers: renderWorkers, machine: renderMachine, session: renderSession };
   $('auth').hidden = live || !authNeeded || !!store.get();
+  // Placeholder rows until the first socket opens, unless that is stuck (a token, no server).
+  $('skel').hidden = everOpen || !$('auth').hidden || offline || connMsg !== 'connecting…';
   // The dock's form follows the view: a reply in a task, a message in a session, else a new task.
   // A read-only token can't send, so it gets none.
   const form = { detail: 'reply', session: 'say' }[r.view] || 'new';
@@ -1192,14 +1287,14 @@ function taskRows(ul, rows) {
       (t.status === 'running' || t.status === 'queued') && t.activity && t.activity !== 'queued'
         ? el('div', { className: 'activity' }, t.activity) : '',
       t.summary ? el('pre', { className: 'answer clamp3' }, t.summary) : ''))));
-  if (!rows.length) ul.append(el('li', { className: 'dim' }, 'no tasks yet'));
+  if (!rows.length) ul.append(el('li', { className: 'dim' }, 'No tasks yet'));
 }
 
 // A routine run's own prompt, past the paragraph of rules the orchestrator puts first.
 const promptOf = (t) => (t.routine ? t.prompt.split('\n\n').slice(1).join('\n\n') || t.prompt : t.prompt);
 // A routine run's row: `↻ <routine> · `, the mode it ran in, then its own prompt.
 const routineHead = (t) => (t.routine ? [`↻ ${t.routine} · `, modeChip(t.routine_mode), promptOf(t)] : [t.prompt]);
-const modeChip = (m) => (m ? el('span', { className: `chip mode-${m}` }, m.replace('_', ' ')) : '');
+const modeChip = (m) => (m ? el('span', { className: `chip mode-${m}` }, cap(m.replace('_', ' '))) : '');
 // `↪ <session title> · ` before a message to one of a worker's sessions; its link back.
 const sentTo = (t) => (t.send_to ? `↪ ${t.send_to.title || short(t.send_to.session)} · ` : '');
 const sendKey = (t) => `${t.worker}/${t.harness}/${t.send_to.session}`; // the session a message went to
@@ -1281,7 +1376,7 @@ function threadRows(th, now) {
   first.append(more);
   return [first, ...(open ? th.replies.map((r) => taskRow(r, now, true)) : [])];
 }
-const LIVE_STATE = { working: 'working', waiting: 'waiting for you', stalled: 'stalled?', shell: 'in shell', idle: 'idle' };
+const LIVE_STATE = { working: 'Working', waiting: 'Waiting for you', stalled: 'Stalled?', shell: 'In shell', idle: 'Idle', active: 'Active' };
 const liveKey = (s) => `${s.worker}/${s.harness}/${s.id}`;
 const liveChip = (state) => el('span', { className: `chip st-${state}` }, LIVE_STATE[state] || state);
 // Where a message to a session is: queued → delivering → delivered (or held in its terminal) → answered.
@@ -1293,11 +1388,12 @@ function liveRow(s, now) {
   const you = s.messages.slice(-2).map((m) => {
     const t = tasks.find((x) => x.id === m.task);
     return el('a', { className: 'you', href: `#task/${m.task}` }, t ? statusDot(t) : '',
-      el('span', { className: 'one' }, `you: ${m.text} · ${m.answered ? `answered ${span(now - ((t && t.finished_at) || m.at))}` : sayState(m.status, m.held)}`));
+      el('span', { className: 'one' }, `You: ${m.text} · ${m.answered ? `answered ${span(now - ((t && t.finished_at) || m.at))}` : sayState(m.status, m.held)}`));
   });
+  const dot = el('span', { className: `sd st-${s.state}` });
   return el('li', { className: `sr${s.online ? '' : ' off'}` }, el('a', { href: `#session/${liveKey(s)}` },
-    el('div', { className: 'r1' }, el('strong', { className: 'one' }, s.name || s.title || short(s.id)), el('span', { className: 'r2' }, span(now - s.updated_ms))),
-    el('div', { className: 'r2 one' }, liveChip(s.state), ...dots([!s.online && 'offline', s.waiting_for && el('span', { className: 'why' }, s.waiting_for),
+    el('div', { className: 'r1' }, dot, el('strong', { className: 'one' }, s.name || s.title || short(s.id)), liveChip(s.state), el('span', { className: 'age' }, span(now - s.updated_ms))),
+    el('div', { className: 'r2 one' }, ...dots([!s.online && 'offline', s.waiting_for && el('span', { className: 'why' }, s.waiting_for),
       shortHost(s.worker_name), s.harness])),
     s.last ? el('div', { className: 'r3 one' }, snippet(s.last)) : ''), ...you);
 }
@@ -1310,13 +1406,17 @@ function renderList() {
   const label = (sec) => (sec === 'need' ? 'Needs you' : sec === 'flight' ? 'In flight' : dayLabel(sec.slice(4), now));
   const groups = new Map();
   for (const th of threads) groups.set(th.sec, [...(groups.get(th.sec) || []), th]);
+  // A new task on its way shows at once, atop In flight.
+  const sending = pending && pending.key === 'draft:new' && el('li', {}, el('a', {},
+    el('div', { className: 'r1' }, el('span', { className: 'sd queued' }), el('span', { className: 'one' }, pending.text)), el('div', { className: 'r2' }, 'Sending…')));
+  if (sending && !groups.has('flight')) groups.set('flight', []);
   // Sections in Home's order; live sessions after the work in hand.
   const keys = [...groups.keys()].sort((a, b) => secRank(a) - secRank(b) || b.localeCompare(a));
-  const body = keys.map((k) => [secHead(label(k)), el('ul', { className: 'rows' }, ...groups.get(k).flatMap((th) => threadRows(th, now)))]);
+  const body = keys.map((k) => [secHead(label(k)), el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []), ...groups.get(k).flatMap((th) => threadRows(th, now)))]);
   const liveAt = keys.filter((k) => secRank(k) < 2).length;
-  if (sessions.length) body.splice(liveAt, 0, [secHead('Live sessions', el('a', { href: '#workers' }, 'All sessions ›')), el('ul', { className: 'rows' }, ...sessions.map((s) => liveRow(s, now)))]);
+  if (sessions.length) body.splice(liveAt, 0, [secHead('Live sessions', el('a', { href: '#workers' }, 'All sessions')), el('ul', { className: 'rows' }, ...sessions.map((s) => liveRow(s, now)))]);
   $('list').replaceChildren(...body.flat());
-  if (!body.length) $('list').append(el('p', { className: 'dim' }, 'no tasks yet'));
+  if (!body.length) $('list').append(el('p', { className: 'dim', style: 'padding: 1rem .375rem' }, 'No tasks yet. Start one below.'));
 }
 
 const KIND = { pr: 'PR', commit: 'commit', ci_run: 'CI', issue: 'issue', url: 'link', test: 'test', note: 'note' };
@@ -1427,12 +1527,12 @@ function approvalCard(t, a) {
     return b;
   };
   return el('div', { className: 'appr' },
-    el('div', { className: 'dim' }, `approval needed · ${t.harness || 'agent'} wants to`),
+    el('div', { className: 'dim' }, `Approval needed · ${t.harness || 'agent'} wants to`),
     el('div', { className: 'what' }, a.summary),
-    a.detail && a.detail !== a.summary ? el('details', { className: 'dim' }, el('summary', {}, 'full call'), el('pre', {}, a.detail)) : '',
-    readOnly ? el('p', { className: 'dim' }, 'waiting for someone with full access')
+    a.detail && a.detail !== a.summary ? el('details', { className: 'dim' }, el('summary', {}, 'Full call'), el('pre', {}, a.detail)) : '',
+    readOnly ? el('p', { className: 'dim' }, 'Waiting for someone with full access')
       : el('div', { className: 'row' }, btn('Allow', 'allow', true), btn('Deny', 'deny'), ...(a.always ? [btn('Always', 'always')] : [])),
-    a.always && !readOnly ? el('p', { className: 'dim' }, `always: ${a.always}`) : '');
+    a.always && !readOnly ? el('p', { className: 'dim' }, `Always: ${a.always}`) : '');
 }
 
 // Conversations (a task's thread, a session's transcript) are items { role: user|assistant|tool, text, call, key, who,
@@ -1469,11 +1569,50 @@ function callName(text) {
   return words.join(' ') || name;
 }
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
-// `⚙ 6 commands · cargo fmt, git commit, gh run watch…`
+// [`Ran 6 commands`, ` · cargo fmt, git commit, gh run watch…`]; `Used 2 tools`; `3 tool outputs`.
 function runLabel(run) {
   const calls = run.filter((x) => x.call), names = [...new Set(calls.map((x) => callName(x.text)))];
-  const noun = !calls.length ? 'tool output' : calls.every((x) => SHELL.has(toolOf(x.text))) ? 'command' : 'tool call';
-  return `⚙ ${plural(calls.length || run.length, noun)}${names.length ? ` · ${names.slice(0, 3).join(', ')}${names.length > 3 ? '…' : ''}` : ''}`;
+  const head = !calls.length ? plural(run.length, 'tool output') : calls.every((x) => SHELL.has(toolOf(x.text)))
+    ? `Ran ${plural(calls.length, 'command')}` : `Used ${plural(calls.length, 'tool')}`;
+  return [head, names.length ? ` · ${names.slice(0, 3).join(', ')}${names.length > 3 ? '…' : ''}` : ''];
+}
+const svg = (d, w = 2) => { const n = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); n.setAttribute('viewBox', '0 0 24 24'); n.setAttribute('aria-hidden', 'true'); n.innerHTML = `<path d="${d}" fill="none" stroke="currentColor" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round"/>`; return n; };
+const ICON = { term: 'M5 8l4 4-4 4M12 16h7', chev: 'M6 9l6 6 6-6', copy: 'M9 9h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2zM5 15V5a2 2 0 0 1 2-2h8', retry: 'M4 12a8 8 0 1 0 3-6.2M4 4v5h5' };
+const chev = () => { const n = svg(ICON.chev); n.classList.add('chev'); return n; };
+const iconBtn = (icon, label, onclick) => { const b = el('button', { type: 'button', className: 'ibtn', title: label, onclick }, svg(ICON[icon])); b.setAttribute('aria-label', label); return b; };
+
+// The clipboard, with a fallback where it is unavailable (plain http on a LAN); resolves whether it copied.
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch {}
+  const t = el('textarea', { value: text, readOnly: true });
+  Object.assign(t.style, { position: 'fixed', top: '0', opacity: '0' });
+  document.body.append(t);
+  t.select();
+  t.setSelectionRange(0, text.length); // iOS selects nothing on select() alone
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch {}
+  t.remove();
+  return ok;
+}
+// A note at the top for a moment.
+let toastTimer = 0;
+function toast(text) {
+  clearTimeout(toastTimer);
+  Object.assign($('toast'), { textContent: text, hidden: false });
+  toastTimer = setTimeout(() => { $('toast').hidden = true; }, 1800);
+}
+// Code blocks get a header: their language, and Copy (`Copied` for a moment).
+function codeBlocks(body) {
+  for (const pre of body.querySelectorAll('pre')) {
+    const copy = el('button', { type: 'button' }, 'Copy');
+    copy.onclick = async () => {
+      copy.textContent = (await copyText(pre.textContent)) ? 'Copied' : 'Couldn’t copy';
+      setTimeout(() => { copy.textContent = 'Copy'; }, 1400);
+    };
+    const box = el('div', { className: 'code' }, el('div', { className: 'code-h' }, el('span', {}, pre.dataset.lang || 'code'), copy));
+    pre.before(box);
+    box.append(pre);
+  }
 }
 // Redraws re-render every turn: keep the HTML per text (a few hundred turns at most are shown).
 const mdCache = new Map();
@@ -1481,41 +1620,50 @@ function mdCached(text) {
   if (!mdCache.has(text)) { if (mdCache.size > 500) mdCache.clear(); mdCache.set(text, md(text)); }
   return mdCache.get(text);
 }
-// Draws a conversation into `box`: earlier turns folded into one line, then your last message and the latest reply
-// as cards with the work between; each tool run folded to a line. `open` ({ earlier, runs }) keeps what the reader
-// unfolded; `more`: older turns exist than were sent; `working`: a last line while it runs.
-function drawConvo(box, items, open, more, working) {
+// Draws a conversation into `box`: earlier turns folded into one pill, then your last message and the latest reply
+// with the work between; each tool run folded to a row. Yours are bubbles, the agent's plain prose. `open` ({ earlier,
+// runs, just }) keeps what the reader unfolded (`just`: the one to animate); `more`: older turns exist than were sent;
+// `working`: a last line while it runs; `retry`: the composer field the latest reply's Retry fills with your message.
+// The reply's actions (copy, retry) show once it has stopped working.
+function drawConvo(box, items, open, more, working, retry) {
   const [earlier, latest] = exchange(items), reply = latest.findLast((x) => x.role === 'assistant');
-  const redraw = () => drawConvo(box, items, open, more, working);
-  const toggle = (cls, label, on, flip) => {
-    const b = el('button', { type: 'button', className: cls }, label);
+  const asked = items.findLast((x) => x.role === 'user');
+  const redraw = () => drawConvo(box, items, open, more, working, retry);
+  const toggle = (cls, label, on, key, flip) => {
+    const b = el('button', { type: 'button', className: cls }, ...label);
     b.setAttribute('aria-expanded', String(on));
-    b.onclick = () => { flip(); redraw(); };
+    b.onclick = () => { flip(); open.just = on ? null : key; redraw(); };
     return b;
   };
+  const enter = (key) => (open.just === key ? ' enter' : '');
   const part = (x) => {
     if (x.run) {
-      const on = open.runs.has(x.key);
-      return [toggle('toolrun one', runLabel(x.run), on, () => (on ? open.runs.delete(x.key) : open.runs.add(x.key))),
-        on ? el('div', { className: 'calls' }, ...x.run.map((c) => el('div', {}, c.text))) : ''];
+      const on = open.runs.has(x.key), [head, names] = runLabel(x.run);
+      return [toggle('toolrun', [svg(ICON.term), el('span', { className: 'one' }, el('b', {}, head), names), chev()], on, x.key,
+        () => (on ? open.runs.delete(x.key) : open.runs.add(x.key))),
+        on ? el('div', { className: `calls${enter(x.key)}` }, ...x.run.map((c) => el('div', c.call ? {} : { className: 'out' }, c.text))) : ''];
     }
     const body = el('div', { className: 'body' });
     // md() escapes all of the text before adding its own tags.
-    if (x.role === 'assistant') { body.classList.add('md'); body.innerHTML = mdCached(x.text); } else body.textContent = x.text;
-    const card = x === reply || (x === latest[0] && x.role === 'user');
-    const note = x.note ? el('a', { className: `note ${x.note.tone}`, href: `#task/${x.note.task}` }, x.note.label) : '';
-    return [el('div', { className: `msg ${x.role}${card ? ' card' : ''}` },
-      el('div', { className: 'who' }, ...dots([x.role === 'user' ? 'you' : x.who || 'agent', x.time])), body, note)];
+    if (x.role === 'assistant') { body.classList.add('md'); body.innerHTML = mdCached(x.text); codeBlocks(body); } else body.textContent = x.text;
+    const n = x.note, note = !n ? '' : n.task ? el('a', { className: `note ${n.tone}`, href: `#task/${n.task}` }, n.label) : el('span', { className: `note ${n.tone}` }, n.label);
+    const msg = el('div', { className: `msg ${x.role}`, title: [x.who, x.time].filter(Boolean).join(' · ') }, body, note);
+    if (x !== reply || working) return [msg];
+    const acts = [iconBtn('copy', 'Copy reply', async () => toast((await copyText(x.text)) ? 'Copied reply' : 'Couldn’t copy'))];
+    if (retry && asked && !readOnly) acts.push(iconBtn('retry', 'Retry: put your last message in the composer', () => { restore(retry, asked.text); retry.focus(); }));
+    if (x.time) acts.push(el('span', { className: 'when' }, x.time));
+    return [msg, el('div', { className: 'acts' }, ...acts)];
   };
   const nodes = [];
   if (earlier.length) {
     const turns = earlier.filter((x) => x.role !== 'tool').length, calls = earlier.filter((x) => x.call).length;
-    nodes.push(toggle('fold', `${open.earlier ? '▾' : '▸'} ${plural(turns, 'earlier turn')}${calls ? ` · ${plural(calls, 'tool call')}` : ''}`,
-      open.earlier, () => { open.earlier = !open.earlier; }));
-    if (open.earlier) nodes.push(el('div', { className: 'earlier' }, more ? el('p', { className: 'dim' }, 'older turns not shown') : '', ...toolRuns(earlier).flatMap(part)));
+    nodes.push(toggle('fold', [open.earlier ? 'Hide earlier turns' : `${plural(turns, 'earlier turn')}${calls ? ` · ${plural(calls, 'tool call')}` : ''}`],
+      open.earlier, 'earlier', () => { open.earlier = !open.earlier; }));
+    if (open.earlier) nodes.push(el('div', { className: `earlier${enter('earlier')}` }, more ? el('p', { className: 'dim' }, 'Older turns not shown') : '', ...toolRuns(earlier).flatMap(part)));
   }
   nodes.push(...toolRuns(latest).flatMap(part));
   if (working) nodes.push(el('div', { className: 'msg working' }, el('div', { className: 'body' }, working)));
+  open.just = null;
   box.replaceChildren(...nodes);
 }
 // Conversation views open on the latest exchange (`toEnd`: at the newest content, e.g. a running task's approvals), then
@@ -1528,7 +1676,7 @@ function placeConvo(key, sig, wasAtBottom, box, toEnd) {
     follow = { key, sig };
     $('latest').hidden = true;
     // The earlier-turns line and your last message under the sticky head; a short exchange just ends at the bottom.
-    const head = box.parentNode.querySelector('.chead'), top = box.querySelector('.fold') || box.querySelector('.msg.user.card');
+    const head = box.parentNode.querySelector('.chead'), top = box.querySelector('.fold') || [...box.querySelectorAll(':scope > .msg.user')].pop();
     scrollTo(0, top && !toEnd ? top.getBoundingClientRect().top + scrollY - head.offsetHeight - 8 : end);
     return;
   }
@@ -1572,6 +1720,8 @@ function ancestors(t) {
   return out;
 }
 const rootOf = (t) => ancestors(t)[0] || t; // whose prompt titles the thread
+// Grey bars standing in for content that is loading.
+const skel = (n = 6) => el('div', { className: 'skel', ariaBusy: 'true' }, ...Array.from({ length: n }, () => el('i')));
 function renderDetail(id) {
   if (!detail || detail.id !== id) {
     // A draft belongs to the thread it was typed in.
@@ -1589,8 +1739,8 @@ function renderDetail(id) {
   $('speak').parentNode.hidden = !synth || !speakText;
   renderEvidence(t);
   const now = Date.now() + skew;
-  $('task-head').replaceChildren(...(t ? [el('div', { className: 'ttl one', title: rootOf(t).prompt }, sentTo(t), ...routineHead(rootOf(t))),
-    el('div', { className: 'r2 one' }, chip(t.status), ...dots([t.worker && shortHost(hostOf(t.worker)), harnessModel(t.harness, t.model),
+  $('task-head').replaceChildren(...(t ? [el('div', { className: 'ttl', title: rootOf(t).prompt }, el('span', {}, sentTo(t), ...routineHead(rootOf(t))), chip(t.status)),
+    el('div', { className: 'r2 one' }, ...dots([t.worker && shortHost(hostOf(t.worker)), harnessModel(t.harness, t.model),
       t.status === 'running' ? clock(t) : changedAt(t) && span(now - changedAt(t))]))] : []));
   drawTask(t);
   renderAttached((t && t.images) || []);
@@ -1613,16 +1763,20 @@ function renderDetail(id) {
 // The task's conversation, redrawn only when it changed.
 function drawTask(t) {
   if (!t || !detail.ready) {
-    $('task-convo').replaceChildren(el('p', { className: detail.note ? 'bad' : 'dim' }, detail.note || 'loading…'));
+    // Kept, not redrawn, while loading: a redraw would restart the sheen.
+    if (detail.note || !$('task-convo').querySelector(':scope > .skel')) $('task-convo').replaceChildren(detail.note ? el('p', { className: 'bad' }, detail.note) : skel());
+    detail.sig = null;
     return;
   }
   const items = taskItems(t, detail.events);
+  // A reply on its way shows at once, under the thread.
+  if (pending && pending.key === replyDraft(t.id)) items.push({ role: 'user', text: pending.text, key: 'pending', note: { label: 'Sending…', tone: '' } });
   const working = isFinished(t) ? '' : t.status === 'running' ? t.activity || 'working…' : t.activity || t.status;
-  const sig = JSON.stringify([items.length, items[items.length - 1].text, working]);
+  const sig = JSON.stringify([items.length, items[items.length - 1].text, working, !!pending]);
   if (sig === detail.sig) return;
   const bottom = atBottom();
   detail.sig = sig;
-  drawConvo($('task-convo'), items, detail.open, false, working);
+  drawConvo($('task-convo'), items, detail.open, false, working, $('reply-text'));
   placeConvo(`task/${t.id}`, sig, bottom, $('task-convo'), !isFinished(t));
 }
 
@@ -1736,12 +1890,12 @@ function sessionRow(w, s, now) {
 function sessionsLine(w) {
   if (!w.online || readOnly) return ''; // sessions need full access
   const open = sessOpen.has(w.id), got = sessLists.get(w.id), now = Date.now() + skew;
-  const body = !got ? el('p', {}, 'reading…') : got.error ? el('p', { className: 'bad' }, got.error)
-    : got.list.length ? el('ul', {}, ...got.list.map((s) => sessionRow(w, s, now))) : el('p', {}, 'no sessions found');
+  const body = !got ? skel(3) : got.error ? el('p', { className: 'bad' }, got.error)
+    : got.list.length ? el('ul', {}, ...got.list.map((s) => sessionRow(w, s, now))) : el('p', {}, 'No sessions found');
   const box = el('input', { type: 'checkbox', checked: showHeadless });
   box.addEventListener('change', () => { showHeadless = box.checked; sessLists.clear(); sessOpen.forEach(loadSessions); });
-  const d = el('details', { className: 'caps sess dim', open }, el('summary', {}, 'sessions'),
-    el('label', { className: 'toggle' }, box, 'show headless'), body);
+  const d = el('details', { className: 'caps sess dim', open }, el('summary', {}, 'Sessions'),
+    el('label', { className: 'toggle' }, box, 'Show headless'), body);
   // Also fires when a redraw creates it open; only a new opening fetches.
   d.addEventListener('toggle', () => {
     if (!d.open) sessOpen.delete(w.id);
@@ -1786,23 +1940,24 @@ function renderSession(key) {
   if (!sess || sess.key !== key) {
     closeSession();
     sess = { key, got: null, drawn: null, timer: 0, open: { earlier: false, runs: new Set() } };
-    $('turns').replaceChildren();
+    $('turns').replaceChildren(skel());
     loadTranscript(sess);
   }
   const [wid, harness, id] = key.split('/'), got = sess.got, info = sessionInfo(key);
   const active = got && got.active, state = info.state || (active ? 'active' : '');
   const updated = Math.max(info.updated_ms || 0, (got && got.updated_ms) || 0);
-  $('session-head').replaceChildren(el('div', { className: 'ttl one', title: info.title || '' }, info.name || info.title || short(id)),
-    el('div', { className: 'r2 one' }, state ? liveChip(state) : '', ...dots([info.waiting_for && el('span', { className: 'why' }, info.waiting_for),
-      shortHost(info.worker_name || hostOf(wid)), harnessModel(harness, info.model), updated && span(Date.now() + skew - updated)])));
+  $('session-head').replaceChildren(el('div', { className: 'ttl', title: info.title || '' }, el('span', {}, info.name || info.title || short(id)), state ? liveChip(state) : ''),
+    el('div', { className: 'r2 one', title: info.cwd || '' }, ...dots([info.waiting_for && el('span', { className: 'why' }, info.waiting_for),
+      shortHost(info.worker_name || hostOf(wid)), harnessModel(harness, info.model), folder(info.cwd), updated && span(Date.now() + skew - updated)])));
   renderSay(got);
   if (!got || !got.turns) {
-    $('session-state').className = got ? 'bad' : 'dim';
-    $('session-state').textContent = got ? got.error : 'reading…';
+    if (got) $('turns').replaceChildren(); // loaded with an error: no more skeleton
+    $('session-state').className = 'bad';
+    $('session-state').textContent = got ? got.error : '';
     return;
   }
   $('session-state').className = got.error ? 'bad' : 'dim';
-  $('session-state').textContent = got.error || (active ? 'refreshing while active' : '');
+  $('session-state').textContent = got.error || '';
   // Shown, it settles the messages it answered in place: their replies are in this transcript (a copy's aren't).
   if (!readOnly && !document.hidden && !got.error) for (const t of tasks) {
     if (t.attention === 'unread' && t.send_to && t.send_to.mode !== 'fork' && sendKey(t) === key) send({ type: 'seen', task: t.id });
@@ -1824,25 +1979,25 @@ function renderSession(key) {
     return !at && m.pending;
   });
   items.push(...unseen.reverse().map((m) => ({ role: 'user', text: m.text, key: `sent|${m.task}`, note: m })));
-  if (!items.length) { $('turns').replaceChildren(el('p', { className: 'dim' }, 'no turns yet')); return; }
+  if (!items.length) { $('turns').replaceChildren(el('p', { className: 'dim' }, 'No turns yet')); return; }
   const bottom = atBottom();
-  drawConvo($('turns'), items, sess.open, got.more, '');
+  drawConvo($('turns'), items, sess.open, got.more, '', $('say-text'));
   const last = items[items.length - 1];
   placeConvo(`session/${key}`, `${items.length}|${last.key}`, bottom, $('turns'));
 }
 
 // Messages sent to session `key` (`<worker>/<harness>/<id>`; a queued one has no worker yet), oldest first, each with
 // where it is (`label`). `pending` until answered; a failed one only while it's the latest. One just sent shows as
-// queued before its task is listed.
+// sending until the orchestrator takes it, then queued until its task is listed.
 function sentHere(key) {
   const [, harness, id] = key.split('/');
   const sent = tasks.filter((t) => t.send_to && t.harness === harness && t.send_to.session === id).sort((a, b) => a.started_at - b.started_at);
   const label = (t) => (t.status === 'failed' ? `failed${t.summary ? `: ${snippet(t.summary)}` : ''}` : t.status === 'delivered' ? t.activity : sayState(t.status));
   const out = sent.map((t, i) => ({ task: t.id, text: t.prompt.trim(), at: t.started_at, label: label(t),
-    tone: t.status === 'failed' ? 'bad' : t.activity === 'waiting for approval in the terminal' ? 'warn' : '',
+    tone: t.status === 'failed' ? 'bad' : t.activity === 'waiting for approval in the terminal' ? 'warn' : t.status === 'done' ? 'ok' : '',
     pending: !isFinished(t) || (t.status === 'failed' && i === sent.length - 1) }));
   const just = saying && saying.key === key && saying.sent;
-  if (just && !out.some((m) => m.task === just.task)) out.push({ ...just, at: Date.now() + skew, label: 'queued', tone: '', pending: true });
+  if (just && !out.some((m) => m.task === just.task)) out.push({ ...just, at: Date.now() + skew, label: just.task ? 'queued' : 'sending…', tone: '', pending: true });
   return out;
 }
 
@@ -1868,24 +2023,37 @@ async function sayTo() {
   if (!text || !sess || saying.busy) return;
   micOff();
   const s = saying, [wid, harness, id] = sess.key.split('/'), listed = sessionInfo(sess.key);
-  s.busy = true;
-  renderSay(sess.got);
+  // Your bubble at once, sending; the field clears now and gets the text back if the send fails.
+  const prev = s.sent;
+  Object.assign(s, { busy: true, sent: { task: null, text }, error: '' });
+  $('say-text').value = '';
+  fit($('say-text'));
+  renderSession(sess.key);
   try {
     const r = await fetch(`/api/workers/${wid}/sessions/${harness}/${id}/messages`, {
       method: 'POST', headers: { ...authHeaders(), 'content-type': 'application/json' },
       body: JSON.stringify({ text, mode: 'deliver', title: listed.title || null }) });
     if (r.ok) {
-      Object.assign(s, { sent: { task: (await r.json()).task, text }, error: '' });
-      if (saying === s) { $('say-text').value = ''; fit($('say-text')); }
-      if (sess) renderSession(sess.key); // your bubble, queued
+      s.sent = { task: (await r.json()).task, text };
       // Follow the reply as it is written.
-      if (sess) { clearTimeout(sess.timer); const t = sess; t.timer = setTimeout(() => loadTranscript(t), REFRESH_MS); }
+      if (sess && saying === s) { clearTimeout(sess.timer); const t = sess; t.timer = setTimeout(() => loadTranscript(t), REFRESH_MS); }
     }
     else s.error = (await r.text()) || `error ${r.status}`;
   } catch { s.error = 'couldn’t reach the orchestrator'; }
+  if (s.error) {
+    s.sent = prev;
+    if (saying === s) restore($('say-text'), text);
+  }
   s.busy = false;
-  if (sess && saying === s) renderSay(sess.got);
+  if (sess && saying === s) renderSession(sess.key);
 }
+// Copies the command that opens this session in a terminal, in its folder when known.
+const shq = (v) => `'${v.replace(/'/g, `'\\''`)}'`;
+$('resume').onclick = async () => {
+  if (!sess) return;
+  const [, harness, id] = sess.key.split('/'), cwd = sessionInfo(sess.key).cwd, run = harness === 'codex' ? 'codex resume' : 'claude --resume';
+  toast((await copyText(`${cwd ? `cd ${shq(cwd)} && ` : ''}${run} ${id}`)) ? `Copied: ${run} ${short(id)}…` : 'Couldn’t copy');
+};
 $('say').addEventListener('submit', (e) => { e.preventDefault(); sayTo(); });
 
 // The worker's build, flagged when it isn't the orchestrator's; its self-update progress.
@@ -1964,7 +2132,7 @@ function routineRow(r, now) {
     el('div', { className: 'row' },
       el('button', { type: 'button', className: 'danger', disabled: busy, onclick: () => { routineLiveAsk = null; routineAct(r.name, 'live'); } }, 'Yes, go live'),
       el('button', { type: 'button', onclick: () => ask(null) }, 'Keep dry run')));
-  return el('li', { className: 'routine' },
+  return el('li', { className: `routine ${r.paused ? 'paused' : status || ''}` },
     el('div', { className: 'head' }, status ? chip(status) : '', r.paused ? chip('paused') : '', modeChip(r.mode), el('strong', {}, r.name)),
     el('div', { className: 'sub dim' }, ...dots([r.trigger || r.file, nextText(r.next_at, now), last])),
     r.trigger ? el('div', { className: 'sub dim' }, ...dots([r.harness || 'claude', r.model, r.worker, r.cwd && folder(r.cwd)])) : '',
@@ -1973,11 +2141,11 @@ function routineRow(r, now) {
 }
 function renderRoutines() {
   if (!everOpen) return; // fetch once connected, with the token in place
-  if (!routines) { $('routine-list').replaceChildren(el('li', { className: 'dim' }, 'reading…')); if (!routinesAsked) loadRoutines(); return; }
+  if (!routines) { if (!$('routine-list').querySelector('.skel')) $('routine-list').replaceChildren(el('li', {}, skel())); if (!routinesAsked) loadRoutines(); return; }
   const now = Date.now() + skew;
   if (routines.error) { $('routine-list').replaceChildren(el('li', { className: 'bad' }, routines.error)); return; }
   $('routine-list').replaceChildren(...routines.list.map((r) => routineRow(r, now)));
-  if (!routines.list.length) $('routine-list').append(el('li', { className: 'dim' }, 'no routines: add a .md file to the orchestrator’s routines folder'));
+  if (!routines.list.length) $('routine-list').append(el('li', { className: 'dim' }, 'No routines yet: add a .md file to the orchestrator’s routines folder'));
 }
 
 function renderWorkers() {
@@ -1985,7 +2153,7 @@ function renderWorkers() {
   $('fleet').textContent = `${workers.filter((w) => w.online).length}/${workers.length} online`;
   $('machines').replaceChildren(...workers.map((w) => {
     const st = workerState(w), run = runningOn(w.id);
-    return el('li', { className: `worker${st === 'offline' ? ' off' : ''}` },
+    return el('li', { className: `worker ${st}${st === 'offline' ? ' off' : ''}` },
       el('div', { className: 'head' }, el('a', { href: `#worker/${w.id}`, className: 'open' }, w.info.hostname), ' ', chip(st),
         run ? el('a', { href: `#task/${run.id}`, className: 'task' }, short(run.id)) : ''),
       // Activity last: it's the part the ellipsis may cut.
@@ -1994,7 +2162,7 @@ function renderWorkers() {
       (w.new_tools || []).length ? el('div', { className: 'new' }, `new: ${w.new_tools.join(', ')}`) : '',
       permLine(w), capsLine(w), sessionsLine(w), meterLine(w), limitRows(w), versionLine(w));
   }));
-  if (!workers.length) $('machines').append(el('li', { className: 'dim' }, 'no workers connected'));
+  if (!workers.length) $('machines').append(el('li', { className: 'dim' }, 'No workers connected'));
 }
 
 // Text over a thin bar.
@@ -2063,7 +2231,7 @@ function renderMachine(id) {
     meter(disk === null ? 'disk —' : `disk ${free === null ? '' : `${Math.round(free)} GB free, `}${pct(disk)} used`, disk),
     meter(`cpu ${pct(cpu)}`, cpu),
     meter(`memory ${pct(mem)}`, mem),
-    el('h3', {}, 'tasks on this worker'),
+    el('h3', {}, 'Tasks on this worker'),
     mine);
 }
 
@@ -2077,7 +2245,7 @@ function onMessage(msg) {
       workers = [...msg.workers].sort((a, b) => a.info.hostname.localeCompare(b.info.hostname) || a.id.localeCompare(b.id));
       const harnesses = [...new Set(msg.workers.flatMap((w) => w.info.harnesses))].sort();
       const sel = $('harness'), keep = sel.value;
-      sel.replaceChildren(el('option', { value: '' }, 'auto'), ...harnesses.map((h) => el('option', { value: h }, h)));
+      sel.replaceChildren(el('option', { value: '' }, 'Auto'), ...harnesses.map((h) => el('option', { value: h }, h)));
       sel.value = harnesses.includes(keep) ? keep : '';
       optLabel();
       break;
@@ -2090,10 +2258,7 @@ function onMessage(msg) {
       // Taken: its draft goes, unless typed on since.
       if (drafts.get(p.key).trim() === p.text) drafts.set(p.key, '');
       if (p.key !== 'draft:new') location.hash = `#task/${msg.task}`;
-      else {
-        if ($('prompt').value.trim() === p.text) $('prompt').value = '';
-        clearShots();
-      }
+      else clearShots();
       refreshSoon();
       break;
     }
@@ -2136,13 +2301,13 @@ function onMessage(msg) {
       }
       // A refused reply (e.g. its worker is offline): say so by the form, keep the view.
       if (pending && pending.key !== 'draft:new') {
-        pending = null;
+        unsend();
         Object.assign($('reply-error'), { textContent: msg.message, hidden: false });
         break;
       }
       // A refused new task (e.g. an expired photo): say so; text and photos stay.
       if (pending) {
-        pending = null;
+        unsend();
         flash(`error: ${msg.message}`);
         render();
         break;
@@ -2193,7 +2358,7 @@ function connect() {
     offline = false;
     clearTimeout(offlineTimer);
     offlineTimer = 0;
-    pending = null; // a submit sent on the old socket gets no reply here; its draft stays
+    unsend(); // a submit sent on the old socket gets no reply here; its text goes back
     send({ type: 'subscribe' });
     if (!readOnly) send({ type: 'watch_sessions' }); // full access only
     send({ type: 'status' });
@@ -2338,6 +2503,7 @@ $('new').onsubmit = (e) => {
   if (!prompt || pending) return;
   pending = { key: 'draft:new', text: prompt };
   send({ type: 'submit', prompt, cwd: null, harness: $('harness').value || null, model: $('model').value.trim() || null, images: shots.map((x) => x.id) });
+  $('prompt').value = '';
   render();
 };
 $('reply').onsubmit = (e) => {
@@ -2349,6 +2515,7 @@ $('reply').onsubmit = (e) => {
   pending = { key: replyDraft(detail.id), text: prompt };
   $('reply-error').hidden = true;
   send({ type: 'submit', prompt, cwd: null, harness: null, model: null, reply_to: detail.id });
+  $('reply-text').value = '';
   render();
 };
 $('clear').onclick = (e) => {
@@ -2400,8 +2567,8 @@ for (const f of composerFields) {
   });
 }
 
-// Harness and model behind one chip: `auto ▾`, `codex ▾`, `claude · opus ▾`; a popover holds the fields.
-function optLabel() { $('opt').firstChild.textContent = `${[$('harness').value || 'auto', $('model').value.trim()].filter(Boolean).join(' · ')} ▾`; }
+// Harness and model behind one chip: `Auto · any machine ▾`, `codex ▾`, `claude · opus ▾`; a popover holds the fields.
+function optLabel() { $('opt').firstChild.textContent = `${[$('harness').value || 'Auto', $('model').value.trim() || (!$('harness').value && 'any machine')].filter(Boolean).join(' · ')} ▾`; }
 function showOpts(on) { $('opts').hidden = !on; $('opt').setAttribute('aria-expanded', String(on)); }
 $('opt').onclick = () => { const on = $('opts').hidden; showOpts(on); if (on) $('harness').focus(); };
 $('harness').addEventListener('change', optLabel);
@@ -2426,8 +2593,15 @@ for (const r of document.querySelectorAll('input[name=theme]')) {
   r.onchange = () => {
     theme.set(r.value);
     if (r.value) document.documentElement.dataset.theme = r.value; else delete document.documentElement.dataset.theme;
+    barColour();
   };
 }
+// The phone's status bar: the picked theme's ground, else each scheme's own.
+function barColour() {
+  const t = theme.get(), bg = { dark: '#0E1217', light: '#F7F6F2' };
+  for (const m of document.querySelectorAll('meta[name=theme-color]')) m.content = bg[t] || bg[m.media.includes('dark') ? 'dark' : 'light'];
+}
+barColour();
 
 // The page's foot clears the dock (--dock) and the keyboard (--kb). An iOS keyboard shrinks only the visual viewport, leaving a fixed
 // dock under it: while a dock field has focus, lift it by the covered height (--kb).

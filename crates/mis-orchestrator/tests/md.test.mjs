@@ -19,6 +19,8 @@ test('HTML in the text stays text', () => {
     '- <svg onload=alert(1)>\n  <iframe src=//x>',
     '> <style>*{}</style>',
     '```\n</code></pre><script>x</script>\n```',
+    '```"><script>x</script>\nx\n```',
+    '```js" onclick="x\nx\n```',
     '`</code><script>x</script>`',
     '# <b onclick=x>t</b>',
     '**<i>x</i>** _<u>y</u>_',
@@ -26,9 +28,9 @@ test('HTML in the text stays text', () => {
     const html = md(src);
     for (const t of tags(html)) assert.ok(ALLOWED.has(t), `${t} in ${html}`);
     assert.ok(!/<(script|img|svg|iframe|style|b|i|u)\b/.test(html), html);
-    // The only attributes: a link's (http/https) and a numbered list's start.
+    // The only attributes: a link's (http/https), a numbered list's start and a code block's language.
     for (const [tag, , attrs] of html.matchAll(/<([a-z0-9]+)([^>]*)>/g)) {
-      assert.ok(!attrs || /^ (href="https?:\/\/[^"]*" target="_blank" rel="noopener noreferrer"|start="\d+")$/.test(attrs), tag);
+      assert.ok(!attrs || /^ (href="https?:\/\/[^"]*" target="_blank" rel="noopener noreferrer"|start="\d+"|data-lang="[\w+#.-]+")$/.test(attrs), tag);
     }
   }
 });
@@ -66,7 +68,10 @@ test('blocks: headings, paragraphs, fences, quotes, rules', () => {
   assert.equal(md('# One\n### Three ###\ntext\nmore\n\nnext'),
     '<h1>One</h1><h3>Three</h3><p>text<br>more</p><p>next</p>');
   assert.equal(md('```rust\nlet a = 1 < 2;\n\n  *x*\n```\nafter'),
-    '<pre><code>let a = 1 &lt; 2;\n\n  *x*</code></pre><p>after</p>');
+    '<pre data-lang="rust"><code>let a = 1 &lt; 2;\n\n  *x*</code></pre><p>after</p>');
+  // Only a word that looks like a language labels a block.
+  assert.equal(md('~~~ c++ linenos\nx\n~~~'), '<pre data-lang="c++"><code>x</code></pre>');
+  assert.equal(md('```<b>\nx\n```'), '<pre><code>x</code></pre>');
   assert.equal(md('> quoted **b**\n> > deeper\n\nout'),
     '<blockquote><p>quoted <strong>b</strong></p><blockquote><p>deeper</p></blockquote></blockquote><p>out</p>');
   assert.equal(md('a\n\n---\nb'), '<p>a</p><hr><p>b</p>');
