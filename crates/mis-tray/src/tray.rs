@@ -4,10 +4,12 @@ use std::time::Duration;
 
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, MenuItemKind, PredefinedMenuItem};
+use tray_icon::menu::{
+    IsMenuItem, Menu, MenuEvent, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu,
+};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
-use crate::model::{menu_model, same_shape, Fleet, Item, MenuModel};
+use crate::model::{find, menu_model, same_shape, Fleet, Item, MenuModel};
 use crate::{runtime, session, Conn};
 
 enum UserEvent {
@@ -32,7 +34,8 @@ fn network(conn: Conn, proxy: EventLoopProxy<UserEvent>) {
     });
 }
 
-/// Monochrome template image: three bars and a block cursor (icons/tray.svg).
+/// Monochrome template image of the favicon: block cursor, three arrow bars (icons/tray.svg,
+/// rendered with `sips -s format png tray.svg --out tray.png`).
 fn icon() -> Icon {
     let decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!("../icons/tray.png")));
     let mut reader = decoder.read_info().expect("tray.png");
@@ -42,29 +45,50 @@ fn icon() -> Icon {
 }
 
 /// Updates `menu` in place: replacing or dropping it would close it while open
-/// (macOS). Item ids are indices into the model, so clicks look up `model`.
+/// (macOS). Item ids are paths into the model (`7.2`), so clicks look up `model`.
 fn render(tray: &TrayIcon, menu: &Menu, old: Option<&MenuModel>, new: &MenuModel) {
     if old.is_some_and(|o| same_shape(o, new)) {
-        for (kind, item) in menu.items().iter().zip(&new.items) {
-            if let (MenuItemKind::MenuItem(m), Item::Label(l) | Item::Open { label: l, .. }) =
-                (kind, item)
-            {
-                m.set_text(l);
-            }
-        }
+        relabel(menu.items(), &new.items);
     } else {
         while menu.remove_at(0).is_some() {}
-        for (i, item) in new.items.iter().enumerate() {
-            let r = match item {
-                Item::Label(l) => menu.append(&MenuItem::new(l, false, None)),
-                Item::Separator => menu.append(&PredefinedMenuItem::separator()),
-                Item::Open { label, .. } => menu.append(&MenuItem::with_id(i, label, true, None)),
-                Item::Quit => menu.append(&MenuItem::with_id(i, "Quit", true, None)),
-            };
-            r.expect("menu append");
-        }
+        build(&new.items, "", &|i| menu.append(i).expect("menu append"));
     }
     tray.set_title((!new.title.is_empty()).then_some(&new.title));
+}
+
+fn relabel(kinds: Vec<MenuItemKind>, items: &[Item]) {
+    for (kind, item) in kinds.into_iter().zip(items) {
+        match (kind, item) {
+            (MenuItemKind::MenuItem(m), Item::Label(l) | Item::Open { label: l, .. }) => {
+                m.set_text(l)
+            }
+            (MenuItemKind::Submenu(m), Item::Submenu { label, items }) => {
+                m.set_text(label);
+                relabel(m.items(), items);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Appends `items` with `add`; ids are `prefix` + index.
+fn build(items: &[Item], prefix: &str, add: &dyn Fn(&dyn IsMenuItem)) {
+    for (i, item) in items.iter().enumerate() {
+        let id = format!("{prefix}{i}");
+        match item {
+            Item::Label(l) => add(&MenuItem::new(l, false, None)),
+            Item::Separator => add(&PredefinedMenuItem::separator()),
+            Item::Open { label, .. } => add(&MenuItem::with_id(id, label, true, None)),
+            Item::Submenu { label, items } => {
+                let sub = Submenu::new(label, true);
+                build(items, &format!("{id}."), &|i| {
+                    sub.append(i).expect("menu append")
+                });
+                add(&sub);
+            }
+            Item::Quit => add(&MenuItem::with_id(id, "Quit", true, None)),
+        }
+    }
 }
 
 fn open(url: &str) {
@@ -125,14 +149,11 @@ pub fn run(conn: Conn, page: String) -> ! {
                 }
                 model = new;
             }
-            Event::UserEvent(UserEvent::Menu(e)) => {
-                let item = e.id.0.parse().ok().and_then(|i: usize| model.items.get(i));
-                match item {
-                    Some(Item::Open { url, .. }) => open(url),
-                    Some(Item::Quit) => *control_flow = ControlFlow::Exit,
-                    _ => {}
-                }
-            }
+            Event::UserEvent(UserEvent::Menu(e)) => match find(&model.items, &e.id.0) {
+                Some(Item::Open { url, .. }) => open(url),
+                Some(Item::Quit) => *control_flow = ControlFlow::Exit,
+                _ => {}
+            },
             _ => {}
         }
     })

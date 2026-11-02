@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{bail, Result};
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
-use mis_types::{access_headers, http_url, ClientMsg, ServerMsg};
+use mis_types::{access_headers, http_url, ClientMsg, RoutineView, ServerMsg};
 use model::{menu_model, Fleet};
 use tokio::time::{interval_at, Instant, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
@@ -45,6 +45,8 @@ pub struct Conn {
 /// Ask for status at most once a second while events arrive, and every 15 s regardless.
 const THROTTLE: Duration = Duration::from_secs(1);
 const REFRESH_TICKS: u32 = 15;
+/// Re-read routines this often, and whenever a routine run changes.
+const ROUTINES_EVERY: Duration = Duration::from_secs(60);
 
 /// One connection: subscribe, call `on_status` with every status, until it drops.
 pub async fn session(conn: &Conn, on_status: impl Fn(Fleet)) -> Result<()> {
@@ -60,14 +62,53 @@ pub async fn session(conn: &Conn, on_status: impl Fn(Fleet)) -> Result<()> {
     let mut tick = interval_at(Instant::now() + THROTTLE, THROTTLE);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let (mut dirty, mut ticks) = (false, 0);
+    // No redirects: they could carry the Access headers elsewhere.
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    // Routines are read beside the socket, never holding up statuses; the first
+    // status waits for the first read so the menu (and --print) starts complete.
+    let (mut routines, mut read, mut runs, mut asked_at) = (vec![], false, vec![], None);
+    let mut fetch = None;
+    let mut last: Option<Fleet> = None;
+    let emit = |f: &Fleet, routines: &Vec<RoutineView>| {
+        on_status(Fleet {
+            routines: routines.clone(),
+            ..f.clone()
+        })
+    };
     loop {
         tokio::select! {
+            r = async { fetch.as_mut().expect("guarded").await }, if fetch.is_some() => {
+                fetch = None;
+                match r {
+                    Ok(r) => routines = r,
+                    // Keep the last list; the error names the URL, never the token.
+                    Err(e) => eprintln!("mis-tray: routines: {e}"),
+                }
+                read = true;
+                if let Some(f) = &last {
+                    emit(f, &routines);
+                }
+            }
             m = ws.next() => match m {
                 // Skip messages this build doesn't know rather than reconnect.
                 Some(Ok(Message::Text(t))) => match serde_json::from_str(&t) {
                     Ok(ServerMsg::Status { workers, tasks, now_ms, .. }) => {
                         let now_ms = now_ms.unwrap_or_else(unix_ms);
-                        on_status(Fleet { workers, tasks, now_ms });
+                        let new_runs = model::routine_runs(&tasks);
+                        let due = new_runs != runs
+                            || asked_at.is_none_or(|t: Instant| t.elapsed() >= ROUTINES_EVERY);
+                        if due && fetch.is_none() {
+                            fetch = Some(Box::pin(fetch_routines(&http, conn)));
+                            (runs, asked_at) = (new_runs, Some(Instant::now()));
+                        }
+                        let f = Fleet { workers, tasks, now_ms, routines: vec![] };
+                        if read {
+                            emit(&f, &routines);
+                        }
+                        last = Some(f);
                     }
                     Ok(ServerMsg::Event { .. }) => dirty = true,
                     // E.g. "dropped N events; re-run status".
@@ -91,6 +132,19 @@ pub async fn session(conn: &Conn, on_status: impl Fn(Fleet)) -> Result<()> {
             }
         }
     }
+}
+
+/// `GET /api/routines`; empty from an orchestrator that predates routines (404).
+async fn fetch_routines(http: &reqwest::Client, conn: &Conn) -> Result<Vec<RoutineView>> {
+    let mut req = http.get(format!("{}/api/routines", http_url(&conn.url)));
+    for (k, v) in &conn.headers {
+        req = req.header(*k, v);
+    }
+    let r = req.send().await?;
+    if r.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(vec![]);
+    }
+    Ok(serde_json::from_str(&r.error_for_status()?.text().await?)?)
 }
 
 pub fn runtime() -> tokio::runtime::Runtime {
