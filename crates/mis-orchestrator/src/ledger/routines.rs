@@ -22,12 +22,6 @@ impl Ledger {
                 s.since = now;
             }
         }
-        // Live lasts only while a valid file says `act: true`: dropping `act`, a
-        // rename or a broken file sends it back to dry run once `act` returns.
-        let acts = |name: &str| defs.iter().flatten().any(|r| r.name == name && r.act);
-        for (name, s) in &mut self.routines {
-            s.live &= acts(name);
-        }
         let due = routine::due(
             defs,
             &self.routines,
@@ -99,12 +93,7 @@ impl Ledger {
             None if !self.known_fleet().contains_key(&task.harness) => {
                 return Err(format!("no worker runs {}", task.harness));
             }
-            None => {
-                let id = task.id;
-                self.tasks.push(super::TaskEntry::new(task, self.now_ms));
-                self.queue.push_back(id);
-                (id, self.schedule())
-            }
+            None => self.enqueue(super::TaskEntry::new(task, self.now_ms)),
         };
         let t = self
             .tasks
@@ -115,10 +104,11 @@ impl Ledger {
         Ok((id, effects))
     }
 
-    /// Switch `r` live (it acts) or back to dry run; Err if its file doesn't say
-    /// `act: true`. Kept in its state, so it outlasts edits that keep `act`.
+    /// Switch `r` live (it acts) or back to dry run, its queued runs too; Err if
+    /// its file doesn't say `act: true`. Kept in its state, so it outlasts edits
+    /// that keep `act` (see `forget_live`).
     pub fn set_live(&mut self, r: &Routine, live: bool) -> Result<(), String> {
-        if live && !r.act {
+        if !r.act {
             return Err(format!(
                 "{} only reports: add `act: true` to {}",
                 r.name, r.file
@@ -127,7 +117,28 @@ impl Ledger {
         let now = self.now_ms;
         let s = (self.routines.entry(r.name.clone())).or_insert_with(|| State::new(now));
         s.live = live;
+        let mode = r.mode(s);
+        let queued = (self.tasks.iter_mut())
+            .filter(|t| t.status == TaskStatus::Queued && t.routine.as_ref() == Some(&r.name));
+        for t in queued {
+            (t.task.prompt, t.task.read_only) = (r.run_prompt(mode), mode != RoutineMode::Live);
+            t.routine_mode = Some(mode);
+        }
         Ok(())
+    }
+
+    /// Live lasts only while a valid file says `act: true`: dropping `act`, a
+    /// rename or a broken file sends it back to dry run once `act` returns. True
+    /// if that ended one.
+    pub fn forget_live(&mut self, defs: &[Def]) -> bool {
+        let acts = |name: &str| defs.iter().flatten().any(|r| r.name == name && r.act);
+        let mut ended = false;
+        for (name, s) in &mut self.routines {
+            if s.live && !acts(name) {
+                (s.live, ended) = (false, true);
+            }
+        }
+        ended
     }
 
     /// The worker a routine names: by its card name, else the one online worker
@@ -327,6 +338,8 @@ mod tests {
         l.start_routine(&r).unwrap();
         let (p, ro, mode) = last_run(&l);
         assert!(p.contains("dry run") && ro && mode == Some(RoutineMode::DryRun));
+        // Finished before going live: it keeps its mode.
+        l.cancel(l.tasks[1].task.id).unwrap();
         l.set_live(&r, true).unwrap();
         assert_eq!(l.routine_views(&act, &Utc)[0].mode, Some(RoutineMode::Live));
         l.start_routine(&r).unwrap();
@@ -342,6 +355,22 @@ mod tests {
     }
 
     #[test]
+    fn switching_mode_reaches_runs_still_queued_but_not_report_routines() {
+        let mut l = Ledger::default();
+        worker(&mut l, "mac");
+        // The worker is busy, so the dry run waits.
+        l.submit("other".into(), None, Some("claude".into()), None, vec![]);
+        let act = defs("---\nevery: 1h\nact: true\n---\ngo");
+        l.routine_tick(&act, &Utc);
+        assert_eq!(l.tasks[1].status, TaskStatus::Queued);
+        l.set_live(act[0].as_ref().unwrap(), true).unwrap();
+        let (p, ro, mode) = last_run(&l);
+        assert!(p.contains("(scheduled run, live)") && !ro && mode == Some(RoutineMode::Live));
+        let report = defs("---\nevery: 1h\n---\ngo");
+        assert!(l.set_live(report[0].as_ref().unwrap(), false).is_err());
+    }
+
+    #[test]
     fn dropping_act_from_the_file_ends_live() {
         let mut l = Ledger::default();
         let act = defs("---\nevery: 1h\nact: true\n---\ngo");
@@ -354,7 +383,8 @@ mod tests {
             l.routine_views(&report, &Utc)[0].mode,
             Some(RoutineMode::Report)
         );
-        l.routine_tick(&report, &Utc);
+        assert!(l.forget_live(&report));
+        assert!(!l.forget_live(&report));
         // ...so `act` back means dry run again.
         assert_eq!(
             l.routine_views(&act, &Utc)[0].mode,
@@ -376,9 +406,10 @@ mod tests {
         assert!(r.ledger.routine_runs("r").busy);
         let v = &r.ledger.routine_views(&act, &Utc)[0];
         assert_eq!(v.mode, Some(RoutineMode::Live));
+        // The queued run went live with its routine.
         assert_eq!(
             r.ledger.tasks[0].summary().routine_mode,
-            Some(RoutineMode::Report)
+            Some(RoutineMode::Live)
         );
     }
 }

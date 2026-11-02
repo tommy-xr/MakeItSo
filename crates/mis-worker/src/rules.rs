@@ -190,8 +190,7 @@ pub fn covered(p: &Permissions, tool: &str, input: &Value) -> bool {
     }
     if tool == "Bash" {
         let cmd = input["command"].as_str().unwrap_or("").trim();
-        return program(input).is_some()
-            && (p.commands.iter()).any(|c| cmd == c || cmd.starts_with(&format!("{c} ")));
+        return program(input).is_some() && p.allows_command(cmd);
     }
     server(tool).is_some_and(|s| p.mcp.iter().any(|m| m == s))
 }

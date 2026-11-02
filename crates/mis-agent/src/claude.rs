@@ -118,20 +118,22 @@ const READ_ONLY_NOTE: &str = "This run is read-only: edits, and shell commands t
 /// Flags for a read-only run under `p`, never more than `p` allows. `dontAsk`
 /// denies what no rule allows; claude itself allows reading files and read-only
 /// git; `allowed` gets the `GH_READS` that `p` lets run (all in full mode, else
-/// those its commands cover). Folders keep their sandbox and dirs. `p`'s MCP
-/// servers and asking are left out: either could act.
+/// those its commands cover). The machine's own settings and MCP servers are left
+/// out, as their rules could allow more (say `Bash(gh *)`), and so are `p`'s
+/// servers and asking. Folders keep their sandbox and dirs.
 fn read_only_args(p: &Permissions, allowed: &mut Vec<String>) -> Vec<String> {
     let full = p.mode == PermissionMode::Full;
-    let covers =
-        |r: &str| full || (p.commands.iter()).any(|c| r == c || r.starts_with(&format!("{c} ")));
-    allowed.extend(
-        (GH_READS.iter())
-            .filter(|r| covers(r))
-            .map(|r| format!("Bash({r} *)")),
-    );
-    let mut a: Vec<String> = ["--permission-mode", "dontAsk", "--append-system-prompt"]
-        .map(String::from)
-        .to_vec();
+    let reads = GH_READS.iter().filter(|r| full || p.allows_command(r));
+    allowed.extend(reads.map(|r| format!("Bash({r} *)")));
+    let mut a: Vec<String> = [
+        "--permission-mode",
+        "dontAsk",
+        "--setting-sources=",
+        "--strict-mcp-config",
+        "--append-system-prompt",
+    ]
+    .map(String::from)
+    .to_vec();
     a.push(READ_ONLY_NOTE.into());
     if !full {
         a.extend(["--settings".into(), SANDBOX.into()]);
@@ -813,8 +815,9 @@ mod tests {
         };
         let a = argv(&full);
         assert!(!a.iter().any(|x| x.contains("dangerously")));
-        assert_eq!(a[6..8], ["--permission-mode", "dontAsk"]);
-        assert_eq!(a[9], READ_ONLY_NOTE);
+        let isolated = ["dontAsk", "--setting-sources=", "--strict-mcp-config"];
+        assert_eq!(a[7..10], isolated);
+        assert_eq!(a[11], READ_ONLY_NOTE);
         let all = allowed(&a);
         assert_eq!(all.len(), 1 + GH_READS.len());
         assert!(all.contains(&"Bash(gh pr list *)".into()) && all[0] == "mcp__mis");
@@ -827,7 +830,8 @@ mod tests {
             commands: vec!["gh pr".into(), "python3".into()],
         };
         let a = argv(&ask);
-        assert_eq!(a[10..14], ["--settings", SANDBOX, "--add-dir", "/u/game"]);
+        assert_eq!(a[7..10], isolated);
+        assert_eq!(a[12..16], ["--settings", SANDBOX, "--add-dir", "/u/game"]);
         assert!(!a.iter().any(|x| x == "--permission-prompt-tool"));
         let got = allowed(&a);
         assert!(got

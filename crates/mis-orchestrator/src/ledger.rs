@@ -600,10 +600,17 @@ impl Ledger {
             entry.offered = offered;
         }
         entry.images = images;
-        self.tasks.push(entry);
         if let Some(prompt) = plan_prompt {
+            self.tasks.push(entry);
             return (id, vec![Effect::Plan { task: id, prompt }]);
         }
+        self.enqueue(entry)
+    }
+
+    /// Add `entry` to the queue and hand out what can run now.
+    fn enqueue(&mut self, entry: TaskEntry) -> (TaskId, Vec<Effect>) {
+        let id = entry.task.id;
+        self.tasks.push(entry);
         self.queue.push_back(id);
         (id, self.schedule())
     }
@@ -705,10 +712,7 @@ impl Ledger {
         let mut entry = TaskEntry::new(task, self.now_ms);
         entry.pin = Some(wid);
         entry.images = images;
-        let id = entry.task.id;
-        self.tasks.push(entry);
-        self.queue.push_back(id);
-        Ok((id, self.schedule()))
+        Ok(self.enqueue(entry))
     }
 
     /// What the planner may choose from: `known_fleet` less the harnesses out of

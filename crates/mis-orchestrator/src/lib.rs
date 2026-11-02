@@ -506,12 +506,24 @@ impl App {
         tracing::info!("task history saved");
     }
 
-    /// The routine files as they are now: none without a routines dir.
+    /// The routine files as they are now: none without a routines dir. Ends (and
+    /// saves at once) live for routines whose file no longer says `act: true`.
     async fn routine_defs(&self) -> Vec<routine::Def> {
         let Some(dir) = self.routines_dir.clone() else {
             return vec![];
         };
-        (tokio::task::spawn_blocking(move || load_routines(&dir)).await).unwrap_or_default()
+        let defs = tokio::task::spawn_blocking(move || load_routines(&dir)).await;
+        let defs = defs.unwrap_or_default();
+        if self.ledger().forget_live(&defs) {
+            self.save_now().await;
+        }
+        defs
+    }
+
+    /// `save` off the async runtime.
+    async fn save_now(&self) {
+        let app = self.clone();
+        let _ = tokio::task::spawn_blocking(move || app.save()).await;
     }
 
     /// Re-read the routine files and start due runs every `routine_every`. The
@@ -1048,8 +1060,7 @@ async fn routine_action(
                 return (StatusCode::BAD_REQUEST, why).into_response();
             }
             // Saved now: a crash mustn't bring back a live it was switched out of.
-            let a = app.clone();
-            let _ = tokio::task::spawn_blocking(move || a.save()).await;
+            app.save_now().await;
             StatusCode::NO_CONTENT.into_response()
         }
         _ => StatusCode::NOT_FOUND.into_response(),

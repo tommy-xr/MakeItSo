@@ -3237,6 +3237,8 @@ async fn acting_routine_runs_dry_until_switched_live() {
     assert_eq!(post_json(&base, live, "r", "").await.0, 403);
     let (status, body) = post_json(&base, "/api/routines/look/live", "s", "").await;
     assert_eq!((status, body.contains("act: true")), (400, true), "{body}");
+    let dry = "/api/routines/look/dry-run";
+    assert_eq!(post_json(&base, dry, "s", "").await.0, 400);
     assert_eq!(post_json(&base, live, "s", "").await.0, 204);
     assert_eq!(mode("fix").await, Some(RoutineMode::Live));
 
