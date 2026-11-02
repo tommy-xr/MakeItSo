@@ -1,0 +1,21 @@
+#!/bin/sh
+# Upload images/GIFs for a PR body to a new secret gist and print Markdown for each.
+# Usage: scripts/pr-media "<description>" <file>...
+set -eu
+[ $# -ge 2 ] || { echo "usage: $0 <description> <file>..." >&2; exit 2; }
+desc=$1; shift
+for f in "$@"; do [ -f "$f" ] || { echo "no such file: $f" >&2; exit 2; }; done
+dir=$(mktemp -d); trap 'rm -rf "$dir"' EXIT
+# gh can't upload binaries; create the gist with a stub, then push the files with git.
+printf '%s\n' "$desc" > "$dir/README.md"
+id=$(gh gist create -d "$desc" "$dir/README.md" | sed 's#.*/##')
+git clone -q "https://gist.github.com/$id.git" "$dir/g"
+cp "$@" "$dir/g/"
+git -C "$dir/g" add -A
+git -C "$dir/g" commit -qm "$desc"
+git -C "$dir/g" push -q
+user=$(gh api user -q .login)
+for f in "$@"; do
+  b=$(basename "$f")
+  echo "![${b%.*}](https://gist.githubusercontent.com/$user/$id/raw/$b)"
+done

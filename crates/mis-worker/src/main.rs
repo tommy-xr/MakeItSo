@@ -869,7 +869,14 @@ fn worker_id() -> Result<(WorkerId, std::fs::File)> {
     Ok((id, file))
 }
 
+/// `MIS_HOSTNAME` overrides it, so demos and PR screenshots needn't show the real one.
 fn hostname() -> String {
+    if let Some(h) = std::env::var("MIS_HOSTNAME")
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+    {
+        return h;
+    }
     std::process::Command::new("hostname")
         .output()
         .ok()
