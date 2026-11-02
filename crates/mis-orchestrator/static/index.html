@@ -25,7 +25,8 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
     --mono: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace;
     /* Labels: a squared geometric face where the system has one; no web fonts, so the page works offline. */
     --display: "Eurostile", "DIN Alternate", "Bahnschrift", ui-sans-serif, system-ui, sans-serif; }
-  /* Light: the system's choice unless the menu picked Dark; or picked Light. :where keeps `html.vr` winning. */
+  /* Light: the system's choice unless the menu picked Dark; or picked Light. A media query can't be OR'd with a
+     selector, so the tokens appear twice: keep both in sync. :where keeps `html.vr` winning. */
   @media (prefers-color-scheme: light) {
     :root:where(:not([data-theme=dark])) { color-scheme: light; --bg: #EAF3F7; --field: #FFFFFF; --fg: #0B2233; --dim: #4A6577; --line: #6A889B; --rule: #C3D6E0;
       --accent: #00687A; --glow: rgba(0, 104, 122, .18); --grid: rgba(0, 104, 122, .06); --run: #00687A; --ok: #1F6B45; --warn: #9A4800; --bad: #B3261E;
@@ -38,7 +39,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
     --arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M0 0h10L5 6z' fill='%230B2233'/%3E%3C/svg%3E"); }
   /* Faint grid lines behind everything. */
   html { min-height: 100%; background: linear-gradient(90deg, var(--grid) 1px, transparent 0) 0 0 / 3rem 3rem, linear-gradient(var(--grid) 1px, transparent 0) 0 0 / 3rem 3rem, var(--bg); }
-  body { --pad: 1.25rem; box-sizing: border-box; margin: 0 auto; max-width: 46rem; min-height: 100svh; padding: 0 var(--pad) calc(var(--dock, 0px) + 1.5rem); color: var(--fg); font: 1rem/1.55 var(--mono); }
+  body { --pad: 1.25rem; box-sizing: border-box; margin: 0 auto; max-width: 46rem; min-height: 100svh; padding: 0 var(--pad) calc(var(--dock, 0px) + var(--kb, 0px) + 1.5rem); color: var(--fg); font: 1rem/1.55 var(--mono); }
   @media (min-width: 64rem) { body { --pad: 2.5rem; border-inline: 1px solid var(--rule); } }
   /* Title strip: dot, wordmark, needs-you badge and menu; then the ticker of live work; then the light-cycle line. */
   .strip { position: relative; margin: 0 calc(-1 * var(--pad)) 1.25rem; padding: calc(1rem + env(safe-area-inset-top, 0px)) var(--pad) 0; background: linear-gradient(var(--field), transparent); }
@@ -605,12 +606,12 @@ function fillDots(bar) {
   const d = bar.querySelector('.dots'), n = Math.max(6, Math.floor(d.clientWidth / 14));
   d.replaceChildren(...Array.from({ length: n }, (_, i) => { const e = document.createElement('i'); e.style.setProperty('--i', i); return e; }));
 }
-// Sends the field when the composer can; offline, the text stays for later.
-function deliver(s) {
-  if (!hasNewText(s.base, s.field.value)) return;
-  const submit = s.form.querySelector('button:not([type=button])');
+// Sends a composer when it can; otherwise (offline, a reply to unfinished work) the text stays for later.
+function sendForm(form) {
+  const submit = form.querySelector('button:not([type=button])');
   if (submit.disabled) flash('not sent · text kept'); else submit.click();
 }
+function deliver(s) { if (hasNewText(s.base, s.field.value)) sendForm(s.form); }
 // Settles a session once: on onend, an error, the watchdogs, or micOff. A held release sends here.
 function micEnd(s) {
   if (rec !== s) return;
@@ -829,13 +830,14 @@ function ticker() {
   }
   if (queued || planning) return { parts: dots([planning && `${planning} planning`, queued && `${queued} queued`]), cls: 'run' };
   const need = needYou();
-  if (need.length) return { parts: [`${need.length} need${need.length === 1 ? 's' : ''} you`], cls: 'need', open: need[0].id };
+  if (need.length) return { parts: [needLabel(need.length)], cls: 'need', open: need[0].id };
   return { parts: [], cls: '' };
 }
 
 // Tasks that need the user, most urgent first, newest first within a kind. A tap opens the first;
 // opening it settles it, so the next tap opens the next.
 const needYou = () => tasks.filter((t) => ATTENTION[t.attention]).reverse().sort((a, b) => rank(a) - rank(b));
+const needLabel = (n) => `${n} need${n === 1 ? 's' : ''} you`;
 // The header badge: how many need you, lit in the most urgent one's colour.
 function renderNeed() {
   const need = everOpen ? needYou() : [], b = $('need');
@@ -844,7 +846,7 @@ function renderNeed() {
   b.textContent = need.length;
   b.className = `att ${need[0].attention}`;
   b.href = `#task/${need[0].id}`;
-  b.setAttribute('aria-label', `${need.length} need${need.length === 1 ? 's' : ''} you`);
+  b.setAttribute('aria-label', needLabel(need.length));
 }
 
 // Dot, then the ticker: a flash wins, then the connection until a socket has opened, then offline, then work.
@@ -1932,7 +1934,11 @@ for (const f of composerFields) {
   f.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' || e.shiftKey || e.isComposing || coarse.matches) return;
     e.preventDefault();
-    if (f.value.trim()) f.form.querySelector('button:not([type=button])').click();
+    if (f.value.trim()) sendForm(f.form);
+  });
+  // The arrow while dictating sends like the mic does: once the last words land, not dropping them.
+  f.form.querySelector('.go').addEventListener('click', (e) => {
+    if (rec && rec.form === f.form && rec.live) { e.preventDefault(); unlock(); micStop(rec, true); }
   });
 }
 
@@ -1963,13 +1969,13 @@ for (const r of document.querySelectorAll('input[name=theme]')) {
   };
 }
 
-// The page's foot clears the dock (--dock). An iOS keyboard shrinks only the visual viewport, leaving a fixed
+// The page's foot clears the dock (--dock) and the keyboard (--kb). An iOS keyboard shrinks only the visual viewport, leaving a fixed
 // dock under it: while a dock field has focus, lift it by the covered height (--kb).
 const dock = $('dock'), vv = window.visualViewport;
 new ResizeObserver(() => document.documentElement.style.setProperty('--dock', `${dock.offsetHeight}px`)).observe(dock);
 function liftDock() {
   const kb = vv && dock.contains(document.activeElement) ? Math.max(0, Math.round(document.documentElement.clientHeight - vv.height - vv.offsetTop)) : 0;
-  dock.style.setProperty('--kb', `${kb}px`);
+  document.documentElement.style.setProperty('--kb', `${kb}px`);
   dock.classList.toggle('kb', kb > 0);
 }
 if (vv) { vv.addEventListener('resize', liftDock); vv.addEventListener('scroll', liftDock); }
