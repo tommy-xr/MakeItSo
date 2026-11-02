@@ -280,16 +280,18 @@ async fn install_update(
     let mins = |d: Duration| d.as_secs() / 60;
     match &installed {
         Ok(()) => tracing::info!("installed {version}; restarting once no task runs"),
-        Err(update::Fail::Unpublished) => tracing::info!(
-            "{version} not published yet; retry in {}m",
-            mins(update::RETRY_UNPUBLISHED)
-        ),
+        Err(update::Fail::Unpublished) => {} // below: on edge, `head` logs the decision instead
         Err(update::Fail::Failed(e)) => tracing::warn!(
             "update to {version} failed: {e}; retry in {}m",
             mins(update::RETRY_AFTER)
         ),
     }
+    let unpublished = installed == Err(update::Fail::Unpublished);
     let update = c.update.fetched(&version, installed, Instant::now());
+    if unpublished && !c.update.reads_edge() {
+        let wait = mins(update::RETRY_UNPUBLISHED);
+        tracing::info!("{version} not published yet; retry in {wait}m");
+    }
     // Next step at once: on edge, an unpublished build is followed by reading edge.json.
     check_update(c);
     Some(update)

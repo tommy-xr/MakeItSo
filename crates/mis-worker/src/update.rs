@@ -108,7 +108,7 @@ impl Updater {
 
     /// What to do now, if anything: the orchestrator runs another release build on a channel,
     /// self-update is on, nothing is in flight or installed, and the build isn't backing off.
-    /// The fallback build, when there is one, goes before the orchestrator's.
+    /// A fallback build (only ever chosen while the orchestrator's backs off) goes first.
     pub fn due(&mut self, now: Instant) -> Option<Step> {
         let (theirs, channel) = self.orch.as_ref()?;
         if self.blocked.is_some() || self.fetching || self.installed || *theirs == self.mine {
@@ -118,10 +118,7 @@ impl Updater {
         let step = if self.read_edge {
             Step::ReadEdge
         } else {
-            let fallback = self.fallback.as_ref();
-            let v = fallback
-                .filter(|v| !self.backing_off(v, now))
-                .unwrap_or(theirs);
+            let v = self.fallback.as_ref().unwrap_or(theirs);
             if self.backing_off(v, now) {
                 return None;
             }
@@ -163,6 +160,10 @@ impl Updater {
                 }
             }
             Err(fail) => {
+                // A failed fallback is dropped: the next edge.json read picks again.
+                if self.fallback.as_deref() == Some(version) {
+                    self.fallback = None;
+                }
                 let (wait, why) = match fail {
                     Fail::Unpublished => {
                         // The newest published edge build may do meanwhile.
@@ -182,6 +183,11 @@ impl Updater {
             }
         };
         self.state.clone()
+    }
+
+    /// edge.json is read next; `head` will log the decision.
+    pub fn reads_edge(&self) -> bool {
+        self.read_edge
     }
 
     /// edge.json was read: take its build meanwhile if it is newer than this one. Newer means a
@@ -444,6 +450,8 @@ mod tests {
         let line = u.head(edge(e, Some(11)), later).unwrap();
         assert!(line.contains("failed recently"), "{line}");
         assert_eq!(u.due(later), None);
+        // Both back-offs over: the orchestrator's build, now published, not the failed fallback.
+        assert_eq!(fetch(u.due(now + RETRY_AFTER)).version, c);
     }
 
     #[test]
