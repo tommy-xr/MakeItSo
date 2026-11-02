@@ -29,6 +29,7 @@ pub mod ledger;
 pub mod note;
 pub mod plan;
 pub mod push;
+pub mod routine;
 pub mod scope;
 pub mod self_update;
 pub mod store;
@@ -45,6 +46,8 @@ const SAVE_EVERY: Duration = Duration::from_secs(1);
 const FORGET_EVERY: Duration = Duration::from_secs(3600);
 /// How long a worker may take to answer an `OrchMsg::Query`.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often routine files are re-read and due ones started.
+pub const ROUTINE_EVERY: Duration = Duration::from_secs(30);
 
 use access::Identity;
 use access_gate::{AccessGate, JWT_HEADER};
@@ -102,6 +105,10 @@ pub struct App {
     store: Arc<Mutex<Option<store::Store>>>,
     /// Where this version's release builds are published, for workers to follow. None: nowhere.
     channel: Option<Channel>,
+    /// Holds routine files (`*.md`). None: no routines.
+    routines_dir: Option<std::path::PathBuf>,
+    /// How often routine files are re-read and due ones started.
+    routine_every: Duration,
 }
 
 impl App {
@@ -135,6 +142,8 @@ impl App {
             ledger_dir: None,
             store: Default::default(),
             channel: None,
+            routines_dir: None,
+            routine_every: ROUTINE_EVERY,
         }
     }
 
@@ -206,6 +215,13 @@ impl App {
     /// Save the ledger in `dir` and restore it from there when serving starts.
     pub fn with_ledger_dir(mut self, dir: std::path::PathBuf) -> Self {
         self.ledger_dir = Some(dir);
+        self
+    }
+
+    /// Run the routines defined in `dir`, checking every `every`.
+    pub fn with_routines(mut self, dir: std::path::PathBuf, every: Duration) -> Self {
+        self.routines_dir = Some(dir);
+        self.routine_every = every;
         self
     }
 
@@ -490,6 +506,33 @@ impl App {
         tracing::info!("task history saved");
     }
 
+    /// The routine files as they are now: none without a routines dir.
+    async fn routine_defs(&self) -> Vec<routine::Def> {
+        let Some(dir) = self.routines_dir.clone() else {
+            return vec![];
+        };
+        (tokio::task::spawn_blocking(move || load_routines(&dir)).await).unwrap_or_default()
+    }
+
+    /// Re-read the routine files and start due runs every `routine_every`. The
+    /// first check waits one period, so workers can reconnect after a restart.
+    fn spawn_routines(&self) {
+        let Some(dir) = self.routines_dir.clone() else {
+            return;
+        };
+        tracing::info!(dir = %dir.display(), "routines on");
+        let app = self.clone();
+        tokio::spawn(async move {
+            let start = tokio::time::Instant::now() + app.routine_every;
+            let mut every = tokio::time::interval_at(start, app.routine_every);
+            loop {
+                every.tick().await;
+                let defs = app.routine_defs().await;
+                app.transition(|l| ((), l.routine_tick(&defs, &chrono::Local)));
+            }
+        });
+    }
+
     /// Periodically disconnect workers that stopped sending heartbeats.
     fn spawn_liveness(&self) {
         let app = self.clone();
@@ -759,6 +802,8 @@ pub fn router(app: App) -> Router {
         .route("/api/images/{id}", get(image))
         .route("/api/update", get(update_status).post(set_update))
         .route("/api/tasks/{id}/cancel", post(cancel))
+        .route("/api/routines", get(routines))
+        .route("/api/routines/{name}/{action}", post(routine_action))
         .route("/api/workers/{id}/sessions", get(sessions))
         .route(
             "/api/workers/{id}/sessions/{harness}/{session}",
@@ -795,6 +840,7 @@ pub async fn serve_until(
 ) -> anyhow::Result<()> {
     app.open_store()?;
     app.spawn_liveness();
+    app.spawn_routines();
     app.spawn_image_sweep();
     let svc = router(app.clone()).into_make_service_with_connect_info::<SocketAddr>();
     tokio::select! {
@@ -913,6 +959,91 @@ async fn mcp(
     match reply {
         Some(r) => Json(r).into_response(),
         None => StatusCode::ACCEPTED.into_response(),
+    }
+}
+
+/// Each `*.md` in `dir` by file name, parsed; a missing dir holds none.
+fn load_routines(dir: &std::path::Path) -> Vec<routine::Def> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return vec![],
+        Err(e) => {
+            let file = dir.display().to_string();
+            return vec![Err(routine::BadFile {
+                file,
+                error: e.to_string(),
+            })];
+        }
+    };
+    let mut files: Vec<_> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let read = || std::fs::read_to_string(e.path()).map_err(|e| e.to_string());
+            (name.ends_with(".md") && !name.starts_with('.')).then(|| (name, read()))
+        })
+        .collect();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    routine::parse_all(files)
+}
+
+/// Routines with their schedules and last runs. Read-only, like task status.
+async fn routines(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if !app.admit(&headers, peer, "/api/routines").await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let defs = app.routine_defs().await;
+    Json(app.ledger().routine_views(&defs, &chrono::Local)).into_response()
+}
+
+/// `run` (replies `{"task": id}`), `pause` or `resume` routine `name`. Acting,
+/// like submitting a task: read-only tokens get 403.
+async fn routine_action(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path((name, action)): Path<(String, String)>,
+) -> Response {
+    match app.admit_scope(&headers, peer, "/api/routines").await {
+        Some(Scope::Full) => {}
+        Some(Scope::Read) => return (StatusCode::FORBIDDEN, "read-only token").into_response(),
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    }
+    // A valid routine first: a bad file named like it mustn't shadow it.
+    let defs = app.routine_defs().await;
+    let valid = defs.iter().flatten().find(|r| r.name == name).cloned();
+    let bad = || defs.iter().filter_map(|d| d.as_ref().err());
+    let r = match (valid, bad().find(|b| routine::stem(&b.file) == name)) {
+        (Some(r), _) => r,
+        (None, Some(bad)) => return (StatusCode::BAD_REQUEST, bad.error.clone()).into_response(),
+        (None, None) => return (StatusCode::NOT_FOUND, "unknown routine").into_response(),
+    };
+    match action.as_str() {
+        "run" => app.transition(|l| {
+            if l.routine_runs(&name).busy {
+                let why = "its last run hasn't finished";
+                return ((StatusCode::CONFLICT, why).into_response(), vec![]);
+            }
+            match l.start_routine(&r) {
+                Ok((task, effects)) => (
+                    Json(serde_json::json!({ "task": task })).into_response(),
+                    effects,
+                ),
+                Err(why) => (
+                    (StatusCode::SERVICE_UNAVAILABLE, why).into_response(),
+                    vec![],
+                ),
+            }
+        }),
+        "pause" | "resume" => {
+            app.ledger().pause_routine(&name, action == "pause");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        _ => StatusCode::NOT_FOUND.into_response(),
     }
 }
 

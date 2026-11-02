@@ -89,12 +89,94 @@ enum Cmd {
         #[arg(long, env = "MIS_ASK_MODEL", default_value = "haiku")]
         ask_model: String,
     },
+    /// List routines (Markdown files in the orchestrator's routines dir) and their schedules.
+    Routines {
+        #[command(subcommand)]
+        cmd: Option<RoutineCmd>,
+    },
     /// Run an orchestrator and a worker on this machine for quick testing.
     Dev {
         /// Let agents run tools without permission prompts.
         #[arg(long)]
         skip_permissions: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum RoutineCmd {
+    /// Start a routine now, whatever its schedule.
+    Run { name: String },
+}
+
+/// `mis routines` (GET /api/routines) or `mis routines run <name>`.
+async fn routines(args: &Args, cmd: Option<&RoutineCmd>) -> Result<()> {
+    let base = http_url(&args.url);
+    let client = reqwest::Client::new();
+    let mut req = match cmd {
+        None => client.get(format!("{base}/api/routines")),
+        Some(RoutineCmd::Run { name }) => client.post(format!("{base}/api/routines/{name}/run")),
+    };
+    let access = access_headers(
+        args.cf_access_client_id.as_deref(),
+        args.cf_access_client_secret.as_deref(),
+    );
+    for (k, v) in access.map_err(anyhow::Error::msg)? {
+        req = req.header(k, v);
+    }
+    if let Some(t) = &args.token {
+        req = req.bearer_auth(t);
+    }
+    let resp = (req.send().await).with_context(|| format!("connecting to {base}"))?;
+    let status = resp.status();
+    let body = resp.text().await?;
+    if !status.is_success() {
+        bail!("{status}: {body}");
+    }
+    match cmd {
+        None => {
+            let list: Vec<RoutineView> = serde_json::from_str(&body)?;
+            let now = unix_ms();
+            for r in &list {
+                println!("{}", routine_line(r, now));
+            }
+            if list.is_empty() {
+                println!("no routines");
+            }
+        }
+        Some(RoutineCmd::Run { name }) => {
+            let v: serde_json::Value = serde_json::from_str(&body)?;
+            println!("{name}: started task {}", v["task"].as_str().unwrap_or("?"));
+        }
+    }
+    Ok(())
+}
+
+/// `pr-grooming · every 6h · next in 2h05m · last 3m12s ago: done (ab12cd34)`, then
+/// its error on a line of its own.
+fn routine_line(r: &RoutineView, now: u64) -> String {
+    let mut parts = vec![r.name.clone()];
+    parts.extend(r.trigger.clone());
+    if r.paused {
+        parts.push("paused".into());
+    }
+    match r.next_at {
+        Some(at) if at <= now => parts.push("due".into()),
+        Some(at) => parts.push(format!("next in {}", fmt_elapsed(at - now))),
+        None => {}
+    }
+    if let Some(at) = r.last_at {
+        let status = r
+            .last_status
+            .map_or("forgotten".into(), |s| format!("{s:?}").to_lowercase());
+        let task = (r.last_task.map(|t| format!(" ({})", &t.to_string()[..8]))).unwrap_or_default();
+        let ago = fmt_elapsed(now.saturating_sub(at));
+        parts.push(format!("last {ago} ago: {status}{task}"));
+    }
+    let mut line = parts.join(" · ");
+    if let Some(e) = &r.error {
+        line.push_str(&format!("\n    error: {e}"));
+    }
+    line
 }
 
 /// Spawns the sibling `mis-orchestrator` and `mis-worker` binaries, binding the
@@ -609,6 +691,10 @@ async fn run(args: Args) -> Result<Option<TaskSummary>> {
         ask(&args, words, ask_model).await?;
         return Ok(None);
     }
+    if let Cmd::Routines { cmd } = &args.cmd {
+        routines(&args, cmd.as_ref()).await?;
+        return Ok(None);
+    }
     check_nested(&args.cmd, std::env::var(TASK_ENV).ok().as_deref())?;
     let mut ws = connect(&args).await?;
     match &args.cmd {
@@ -807,7 +893,7 @@ async fn run(args: Args) -> Result<Option<TaskSummary>> {
                 }
             }
         }
-        Cmd::Dev { .. } | Cmd::Ask { .. } => unreachable!(),
+        Cmd::Dev { .. } | Cmd::Ask { .. } | Cmd::Routines { .. } => unreachable!(),
     }
     Ok(None)
 }
@@ -851,6 +937,7 @@ mod tests {
             approvals: vec![],
             images: vec![],
             send_to: None,
+            routine: None,
         }
     }
 
@@ -1030,6 +1117,37 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(stats_text(Some(&s)), "disk 38% cpu 64% mem 82%");
+    }
+
+    #[test]
+    fn routine_line_shows_schedule_last_run_and_error() {
+        let task: TaskId = "ab12cd34-0000-0000-0000-000000000000".parse().unwrap();
+        let mut r = RoutineView {
+            name: "pr-grooming".into(),
+            file: "pr-grooming.md".into(),
+            trigger: Some("every 6h".into()),
+            harness: None,
+            model: None,
+            worker: None,
+            cwd: None,
+            paused: false,
+            next_at: Some(3_600_000 + 65_000),
+            last_at: Some(3_600_000 - 192_000),
+            last_task: Some(task),
+            last_status: Some(TaskStatus::Done),
+            error: None,
+        };
+        assert_eq!(
+            routine_line(&r, 3_600_000),
+            "pr-grooming · every 6h · next in 1m05s · last 3m12s ago: done (ab12cd34)"
+        );
+        r.paused = true;
+        r.next_at = None;
+        r.error = Some("no worker named mac".into());
+        assert_eq!(
+            routine_line(&r, 3_600_000),
+            "pr-grooming · every 6h · paused · last 3m12s ago: done (ab12cd34)\n    error: no worker named mac"
+        );
     }
 
     #[test]

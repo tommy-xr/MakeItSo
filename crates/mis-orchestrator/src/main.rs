@@ -59,6 +59,10 @@ struct Args {
     /// (%LOCALAPPDATA%\mis on Windows).
     #[arg(long, env = "MIS_STATE_DIR")]
     state_dir: Option<std::path::PathBuf>,
+    /// Routine files: one Markdown file per periodic task, re-read every 30s.
+    /// Default: ~/.config/mis/routines.
+    #[arg(long, env = "MIS_ROUTINES_DIR")]
+    routines_dir: Option<std::path::PathBuf>,
     /// VAPID contact push services may use about this sender (`mailto:` or `https:`).
     #[arg(
         long,
@@ -98,19 +102,27 @@ fn channel(arg: Option<UpdateChannel>, ci_build: bool) -> Option<mis_types::Chan
     }
 }
 
+/// Env var `k` as a path, if set and not empty.
+fn var(k: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os(k)
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
 /// `$XDG_STATE_HOME/mis`, else `~/.local/state/mis`; `%LOCALAPPDATA%\mis` on Windows.
 fn default_state_dir() -> Option<std::path::PathBuf> {
-    let var = |k| {
-        std::env::var_os(k)
-            .filter(|v| !v.is_empty())
-            .map(std::path::PathBuf::from)
-    };
     let base = if cfg!(windows) {
         var("LOCALAPPDATA")?
     } else {
         var("XDG_STATE_HOME").or_else(|| Some(var("HOME")?.join(".local/state")))?
     };
     Some(base.join("mis"))
+}
+
+/// `~/.config/mis/routines`, beside the worker's `worker.toml` (home is `%USERPROFILE%` on Windows).
+fn default_routines_dir() -> Option<std::path::PathBuf> {
+    let home = var("HOME").or_else(|| var("USERPROFILE"))?;
+    Some(home.join(".config").join("mis").join("routines"))
 }
 
 /// Local `claude` for one tool-less turn on `model`: no user/project settings
@@ -270,6 +282,10 @@ async fn main() -> anyhow::Result<()> {
         .with_allowed_origins(origins);
     if let Some(gate) = gate {
         app = app.with_access(gate);
+    }
+    match args.routines_dir.clone().or_else(default_routines_dir) {
+        Some(dir) => app = app.with_routines(dir, mis_orchestrator::ROUTINE_EVERY),
+        None => tracing::warn!("no --routines-dir and no home dir: routines off"),
     }
     match state_dir {
         Some(dir) => {

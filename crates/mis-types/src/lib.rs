@@ -504,6 +504,37 @@ pub struct TaskSummary {
     /// Attached images, served at `/api/images/<id>`.
     #[serde(default)]
     pub images: Vec<Uuid>,
+    /// The routine this task is a run of.
+    #[serde(default)]
+    pub routine: Option<String>,
+}
+
+/// A routine file as `GET /api/routines` lists it, with its schedule.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RoutineView {
+    pub name: String,
+    /// File name in the routines dir, e.g. `pr-grooming.md`.
+    pub file: String,
+    /// `every 6h`, `cron 0 9 * * 1-5`; None for a bad file.
+    pub trigger: Option<String>,
+    #[serde(default)]
+    pub harness: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Worker name it is pinned to.
+    #[serde(default)]
+    pub worker: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    pub paused: bool,
+    /// Unix millis; None while paused, for a bad file, or a cron that never matches.
+    pub next_at: Option<u64>,
+    pub last_at: Option<u64>,
+    pub last_task: Option<TaskId>,
+    /// None once the ledger forgot that task.
+    pub last_status: Option<TaskStatus>,
+    /// Why the file is bad, or why the last run couldn't start.
+    pub error: Option<String>,
 }
 
 /// First non-blank line of `s`, cut to `max` chars with a trailing ellipsis.
@@ -945,6 +976,7 @@ mod tests {
             approvals: vec![],
             images: vec![],
             send_to: None,
+            routine: None,
         }
     }
 
