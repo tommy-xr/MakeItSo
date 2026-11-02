@@ -1976,6 +1976,7 @@ dependencies = [
  "futures-util",
  "mis-types",
  "png",
+ "reqwest",
  "serde_json",
  "tao",
  "tokio",

@@ -1,18 +1,23 @@
 //! Pure core: fleet status -> menu contents, and connection config.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use mis_types::*;
 
-/// Tasks listed in the menu, newest first.
-pub const MAX_TASKS: usize = 8;
+/// Rows per section; the rest collapse into a `+N more` row.
+pub const MAX_ROWS: usize = 5;
 
-/// Latest `ServerMsg::Status`.
+/// A window this full stops its harness unless it has overage (as the orchestrator judges).
+const FULL_PCT: f32 = 99.0;
+
+/// Latest `ServerMsg::Status`, plus routines from `GET /api/routines`.
 #[derive(Debug, Clone, Default)]
 pub struct Fleet {
     pub workers: Vec<WorkerSummary>,
     pub tasks: Vec<TaskSummary>,
     pub now_ms: u64,
+    /// Empty when the orchestrator has none or predates them.
+    pub routines: Vec<RoutineView>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -23,6 +28,10 @@ pub enum Item {
     Open {
         label: String,
         url: String,
+    },
+    Submenu {
+        label: String,
+        items: Vec<Item>,
     },
     Quit,
 }
@@ -39,6 +48,7 @@ pub fn menu_model(fleet: Option<&Fleet>, page: &str) -> MenuModel {
     let page = page.trim_end_matches('/');
     let mut items = vec![];
     let mut title = String::new();
+    let mut workers = None;
     match fleet {
         None => items.push(Item::Label("Disconnected · retrying".into())),
         Some(f) => {
@@ -47,19 +57,21 @@ pub fn menu_model(fleet: Option<&Fleet>, page: &str) -> MenuModel {
             if running > 0 {
                 title = running.to_string();
             }
-            if !f.tasks.is_empty() {
+            items.extend(
+                usage_lines(&f.workers, f.now_ms)
+                    .into_iter()
+                    .map(Item::Label),
+            );
+            let body = sections(f, page);
+            if !body.is_empty() {
                 items.push(Item::Separator);
+                items.extend(body);
             }
-            // The orchestrator lists tasks in submission order.
-            for t in f.tasks.iter().rev().take(MAX_TASKS) {
-                items.push(Item::Open {
-                    label: task_label(t, f.now_ms),
-                    url: format!("{page}/#task/{}", t.id),
-                });
-            }
+            workers = workers_menu(f, page);
         }
     }
     items.push(Item::Separator);
+    items.extend(workers);
     items.push(Item::Open {
         label: "Open Make It So".into(),
         url: format!("{page}/"),
@@ -68,38 +80,68 @@ pub fn menu_model(fleet: Option<&Fleet>, page: &str) -> MenuModel {
     MenuModel { title, items }
 }
 
-/// The menu as text, one item per line, for `--print`.
+/// The menu as text, one item per line, submenus indented, for `--print`.
 pub fn text(m: &MenuModel) -> String {
-    let mut out = format!("title: {}\n", m.title);
-    for i in &m.items {
-        match i {
-            Item::Label(l) => out += &format!("{l}\n"),
-            Item::Separator => out += "---\n",
-            Item::Open { label, url } => out += &format!("{label}  <{url}>\n"),
-            Item::Quit => out += "Quit\n",
+    fn lines(out: &mut String, items: &[Item], indent: &str) {
+        for i in items {
+            match i {
+                Item::Label(l) => *out += &format!("{indent}{l}\n"),
+                Item::Separator => *out += &format!("{indent}---\n"),
+                Item::Open { label, url } => *out += &format!("{indent}{label}  <{url}>\n"),
+                Item::Submenu { label, items } => {
+                    *out += &format!("{indent}{label} ▸\n");
+                    lines(out, items, &format!("{indent}  "));
+                }
+                Item::Quit => *out += &format!("{indent}Quit\n"),
+            }
         }
     }
+    let mut out = format!("title: {}\n", m.title);
+    lines(&mut out, &m.items, "");
     out
 }
 
-/// Same kinds of item in the same order, so `new` can relabel `old`'s menu in place.
+/// Same kinds of item in the same order, submenus too, so `new` can relabel
+/// `old`'s menu in place.
 #[cfg(any(target_os = "macos", windows))]
 pub fn same_shape(old: &MenuModel, new: &MenuModel) -> bool {
-    let kinds = |m: &MenuModel| {
-        m.items
-            .iter()
-            .map(std::mem::discriminant)
-            .collect::<Vec<_>>()
-    };
-    kinds(old) == kinds(new)
+    fn same(a: &[Item], b: &[Item]) -> bool {
+        a.len() == b.len()
+            && a.iter().zip(b).all(|(x, y)| match (x, y) {
+                (Item::Submenu { items: a, .. }, Item::Submenu { items: b, .. }) => same(a, b),
+                _ => std::mem::discriminant(x) == std::mem::discriminant(y),
+            })
+    }
+    same(&old.items, &new.items)
+}
+
+/// The item a menu id names: its index, and `.`-separated indices into submenus (`7.2`).
+#[cfg(any(target_os = "macos", windows))]
+pub fn find<'a>(items: &'a [Item], id: &str) -> Option<&'a Item> {
+    let (head, rest) = id.split_once('.').map_or((id, None), |(h, r)| (h, Some(r)));
+    let item = items.get(head.parse::<usize>().ok()?)?;
+    match (item, rest) {
+        (_, None) => Some(item),
+        (Item::Submenu { items, .. }, Some(rest)) => find(items, rest),
+        _ => None,
+    }
+}
+
+/// Task ids and statuses of routine runs: when these change, routines' last runs did.
+pub fn routine_runs(tasks: &[TaskSummary]) -> Vec<(TaskId, TaskStatus)> {
+    tasks
+        .iter()
+        .filter(|t| t.routine.is_some())
+        .map(|t| (t.id, t.status))
+        .collect()
 }
 
 fn count(tasks: &[TaskSummary], f: impl Fn(TaskStatus) -> bool) -> usize {
     tasks.iter().filter(|t| f(t.status)).count()
 }
 
-/// `2 workers · 1 running · 2 queued · 4 done · 1 failed`; zero buckets left out,
-/// `idle` when nothing is running or waiting. Offline workers don't count.
+/// `2 workers · 1 running · 2 queued · 4 done · 1 failed · 1 needs you`; zero
+/// buckets left out, `idle` when nothing is running or waiting. Offline workers don't count.
 fn headline(workers: &[WorkerSummary], tasks: &[TaskSummary]) -> String {
     use TaskStatus::*;
     let mut parts = vec![match workers.iter().filter(|w| w.online).count() {
@@ -124,19 +166,136 @@ fn headline(workers: &[WorkerSummary], tasks: &[TaskSummary]) -> String {
             parts.push(format!("{n} {name}"));
         }
     }
+    match tasks.iter().filter(|t| urgency(t).is_some()).count() {
+        0 => {}
+        1 => parts.push("1 needs you".into()),
+        n => parts.push(format!("{n} need you")),
+    }
     parts.join(" · ")
+}
+
+/// Why a task needs the user, most urgent first (as the page ranks them).
+fn urgency(t: &TaskSummary) -> Option<u8> {
+    match t.attention {
+        Attention::None => None,
+        Attention::Approval => Some(0),
+        Attention::Failed => Some(1),
+        Attention::Limited => Some(2),
+        Attention::Unread => Some(3),
+    }
+}
+
+/// Needs you, Running, Routines, then Recent; a task shows in the first that claims it.
+fn sections(f: &Fleet, page: &str) -> Vec<Item> {
+    let open = |t: &TaskSummary, label| Item::Open {
+        label,
+        url: format!("{page}/#task/{}", t.id),
+    };
+    let tasks_url = format!("{page}/#");
+    // The orchestrator lists tasks in submission order.
+    let newest = || f.tasks.iter().rev();
+    let mut out = vec![];
+    let mut need: Vec<_> = newest().filter(|t| urgency(t).is_some()).collect();
+    need.sort_by_key(|t| urgency(t)); // stable: newest first within a rank
+    let rows = need.iter().map(|t| open(t, need_label(t, &f.workers)));
+    section(&mut out, "Needs you", rows.collect(), &tasks_url);
+    let shown: HashSet<TaskId> = need.iter().map(|t| t.id).collect();
+    let running: Vec<_> = newest()
+        .filter(|t| t.status == TaskStatus::Running && !shown.contains(&t.id))
+        .collect();
+    let rows = running.iter().map(|t| open(t, running_label(t, f)));
+    section(&mut out, "Running", rows.collect(), &tasks_url);
+    let rows = f.routines.iter().map(|r| Item::Open {
+        label: routine_label(r, &f.tasks, f.now_ms),
+        url: format!("{page}/#routines"),
+    });
+    section(
+        &mut out,
+        "Routines",
+        rows.collect(),
+        &format!("{page}/#routines"),
+    );
+    let shown: HashSet<_> = shown
+        .into_iter()
+        .chain(running.iter().map(|t| t.id))
+        .collect();
+    let rows = newest()
+        .filter(|t| !shown.contains(&t.id))
+        .map(|t| open(t, task_label(t, f.now_ms)));
+    section(&mut out, "Recent", rows.collect(), &tasks_url);
+    out
+}
+
+/// `title`, up to `MAX_ROWS` rows, then `+N more` opening `more`; nothing without rows.
+fn section(out: &mut Vec<Item>, title: &str, mut rows: Vec<Item>, more: &str) {
+    if rows.is_empty() {
+        return;
+    }
+    out.push(Item::Label(title.into()));
+    let extra = rows.len().saturating_sub(MAX_ROWS);
+    rows.truncate(MAX_ROWS);
+    out.extend(rows);
+    if extra > 0 {
+        out.push(Item::Open {
+            label: format!("+{extra} more"),
+            url: more.into(),
+        });
+    }
+}
+
+fn host(workers: &[WorkerSummary], id: Option<WorkerId>) -> Option<&str> {
+    let w = workers.iter().find(|w| Some(w.id) == id)?;
+    Some(&w.info.hostname)
+}
+
+/// `⚠ approve Bash: make · mac-mini · tune physics`, `✗ failed · tune physics`.
+fn need_label(t: &TaskSummary, workers: &[WorkerSummary]) -> String {
+    let why = match (t.attention, t.approvals.first()) {
+        (Attention::Approval, Some(a)) => format!("⚠ approve {}", first_line(&a.summary, 40)),
+        (Attention::Approval, None) => "⚠ approval".into(),
+        (Attention::Limited, _) => "⚠ usage limit".into(),
+        (Attention::Failed, _) => "✗ failed".into(),
+        _ => "✓ unread".into(),
+    };
+    let on = (t.attention == Attention::Approval)
+        .then(|| host(workers, t.worker))
+        .flatten();
+    let what = first_line(&t.prompt, 30);
+    [Some(why.as_str()), on, Some(what.as_str())]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// `● counting tests · mac-mini · 3m12s`: what it does (else its prompt), where, how long.
+fn running_label(t: &TaskSummary, f: &Fleet) -> String {
+    let activity = t.activity.strip_prefix("status: ").unwrap_or(&t.activity);
+    let what = first_line(
+        if activity.is_empty() {
+            &t.prompt
+        } else {
+            activity
+        },
+        40,
+    );
+    let time = t
+        .started_at
+        .map(|s| fmt_elapsed(f.now_ms.saturating_sub(s)));
+    let parts: Vec<_> = [
+        Some(what.as_str()),
+        host(&f.workers, t.worker),
+        time.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    format!("● {}", parts.join(" · "))
 }
 
 /// `● 3m12s  counting tests`: status glyph, elapsed, then what a running task
 /// is doing or else the prompt's first line.
 fn task_label(t: &TaskSummary, now_ms: u64) -> String {
-    let glyph = match t.status {
-        TaskStatus::Running => '●',
-        TaskStatus::Planning | TaskStatus::Queued => '○',
-        TaskStatus::Done => '✓',
-        TaskStatus::Failed => '✗',
-        TaskStatus::Cancelled => '⊘',
-    };
     let time = t.started_at.map_or(String::new(), |s| {
         fmt_elapsed(t.finished_at.unwrap_or(now_ms).saturating_sub(s)) + " "
     });
@@ -145,7 +304,187 @@ fn task_label(t: &TaskSummary, now_ms: u64) -> String {
         TaskStatus::Running if !activity.is_empty() => activity,
         _ => &t.prompt,
     };
-    format!("{glyph} {time} {}", first_line(what, 50))
+    format!("{} {time} {}", glyph(t.status), first_line(what, 50))
+}
+
+fn glyph(s: TaskStatus) -> char {
+    match s {
+        TaskStatus::Running => '●',
+        TaskStatus::Planning | TaskStatus::Queued => '○',
+        TaskStatus::Done => '✓',
+        TaskStatus::Failed => '✗',
+        TaskStatus::Cancelled => '⊘',
+    }
+}
+
+/// `↻ pr-grooming · next 1h20m · last ✓ 3h ago`, `↻ nightly · running`,
+/// `↻ broken · ⚠ no trigger`. A run in `tasks` beats the fetched view, which lags.
+fn routine_label(r: &RoutineView, tasks: &[TaskSummary], now: u64) -> String {
+    let mine = |t: &&TaskSummary| t.routine.as_deref() == Some(r.name.as_str());
+    let active = tasks
+        .iter()
+        .rev()
+        .filter(mine)
+        .find(|t| !t.status.finished());
+    let name = if r.name.is_empty() { &r.file } else { &r.name };
+    let mut parts = vec![format!("↻ {name}")];
+    match (active, r.trigger.is_some()) {
+        (Some(t), _) if t.status == TaskStatus::Running => parts.push("running".into()),
+        (Some(_), _) => parts.push("queued".into()),
+        (None, false) => {}
+        (None, true) if r.paused => parts.push("paused".into()),
+        (None, true) => match r.next_at {
+            Some(at) if at <= now => parts.push("due".into()),
+            Some(at) => parts.push(format!("next {}", span(at - now))),
+            None => {}
+        },
+    }
+    if let Some(at) = r.last_at.filter(|_| active.is_none()) {
+        let status = r
+            .last_task
+            .and_then(|id| tasks.iter().find(|t| t.id == id))
+            .map(|t| t.status)
+            .or(r.last_status);
+        let g = status.map_or(String::new(), |s| format!("{} ", glyph(s)));
+        parts.push(format!("last {g}{} ago", span(now.saturating_sub(at))));
+    }
+    if let Some(e) = &r.error {
+        parts.push(format!("⚠ {}", first_line(e, 40)));
+    }
+    parts.join(" · ")
+}
+
+/// A rough duration: `<1m`, `4m`, `1h20m`, `2d03h`.
+fn span(ms: u64) -> String {
+    let m = ms / 60_000;
+    match m {
+        0 => "<1m".into(),
+        1..60 => format!("{m}m"),
+        60..1440 => format!("{}h{:02}m", m / 60, m % 60),
+        _ => format!("{}d{:02}h", m / 1440, m / 60 % 24),
+    }
+}
+
+/// Per harness, a line of its windows' fullest fresh reading across online
+/// workers (they usually share an account), else the newest stale one:
+/// `Claude: 5h 62%, resets 2h10m · 7d 31%, resets 4d02h`.
+fn usage_lines(workers: &[WorkerSummary], now: u64) -> Vec<String> {
+    let mut best: BTreeMap<&str, Vec<&LimitWindow>> = BTreeMap::new();
+    let limits = workers
+        .iter()
+        .filter(|w| w.online)
+        .filter_map(|w| w.stats.as_ref())
+        .flat_map(|s| &s.limits);
+    for (h, ws) in limits {
+        let have = best.entry(h).or_default();
+        for w in ws {
+            match have.iter_mut().find(|x| x.name == w.name) {
+                Some(x) if better(w, x, now) => *x = w,
+                Some(_) => {}
+                None => have.push(w),
+            }
+        }
+    }
+    best.into_iter()
+        .filter_map(|(h, ws)| limit_line(h, ws, now))
+        .collect()
+}
+
+/// Fresh beats stale; then fuller when fresh, newer when stale.
+fn better(a: &LimitWindow, b: &LimitWindow, now: u64) -> bool {
+    match (a.stale(now), b.stale(now)) {
+        (false, true) => true,
+        (true, false) => false,
+        (false, false) => a.used_pct > b.used_pct,
+        (true, true) => a.observed_at > b.observed_at,
+    }
+}
+
+/// `Claude: 5h 62%, resets 2h10m · 7d 31%`, shortest window first; None without windows.
+fn limit_line(harness: &str, mut ws: Vec<&LimitWindow>, now: u64) -> Option<String> {
+    if ws.is_empty() {
+        return None;
+    }
+    ws.sort_by(|a, b| (minutes(&a.name), &a.name).cmp(&(minutes(&b.name), &b.name)));
+    let mut name = harness.chars();
+    let name = name
+        .next()
+        .map_or(String::new(), |c| c.to_uppercase().chain(name).collect());
+    let ws: Vec<_> = ws.iter().map(|w| window_text(w, now)).collect();
+    Some(format!("{name}: {}", ws.join(" · ")))
+}
+
+/// Length of a window named `5h`, `7d` or `90m`; unknown names sort last.
+fn minutes(name: &str) -> u64 {
+    let (n, unit) = name.split_at(name.len().saturating_sub(1));
+    let n: u64 = n.parse().unwrap_or(u64::MAX / 1440);
+    match unit {
+        "m" => n,
+        "h" => n * 60,
+        "d" => n * 1440,
+        _ => u64::MAX,
+    }
+}
+
+/// `5h 62%, resets 2h10m`; `(stale)` for a reading too old to trust, `(overage)`
+/// for a full window its harness runs on past.
+fn window_text(w: &LimitWindow, now: u64) -> String {
+    let mut s = format!("{} {:.0}%", w.name, w.used_pct);
+    if w.stale(now) {
+        return s + " (stale)";
+    }
+    if w.overage && w.used_pct >= FULL_PCT {
+        s += " (overage)";
+    }
+    if let Some(at) = w.resets_at {
+        s += &format!(", resets {}", span(at.saturating_sub(now)));
+    }
+    s
+}
+
+/// `Workers · 2 online` with a row per worker (online first) opening it, and its usage.
+fn workers_menu(f: &Fleet, page: &str) -> Option<Item> {
+    if f.workers.is_empty() {
+        return None;
+    }
+    let mut ws: Vec<_> = f.workers.iter().collect();
+    ws.sort_by(|a, b| (!a.online, &a.info.hostname).cmp(&(!b.online, &b.info.hostname)));
+    let mut items = vec![];
+    for w in ws {
+        let state = match (w.online, w.busy) {
+            (false, _) => "✗ offline",
+            (true, true) => "● busy",
+            (true, false) => "○ idle",
+        };
+        let update = match &w.update {
+            WorkerUpdate::None => None,
+            WorkerUpdate::Pending { version } => Some(format!("updating to {version}")),
+            WorkerUpdate::Failed { .. } => Some("update failed".into()),
+        };
+        let parts: Vec<&str> = [
+            Some(w.info.hostname.as_str()),
+            Some(state),
+            w.info.version.as_deref(),
+            update.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        items.push(Item::Open {
+            label: parts.join(" · "),
+            url: format!("{page}/#worker/{}", w.id),
+        });
+        let limits = w.stats.iter().flat_map(|s| &s.limits);
+        let lines = limits.filter_map(|(h, ws)| limit_line(h, ws.iter().collect(), f.now_ms));
+        items.extend(lines.map(|l| Item::Label(format!("    {l}"))));
+    }
+    let online = f.workers.iter().filter(|w| w.online).count();
+    let offline = f.workers.len() - online;
+    let label = match offline {
+        0 => format!("Workers · {online} online"),
+        n => format!("Workers · {online} online, {n} offline"),
+    };
+    Some(Item::Submenu { label, items })
 }
 
 /// `KEY=value` lines of a shell env file; skips comments, strips quotes and `export`.
@@ -179,6 +518,9 @@ pub fn local_url(env: &HashMap<String, String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const NOW: u64 = 1_800_000_000_000;
+    const MIN: u64 = 60_000;
 
     fn task(n: u128, status: TaskStatus, activity: &str) -> TaskSummary {
         TaskSummary {
@@ -231,15 +573,75 @@ mod tests {
         }
     }
 
+    /// `host`, id `n`, with `limits` per harness.
+    fn host(
+        n: u128,
+        name: &str,
+        online: bool,
+        limits: &[(&str, Vec<LimitWindow>)],
+    ) -> WorkerSummary {
+        let mut w = worker(online);
+        w.id = uuid_from(n);
+        w.info.hostname = name.into();
+        w.stats = Some(WorkerStats {
+            limits: limits
+                .iter()
+                .map(|(h, ws)| (h.to_string(), ws.clone()))
+                .collect(),
+            ..Default::default()
+        });
+        w
+    }
+
+    /// A reading of `pct`% taken `age` ago, resetting in `resets`.
+    fn win(name: &str, pct: f32, age: u64, resets: Option<u64>) -> LimitWindow {
+        LimitWindow {
+            name: name.into(),
+            used_pct: pct,
+            resets_at: resets.map(|r| NOW + r),
+            observed_at: NOW - age,
+            overage: false,
+        }
+    }
+
+    fn routine(name: &str) -> RoutineView {
+        RoutineView {
+            name: name.into(),
+            file: format!("{name}.md"),
+            trigger: Some("every 6h".into()),
+            harness: None,
+            model: None,
+            worker: None,
+            cwd: None,
+            paused: false,
+            next_at: None,
+            last_at: None,
+            last_task: None,
+            last_status: None,
+            error: None,
+        }
+    }
+
     fn labels(m: &MenuModel) -> Vec<String> {
         m.items
             .iter()
             .map(|i| match i {
-                Item::Label(l) | Item::Open { label: l, .. } => l.clone(),
+                Item::Label(l) | Item::Open { label: l, .. } | Item::Submenu { label: l, .. } => {
+                    l.clone()
+                }
                 Item::Separator => "---".into(),
                 Item::Quit => "Quit".into(),
             })
             .collect()
+    }
+
+    fn fleet(workers: Vec<WorkerSummary>, tasks: Vec<TaskSummary>) -> Fleet {
+        Fleet {
+            workers,
+            tasks,
+            now_ms: NOW,
+            routines: vec![],
+        }
     }
 
     #[test]
@@ -260,73 +662,297 @@ mod tests {
     }
 
     #[test]
-    fn headline_counts_and_idle() {
-        use TaskStatus::*;
-        let empty = Fleet::default();
+    fn empty_fleet_has_only_headline_and_footer() {
+        let m = menu_model(Some(&Fleet::default()), "p");
         assert_eq!(
-            labels(&menu_model(Some(&empty), "p"))[0],
-            "no workers · idle"
+            labels(&m),
+            ["no workers · idle", "---", "Open Make It So", "Quit"]
         );
-        let f = Fleet {
-            workers: vec![worker(true), worker(false)],
-            tasks: vec![task(1, Done, "done"), task(2, Failed, "FAILED")],
-            now_ms: 0,
-        };
+    }
+
+    #[test]
+    fn headline_counts_idle_and_needs_you() {
+        use TaskStatus::*;
+        let mut failed = task(2, Failed, "FAILED");
+        failed.attention = Attention::Failed;
+        let f = fleet(
+            vec![worker(true), worker(false)],
+            vec![task(1, Done, "done"), failed],
+        );
         assert_eq!(
             labels(&menu_model(Some(&f), "p"))[0],
-            "1 worker · idle · 1 done · 1 failed"
+            "1 worker · idle · 1 done · 1 failed · 1 needs you"
         );
-        let f = Fleet {
-            workers: vec![worker(true), worker(true)],
-            tasks: vec![
+        let f = fleet(
+            vec![worker(true), worker(true)],
+            vec![
                 task(1, Running, ""),
                 task(2, Queued, "queued"),
                 task(3, Planning, "planning…"),
                 task(4, Done, "done"),
             ],
-            now_ms: 0,
-        };
+        );
         let m = menu_model(Some(&f), "p");
         assert_eq!(labels(&m)[0], "2 workers · 1 running · 2 queued · 1 done");
         assert_eq!(m.title, "1");
     }
 
     #[test]
-    fn rows_newest_first_with_glyph_time_and_text() {
+    fn sections_rank_needs_then_running_then_recent_without_repeats() {
         use TaskStatus::*;
-        let mut tasks: Vec<_> = (0..10).map(|n| task(n, Done, "done")).collect();
-        tasks[9].finished_at = Some(43_000);
-        tasks[8].status = Failed;
-        tasks[7].status = Queued;
-        tasks[7].started_at = None;
-        tasks[6] = task(6, Running, "status: counting tests");
-        tasks[5] = task(5, Running, "");
-        let f = Fleet {
-            workers: vec![],
-            tasks,
-            now_ms: 193_000,
-        };
+        let mini = host(50, "mac-mini", true, &[]);
+        let mut unread = task(1, Done, "done");
+        unread.attention = Attention::Unread;
+        let mut failed = task(2, Failed, "FAILED");
+        failed.attention = Attention::Failed;
+        let mut asks = task(3, Running, "> Bash make");
+        asks.prompt = "tune jump physics in the functor2 platformer".into();
+        asks.worker = Some(mini.id);
+        asks.attention = Attention::Approval;
+        asks.approvals = vec![Approval {
+            id: uuid_from(7),
+            tool: "Bash".into(),
+            summary: "Bash: python3 make.py".into(),
+            detail: String::new(),
+            always: None,
+        }];
+        let mut runs = task(4, Running, "status: counting tests");
+        runs.worker = Some(mini.id);
+        runs.started_at = Some(NOW - 4 * MIN);
+        let mut queued = task(5, Queued, "queued");
+        queued.started_at = None;
+        let mut limited = task(6, Failed, "limit");
+        limited.attention = Attention::Limited;
+        let f = fleet(
+            vec![mini],
+            vec![unread, failed, asks, runs, queued, limited],
+        );
         let m = menu_model(Some(&f), "http://h:1");
-        let l = labels(&m);
-        assert_eq!(l.len(), 1 + 1 + MAX_TASKS + 3);
-        assert_eq!(l[2], "✓ 42s  prompt 9");
-        assert_eq!(l[3], "✗ 3m12s  prompt 8");
-        assert_eq!(l[4], "○  prompt 7");
-        assert_eq!(l[5], "● 3m12s  counting tests");
-        assert_eq!(l[6], "● 3m12s  prompt 5");
-        assert_eq!(l[9], "✓ 3m12s  prompt 2"); // tasks 0 and 1 cut
         assert_eq!(
-            m.items[2],
+            labels(&m)[1..12],
+            [
+                "---",
+                "Needs you",
+                "⚠ approve Bash: python3 make.py · mac-mini · tune jump physics in the func…",
+                "✗ failed · prompt 2",
+                "⚠ usage limit · prompt 6",
+                "✓ unread · prompt 1",
+                "Running",
+                "● counting tests · mac-mini · 4m00s",
+                "Recent",
+                "○  prompt 5",
+                "---",
+            ]
+        );
+        assert_eq!(
+            m.items[3],
             Item::Open {
-                label: l[2].clone(),
-                url: format!("http://h:1/#task/{}", uuid_from(9))
+                label: labels(&m)[3].clone(),
+                url: format!("http://h:1/#task/{}", uuid_from(3))
             }
         );
     }
 
+    #[test]
+    fn recent_rows_newest_first_capped_with_more() {
+        use TaskStatus::*;
+        let mut tasks: Vec<_> = (0..8).map(|n| task(n, Done, "done")).collect();
+        tasks[7].finished_at = Some(43_000);
+        tasks[6].status = Cancelled;
+        tasks[5].status = Queued;
+        tasks[5].started_at = None;
+        let f = Fleet {
+            now_ms: 193_000,
+            ..fleet(vec![], tasks)
+        };
+        let m = menu_model(Some(&f), "http://h:1");
+        let l = labels(&m);
+        assert_eq!(
+            l[2..10],
+            [
+                "Recent",
+                "✓ 42s  prompt 7",
+                "⊘ 3m12s  prompt 6",
+                "○  prompt 5",
+                "✓ 3m12s  prompt 4",
+                "✓ 3m12s  prompt 3",
+                "+3 more",
+                "---",
+            ]
+        );
+        assert_eq!(
+            m.items[8],
+            Item::Open {
+                label: "+3 more".into(),
+                url: "http://h:1/#".into()
+            }
+        );
+    }
+
+    #[test]
+    fn usage_takes_fullest_fresh_reading_per_window() {
+        let stale = 7 * 60 * MIN;
+        let mut over = win("5h", 100.0, MIN, Some(90 * MIN));
+        over.overage = true;
+        let f = fleet(
+            vec![
+                host(
+                    1,
+                    "a",
+                    true,
+                    &[
+                        (
+                            "claude",
+                            vec![
+                                win("7d", 31.0, stale, None),
+                                win("5h", 62.0, MIN, Some(130 * MIN)),
+                            ],
+                        ),
+                        ("codex", vec![over]),
+                    ],
+                ),
+                // Fuller but stale, and fuller but offline: neither counts.
+                host(
+                    2,
+                    "b",
+                    true,
+                    &[("claude", vec![win("5h", 70.0, stale, None)])],
+                ),
+                host(
+                    3,
+                    "c",
+                    false,
+                    &[("claude", vec![win("5h", 90.0, MIN, None)])],
+                ),
+            ],
+            vec![],
+        );
+        let l = labels(&menu_model(Some(&f), "p"));
+        assert_eq!(
+            l[1..3],
+            [
+                "Claude: 5h 62%, resets 2h10m · 7d 31% (stale)",
+                "Codex: 5h 100% (overage), resets 1h30m",
+            ]
+        );
+        // A reset window is stale too, even when just read.
+        let f = fleet(
+            vec![host(
+                1,
+                "a",
+                true,
+                &[("claude", vec![win("5h", 99.0, 0, Some(0))])],
+            )],
+            vec![],
+        );
+        assert_eq!(
+            labels(&menu_model(Some(&f), "p"))[1],
+            "Claude: 5h 99% (stale)"
+        );
+    }
+
+    #[test]
+    fn routines_show_schedule_runs_and_errors() {
+        use TaskStatus::*;
+        let mut next = routine("pr-grooming");
+        next.next_at = Some(NOW + 80 * MIN);
+        next.last_at = Some(NOW - 3 * 60 * MIN);
+        next.last_task = Some(uuid_from(1));
+        next.last_status = Some(Failed); // the live task wins
+        let mut busy = routine("nightly-ci");
+        busy.last_at = Some(NOW - MIN);
+        let mut paused = routine("weekly");
+        paused.paused = true;
+        let mut due = routine("due");
+        due.next_at = Some(NOW);
+        due.error = Some("no worker named mac-pro\nmore".into());
+        let mut bad = routine("");
+        bad.file = "broken.md".into();
+        bad.trigger = None;
+        bad.error = Some("no `every` or `cron`".into());
+        let mut run = task(2, Running, "");
+        run.routine = Some("nightly-ci".into());
+        let mut f = fleet(vec![], vec![task(1, Done, ""), run]);
+        f.routines = vec![next, busy, paused, due, bad];
+        let m = menu_model(Some(&f), "http://h");
+        let l = labels(&m);
+        let at = l.iter().position(|l| l == "Routines").unwrap();
+        assert_eq!(
+            l[at + 1..at + 6],
+            [
+                "↻ pr-grooming · next 1h20m · last ✓ 3h00m ago",
+                "↻ nightly-ci · running",
+                "↻ weekly · paused",
+                "↻ due · due · ⚠ no worker named mac-pro",
+                "↻ broken.md · ⚠ no `every` or `cron`",
+            ]
+        );
+        assert_eq!(
+            m.items[at + 1],
+            Item::Open {
+                label: l[at + 1].clone(),
+                url: "http://h/#routines".into()
+            }
+        );
+        f.routines.clear();
+        assert!(!labels(&menu_model(Some(&f), "p")).contains(&"Routines".to_string()));
+    }
+
+    #[test]
+    fn workers_submenu_lists_state_version_and_usage() {
+        let mut mini = host(
+            2,
+            "mac-mini",
+            true,
+            &[("claude", vec![win("5h", 62.0, MIN, None)])],
+        );
+        mini.busy = true;
+        mini.info.version = Some("0.1.0+abc1234".into());
+        mini.update = WorkerUpdate::Pending {
+            version: "0.1.0+def5678".into(),
+        };
+        let air = host(3, "MacBook-Air", true, &[]);
+        let old = host(1, "aaa-old", false, &[]);
+        let m = menu_model(Some(&fleet(vec![mini, old, air], vec![])), "http://h");
+        let Item::Submenu { label, .. } = &m.items[m.items.len() - 3] else {
+            panic!("{:?}", m.items)
+        };
+        assert_eq!(label, "Workers · 2 online, 1 offline");
+        let t = text(&m);
+        let want = format!(
+            "---\nWorkers · 2 online, 1 offline ▸\n\
+             \x20 MacBook-Air · ○ idle  <http://h/#worker/{}>\n\
+             \x20 mac-mini · ● busy · 0.1.0+abc1234 · updating to 0.1.0+def5678  <http://h/#worker/{}>\n\
+             \x20     Claude: 5h 62%\n\
+             \x20 aaa-old · ✗ offline  <http://h/#worker/{}>\n\
+             Open Make It So",
+            uuid_from(3),
+            uuid_from(2),
+            uuid_from(1)
+        );
+        assert!(t.contains(&want), "{t}");
+    }
+
     #[cfg(any(target_os = "macos", windows))]
     #[test]
-    fn shape_ignores_labels() {
+    fn find_walks_submenu_paths() {
+        let items = vec![
+            Item::Separator,
+            Item::Submenu {
+                label: "s".into(),
+                items: vec![Item::Separator, Item::Quit],
+            },
+        ];
+        assert_eq!(find(&items, "0"), Some(&Item::Separator));
+        assert_eq!(find(&items, "1.1"), Some(&Item::Quit));
+        assert_eq!(find(&items, "1.2"), None);
+        assert_eq!(find(&items, "0.0"), None);
+        assert_eq!(find(&items, "x"), None);
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn shape_ignores_labels_but_not_submenu_contents() {
         let a = menu_model(None, "p");
         let mut b = menu_model(None, "p");
         b.items[0] = Item::Label("other".into());
@@ -336,6 +962,15 @@ mod tests {
             ..Default::default()
         };
         assert!(!same_shape(&a, &menu_model(Some(&one), "p")));
+        let sub = |n| MenuModel {
+            title: String::new(),
+            items: vec![Item::Submenu {
+                label: format!("{n}"),
+                items: (0..n).map(|_| Item::Separator).collect(),
+            }],
+        };
+        assert!(same_shape(&sub(1), &sub(1)));
+        assert!(!same_shape(&sub(1), &sub(2)));
     }
 
     #[test]
@@ -344,6 +979,25 @@ mod tests {
             text(&menu_model(None, "http://h")),
             "title: \nDisconnected · retrying\n---\nOpen Make It So  <http://h/>\nQuit\n"
         );
+    }
+
+    #[test]
+    fn spans_and_window_lengths() {
+        assert_eq!(span(59_000), "<1m");
+        assert_eq!(span(4 * MIN), "4m");
+        assert_eq!(span(80 * MIN), "1h20m");
+        assert_eq!(span(51 * 60 * MIN), "2d03h");
+        let mut names = ["7d", "x", "90m", "5h", "1d"];
+        names.sort_by_key(|n| minutes(n));
+        assert_eq!(names, ["90m", "5h", "1d", "7d", "x"]);
+    }
+
+    #[test]
+    fn routine_runs_track_routine_tasks_only() {
+        let mut r = task(2, TaskStatus::Running, "");
+        r.routine = Some("x".into());
+        let tasks = vec![task(1, TaskStatus::Done, ""), r];
+        assert_eq!(routine_runs(&tasks), [(uuid_from(2), TaskStatus::Running)]);
     }
 
     #[test]
