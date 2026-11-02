@@ -108,11 +108,30 @@ impl FileKind {
     }
 }
 
+/// Why a file is refused for its size.
+pub fn too_big() -> String {
+    format!("files are limited to {} MB", MAX_FILE_BYTES >> 20)
+}
+
+/// Whether a task holding `items` evidence items of `bytes` has room for one more of `more` bytes.
+pub fn room(items: usize, bytes: u64, more: u64) -> Result<(), String> {
+    if items >= MAX_EVIDENCE {
+        return Err(format!("at most {MAX_EVIDENCE} files per task"));
+    }
+    if bytes + more > MAX_TASK_BYTES {
+        return Err(format!(
+            "at most {} MB of files per task",
+            MAX_TASK_BYTES >> 20
+        ));
+    }
+    Ok(())
+}
+
 /// The media file `bytes` are, if accepted: an image, or an MP4 of at most
 /// `MAX_VIDEO_SECS`, within `MAX_FILE_BYTES`.
 pub fn media(bytes: &[u8]) -> Result<FileKind, String> {
     if bytes.len() > MAX_FILE_BYTES {
-        return Err(format!("files are limited to {} MB", MAX_FILE_BYTES >> 20));
+        return Err(too_big());
     }
     let kind = FileKind::sniff(bytes).ok_or("not a PNG, JPEG, WebP, GIF or MP4 file")?;
     if kind == FileKind::Mp4 {
@@ -144,6 +163,7 @@ fn boxes(mut b: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
 }
 
 /// An MP4's length from its `moov/mvhd` box; None if it has none readable.
+/// Trusts the box: a fragmented MP4 may claim 0 s (`MAX_FILE_BYTES` still bounds it).
 pub fn mp4_seconds(bytes: &[u8]) -> Option<f64> {
     let (_, moov) = boxes(bytes).find(|(k, _)| *k == b"moov")?;
     let (_, mvhd) = boxes(moov).find(|(k, _)| *k == b"mvhd")?;
@@ -265,7 +285,7 @@ impl Table {
         if let Some(i) = rows.iter().position(|r| r.len() > cols) {
             return Err(format!("row {} has more cells than the header", i + 1));
         }
-        if before.or(after).is_some_and(|c| c >= cols) {
+        if [before, after].into_iter().flatten().any(|c| c >= cols) {
             return Err("before/after names no column".into());
         }
         let header = header.iter().map(|h| Cell::new(h).text).collect();
@@ -400,7 +420,7 @@ impl TaskResult {
             cut.push(format!("kept the first {MAX_POINTS} points"));
         }
         let points: Vec<String> = (given.iter().take(MAX_POINTS))
-            .map(|p| first_line(p, MAX_POINT_CHARS))
+            .map(|p| first_line(p.trim(), MAX_POINT_CHARS))
             .collect();
         if points.iter().zip(&given).any(|(p, g)| p != g.trim()) {
             cut.push(format!("points cut to one line of {MAX_POINT_CHARS} chars"));
@@ -487,6 +507,17 @@ mod tests {
     }
 
     #[test]
+    fn tasks_have_room_for_so_many_files() {
+        assert_eq!(room(MAX_EVIDENCE - 1, MAX_TASK_BYTES - 5, 5), Ok(()));
+        assert!(room(MAX_EVIDENCE, 0, 0)
+            .unwrap_err()
+            .contains("at most 32 files"));
+        assert!(room(0, MAX_TASK_BYTES - 5, 6)
+            .unwrap_err()
+            .contains("50 MB"));
+    }
+
+    #[test]
     fn files_are_capped() {
         let mut big = PNG.to_vec();
         big.resize(MAX_FILE_BYTES + 1, 0);
@@ -570,6 +601,10 @@ mod tests {
         assert!(Table::new(vec![], vec![], None, None).is_err());
         assert!(Table::new(s(&["a"]), vec![s(&["1", "2"])], None, None).is_err());
         assert!(Table::new(s(&["a"]), vec![], Some(1), None).is_err());
+        assert!(
+            Table::new(s(&["a"]), vec![], Some(0), Some(1)).is_err(),
+            "each hint checked"
+        );
         let wide = vec![String::new(); MAX_TABLE_COLS + 1];
         assert!(Table::new(wide, vec![], None, None).is_err());
         let long = vec![s(&["1"]); MAX_TABLE_ROWS + 1];
@@ -594,6 +629,8 @@ mod tests {
         );
         assert_eq!(r.points, ["a", "b", "c"]);
         assert_eq!(cut, ["headline cut to 12 words", "kept the first 3 points"]);
+        let (r, cut) = TaskResult::new("ok", &["trailing  "]).unwrap();
+        assert_eq!((r.points[0].as_str(), cut.len()), ("trailing", 0));
         let (r, cut) = TaskResult::new("ok", &[&"p".repeat(200)]).unwrap();
         assert_eq!(r.points[0].chars().count(), MAX_POINT_CHARS);
         assert_eq!(cut.len(), 1);

@@ -28,31 +28,41 @@ impl Files {
     /// The bytes of `path` (relative to the task's folder): a regular file of at
     /// most `MAX_FILE_BYTES` whose real path, symlinks resolved, is allowed.
     pub fn read(&self, path: &str) -> Result<Vec<u8>, String> {
-        let real = (self.cwd.join(path).canonicalize()).map_err(|e| format!("{path}: {e}"))?;
+        let err = |e: std::io::Error| format!("{path}: {e}");
+        let real = self.cwd.join(path).canonicalize().map_err(err)?;
         if !self.allows(&real) {
             return Err(format!(
                 "{path} is outside the task's folder and the worker's roots"
             ));
         }
-        // Checked before opening: opening a FIFO would block.
-        let meta = std::fs::metadata(&real).map_err(|e| format!("{path}: {e}"))?;
+        // The checked path, opened without following a symlink swapped in since
+        // or waiting on a FIFO, and judged by what was opened.
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::custom_flags(
+            &mut opts,
+            libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        );
+        let file = opts.open(&real).map_err(err)?;
+        let meta = file.metadata().map_err(err)?;
         if !meta.is_file() {
             return Err(format!("{path} is not a regular file"));
         }
         if meta.len() > MAX_FILE_BYTES as u64 {
-            return Err(format!("files are limited to {} MB", MAX_FILE_BYTES >> 20));
+            return Err(evidence::too_big());
         }
         let mut bytes = vec![];
-        (std::fs::File::open(&real).map_err(|e| format!("{path}: {e}"))?)
-            .take(MAX_FILE_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| format!("{path}: {e}"))?;
+        (file.take(MAX_FILE_BYTES as u64 + 1).read_to_end(&mut bytes)).map_err(err)?;
         if bytes.len() > MAX_FILE_BYTES {
-            return Err(format!("files are limited to {} MB", MAX_FILE_BYTES >> 20));
+            return Err(evidence::too_big());
         }
         Ok(bytes)
     }
 }
+
+/// Largest table file parsed.
+const MAX_TABLE_FILE_BYTES: usize = 512 << 10;
 
 /// Reads a path's bytes; `Files::read` in the worker, a map in tests.
 pub type Reader<'a> = &'a dyn Fn(&str) -> Result<Vec<u8>, String>;
@@ -109,6 +119,13 @@ fn table(args: &Value, read: Reader) -> Result<Table, String> {
     let cells = match (args["path"].as_str(), &args["rows"]) {
         (Some(p), Value::Null) => {
             let bytes = read(p)?;
+            // Far past any table within the row and column caps; keeps parsing cheap.
+            if bytes.len() > MAX_TABLE_FILE_BYTES {
+                return Err(format!(
+                    "a table file is at most {} KB",
+                    MAX_TABLE_FILE_BYTES >> 10
+                ));
+            }
             let text = std::str::from_utf8(&bytes).map_err(|_| format!("{p} is not UTF-8"))?;
             let ext = Path::new(p).extension().and_then(|e| e.to_str());
             match ext.map(str::to_ascii_lowercase).as_deref() {
@@ -146,7 +163,9 @@ fn csv(text: &str) -> Vec<Vec<String>> {
                 field.push('"');
                 chars.next();
             }
-            '"' => quoted = !quoted,
+            '"' if quoted => quoted = false,
+            // Only a field's first char opens a quote: `5" screen` is text.
+            '"' if field.is_empty() => quoted = true,
             ',' if !quoted => row.push(std::mem::take(&mut field)),
             '\n' if !quoted => {
                 row.push(std::mem::take(&mut field));
@@ -345,14 +364,16 @@ mod tests {
 
     #[test]
     fn tables_parse_from_csv_json_md_and_rows() {
-        let csv = b"case,before,after\r\n\"cold, start\",120 ms,80 ms\n\nwarm,\"\"\"x\"\"\",9\n";
+        let csv = b"case,before,after\r\n\"cold, start\",120 ms,80 ms\n\nwarm,\"\"\"x\"\"\",9\n5\" screen,1,2\n";
         let md = b"# Bench\n\n| case | before | after |\n|:--|--:|--:|\n| cold \\| start | 120 ms | 80 ms |\n| warm | 10 | 9 |\n\nafter text | x\n";
         let json = br#"{"header": ["case", "before", "after"], "rows": [["cold", 120, 80.5], ["warm", null, true]]}"#;
+        let huge = vec![b','; MAX_TABLE_FILE_BYTES + 1];
         let files: &[(&str, &[u8])] = &[
             ("b.csv", csv),
             ("b.md", md),
             ("b.json", json),
             ("b.txt", b"x"),
+            ("huge.csv", &huge),
         ];
         let t = table_of(
             json!({"kind": "table", "path": "b.csv", "before": "before", "after": "after"}),
@@ -360,8 +381,9 @@ mod tests {
         );
         assert_eq!(t.header, ["case", "before", "after"]);
         assert_eq!((t.before, t.after), (Some(1), Some(2)));
-        assert_eq!(t.rows.len(), 2);
+        assert_eq!(t.rows.len(), 3);
         assert_eq!(t.rows[0][0].text, "cold, start");
+        assert_eq!(t.rows[2][0].text, "5\" screen", "a quote mid-field is text");
         assert_eq!(
             t.rows[0][2],
             Cell {
@@ -397,6 +419,10 @@ mod tests {
                 "no column named nope",
             ),
             (json!({"kind": "table"}), "path or rows"),
+            (
+                json!({"kind": "table", "path": "huge.csv"}),
+                "at most 512 KB",
+            ),
             (
                 json!({"kind": "table", "rows": [[{"a": 1}]]}),
                 "strings or numbers",

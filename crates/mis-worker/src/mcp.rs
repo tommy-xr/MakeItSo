@@ -12,7 +12,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use mis_types::evidence::{DraftItem, EvidenceDraft, MAX_EVIDENCE, MAX_TASK_BYTES};
+use mis_types::evidence::{room, DraftItem, EvidenceDraft};
 use mis_types::{
     first_line, github_link, mcp, AgentEvent, Inventory, Link, LinkKind, TaskId, TaskResult,
 };
@@ -255,19 +255,12 @@ fn evidence(args: &Value, read: Reader, used: Used) -> Result<AgentEvent, String
             row(LinkKind::Test, url()?, args["ok"].as_bool(), detail)
         }
         Some("note") => row(LinkKind::Note, String::new(), None, None),
-        _ => {
-            if used.items >= MAX_EVIDENCE {
-                return Err(format!("at most {MAX_EVIDENCE} files per task"));
-            }
+        Some("image" | "compare" | "table" | "output") => {
             let draft = evidence::draft(args, label.clone(), read)?;
-            if used.bytes + stored_bytes(&draft) > MAX_TASK_BYTES {
-                return Err(format!(
-                    "at most {} MB of files per task",
-                    MAX_TASK_BYTES >> 20
-                ));
-            }
+            room(used.items, used.bytes, stored_bytes(&draft))?;
             return Ok(AgentEvent::Artifact(draft));
         }
+        _ => return Err("kind must be link, test, note, image, compare, table or output".into()),
     };
     Ok(AgentEvent::Evidence(link))
 }
@@ -362,16 +355,21 @@ async fn post(State(ctx): State<Ctx>, headers: HeaderMap, body: Bytes) -> Respon
         Some(a) if is_approve(&req) => Some(a.ask(ctx.task, &req["params"]["arguments"]).await),
         _ => None,
     };
-    // Held while files are read, so concurrent calls can't both pass the task's caps.
-    let (reply, event) = {
-        let mut used = ctx.used.lock().unwrap();
-        let read = |p: &str| ctx.files.read(p);
-        let (reply, event) = handle(&req, ctx.approvals.is_some(), approved, &read, *used);
+    // Off the runtime: attached files are read and encoded here. The lock is
+    // held throughout, so concurrent calls can't both pass the task's caps.
+    let c = ctx.clone();
+    let handled = tokio::task::spawn_blocking(move || {
+        let mut used = c.used.lock().unwrap();
+        let read = |p: &str| c.files.read(p);
+        let (reply, event) = handle(&req, c.approvals.is_some(), approved, &read, *used);
         if let Some(AgentEvent::Artifact(draft)) = &event {
             used.items += 1;
             used.bytes += stored_bytes(draft);
         }
         (reply, event)
+    });
+    let Ok((reply, event)) = handled.await else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     if let Some(event) = event {
         let _ = ctx.tx.send((ctx.task, event)).await;
@@ -385,6 +383,7 @@ async fn post(State(ctx): State<Ctx>, headers: HeaderMap, body: Bytes) -> Respon
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mis_types::evidence::{MAX_EVIDENCE, MAX_TASK_BYTES};
 
     #[test]
     fn hint_names_this_harness_mcp_and_apps() {

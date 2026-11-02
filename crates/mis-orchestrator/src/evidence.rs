@@ -1,5 +1,5 @@
 //! Evidence files agents attach: checked again here (a worker's word is never
-//! trusted), stored as `<dir>/<uuid>.<ext>`, served back, swept after 30 days.
+//! trusted), stored as `<dir>/<uuid>.<ext>`, served back, swept with their task.
 //! `check` is pure; `Store` is the filesystem shell around it.
 
 use std::path::PathBuf;
@@ -12,8 +12,10 @@ use uuid::Uuid;
 
 use crate::images::{private_dir, sweep_dir};
 
-/// Older files are deleted. Task history is kept as long, so its evidence goes with it.
-pub const MAX_AGE: Duration = Duration::from_secs(30 * 24 * 3600);
+/// Older files are deleted: as long as a finished task is kept, plus two days
+/// for the run that stored them.
+pub const MAX_AGE: Duration =
+    Duration::from_millis(crate::ledger::persist::KEEP_MS + 2 * 24 * 3600 * 1000);
 
 /// A draft's contents, checked, as files to store.
 #[derive(Debug)]
@@ -39,13 +41,10 @@ pub fn check(draft: EvidenceDraft, held: &[Evidence]) -> Result<Checked, String>
     if title.is_empty() {
         return Err("no title".into());
     }
-    if held.len() >= MAX_EVIDENCE {
-        return Err(format!("at most {MAX_EVIDENCE} files per task"));
-    }
     let decode = |data: &str| {
         // Refused before decoding: base64 is 4 chars per 3 bytes.
         if data.len() > MAX_FILE_BYTES.div_ceil(3) * 4 {
-            return Err(format!("files are limited to {} MB", MAX_FILE_BYTES >> 20));
+            return Err(too_big());
         }
         let bytes = Base64::decode_vec(data).map_err(|_| "media isn't base64".to_string())?;
         Ok::<_, String>((media(&bytes)?, bytes))
@@ -80,12 +79,7 @@ pub fn check(draft: EvidenceDraft, held: &[Evidence]) -> Result<Checked, String>
     };
     let held_bytes: u64 = held.iter().flat_map(|e| e.files()).map(|f| f.bytes).sum();
     let bytes: u64 = files.iter().map(|(_, b)| b.len() as u64).sum();
-    if held_bytes + bytes > MAX_TASK_BYTES {
-        return Err(format!(
-            "at most {} MB of files per task",
-            MAX_TASK_BYTES >> 20
-        ));
-    }
+    room(held.len(), held_bytes, bytes)?;
     Ok(Checked {
         title,
         files,
@@ -312,8 +306,12 @@ mod tests {
         );
         assert_eq!(store.read(Uuid::new_v4()), None);
         let day = Duration::from_secs(24 * 3600);
-        assert_eq!(store.sweep(SystemTime::now() + 29 * day), 0);
-        assert_eq!(store.sweep(SystemTime::now() + 31 * day), 1);
+        assert_eq!(
+            store.sweep(SystemTime::now() + 31 * day),
+            0,
+            "kept with its task"
+        );
+        assert_eq!(store.sweep(SystemTime::now() + 33 * day), 1);
         assert_eq!(store.read(id), None);
         std::fs::remove_dir_all(dir).unwrap();
     }

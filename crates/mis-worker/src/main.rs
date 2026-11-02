@@ -526,7 +526,14 @@ async fn session(
             }))
             .await
         {
-            c.pending = Some((task, event));
+            // A file too big for an older orchestrator's frames would fail on every
+            // reconnect: it is dropped, not resent.
+            match event {
+                AgentEvent::Artifact(d) => {
+                    tracing::warn!(%task, "evidence {:?} not sent: {e}", d.title)
+                }
+                event => c.pending = Some((task, event)),
+            }
             return Err(e.into());
         }
         if finished {

@@ -24,6 +24,9 @@ toml.workspace = true
 rpassword = "7.5.4"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system", "disk"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 mis-update = { workspace = true, features = ["testing"] }
 mis-orchestrator = { path = "../mis-orchestrator" }

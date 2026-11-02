@@ -447,6 +447,18 @@ fn key(l: &Link) -> (Option<LinkKind>, &str) {
     }
 }
 
+/// A note row saying `text`, cut to one line.
+fn note(text: &str) -> Link {
+    Link {
+        kind: LinkKind::Note,
+        url: String::new(),
+        label: first_line(text, 200),
+        ok: None,
+        detail: None,
+        pr: None,
+    }
+}
+
 fn size(e: &AgentEvent) -> usize {
     serde_json::to_vec(e).map_or(0, |v| v.len())
 }
@@ -1304,7 +1316,8 @@ impl Ledger {
             // The agent's own result is the summary; else maybe the summarizer's.
             // Truncated: the transcript was too long to be a short answer.
             let wanted = t.truncated || summary::wanted(&t.events, t.summary.as_deref());
-            if let Some(r) = &t.result {
+            // A failure keeps its reason.
+            if let (true, Some(r)) = (*ok, &t.result) {
                 t.summary = Some(r.line());
             } else if *ok && wanted {
                 summarize = Some(Effect::Summarize {
@@ -1387,14 +1400,7 @@ impl Ledger {
         let Some(t) = self.owned_task(wid, conn, task) else {
             return vec![];
         };
-        t.add_link(Link {
-            kind: LinkKind::Note,
-            url: String::new(),
-            label: first_line(&format!("{PR_UNAVAILABLE}{why}"), 200),
-            ok: None,
-            detail: None,
-            pr: None,
-        });
+        t.add_link(note(&format!("{PR_UNAVAILABLE}{why}")));
         vec![Effect::Broadcast(self.status())]
     }
 
@@ -1418,24 +1424,13 @@ impl Ledger {
         task: TaskId,
         evidence: Result<Evidence, (String, String)>,
     ) -> Vec<Effect> {
-        if self.attached(wid, conn, task).is_none() {
+        let running = self.owned_task(wid, conn, task);
+        let Some(t) = running.filter(|t| t.status == TaskStatus::Running) else {
             return vec![];
-        }
-        let t = self
-            .tasks
-            .iter_mut()
-            .find(|t| t.task.id == task)
-            .expect("attached");
+        };
         match evidence {
             Ok(e) => t.evidence.push(e),
-            Err((title, why)) => t.add_link(Link {
-                kind: LinkKind::Note,
-                url: String::new(),
-                label: first_line(&format!("{title}: not kept ({why})"), 200),
-                ok: None,
-                detail: None,
-                pr: None,
-            }),
+            Err((title, why)) => t.add_link(note(&format!("{title}: not kept ({why})"))),
         }
         vec![Effect::Broadcast(self.status())]
     }
@@ -2651,12 +2646,21 @@ mod tests {
         assert!(!eff.iter().any(|e| matches!(e, Effect::Summarize { .. })));
         assert!(l.summarized(task, "Haiku's take.").is_empty());
         let (s, events, _) = l.show(task).unwrap();
-        assert_eq!(s.result, Some(result));
+        assert_eq!(s.result.as_ref(), Some(&result));
         assert_eq!(
             s.summary.as_deref(),
             Some("Fixed the flaky test · 3 retries removed")
         );
         assert!(!events.iter().any(|e| matches!(e, AgentEvent::Result(_))));
+        // A run that fails after reporting keeps its failure as the summary.
+        let (mut l, wid, task) = running_setup();
+        l.event(wid, 1, task, AgentEvent::Result(result));
+        let failed = AgentEvent::Finished {
+            ok: false,
+            summary: Some("exit 1".into()),
+        };
+        l.event(wid, 1, task, failed);
+        assert_eq!(l.show(task).unwrap().0.summary.as_deref(), Some("exit 1"));
     }
 
     #[test]

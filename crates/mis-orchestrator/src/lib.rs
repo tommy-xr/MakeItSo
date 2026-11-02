@@ -466,13 +466,15 @@ impl App {
     }
 
     /// Check and store a file the agent of `task` attached, then list it on the
-    /// task; one refused becomes a note saying why.
-    fn attach(&self, wid: WorkerId, conn: ConnId, task: TaskId, draft: EvidenceDraft) {
+    /// task; one refused becomes a note saying why. Decoding and writing run off
+    /// the runtime; the caller awaits it, so the worker's later events wait too.
+    async fn attach(&self, wid: WorkerId, conn: ConnId, task: TaskId, draft: EvidenceDraft) {
         let title = draft.title.clone();
         let Some(held) = self.ledger().attached(wid, conn, task).map(<[_]>::to_vec) else {
             return;
         };
-        let stored = match &self.evidence {
+        let store = self.evidence.clone();
+        let stored = tokio::task::spawn_blocking(move || match store {
             None => Err("evidence files are off".to_string()),
             Some(store) => evidence::check(draft, &held).and_then(|checked| {
                 let ids = (checked.files.iter())
@@ -484,7 +486,9 @@ impl App {
                     })?;
                 Ok(checked.evidence(uuid::Uuid::new_v4(), ids, unix_ms()))
             }),
-        };
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("checking it failed: {e}")));
         if let Err(why) = &stored {
             tracing::warn!(%task, "evidence {title:?} refused: {why}");
         }
@@ -1516,7 +1520,7 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
                 },
                 incoming = recv_json::<WorkerMsg>(&mut sock) => match incoming {
                     Some(WorkerMsg::Event { task, event: AgentEvent::Artifact(draft) }) => {
-                        app.attach(wid, conn, task, draft);
+                        app.attach(wid, conn, task, draft).await;
                     }
                     Some(WorkerMsg::Event { task, event }) => {
                         app.transition(|l| ((), l.event(wid, conn, task, event)));
