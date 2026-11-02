@@ -141,7 +141,14 @@
   li { border-top: 1px solid var(--rule); }
   li.dim { padding: 1rem 0; }
   li > a { display: block; padding: 1rem 0; text-decoration: none; }
-  .queued { --s: var(--dim); } .running { --s: var(--run); } .done { --s: var(--ok); } .failed { --s: var(--bad); }
+  .queued { --s: var(--dim); } .running { --s: var(--run); } .done { --s: var(--ok); } .failed { --s: var(--bad); } .cancelled { --s: var(--dim); }
+  /* Cancelled rows step back: the user ended them, nothing to look at. */
+  li.cancelled > a { opacity: .6; }
+  /* Cancel: a red outline, then an in-page confirm. */
+  button[type=button].danger { color: var(--bad); border-color: var(--bad); }
+  #cancel-confirm { margin: 1rem 0; padding: .75rem; border: 1px solid var(--bad); }
+  #cancel-confirm p { margin: 0; }
+  #cancel-confirm .row { margin-bottom: 0; }
   .busy { --s: var(--run); } .idle { --s: var(--ok); } .offline { --s: var(--dim); }
   /* Needs you: a lit dot before the status, red failed, orange usage limit, cyan unread. A glyph, so it stays inline (see .chip). */
   .att { margin-right: .375em; font-size: .75em; color: var(--a); text-shadow: 0 0 6px var(--a); }
@@ -305,6 +312,14 @@
   <div id="ask" class="meta dim"></div>
   <div id="shots-view" class="shots" hidden></div>
   <div id="thread" class="meta dim"></div>
+  <div id="cancel" hidden>
+    <div class="row"><button type="button" id="cancel-ask" class="danger">Cancel task</button></div>
+    <div id="cancel-confirm" hidden>
+      <p>Cancel this task? Its agent stops, and it can’t be resumed from where it was.</p>
+      <div class="row"><button type="button" id="cancel-yes" class="danger">Yes, cancel</button><button type="button" id="cancel-no">Keep it</button></div>
+    </div>
+    <p id="cancel-state" class="dim" hidden></p>
+  </div>
   <form id="reply" hidden>
     <textarea id="reply-text" aria-label="reply" placeholder="Reply in this thread…" required></textarea>
     <div class="row"><button id="send-reply">Reply</button><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button></div>
@@ -409,6 +424,7 @@ function eventLine(e) {
     case 'limited': return `usage limit hit${e.resets_at ? `; resets ${new Date(e.resets_at * 1000).toLocaleString()}` : ''}`;
     case 'evidence': return `evidence: ${[`${e.label}${verdict(e.ok)}`, e.detail, e.url].filter(Boolean).join(' ')}`;
     case 'finished': return `${e.ok ? 'done' : 'FAILED'} ${e.summary || ''}`;
+    case 'cancelled': return 'cancelled';
     default: return `[${e.type}] ${JSON.stringify(e)}`;
   }
 }
@@ -895,7 +911,7 @@ function heldRows(key, list) {
 // Status + prompt, then placement/time/tokens, then what a running task is doing (or what a queued one
 // waits for), then the answer preview.
 function taskRows(ul, rows) {
-  ul.replaceChildren(...rows.map(([depth, t]) => el('li', depth ? { className: 'reply', style: `--depth: ${depth}` } : {},
+  ul.replaceChildren(...rows.map(([depth, t]) => el('li', { className: [depth && 'reply', t.status === 'cancelled' && 'cancelled'].filter(Boolean).join(' '), ...(depth ? { style: `--depth: ${depth}` } : {}) },
     el('a', { href: `#task/${t.id}` },
       el('div', { className: 'head clamp2' }, depth ? '↳ ' : '', attDot(t), chip(t.status), sentTo(t), t.prompt),
       el('div', { className: 'sub dim' }, ...dots([...placement(t), clock(t), tokensOf(t), linksBrief(t)])),
@@ -1055,11 +1071,42 @@ function renderDetail(id) {
   $('thread').replaceChildren(...(t && t.parent ? [el('a', { href: `#task/${t.parent}`, className: 'thread' }, `↑ reply to ${short(t.parent)}`)] : []),
     ...(t && t.send_to && t.worker ? [el('a', { href: sessionHref(t), className: 'thread' }, `↪ session: ${t.send_to.title || short(t.send_to.session)}`)] : []),
     ...replies.map((r) => el('a', { href: `#task/${r.id}`, className: 'thread' }, `↳ ${short(r.id)} ${r.prompt.split('\n')[0]}`)));
-  $('reply').hidden = readOnly || !t || !['done', 'failed'].includes(t.status);
+  $('reply').hidden = readOnly || !t || !['done', 'failed', 'cancelled'].includes(t.status);
+  renderCancel(t);
   $('ids').replaceChildren(...(t ? [['task', t.id], ['session', t.session]] : [])
     .filter(([, v]) => v).flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]));
   $('log').textContent = detail.ready ? detail.lines.join('\n') : 'loading…';
 }
+
+// Cancel: a tap asks, a second confirms. `cancelAsk` belongs to the task open when it was asked.
+let cancelAsk = { id: null, confirm: false, busy: false, error: '' };
+function renderCancel(t) {
+  if (!t || cancelAsk.id !== t.id) cancelAsk = { id: t && t.id, confirm: false, busy: false, error: '' };
+  const live = !readOnly && t && ['planning', 'queued', 'running'].includes(t.status);
+  const stopping = live && t.activity === 'cancelling…';
+  const note = stopping ? 'cancelling… its worker is stopping the agent' : cancelAsk.error;
+  $('cancel').hidden = !live && !note;
+  $('cancel-ask').parentNode.hidden = !live || stopping || cancelAsk.confirm;
+  $('cancel-confirm').hidden = !live || stopping || !cancelAsk.confirm;
+  $('cancel-yes').disabled = cancelAsk.busy;
+  $('cancel-state').hidden = !note;
+  $('cancel-state').className = cancelAsk.error && !stopping ? 'bad' : 'dim';
+  $('cancel-state').textContent = note;
+}
+$('cancel-ask').addEventListener('click', () => { Object.assign(cancelAsk, { confirm: true, error: '' }); render(); });
+$('cancel-no').addEventListener('click', () => { cancelAsk.confirm = false; render(); });
+$('cancel-yes').addEventListener('click', async () => {
+  const a = cancelAsk;
+  a.busy = true;
+  render();
+  try {
+    const r = await fetch(`/api/tasks/${a.id}/cancel`, { method: 'POST', headers: authHeaders() });
+    a.error = r.ok ? '' : (await r.text()) || `error ${r.status}`;
+  } catch { a.error = 'couldn’t reach the orchestrator'; }
+  Object.assign(a, { busy: false, confirm: false });
+  refreshSoon();
+  render();
+});
 
 // `disk 38% · cpu 64% · mem 82%`, each value coloured by level.
 function meterLine(w) {

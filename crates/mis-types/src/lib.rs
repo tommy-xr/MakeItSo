@@ -142,6 +142,15 @@ pub enum TaskStatus {
     Running,
     Done,
     Failed,
+    /// The user cancelled it.
+    Cancelled,
+}
+
+impl TaskStatus {
+    /// Done, failed or cancelled: it never changes again.
+    pub fn finished(self) -> bool {
+        matches!(self, Self::Done | Self::Failed | Self::Cancelled)
+    }
 }
 
 /// Harness-agnostic view of what an agent is doing. Visualizers build on this.
@@ -200,6 +209,8 @@ pub enum AgentEvent {
         ok: bool,
         summary: Option<String>,
     },
+    /// The user cancelled the task: it ends with this in place of `Finished`.
+    Cancelled,
 }
 
 /// Worker -> orchestrator.
@@ -324,6 +335,9 @@ pub enum OrchMsg {
     UpdateHeld,
     /// Answer with `WorkerMsg::Answer` carrying the same `req`.
     Query { req: Uuid, query: Query },
+    /// Stop `task` (its agent and the processes it started, or its wait for a
+    /// session), then end it with `AgentEvent::Cancelled`.
+    Cancel { task: TaskId },
 }
 
 /// Client (CLI / voice app) -> orchestrator.
@@ -554,6 +568,7 @@ pub fn headline(workers: &[WorkerSummary], tasks: &[TaskSummary], now_ms: u64) -
     for (s, name) in [
         (TaskStatus::Done, "done"),
         (TaskStatus::Failed, "failed"),
+        (TaskStatus::Cancelled, "cancelled"),
         (TaskStatus::Planning, "planning"),
         (TaskStatus::Queued, "queued"),
     ] {
@@ -799,6 +814,14 @@ mod tests {
         let set = OrchMsg::SetPurpose { purpose: None };
         let s = serde_json::to_string(&set).unwrap();
         assert_eq!(s, r#"{"type":"set_purpose","purpose":null}"#);
+        let cancel = OrchMsg::Cancel { task: Uuid::nil() };
+        let s = serde_json::to_string(&cancel).unwrap();
+        assert_eq!(
+            s,
+            format!(r#"{{"type":"cancel","task":"{}"}}"#, Uuid::nil())
+        );
+        let s = serde_json::to_string(&AgentEvent::Cancelled).unwrap();
+        assert_eq!(s, r#"{"type":"cancelled"}"#);
         let draft = ServerMsg::PurposeDraft {
             worker: Uuid::nil(),
             draft: "d".into(),
@@ -955,10 +978,11 @@ mod tests {
             task(Done, 0, "done"),
             task(Done, 0, "done"),
             task(Failed, 0, "FAILED"),
+            task(Cancelled, 0, "cancelled"),
         ];
         assert_eq!(
             headline(&w[..1], &tasks, 0),
-            "1 worker · idle · 2 done · 1 failed"
+            "1 worker · idle · 2 done · 1 failed · 1 cancelled"
         );
         tasks.push(task(Running, 1_000, "> Bash ls"));
         tasks.push(task(Running, 8_000, "status: counting tests"));
@@ -966,12 +990,12 @@ mod tests {
         tasks.push(task(Planning, 9_000, "planning…"));
         assert_eq!(
             headline(&w, &tasks, 200_000),
-            "2 workers · 2 running (counting tests, 3m12s) · 2 done · 1 failed · 1 planning · 1 queued"
+            "2 workers · 2 running (counting tests, 3m12s) · 2 done · 1 failed · 1 cancelled · 1 planning · 1 queued"
         );
         // Queued with only an offline worker: not idle.
         let mut off = worker();
         off.online = false;
-        assert_eq!(headline(&[off], &tasks[5..6], 0), "no workers · 1 queued");
+        assert_eq!(headline(&[off], &tasks[6..7], 0), "no workers · 1 queued");
         // Running with nothing known about it.
         let mut bare = task(Running, 0, "");
         bare.started_at = None;

@@ -26,7 +26,7 @@ use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use mis_agent::Agent;
 use mis_types::*;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -195,6 +195,7 @@ async fn main() -> Result<()> {
         running: HashSet::new(),
         pr_rx,
         watches: HashMap::new(),
+        cancels: HashMap::new(),
         backoff: Duration::from_secs(1),
         sampler: stats::Sampler::new(ctx.roots.first().cloned().unwrap_or_else(|| "/".into())),
         info,
@@ -332,6 +333,8 @@ struct Conn {
     pr_rx: mpsc::Receiver<WorkerMsg>,
     /// One PR watch per task; a new `CheckPrs` replaces it.
     watches: HashMap<TaskId, tokio::task::AbortHandle>,
+    /// Stops a running task (`OrchMsg::Cancel`); dropped once it ends.
+    cancels: HashMap<TaskId, oneshot::Sender<()>>,
     backoff: Duration,
     sampler: stats::Sampler,
     /// Sent in each Hello; its purpose changes on `OrchMsg::SetPurpose`.
@@ -443,7 +446,7 @@ async fn session(
         let Some((task, event)) = next else {
             return Ok(Ended::Closed);
         };
-        let finished = matches!(event, AgentEvent::Finished { .. });
+        let finished = matches!(event, AgentEvent::Finished { .. } | AgentEvent::Cancelled);
         if let Err(e) = sink
             .send(text(&WorkerMsg::Event {
                 task,
@@ -456,6 +459,7 @@ async fn session(
         }
         if finished {
             c.running.remove(&task);
+            c.cancels.remove(&task);
         }
     }
 }
@@ -487,10 +491,20 @@ fn handle_incoming(
                     return Ok(());
                 }
                 tracing::info!(id = %task.id, "assigned to {}: {}", task.harness, task.prompt);
+                let (cancel, cancelled) = oneshot::channel();
+                c.cancels.insert(task.id, cancel);
                 let ctx = ctx.clone();
                 let tx = ev_tx.clone();
-                tokio::spawn(async move { run_task(&ctx, task, images, tx).await });
+                tokio::spawn(async move { run_task(&ctx, task, images, tx, cancelled).await });
             }
+            Ok(OrchMsg::Cancel { task }) => match c.cancels.remove(&task) {
+                Some(cancel) => {
+                    tracing::info!(%task, "cancelling");
+                    let _ = cancel.send(());
+                }
+                // Already ended; its Finished is on the way.
+                None => tracing::info!(%task, "cancel for a task not running here"),
+            },
             Ok(OrchMsg::CheckPrs { task, urls }) => {
                 c.watches.retain(|_, h| !h.is_finished());
                 if let Some(old) = c.watches.remove(&task) {
@@ -633,11 +647,44 @@ fn session_state(harness: &str, id: uuid::Uuid) -> std::result::Result<SessionSt
     Ok((cwd, s.model, open))
 }
 
+/// Run `task` until it ends or `cancelled` fires, which drops the run where it is
+/// (waiting for a session, or the agent, whose processes go with it) and ends it
+/// with `AgentEvent::Cancelled`.
 async fn run_task(
     ctx: &Ctx,
     task: Task,
     images: Vec<ImageFile>,
     tx: mpsc::Sender<(TaskId, AgentEvent)>,
+    cancelled: oneshot::Receiver<()>,
+) {
+    let id = task.id;
+    let had_images = !images.is_empty();
+    let cancelled = tokio::select! {
+        () = run(ctx, task, images, &tx) => false,
+        // Err: the sender is gone, so no cancel can come; let the run finish.
+        Ok(()) = cancelled => true,
+    };
+    ctx.approvals.forget(id);
+    if had_images {
+        let _ = std::fs::remove_dir_all(image_dir(id));
+    }
+    if cancelled {
+        tracing::info!(%id, "cancelled");
+        let _ = tx.send((id, AgentEvent::Cancelled)).await;
+    }
+}
+
+/// Attached images live in a dir of their own until the task ends. No shared
+/// parent: on a multi-user /tmp another user's would lock us out.
+fn image_dir(id: TaskId) -> PathBuf {
+    std::env::temp_dir().join(format!("mis-task-{id}"))
+}
+
+async fn run(
+    ctx: &Ctx,
+    task: Task,
+    images: Vec<ImageFile>,
+    tx: &mpsc::Sender<(TaskId, AgentEvent)>,
 ) {
     let id = task.id;
     let fail = |summary: String| {
@@ -655,7 +702,7 @@ async fn run_task(
     };
     // A session on this disk runs in its own folder, on its own model.
     let (cwd, model) = match &task.send_to {
-        Some(to) => match session_cwd(ctx, &task, to, &tx).await {
+        Some(to) => match session_cwd(ctx, &task, to, tx).await {
             Ok((cwd, model)) => (Ok(cwd), model),
             Err(why) => (Err(why), None),
         },
@@ -670,9 +717,7 @@ async fn run_task(
             return;
         }
     };
-    // Attached images live in a dir of their own until the task ends. No shared
-    // parent: on a multi-user /tmp another user's would lock us out.
-    let image_dir = std::env::temp_dir().join(format!("mis-task-{id}"));
+    let image_dir = image_dir(id);
     let image_paths = match images.is_empty() {
         true => vec![],
         false => match mis_agent::write_images(&image_dir, &images) {
@@ -732,10 +777,6 @@ async fn run_task(
         atx,
     );
     tokio::join!(run, fwd);
-    ctx.approvals.forget(id);
-    if !images.is_empty() {
-        let _ = std::fs::remove_dir_all(&image_dir);
-    }
 }
 
 /// `CF_ACCESS_CLIENT_SECRET`; empty counts as unset.

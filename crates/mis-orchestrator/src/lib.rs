@@ -48,7 +48,7 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 use access::Identity;
 use access_gate::{AccessGate, JWT_HEADER};
-use ledger::{ConnId, Effect, Ledger};
+use ledger::{ConnId, Effect, Ledger, NotCancelled};
 use mis_agent::Agent;
 use scope::Scope;
 
@@ -758,6 +758,7 @@ pub fn router(app: App) -> Router {
         .route("/api/upload", post(upload))
         .route("/api/images/{id}", get(image))
         .route("/api/update", get(update_status).post(set_update))
+        .route("/api/tasks/{id}/cancel", post(cancel))
         .route("/api/workers/{id}/sessions", get(sessions))
         .route(
             "/api/workers/{id}/sessions/{harness}/{session}",
@@ -1132,6 +1133,38 @@ async fn message(
     match sent {
         Ok(task) => Json(serde_json::json!({ "task": task })).into_response(),
         Err::<_, (StatusCode, String)>(why) => why.into_response(),
+    }
+}
+
+/// Cancel a task. Acting, like submitting one: read-only tokens get 403. Replies
+/// `{"task": id, "status": s}`: `cancelled`, or `running` while its worker stops it.
+/// 404 for an unknown task; 409 when it already ended or its worker is offline.
+async fn cancel(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(task): Path<TaskId>,
+) -> Response {
+    match app.admit_scope(&headers, peer, "/api/tasks/cancel").await {
+        Some(Scope::Full) => {}
+        Some(Scope::Read) => return (StatusCode::FORBIDDEN, "read-only token").into_response(),
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    }
+    let done = app.transition(|l| match l.cancel(task) {
+        Ok((status, effects)) => (Ok(status), effects),
+        Err(why) => (Err(why), vec![]),
+    });
+    match done {
+        Ok(status) => Json(serde_json::json!({ "task": task, "status": status })).into_response(),
+        Err(NotCancelled::Unknown) => (StatusCode::NOT_FOUND, "unknown task").into_response(),
+        Err(NotCancelled::Finished(s)) => {
+            let s = format!("{s:?}").to_lowercase();
+            (StatusCode::CONFLICT, format!("already {s}")).into_response()
+        }
+        Err(NotCancelled::Offline) => {
+            let why = "its worker is offline; cancel once it reconnects";
+            (StatusCode::CONFLICT, why).into_response()
+        }
     }
 }
 

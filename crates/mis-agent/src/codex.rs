@@ -351,6 +351,8 @@ impl Agent for CodexAgent {
                 .stderr(std::process::Stdio::inherit())
                 .kill_on_drop(true);
             let mut child = cmd.spawn().context("spawning codex")?;
+            // Declared after `child`, so it drops first, while the tree still hangs off it.
+            let mut tree = crate::Tree::new(child.id());
             let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
             // Codex has no result payload; the last assistant message is the summary.
             let mut last_text = None;
@@ -374,6 +376,7 @@ impl Agent for CodexAgent {
                 }
             }
             let status = child.wait().await;
+            tree.disarm();
             if finished {
                 return Ok(());
             }

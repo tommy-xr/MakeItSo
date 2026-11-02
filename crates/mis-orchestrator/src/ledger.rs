@@ -174,6 +174,9 @@ struct TaskEntry {
     /// them again when it reconnects to a restarted orchestrator.
     #[serde(skip)]
     approvals: Vec<Approval>,
+    /// Cancelled while running: its worker was told to stop it.
+    #[serde(default)]
+    cancel: bool,
 }
 
 /// What a task needs from the user: an answer while its agent waits for one;
@@ -234,6 +237,7 @@ impl TaskEntry {
             images: vec![],
             offered: vec![],
             approvals: vec![],
+            cancel: false,
         }
     }
 
@@ -268,9 +272,11 @@ impl TaskEntry {
         match self.status {
             TaskStatus::Planning => "planning…".into(),
             TaskStatus::Queued => "queued".into(),
+            TaskStatus::Running if self.cancel => "cancelling…".into(),
             TaskStatus::Running => self.step.clone().unwrap_or_else(|| "started".into()),
             TaskStatus::Done => "done".into(),
             TaskStatus::Failed => "FAILED".into(),
+            TaskStatus::Cancelled => "cancelled".into(),
         }
     }
 
@@ -359,6 +365,7 @@ impl TaskEntry {
                 self.summary = summary.clone();
                 self.finished_at = Some(now_ms);
             }
+            AgentEvent::Cancelled => self.finished_at = Some(now_ms),
             AgentEvent::Limited { .. } => self.limited = true,
             _ => {}
         }
@@ -399,6 +406,16 @@ fn key(l: &Link) -> (Option<LinkKind>, &str) {
 
 fn size(e: &AgentEvent) -> usize {
     serde_json::to_vec(e).map_or(0, |v| v.len())
+}
+
+/// Why `Ledger::cancel` did nothing.
+#[derive(Debug, PartialEq)]
+pub enum NotCancelled {
+    Unknown,
+    /// It already ended so.
+    Finished(TaskStatus),
+    /// It runs on a worker that is offline, so nothing can stop it now.
+    Offline,
 }
 
 #[derive(Default)]
@@ -595,7 +612,7 @@ impl Ledger {
             .find(|t| t.task.id == parent)
             .ok_or_else(|| format!("unknown task {parent}"))?;
         let short = &parent.to_string()[..8];
-        if !matches!(p.status, TaskStatus::Done | TaskStatus::Failed) {
+        if !p.status.finished() {
             return Err(format!("task {short} hasn't finished; reply once it has"));
         }
         let by_planner = p.task.harness == "planner" || p.task.harness.is_empty();
@@ -780,7 +797,7 @@ impl Ledger {
             return vec![];
         };
         let fresh = !t.approvals.iter().any(|a| a.id == approval.id);
-        if t.worker != Some(wid) || t.status != TaskStatus::Running || !fresh {
+        if t.worker != Some(wid) || t.status != TaskStatus::Running || t.cancel || !fresh {
             return vec![];
         }
         let notify = Effect::Notify {
@@ -1053,6 +1070,15 @@ impl Ledger {
             t.approvals.clear();
         }
         let mut effects = self.fail_running(wid, running, "worker restarted");
+        // A cancel the worker may have missed while the socket was down.
+        effects.extend(
+            (self.tasks.iter())
+                .filter(|t| t.worker == Some(wid) && t.status == TaskStatus::Running && t.cancel)
+                .map(|t| Effect::Send {
+                    conn,
+                    msg: OrchMsg::Cancel { task: t.task.id },
+                }),
+        );
         // Replies waiting for this worker can't run if it dropped their harness.
         let harnesses = self.workers[&wid].info.harnesses.clone();
         effects.extend(
@@ -1202,6 +1228,10 @@ impl Ledger {
             }
             notify = t.notify();
         }
+        if event == AgentEvent::Cancelled {
+            t.status = TaskStatus::Cancelled;
+            t.approvals.clear();
+        }
         let mut effects = vec![Effect::Broadcast(ServerMsg::Event {
             task,
             worker: Some(wid),
@@ -1263,6 +1293,44 @@ impl Ledger {
             pr: None,
         });
         vec![Effect::Broadcast(self.status())]
+    }
+
+    /// The user cancels `task`. Planning or queued, it ends now (a late plan finds it
+    /// no longer planning). Running, its worker is told to stop it and ends it with
+    /// `AgentEvent::Cancelled`; meanwhile it shows as cancelling, its approvals gone.
+    /// Returns the status it is left in.
+    pub fn cancel(&mut self, task: TaskId) -> Result<(TaskStatus, Vec<Effect>), NotCancelled> {
+        let now = self.now_ms;
+        let t = (self.tasks.iter_mut())
+            .find(|t| t.task.id == task)
+            .ok_or(NotCancelled::Unknown)?;
+        match t.status {
+            s if s.finished() => Err(NotCancelled::Finished(s)),
+            TaskStatus::Running => {
+                let conn = (t.worker)
+                    .and_then(|w| self.workers.get(&w)?.conn)
+                    .ok_or(NotCancelled::Offline)?;
+                t.cancel = true;
+                t.approvals.clear();
+                let msg = OrchMsg::Cancel { task };
+                let status = Effect::Broadcast(self.status());
+                Ok((
+                    TaskStatus::Running,
+                    vec![Effect::Send { conn, msg }, status],
+                ))
+            }
+            _ => {
+                t.status = TaskStatus::Cancelled;
+                t.record(&AgentEvent::Cancelled, now);
+                self.queue.retain(|id| *id != task);
+                let event = ServerMsg::Event {
+                    task,
+                    worker: None,
+                    event: AgentEvent::Cancelled,
+                };
+                Ok((TaskStatus::Cancelled, vec![Effect::Broadcast(event)]))
+            }
+        }
     }
 
     /// Ask the task's worker to re-read its PR links now. Err when it can't.
@@ -1386,6 +1454,7 @@ impl Ledger {
     }
 
     /// Fail every task matching `pred`, telling followers why (as from `wid`).
+    /// One being cancelled ends cancelled instead: that is what the user asked for.
     fn fail_where(
         &mut self,
         wid: WorkerId,
@@ -1397,10 +1466,16 @@ impl Ledger {
             .iter_mut()
             .filter(|t| pred(t))
             .flat_map(|t| {
-                t.status = TaskStatus::Failed;
-                let event = AgentEvent::Finished {
-                    ok: false,
-                    summary: Some(why.into()),
+                let event = match t.cancel {
+                    true => AgentEvent::Cancelled,
+                    false => AgentEvent::Finished {
+                        ok: false,
+                        summary: Some(why.into()),
+                    },
+                };
+                t.status = match t.cancel {
+                    true => TaskStatus::Cancelled,
+                    false => TaskStatus::Failed,
                 };
                 t.record(&event, now);
                 let broadcast = Effect::Broadcast(ServerMsg::Event {
@@ -2684,6 +2759,111 @@ mod tests {
                 .is_empty(),
             "not running"
         );
+    }
+
+    /// The `Cancelled` broadcast in `effects` for `task`.
+    fn cancelled(effects: &[Effect], task: TaskId) -> bool {
+        effects.iter().any(|e| {
+            matches!(e, Effect::Broadcast(ServerMsg::Event { task: t, event: AgentEvent::Cancelled, .. }) if *t == task)
+        })
+    }
+
+    fn activity_of(l: &Ledger, task: TaskId) -> String {
+        l.show(task).unwrap().0.activity
+    }
+
+    #[test]
+    fn queued_and_planning_tasks_cancel_at_once() {
+        let mut l = Ledger::default();
+        assert_eq!(l.cancel(Uuid::new_v4()), Err(NotCancelled::Unknown));
+        let (queued, _) = l.submit("p".into(), None, Some("claude".into()), None, vec![]);
+        let (ok, eff) = l.cancel(queued).unwrap();
+        assert_eq!(ok, TaskStatus::Cancelled);
+        assert!(cancelled(&eff, queued), "{eff:?}");
+        assert!(!eff.iter().any(|e| matches!(e, Effect::Notify { .. })));
+        assert_eq!(activity_of(&l, queued), "cancelled");
+        assert_eq!(attention_of(&l, queued), Attention::None);
+        assert!(l.show(queued).unwrap().0.finished_at.is_some());
+        let again = l.cancel(queued).map(|(s, _)| s);
+        assert_eq!(again, Err(NotCancelled::Finished(TaskStatus::Cancelled)));
+        // Off the queue: a worker joining gets nothing.
+        let (_, eff) = l.connect(Uuid::new_v4(), info(), &[], 1, T0);
+        assert!(assigned(&eff).is_empty());
+
+        let (planning, _) = l.submit("p".into(), None, None, None, vec![]);
+        assert_eq!(l.cancel(planning).unwrap().0, TaskStatus::Cancelled);
+        // The planner's late answer finds it no longer planning.
+        let plan = r#"{"harness":"claude","prompt":"p"}"#.to_string();
+        let done = AgentEvent::Finished {
+            ok: true,
+            summary: Some(plan),
+        };
+        assert!(l.planning_event(planning, done).is_empty());
+        assert_eq!(task_status(&l, planning), TaskStatus::Cancelled);
+    }
+
+    #[test]
+    fn running_task_cancels_through_its_worker_which_then_takes_the_next() {
+        let (mut l, wid, task) = running_setup();
+        l.approval_request(wid, 1, task, approval("one"));
+        let (left, eff) = l.cancel(task).unwrap();
+        assert_eq!(left, TaskStatus::Running);
+        let send = OrchMsg::Cancel { task };
+        assert!(
+            matches!(&eff[..], [Effect::Send { conn: 1, msg }, Effect::Broadcast(ServerMsg::Status { .. })] if *msg == send),
+            "{eff:?}"
+        );
+        assert!(approvals_of(&l, task).is_empty());
+        assert_eq!(attention_of(&l, task), Attention::None);
+        assert_eq!(activity_of(&l, task), "cancelling…");
+        assert!(l
+            .approval_request(wid, 1, task, approval("late"))
+            .is_empty());
+        // Busy until the worker says it stopped.
+        let (next, eff) = l.submit("q".into(), None, Some("claude".into()), None, vec![]);
+        assert!(assigned(&eff).is_empty());
+        assert_eq!(
+            l.cancel(task).unwrap().0,
+            TaskStatus::Running,
+            "again: resent"
+        );
+
+        let eff = l.event(wid, 1, task, AgentEvent::Cancelled);
+        assert!(cancelled(&eff, task));
+        assert!(!eff
+            .iter()
+            .any(|e| matches!(e, Effect::Notify { .. } | Effect::Summarize { .. })));
+        assert_eq!(task_status(&l, task), TaskStatus::Cancelled);
+        assert_eq!(assigned(&eff), vec![(1, next)]);
+        // Its agent finished just before the cancel landed: that stands.
+        l.cancel(next).unwrap();
+        let summary = None;
+        l.event(wid, 1, next, AgentEvent::Finished { ok: true, summary });
+        assert_eq!(task_status(&l, next), TaskStatus::Done);
+        let over = l.cancel(next).map(|(s, _)| s);
+        assert_eq!(over, Err(NotCancelled::Finished(TaskStatus::Done)));
+    }
+
+    #[test]
+    fn cancel_needs_the_worker_online_and_survives_losing_it() {
+        let (mut l, wid, task) = running_setup();
+        l.disconnect(wid, 1);
+        assert_eq!(l.cancel(task).map(|(s, _)| s), Err(NotCancelled::Offline));
+        l.connect(wid, info(), &[task], 2, T0);
+        l.cancel(task).unwrap();
+        // Dropped mid-cancel and back still running it: it hears the cancel again.
+        l.disconnect(wid, 2);
+        let (_, eff) = l.connect(wid, info(), &[task], 3, T0);
+        let send = OrchMsg::Cancel { task };
+        assert!(eff
+            .iter()
+            .any(|e| matches!(e, Effect::Send { conn: 3, msg } if *msg == send)));
+        // Gone for good: cancelled, as asked, not failed.
+        l.disconnect(wid, 3);
+        let eff = l.expire(wid, 3);
+        assert!(cancelled(&eff, task), "{eff:?}");
+        assert!(!eff.iter().any(|e| matches!(e, Effect::Notify { .. })));
+        assert_eq!(task_status(&l, task), TaskStatus::Cancelled);
     }
 
     #[test]
