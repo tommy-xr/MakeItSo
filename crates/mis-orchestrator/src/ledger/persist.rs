@@ -11,6 +11,7 @@ use mis_types::*;
 use serde::{Deserialize, Serialize};
 
 use super::{size, Effect, Ledger, TaskEntry, Worker};
+use crate::routine;
 
 /// Bump on any change this build's reader can't take; a mismatched file is set aside.
 pub const VERSION: u32 = 1;
@@ -29,6 +30,9 @@ struct Saved<'a> {
     noted: BTreeMap<WorkerId, Inventory>,
     /// In submission order, without transcripts.
     tasks: Cow<'a, [TaskEntry]>,
+    /// `Ledger::routines`.
+    #[serde(default)]
+    routines: Cow<'a, BTreeMap<String, routine::State>>,
 }
 
 /// One save: the ledger file and each transcript that may have changed.
@@ -71,6 +75,7 @@ impl Ledger {
                 .map(|(id, i)| (*id, i.clone()))
                 .collect(),
             tasks: Cow::Borrowed(&self.tasks),
+            routines: Cow::Borrowed(&self.routines),
         };
         let transcripts = (self.tasks.iter())
             .filter(|t| !written.contains(&t.task.id))
@@ -128,6 +133,7 @@ impl Ledger {
         }
         l.noted = saved.noted.into_iter().collect();
         l.tasks = saved.tasks.into_owned();
+        l.routines = saved.routines.into_owned();
         let written = (l.tasks.iter())
             .filter(|t| t.status.finished())
             .map(|t| t.task.id)

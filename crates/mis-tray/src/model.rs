@@ -202,6 +202,7 @@ mod tests {
             approvals: vec![],
             images: vec![],
             send_to: None,
+            routine: None,
         }
     }
 

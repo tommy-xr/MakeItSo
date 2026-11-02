@@ -3040,3 +3040,139 @@ async fn messaging_a_session_runs_a_task_on_its_worker() {
     };
     assert_eq!(task.send_to, Some(to));
 }
+
+/// GET `path` with bearer `auth`; the status and body.
+async fn get_json(base: &str, path: &str, auth: &str) -> (u16, String) {
+    let head = format!("GET {path} HTTP/1.1\r\nAuthorization: Bearer {auth}");
+    let (status, _, body) = http(base, &head, b"").await;
+    (status, String::from_utf8(body).unwrap())
+}
+
+/// Wait until a subscribed `client` sees `task` finish.
+async fn finished(client: &mut Ws, task: TaskId) {
+    loop {
+        if let ServerMsg::Event {
+            task: t,
+            event: AgentEvent::Finished { .. },
+            ..
+        } = recv(client).await
+        {
+            if t == task {
+                return;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn routine_files_run_as_tagged_tasks_run_now_and_pause() {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-routines-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |file: &str, text: &str| std::fs::write(dir.join(file), text).unwrap();
+    write(
+        "count.md",
+        "---\nevery: 1h\nmodel: haiku\n---\nCount the files.\n",
+    );
+    write(
+        "nightly.md",
+        "---\ncron: 0 3 * * *\npaused: true\n---\nSweep.\n",
+    );
+    write("bad.md", "no frontmatter");
+    let every = std::time::Duration::from_millis(100);
+    let base = start_app(with_read_token().with_routines(dir.clone(), every)).await;
+    let mut req = format!("{base}/ws/worker").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("authorization", "Bearer s".parse().unwrap());
+    let (mut worker, _) = connect_async(req).await.unwrap();
+    let hello = WorkerMsg::Hello {
+        id: WorkerId::new_v4(),
+        info: info("claude"),
+        running: vec![],
+    };
+    send(&mut worker, &hello).await;
+    let OrchMsg::Welcome { .. } = recv(&mut worker).await else {
+        panic!("welcome")
+    };
+    let finish = |task| WorkerMsg::Event {
+        task,
+        event: AgentEvent::Finished {
+            ok: true,
+            summary: Some("12 files".into()),
+        },
+    };
+
+    // A new `every` routine is due at once: a report-only task, tagged with its name.
+    let OrchMsg::Assign { task, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    assert!(task
+        .prompt
+        .starts_with("Routine \"count\" (scheduled run, report only)"));
+    assert!(task.prompt.ends_with("\n\nCount the files."));
+    assert_eq!(
+        (task.harness.as_str(), task.model.as_deref()),
+        ("claude", Some("haiku"))
+    );
+    let (mut client, _) = connect_async(client_req(&base, &[("authorization", "Bearer r")]))
+        .await
+        .unwrap();
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { tasks, .. } = recv(&mut client).await else {
+        panic!("status")
+    };
+    assert_eq!(tasks[0].routine.as_deref(), Some("count"));
+    send(&mut client, &ClientMsg::Subscribe).await;
+
+    // Listed with read access: schedule, last run, and the bad file's error.
+    let (status, body) = get_json(&base, "/api/routines", "r").await;
+    assert_eq!(status, 200, "{body}");
+    let list: Vec<RoutineView> = serde_json::from_str(&body).unwrap();
+    let names: Vec<_> = list.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["bad", "count", "nightly"]);
+    assert!(list[0].error.as_deref().unwrap().contains("frontmatter"));
+    let count = &list[1];
+    assert_eq!(count.trigger.as_deref(), Some("every 1h"));
+    assert_eq!(count.last_task, Some(task.id));
+    assert_eq!(count.last_status, Some(TaskStatus::Running));
+    assert!(list[2].paused && list[2].next_at.is_none() && list[2].last_at.is_none());
+
+    // Run now: acting needs the full token, and waits for the last run to finish.
+    let run = "/api/routines/count/run";
+    assert_eq!(post_json(&base, run, "r", "").await.0, 403);
+    assert_eq!(post_json(&base, run, "s", "").await.0, 409);
+    assert_eq!(
+        post_json(&base, "/api/routines/nope/run", "s", "").await.0,
+        404
+    );
+    assert_eq!(
+        post_json(&base, "/api/routines/bad/run", "s", "").await.0,
+        400
+    );
+    send(&mut worker, &finish(task.id)).await;
+    finished(&mut client, task.id).await;
+    let (status, body) = post_json(&base, run, "s", "").await;
+    assert_eq!(status, 200, "{body}");
+    let OrchMsg::Assign { task: again, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    assert!(body.contains(&again.id.to_string()), "{body}");
+    send(&mut worker, &finish(again.id)).await;
+    finished(&mut client, again.id).await;
+
+    // Resume overrides the file's `paused`; pause stops the next run.
+    let resume = "/api/routines/nightly/resume";
+    assert_eq!(post_json(&base, resume, "s", "").await.0, 204);
+    let (_, body) = get_json(&base, "/api/routines", "r").await;
+    let list: Vec<RoutineView> = serde_json::from_str(&body).unwrap();
+    assert!(!list[2].paused && list[2].next_at.is_some());
+    assert_eq!(
+        post_json(&base, "/api/routines/count/pause", "s", "")
+            .await
+            .0,
+        204
+    );
+    let (_, body) = get_json(&base, "/api/routines", "r").await;
+    let list: Vec<RoutineView> = serde_json::from_str(&body).unwrap();
+    assert!(list[1].paused && list[1].next_at.is_none());
+    std::fs::remove_dir_all(dir).unwrap();
+}

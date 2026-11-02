@@ -8,9 +8,10 @@ use std::time::Duration;
 use mis_types::*;
 use uuid::Uuid;
 
-use crate::{note, plan, summary};
+use crate::{note, plan, routine, summary};
 
 pub mod persist;
+mod routines;
 
 /// Opaque handle for one worker connection; the shell maps it to a socket.
 pub type ConnId = u64;
@@ -177,6 +178,9 @@ struct TaskEntry {
     /// Cancelled while running: its worker was told to stop it.
     #[serde(default)]
     cancel: bool,
+    /// The routine this is a run of.
+    #[serde(default)]
+    routine: Option<String>,
 }
 
 /// What a task needs from the user: an answer while its agent waits for one;
@@ -238,6 +242,7 @@ impl TaskEntry {
             offered: vec![],
             approvals: vec![],
             cancel: false,
+            routine: None,
         }
     }
 
@@ -326,6 +331,7 @@ impl TaskEntry {
             },
             images: self.images.clone(),
             send_to: self.task.send_to.clone(),
+            routine: self.routine.clone(),
         }
     }
 
@@ -432,6 +438,8 @@ pub struct Ledger {
     queue: VecDeque<TaskId>,
     /// The supervisor's last report; not saved, so a restart clears it.
     update: Update,
+    /// Each routine's schedule state, by name (see `routines`).
+    routines: BTreeMap<String, routine::State>,
 }
 
 impl Ledger {

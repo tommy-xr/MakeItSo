@@ -149,7 +149,7 @@
   #cancel-confirm { margin: 1rem 0; padding: .75rem; border: 1px solid var(--bad); }
   #cancel-confirm p { margin: 0; }
   #cancel-confirm .row { margin-bottom: 0; }
-  .busy { --s: var(--run); } .idle { --s: var(--ok); } .offline { --s: var(--dim); }
+  .busy { --s: var(--run); } .idle { --s: var(--ok); } .offline { --s: var(--dim); } .paused { --s: var(--warn); }
   /* Needs you: a lit dot before the status, red failed, orange usage limit, cyan unread. A glyph, so it stays inline (see .chip). */
   .att { margin-right: .375em; font-size: .75em; color: var(--a); text-shadow: 0 0 6px var(--a); }
   .att.failed { --a: var(--bad); } .att.limited { --a: var(--warn); } .att.unread { --a: var(--accent); } .att.approval { --a: var(--warn); }
@@ -213,6 +213,10 @@
   .worker .open { text-decoration: none; }
   .worker .open::after { content: ""; position: absolute; inset: 0; }
   .worker .task { position: relative; display: inline-block; padding: .625rem .25rem; margin: -.625rem 0; }
+  /* Routines: name and status, schedule, placement, then Run now / Pause. */
+  li.routine { padding: 1rem 0; }
+  .routine .row { margin: .5rem 0 0; }
+  .routine .err { margin-top: .25rem; overflow-wrap: anywhere; }
   /* Purpose and tools: what the planner routes on. The tools line opens above the row's link. */
   .purpose { margin-top: .25rem; overflow-wrap: anywhere; }
   .perm { margin-top: .25rem; font-size: .875rem; overflow-wrap: anywhere; }
@@ -274,6 +278,7 @@
     <a id="gauges" class="gauges" href="#workers" hidden></a>
     <nav id="tabs" role="tablist" aria-label="View" hidden>
       <a href="#" id="tab-tasks" role="tab" aria-selected="true">Tasks</a>
+      <a href="#routines" id="tab-routines" role="tab" aria-selected="false">Routines</a>
       <a href="#workers" id="tab-workers" role="tab" aria-selected="false">Workers</a>
     </nav>
   </div>
@@ -327,6 +332,10 @@
   </form>
   <details><summary>transcript</summary><pre id="log"></pre></details>
   <details><summary>ids</summary><dl id="ids"></dl></details>
+</main>
+
+<main id="routines" hidden>
+  <ul id="routine-list"></ul>
 </main>
 
 <main id="workers" hidden>
@@ -707,6 +716,7 @@ function tick() {
   for (const s of document.querySelectorAll('[data-start]')) s.textContent = fmtElapsed(Date.now() + skew - Number(s.dataset.start));
   renderStrip();
   if (++ticks % 30 === 0 && everOpen && route().view === 'workers') renderWorkers();
+  if (ticks % 10 === 0 && everOpen && route().view === 'routines' && !document.hidden) loadRoutines();
   for (const s of document.querySelectorAll('[data-asof]')) s.textContent = asOf(Number(s.dataset.asof));
 }
 // Known parts joined with ` · ` (or `sep`).
@@ -794,19 +804,19 @@ $('upd').onclick = (e) => {
   renderUpdate();
 };
 
-// `#` tasks, `#task/<id>`, `#workers`, `#worker/<id>`.
+// `#` tasks, `#task/<id>`, `#routines`, `#workers`, `#worker/<id>`.
 function route() {
   const m = location.hash.match(/^#(task|worker)\/([0-9a-f-]{36})$/);
   if (m) return { view: m[1] === 'task' ? 'detail' : 'machine', id: m[2] };
   const s = location.hash.match(/^#session\/([0-9a-f-]{36}\/(?:claude|codex)\/[0-9a-f-]{36})$/);
   if (s) return { view: 'session', id: s[1] };
-  return { view: location.hash === '#workers' ? 'workers' : 'list' };
+  return { view: { '#workers': 'workers', '#routines': 'routines' }[location.hash] || 'list' };
 }
 
 function render() {
   const r = route();
   const live = ws && ws.readyState === WebSocket.OPEN;
-  const views = { list: renderList, detail: renderDetail, workers: renderWorkers, machine: renderMachine, session: renderSession };
+  const views = { list: renderList, detail: renderDetail, routines: renderRoutines, workers: renderWorkers, machine: renderMachine, session: renderSession };
   $('auth').hidden = live || !authNeeded || !!store.get();
   $('new').hidden = readOnly; // a read-only token can't submit
   $('tabs').hidden = !everOpen;
@@ -821,7 +831,8 @@ function render() {
   else from = location.hash || '#';
   if (r.view !== 'session') closeSession();
   const onWorkers = r.view === 'workers' || r.view === 'machine' || r.view === 'session';
-  $('tab-tasks').setAttribute('aria-selected', String(!onWorkers));
+  $('tab-tasks').setAttribute('aria-selected', String(!onWorkers && r.view !== 'routines'));
+  $('tab-routines').setAttribute('aria-selected', String(r.view === 'routines'));
   $('tab-workers').setAttribute('aria-selected', String(onWorkers));
   $('clear').hidden = !store.get();
   views[r.view](r.id);
@@ -913,7 +924,7 @@ function heldRows(key, list) {
 function taskRows(ul, rows) {
   ul.replaceChildren(...rows.map(([depth, t]) => el('li', { className: [depth && 'reply', t.status === 'cancelled' && 'cancelled'].filter(Boolean).join(' '), ...(depth ? { style: `--depth: ${depth}` } : {}) },
     el('a', { href: `#task/${t.id}` },
-      el('div', { className: 'head clamp2' }, depth ? '↳ ' : '', attDot(t), chip(t.status), sentTo(t), t.prompt),
+      el('div', { className: 'head clamp2' }, depth ? '↳ ' : '', attDot(t), chip(t.status), sentTo(t), ...routineHead(t)),
       el('div', { className: 'sub dim' }, ...dots([...placement(t), clock(t), tokensOf(t), linksBrief(t)])),
       (t.status === 'running' || t.status === 'queued') && t.activity && t.activity !== 'queued'
         ? el('div', { className: 'activity' }, t.activity) : '',
@@ -921,6 +932,8 @@ function taskRows(ul, rows) {
   if (!rows.length) ul.append(el('li', { className: 'dim' }, 'no tasks yet'));
 }
 
+// A routine run's row: `↻ <routine> · ` and its own prompt, past the report-only paragraph the orchestrator puts first.
+const routineHead = (t) => (t.routine ? [`↻ ${t.routine} · `, t.prompt.split('\n\n').slice(1).join('\n\n') || t.prompt] : [t.prompt]);
 // `↪ <session title> · ` before a message to one of a worker's sessions; its link back.
 const sentTo = (t) => (t.send_to ? `↪ ${t.send_to.title || short(t.send_to.session)} · ` : '');
 const sessionHref = (t) => `#session/${t.worker}/${t.harness}/${t.send_to.session}`;
@@ -1070,6 +1083,7 @@ function renderDetail(id) {
   const replies = tasks.filter((x) => x.parent === id);
   $('thread').replaceChildren(...(t && t.parent ? [el('a', { href: `#task/${t.parent}`, className: 'thread' }, `↑ reply to ${short(t.parent)}`)] : []),
     ...(t && t.send_to && t.worker ? [el('a', { href: sessionHref(t), className: 'thread' }, `↪ session: ${t.send_to.title || short(t.send_to.session)}`)] : []),
+    ...(t && t.routine ? [el('a', { href: '#routines', className: 'thread' }, `↻ routine: ${t.routine}`)] : []),
     ...replies.map((r) => el('a', { href: `#task/${r.id}`, className: 'thread' }, `↳ ${short(r.id)} ${r.prompt.split('\n')[0]}`)));
   $('reply').hidden = readOnly || !t || !['done', 'failed', 'cancelled'].includes(t.status);
   renderCancel(t);
@@ -1334,6 +1348,59 @@ const permRows = (w) => {
     // Codex runs any command, inside a sandbox that only lets it write the folders.
     el('dd', {}, list(p.commands) + (w.info.harnesses.includes('codex') ? `\ncodex: any, sandboxed${p.mode === 'ask' ? '; never asks' : ''}` : ''))];
 };
+
+// Routine files and their schedules, fetched on open, every 10 s while shown, and after each action.
+// The last run's status comes from the live task list when it's there.
+let routines = null; // { list } | { error } | null while reading
+const routineErr = new Map(), routineBusy = new Set(); // name -> why its last action failed; names with an action in flight
+let routinesAsked = null;
+async function loadRoutines() {
+  const ask = {};
+  routinesAsked = ask;
+  let got;
+  try {
+    const r = await fetch('/api/routines', { headers: authHeaders() });
+    got = r.ok ? { list: await r.json() } : { error: (await r.text()) || `error ${r.status}` };
+  } catch { got = { error: 'couldn’t reach the orchestrator' }; }
+  if (routinesAsked !== ask) return;
+  routines = got;
+  if (route().view === 'routines') renderRoutines();
+}
+async function routineAct(name, action) {
+  routineBusy.add(name);
+  renderRoutines();
+  try {
+    const r = await fetch(`/api/routines/${encodeURIComponent(name)}/${action}`, { method: 'POST', headers: authHeaders() });
+    if (r.ok) routineErr.delete(name); else routineErr.set(name, (await r.text()) || `error ${r.status}`);
+  } catch { routineErr.set(name, 'couldn’t reach the orchestrator'); }
+  routineBusy.delete(name);
+  await loadRoutines();
+}
+// `in 2h`, `due`, or nothing when it won't run (paused).
+const nextText = (at, now) => (num(at) === null ? '' : at <= now ? 'due' : `next in ${span(at - now)}`);
+function routineRow(r, now) {
+  const t = r.last_task && tasks.find((x) => x.id === r.last_task), status = (t && t.status) || r.last_status;
+  const last = num(r.last_at) === null ? 'never run'
+    : el('a', { href: r.last_task ? `#task/${r.last_task}` : '#' }, `last ${ago(now - r.last_at)}`);
+  const busy = routineBusy.has(r.name), err = routineErr.get(r.name) || r.error;
+  const actions = readOnly || !r.trigger ? '' : el('div', { className: 'row' },
+    el('button', { disabled: busy, onclick: () => routineAct(r.name, 'run') }, 'Run now'),
+    el('button', { type: 'button', disabled: busy, onclick: () => routineAct(r.name, r.paused ? 'resume' : 'pause') }, r.paused ? 'Resume' : 'Pause'));
+  return el('li', { className: 'routine' },
+    el('div', { className: 'head' }, status ? chip(status) : '', r.paused ? chip('paused') : '', el('strong', {}, r.name)),
+    el('div', { className: 'sub dim' }, ...dots([r.trigger || r.file, nextText(r.next_at, now), last])),
+    r.trigger ? el('div', { className: 'sub dim' }, ...dots([r.harness || 'claude', r.model, r.worker, r.cwd && folder(r.cwd)])) : '',
+    err ? el('div', { className: 'err bad' }, err) : '',
+    actions);
+}
+function renderRoutines() {
+  if (!everOpen) return; // fetch once connected, with the token in place
+  if (!routines) { $('routine-list').replaceChildren(el('li', { className: 'dim' }, 'reading…')); if (!routinesAsked) loadRoutines(); return; }
+  const now = Date.now() + skew;
+  if (routines.error) { $('routine-list').replaceChildren(el('li', { className: 'bad' }, routines.error)); return; }
+  $('routine-list').replaceChildren(...routines.list.map((r) => routineRow(r, now)));
+  if (!routines.list.length) $('routine-list').append(el('li', { className: 'dim' }, 'no routines: add a .md file to the orchestrator’s routines folder'));
+}
 
 function renderWorkers() {
   renderNotify();
@@ -1720,7 +1787,7 @@ for (const f of [$('prompt'), $('reply-text')]) f.addEventListener('input', () =
 $('prompt').value = drafts.get('draft:new');
 // Leaving a view stops dictation into it and any readback.
 // A press's click has landed once the view changes: nothing left to hold for.
-window.onhashchange = () => { micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; render(); };
+window.onhashchange = () => { micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); render(); };
 setInterval(tick, 1000);
 
 // Push notifications: offered where the browser has push (on iOS, only once added to the Home Screen),
