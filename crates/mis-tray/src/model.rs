@@ -260,7 +260,7 @@ fn need_label(t: &TaskSummary, workers: &[WorkerSummary]) -> String {
     let on = (t.attention == Attention::Approval)
         .then(|| host(workers, t.worker))
         .flatten();
-    let what = first_line(&t.prompt, 30);
+    let what = first_line(&about(t), 30);
     [Some(why.as_str()), on, Some(what.as_str())]
         .into_iter()
         .flatten()
@@ -271,9 +271,10 @@ fn need_label(t: &TaskSummary, workers: &[WorkerSummary]) -> String {
 /// `● counting tests · mac-mini · 3m12s`: what it does (else its prompt), where, how long.
 fn running_label(t: &TaskSummary, f: &Fleet) -> String {
     let activity = t.activity.strip_prefix("status: ").unwrap_or(&t.activity);
+    let about = about(t);
     let what = first_line(
         if activity.is_empty() {
-            &t.prompt
+            &about
         } else {
             activity
         },
@@ -300,11 +301,19 @@ fn task_label(t: &TaskSummary, now_ms: u64) -> String {
         fmt_elapsed(t.finished_at.unwrap_or(now_ms).saturating_sub(s)) + " "
     });
     let activity = t.activity.strip_prefix("status: ").unwrap_or(&t.activity);
+    let about = about(t);
     let what = match t.status {
         TaskStatus::Running if !activity.is_empty() => activity,
-        _ => &t.prompt,
+        _ => &about,
     };
     format!("{} {time} {}", glyph(t.status), first_line(what, 50))
+}
+
+/// What a task is for: `↻ <routine>` for a routine run (its prompt is boilerplate), else its prompt.
+fn about(t: &TaskSummary) -> String {
+    t.routine
+        .as_ref()
+        .map_or_else(|| t.prompt.clone(), |r| format!("↻ {r}"))
 }
 
 fn glyph(s: TaskStatus) -> char {
@@ -703,6 +712,7 @@ mod tests {
         let mini = host(50, "mac-mini", true, &[]);
         let mut unread = task(1, Done, "done");
         unread.attention = Attention::Unread;
+        unread.routine = Some("pr-grooming".into());
         let mut failed = task(2, Failed, "FAILED");
         failed.attention = Attention::Failed;
         let mut asks = task(3, Running, "> Bash make");
@@ -736,7 +746,7 @@ mod tests {
                 "⚠ approve Bash: python3 make.py · mac-mini · tune jump physics in the func…",
                 "✗ failed · prompt 2",
                 "⚠ usage limit · prompt 6",
-                "✓ unread · prompt 1",
+                "✓ unread · ↻ pr-grooming",
                 "Running",
                 "● counting tests · mac-mini · 4m00s",
                 "Recent",
