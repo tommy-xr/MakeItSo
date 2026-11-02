@@ -11,7 +11,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use mis_types::{first_line, github_link, mcp, AgentEvent, Link, LinkKind, TaskId};
+use mis_types::{first_line, github_link, mcp, AgentEvent, Inventory, Link, LinkKind, TaskId};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
@@ -22,13 +22,49 @@ const MAX_LINE_CHARS: usize = 200;
 /// Longest evidence URL accepted.
 const MAX_URL_BYTES: usize = 2048;
 
-/// Tell the agent the tools exist.
-pub fn with_hint(prompt: &str) -> String {
+/// Prefix the prompt with notes for the agent: the reporting tools, when the task's
+/// MCP server runs, and what this machine offers (`machine_hint`).
+pub fn with_hint(prompt: &str, tools: bool, machine: &str) -> String {
+    let mut notes = vec![];
+    if tools {
+        notes.push(
+            "(You have a `report_status` tool: call it with a one-line status at each major \
+             step so the user can follow along. After you push, open a PR, run tests or CI, or \
+             capture screenshots, call `report_evidence` once for each (a screenshot without an \
+             https URL: a note naming its path).)"
+                .to_string(),
+        );
+    }
+    if !machine.is_empty() {
+        notes.push(format!("({machine})"));
+    }
+    notes.push(prompt.to_string());
+    notes.join("\n\n")
+}
+
+/// What this machine offers `harness`, so the agent uses it rather than assuming it's
+/// missing, e.g. "This machine has MCP servers: blender; apps: Blender 4.5, ffmpeg 7.0.
+/// Use them when the request calls for them." Empty if it has neither.
+pub fn machine_hint(inv: &Inventory, harness: &str) -> String {
+    let mut parts = vec![];
+    if let Some(names) = inv.mcp.get(harness).filter(|n| !n.is_empty()) {
+        parts.push(format!("MCP servers: {}", names.join(", ")));
+    }
+    if !inv.apps.is_empty() {
+        let apps: Vec<String> = (inv.apps.iter())
+            .map(|a| match &a.version {
+                Some(v) => format!("{} {v}", a.name),
+                None => a.name.clone(),
+            })
+            .collect();
+        parts.push(format!("apps: {}", apps.join(", ")));
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
     format!(
-        "(You have a `report_status` tool: call it with a one-line status at each major \
-         step so the user can follow along. After you push, open a PR, run tests or CI, or \
-         capture screenshots, call `report_evidence` once for each (a screenshot without an \
-         https URL: a note naming its path).)\n\n{prompt}"
+        "This machine has {}. Use them when the request calls for them.",
+        parts.join("; ")
     )
 }
 
@@ -244,6 +280,32 @@ async fn post(State(ctx): State<Ctx>, headers: HeaderMap, body: Bytes) -> Respon
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hint_names_this_harness_mcp_and_apps() {
+        let inv = Inventory {
+            mcp: [
+                ("claude".into(), vec!["blender".into()]),
+                ("codex".into(), vec!["figma".into()]),
+            ]
+            .into(),
+            apps: vec![mis_types::InstalledApp {
+                name: "Blender".into(),
+                version: Some("4.5".into()),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            machine_hint(&inv, "claude"),
+            "This machine has MCP servers: blender; apps: Blender 4.5. \
+             Use them when the request calls for them."
+        );
+        assert!(machine_hint(&inv, "codex").contains("MCP servers: figma;"));
+        assert_eq!(machine_hint(&Inventory::default(), "claude"), "");
+        assert_eq!(with_hint("go", false, ""), "go");
+        assert_eq!(with_hint("go", false, "m"), "(m)\n\ngo");
+        assert!(with_hint("go", true, "m").starts_with("(You have a `report_status`"));
+    }
 
     fn call(method: &str, params: Value) -> (Option<Value>, Option<AgentEvent>) {
         handle(
