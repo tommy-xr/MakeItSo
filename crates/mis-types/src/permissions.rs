@@ -59,3 +59,11 @@ pub struct Permissions {
     /// Shell command prefixes allowed, e.g. "python3", "git log".
     pub commands: Vec<String>,
 }
+
+impl Permissions {
+    /// Whether `commands` allows `cmd`, a word at a time as claude's `Bash(<c> *)`
+    /// does: "git log" covers "git log -1" but not "git logx".
+    pub fn allows_command(&self, cmd: &str) -> bool {
+        (self.commands.iter()).any(|c| cmd == c || cmd.starts_with(&format!("{c} ")))
+    }
+}

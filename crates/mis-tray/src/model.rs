@@ -547,6 +547,7 @@ mod tests {
             images: vec![],
             send_to: None,
             routine: None,
+            routine_mode: None,
         }
     }
 

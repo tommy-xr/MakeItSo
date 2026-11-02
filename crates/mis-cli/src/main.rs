@@ -106,15 +106,23 @@ enum Cmd {
 enum RoutineCmd {
     /// Start a routine now, whatever its schedule.
     Run { name: String },
+    /// Let a routine whose file says `act: true` act, not just say what it would do.
+    Live { name: String },
+    /// Back to listing what it would do, acting on nothing.
+    DryRun { name: String },
 }
 
-/// `mis routines` (GET /api/routines) or `mis routines run <name>`.
+/// `mis routines` (GET /api/routines), or `run`, `live` or `dry-run <name>`.
 async fn routines(args: &Args, cmd: Option<&RoutineCmd>) -> Result<()> {
     let base = http_url(&args.url);
     let client = reqwest::Client::new();
     let mut req = match cmd {
         None => client.get(format!("{base}/api/routines")),
         Some(RoutineCmd::Run { name }) => client.post(format!("{base}/api/routines/{name}/run")),
+        Some(RoutineCmd::Live { name }) => client.post(format!("{base}/api/routines/{name}/live")),
+        Some(RoutineCmd::DryRun { name }) => {
+            client.post(format!("{base}/api/routines/{name}/dry-run"))
+        }
     };
     let access = access_headers(
         args.cf_access_client_id.as_deref(),
@@ -147,6 +155,8 @@ async fn routines(args: &Args, cmd: Option<&RoutineCmd>) -> Result<()> {
             let v: serde_json::Value = serde_json::from_str(&body)?;
             println!("{name}: started task {}", v["task"].as_str().unwrap_or("?"));
         }
+        Some(RoutineCmd::Live { name }) => println!("{name}: live, its next runs act"),
+        Some(RoutineCmd::DryRun { name }) => println!("{name}: dry run, acting on nothing"),
     }
     Ok(())
 }
@@ -156,6 +166,11 @@ async fn routines(args: &Args, cmd: Option<&RoutineCmd>) -> Result<()> {
 fn routine_line(r: &RoutineView, now: u64) -> String {
     let mut parts = vec![r.name.clone()];
     parts.extend(r.trigger.clone());
+    match r.mode {
+        Some(RoutineMode::DryRun) => parts.push("dry run".into()),
+        Some(RoutineMode::Live) => parts.push("LIVE".into()),
+        Some(RoutineMode::Report) | None => {}
+    }
     if r.paused {
         parts.push("paused".into());
     }
@@ -938,6 +953,7 @@ mod tests {
             images: vec![],
             send_to: None,
             routine: None,
+            routine_mode: None,
         }
     }
 
@@ -1131,6 +1147,7 @@ mod tests {
             worker: None,
             cwd: None,
             paused: false,
+            mode: Some(RoutineMode::Report),
             next_at: Some(3_600_000 + 65_000),
             last_at: Some(3_600_000 - 192_000),
             last_task: Some(task),
@@ -1148,6 +1165,8 @@ mod tests {
             routine_line(&r, 3_600_000),
             "pr-grooming · every 6h · paused · last 3m12s ago: done (ab12cd34)\n    error: no worker named mac"
         );
+        r.mode = Some(RoutineMode::Live);
+        assert!(routine_line(&r, 0).starts_with("pr-grooming · every 6h · LIVE · paused"));
     }
 
     #[test]

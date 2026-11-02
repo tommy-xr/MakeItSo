@@ -131,6 +131,10 @@ pub struct Task {
     /// its id, and the worker runs it in that session's own folder.
     #[serde(default)]
     pub send_to: Option<SendTo>,
+    /// Tools may only read (a routine run that mustn't act); harnesses that can't
+    /// enforce it rely on the prompt.
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -507,6 +511,22 @@ pub struct TaskSummary {
     /// The routine this task is a run of.
     #[serde(default)]
     pub routine: Option<String>,
+    /// How that run was allowed to act.
+    #[serde(default)]
+    pub routine_mode: Option<RoutineMode>,
+}
+
+/// How a routine's runs may act: `act: true` in its file runs dry until the user
+/// switches it live.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutineMode {
+    /// Investigates and reports; its file doesn't say `act: true`.
+    Report,
+    /// Lists the actions it would take, taking none.
+    DryRun,
+    /// Acts within its instructions.
+    Live,
 }
 
 /// A routine file as `GET /api/routines` lists it, with its schedule.
@@ -527,6 +547,9 @@ pub struct RoutineView {
     #[serde(default)]
     pub cwd: Option<String>,
     pub paused: bool,
+    /// None for a bad file.
+    #[serde(default)]
+    pub mode: Option<RoutineMode>,
     /// Unix millis; None while paused, for a bad file, or a cron that never matches.
     pub next_at: Option<u64>,
     pub last_at: Option<u64>,
@@ -977,6 +1000,7 @@ mod tests {
             images: vec![],
             send_to: None,
             routine: None,
+            routine_mode: None,
         }
     }
 

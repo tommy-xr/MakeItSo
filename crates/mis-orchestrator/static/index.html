@@ -217,6 +217,12 @@
   li.routine { padding: 1rem 0; }
   .routine .row { margin: .5rem 0 0; }
   .routine .err { margin-top: .25rem; overflow-wrap: anywhere; }
+  /* Mode: report dim, dry run orange, live filled red so it can't be missed. */
+  .chip.mode-report { --s: var(--dim); } .chip.mode-dry_run { --s: var(--warn); }
+  .chip.mode-live { --s: var(--bad); background: var(--bad); border-color: var(--bad); color: var(--bg); box-shadow: 0 0 8px var(--bad); }
+  .golive { margin: .5rem 0 0; padding: .75rem; border: 1px solid var(--bad); }
+  .golive p { margin: 0; overflow-wrap: anywhere; }
+  .golive .row { margin: .5rem 0 0; }
   /* Purpose and tools: what the planner routes on. The tools line opens above the row's link. */
   .purpose { margin-top: .25rem; overflow-wrap: anywhere; }
   .perm { margin-top: .25rem; font-size: .875rem; overflow-wrap: anywhere; }
@@ -932,8 +938,9 @@ function taskRows(ul, rows) {
   if (!rows.length) ul.append(el('li', { className: 'dim' }, 'no tasks yet'));
 }
 
-// A routine run's row: `↻ <routine> · ` and its own prompt, past the report-only paragraph the orchestrator puts first.
-const routineHead = (t) => (t.routine ? [`↻ ${t.routine} · `, t.prompt.split('\n\n').slice(1).join('\n\n') || t.prompt] : [t.prompt]);
+// A routine run's row: `↻ <routine> · `, the mode it ran in, then its own prompt, past the paragraph of rules the orchestrator puts first.
+const routineHead = (t) => (t.routine ? [`↻ ${t.routine} · `, modeChip(t.routine_mode), t.prompt.split('\n\n').slice(1).join('\n\n') || t.prompt] : [t.prompt]);
+const modeChip = (m) => (m ? el('span', { className: `chip mode-${m}` }, m.replace('_', ' ')) : '');
 // `↪ <session title> · ` before a message to one of a worker's sessions; its link back.
 const sentTo = (t) => (t.send_to ? `↪ ${t.send_to.title || short(t.send_to.session)} · ` : '');
 const sessionHref = (t) => `#session/${t.worker}/${t.harness}/${t.send_to.session}`;
@@ -1083,7 +1090,7 @@ function renderDetail(id) {
   const replies = tasks.filter((x) => x.parent === id);
   $('thread').replaceChildren(...(t && t.parent ? [el('a', { href: `#task/${t.parent}`, className: 'thread' }, `↑ reply to ${short(t.parent)}`)] : []),
     ...(t && t.send_to && t.worker ? [el('a', { href: sessionHref(t), className: 'thread' }, `↪ session: ${t.send_to.title || short(t.send_to.session)}`)] : []),
-    ...(t && t.routine ? [el('a', { href: '#routines', className: 'thread' }, `↻ routine: ${t.routine}`)] : []),
+    ...(t && t.routine ? [el('a', { href: '#routines', className: 'thread' }, `↻ routine: ${t.routine}`, t.routine_mode ? ` · ${t.routine_mode.replace('_', ' ')}` : '')] : []),
     ...replies.map((r) => el('a', { href: `#task/${r.id}`, className: 'thread' }, `↳ ${short(r.id)} ${r.prompt.split('\n')[0]}`)));
   $('reply').hidden = readOnly || !t || !['done', 'failed', 'cancelled'].includes(t.status);
   renderCancel(t);
@@ -1354,6 +1361,7 @@ const permRows = (w) => {
 let routines = null; // { list } | { error } | null while reading
 const routineErr = new Map(), routineBusy = new Set(); // name -> why its last action failed; names with an action in flight
 let routinesAsked = null;
+let routineLiveAsk = null; // name of the routine whose go-live confirm is open
 async function loadRoutines() {
   const ask = {};
   routinesAsked = ask;
@@ -1383,15 +1391,26 @@ function routineRow(r, now) {
   const last = num(r.last_at) === null ? 'never run'
     : el('a', { href: r.last_task ? `#task/${r.last_task}` : '#' }, `last ${ago(now - r.last_at)}`);
   const busy = routineBusy.has(r.name), err = routineErr.get(r.name) || r.error;
+  const asking = routineLiveAsk === r.name && r.mode === 'dry_run';
+  const ask = (name) => { routineLiveAsk = name; renderRoutines(); };
+  // Dry run: going live asks first, in the page. Live: back to dry run at once.
+  const modeBtn = { dry_run: el('button', { type: 'button', className: 'danger', disabled: busy || asking, onclick: () => ask(r.name) }, 'Go live'),
+    live: el('button', { type: 'button', disabled: busy, onclick: () => routineAct(r.name, 'dry-run') }, 'Back to dry run') }[r.mode] || '';
   const actions = readOnly || !r.trigger ? '' : el('div', { className: 'row' },
     el('button', { disabled: busy, onclick: () => routineAct(r.name, 'run') }, 'Run now'),
-    el('button', { type: 'button', disabled: busy, onclick: () => routineAct(r.name, r.paused ? 'resume' : 'pause') }, r.paused ? 'Resume' : 'Pause'));
+    el('button', { type: 'button', disabled: busy, onclick: () => routineAct(r.name, r.paused ? 'resume' : 'pause') }, r.paused ? 'Resume' : 'Pause'),
+    modeBtn);
+  const confirm = readOnly || !asking ? '' : el('div', { className: 'golive' },
+    el('p', {}, `Let ${r.name} act? Its runs will do what its file says (push, comment, label) instead of listing it. They still never merge.`),
+    el('div', { className: 'row' },
+      el('button', { type: 'button', className: 'danger', disabled: busy, onclick: () => { routineLiveAsk = null; routineAct(r.name, 'live'); } }, 'Yes, go live'),
+      el('button', { type: 'button', onclick: () => ask(null) }, 'Keep dry run')));
   return el('li', { className: 'routine' },
-    el('div', { className: 'head' }, status ? chip(status) : '', r.paused ? chip('paused') : '', el('strong', {}, r.name)),
+    el('div', { className: 'head' }, status ? chip(status) : '', r.paused ? chip('paused') : '', modeChip(r.mode), el('strong', {}, r.name)),
     el('div', { className: 'sub dim' }, ...dots([r.trigger || r.file, nextText(r.next_at, now), last])),
     r.trigger ? el('div', { className: 'sub dim' }, ...dots([r.harness || 'claude', r.model, r.worker, r.cwd && folder(r.cwd)])) : '',
     err ? el('div', { className: 'err bad' }, err) : '',
-    actions);
+    actions, confirm);
 }
 function renderRoutines() {
   if (!everOpen) return; // fetch once connected, with the token in place

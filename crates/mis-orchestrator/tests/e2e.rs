@@ -3176,3 +3176,97 @@ async fn routine_files_run_as_tagged_tasks_run_now_and_pause() {
     assert!(list[1].paused && list[1].next_at.is_none());
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn acting_routine_runs_dry_until_switched_live() {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-act-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |file: &str, text: &str| std::fs::write(dir.join(file), text).unwrap();
+    write("fix.md", "---\nevery: 1h\nact: true\n---\nFix lint.\n");
+    write("look.md", "---\nevery: 1h\npaused: true\n---\nLook.\n");
+    let every = std::time::Duration::from_millis(100);
+    let base = start_app(with_read_token().with_routines(dir.clone(), every)).await;
+    let mut req = format!("{base}/ws/worker").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("authorization", "Bearer s".parse().unwrap());
+    let (mut worker, _) = connect_async(req).await.unwrap();
+    let hello = WorkerMsg::Hello {
+        id: WorkerId::new_v4(),
+        info: info("claude"),
+        running: vec![],
+    };
+    send(&mut worker, &hello).await;
+    let OrchMsg::Welcome { .. } = recv(&mut worker).await else {
+        panic!("welcome")
+    };
+    let (mut client, _) = connect_async(client_req(&base, &[("authorization", "Bearer r")]))
+        .await
+        .unwrap();
+    send(&mut client, &ClientMsg::Subscribe).await;
+    let finish = |task| WorkerMsg::Event {
+        task,
+        event: AgentEvent::Finished {
+            ok: true,
+            summary: None,
+        },
+    };
+
+    // `act: true` alone: a dry run, read-only.
+    let OrchMsg::Assign { task, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    assert!(task
+        .prompt
+        .starts_with("Routine \"fix\" (scheduled run, dry run)"));
+    assert!(task.read_only);
+    send(&mut worker, &finish(task.id)).await;
+    finished(&mut client, task.id).await;
+    let mode = |name: &'static str| {
+        let base = base.clone();
+        async move {
+            let (_, body) = get_json(&base, "/api/routines", "r").await;
+            let list: Vec<RoutineView> = serde_json::from_str(&body).unwrap();
+            list.into_iter().find(|r| r.name == name).unwrap().mode
+        }
+    };
+    assert_eq!(mode("fix").await, Some(RoutineMode::DryRun));
+    assert_eq!(mode("look").await, Some(RoutineMode::Report));
+
+    // Going live: full token only, and only for a file that says `act: true`.
+    let live = "/api/routines/fix/live";
+    assert_eq!(post_json(&base, live, "r", "").await.0, 403);
+    let (status, body) = post_json(&base, "/api/routines/look/live", "s", "").await;
+    assert_eq!((status, body.contains("act: true")), (400, true), "{body}");
+    let dry = "/api/routines/look/dry-run";
+    assert_eq!(post_json(&base, dry, "s", "").await.0, 400);
+    assert_eq!(post_json(&base, live, "s", "").await.0, 204);
+    assert_eq!(mode("fix").await, Some(RoutineMode::Live));
+
+    // A live run may act, and its task says so.
+    let (status, body) = post_json(&base, "/api/routines/fix/run", "s", "").await;
+    assert_eq!(status, 200, "{body}");
+    let OrchMsg::Assign { task, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    assert!(task
+        .prompt
+        .starts_with("Routine \"fix\" (scheduled run, live)"));
+    assert!(!task.read_only);
+    send(&mut client, &ClientMsg::Status).await;
+    let tasks = loop {
+        if let ServerMsg::Status { tasks, .. } = recv(&mut client).await {
+            break tasks;
+        }
+    };
+    let modes = |id| tasks.iter().find(|t| t.id == id).unwrap().routine_mode;
+    assert_eq!(modes(task.id), Some(RoutineMode::Live));
+
+    assert_eq!(
+        post_json(&base, "/api/routines/fix/dry-run", "s", "")
+            .await
+            .0,
+        204
+    );
+    assert_eq!(mode("fix").await, Some(RoutineMode::DryRun));
+    std::fs::remove_dir_all(dir).unwrap();
+}
