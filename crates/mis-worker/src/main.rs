@@ -4,6 +4,7 @@
 mod approvals;
 mod config;
 mod deliver;
+mod evidence;
 mod feed;
 mod inventory;
 mod live;
@@ -860,7 +861,11 @@ async fn run(
         .is_some_and(|p| p.mode == PermissionMode::Ask)
         && agent.name() == "claude";
     // Without the server the task still runs, just without its reporting tools.
-    let server = mcp::serve(id, tx.clone(), ask.then(|| ctx.approvals.clone()))
+    let files = evidence::Files {
+        cwd: PathBuf::from(&cwd),
+        roots: ctx.roots.clone(),
+    };
+    let server = mcp::serve(id, tx.clone(), ask.then(|| ctx.approvals.clone()), files)
         .await
         .inspect_err(|e| tracing::warn!(%id, "no mcp server: {e}"))
         .ok();

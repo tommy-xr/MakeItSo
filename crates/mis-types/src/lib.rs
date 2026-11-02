@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 mod access;
 pub use access::access_headers;
+pub mod evidence;
+pub use evidence::{Evidence, EvidenceDraft, TaskResult};
 mod image;
 mod inventory;
 pub use image::{ImageFile, ImageKind, MAX_IMAGES, MAX_IMAGE_BYTES};
@@ -203,6 +205,14 @@ pub enum AgentEvent {
     },
     /// Proof of work the agent posted via the worker's `report_evidence` tool.
     Evidence(Link),
+    /// A file the agent attached with `report_evidence` (screenshot, table,
+    /// output). Worker to orchestrator only: the orchestrator stores it as a
+    /// `TaskSummary::evidence` item, off the transcript, so clients predating it
+    /// still parse every transcript.
+    Artifact(EvidenceDraft),
+    /// The agent's closing summary (`report_result`); kept off the transcript
+    /// like `Artifact`, and shown as `TaskSummary::result`.
+    Result(TaskResult),
     /// The agent hit a usage limit; `resets_at` is Unix seconds when it lifts, if known.
     Limited {
         #[serde(default)]
@@ -519,6 +529,12 @@ pub struct TaskSummary {
     /// eviction nor summarizing loses them.
     #[serde(default)]
     pub links: Vec<Link>,
+    /// Files the agent attached, oldest first; each served at `/api/evidence/<file id>`.
+    #[serde(default)]
+    pub evidence: Vec<Evidence>,
+    /// The agent's own summary; when set, `summary` is its one-line form.
+    #[serde(default)]
+    pub result: Option<TaskResult>,
     #[serde(default)]
     pub attention: Attention,
     /// Queued only because every online worker that could run it is out of
@@ -1009,6 +1025,7 @@ mod tests {
         assert!(old.activity.is_empty() && old.links.is_empty());
         assert_eq!(old.attention, Attention::None);
         assert!(old.images.is_empty());
+        assert!(old.evidence.is_empty() && old.result.is_none());
         // Clients and orchestrators predating images still parse.
         let submit: ClientMsg =
             serde_json::from_str(r#"{"type":"submit","prompt":"p","cwd":null,"harness":null}"#)
@@ -1081,6 +1098,8 @@ mod tests {
             activity: activity.into(),
             parent: None,
             links: vec![],
+            evidence: vec![],
+            result: None,
             attention: Attention::None,
             blocked_until: None,
             approvals: vec![],

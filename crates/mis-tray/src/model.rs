@@ -547,6 +547,8 @@ mod tests {
             activity: activity.into(),
             parent: None,
             links: vec![],
+            evidence: vec![],
+            result: None,
             attention: Default::default(),
             blocked_until: None,
             approvals: vec![],

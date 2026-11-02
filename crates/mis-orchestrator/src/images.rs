@@ -50,6 +50,32 @@ pub fn expired(
         .collect()
 }
 
+/// Create `dir`, readable only by this user.
+pub(crate) fn private_dir(dir: &Path) -> anyhow::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder
+        .create(dir)
+        .with_context(|| format!("creating {}", dir.display()))
+}
+
+/// Delete the files in `dir` older than `max_age`; how many went.
+pub(crate) fn sweep_dir(dir: &Path, now: SystemTime, max_age: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let files = entries
+        .flatten()
+        .filter_map(|e| Some((e.path(), e.metadata().ok()?.modified().ok()?)))
+        .collect();
+    expired(files, now, max_age)
+        .into_iter()
+        .filter(|p| std::fs::remove_file(p).is_ok())
+        .count()
+}
+
 pub struct Images {
     dir: PathBuf,
 }
@@ -57,13 +83,7 @@ pub struct Images {
 impl Images {
     /// Use `dir`, creating it readable only by this user.
     pub fn open(dir: PathBuf) -> anyhow::Result<Self> {
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-        builder
-            .create(&dir)
-            .with_context(|| format!("creating {}", dir.display()))?;
+        private_dir(&dir)?;
         Ok(Self { dir })
     }
 
@@ -112,17 +132,7 @@ impl Images {
 
     /// Delete expired files; how many went.
     pub fn sweep(&self, now: SystemTime) -> usize {
-        let Ok(entries) = std::fs::read_dir(&self.dir) else {
-            return 0;
-        };
-        let files = entries
-            .flatten()
-            .filter_map(|e| Some((e.path(), e.metadata().ok()?.modified().ok()?)))
-            .collect();
-        expired(files, now, MAX_AGE)
-            .into_iter()
-            .filter(|p| std::fs::remove_file(p).is_ok())
-            .count()
+        sweep_dir(&self.dir, now, MAX_AGE)
     }
 }
 

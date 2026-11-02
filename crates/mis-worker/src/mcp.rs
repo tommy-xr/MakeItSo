@@ -1,21 +1,26 @@
-//! Loopback MCP server for one task: the agent calls `report_status` and
-//! `report_evidence`, and the worker forwards them as `AgentEvent::Status` and
-//! `AgentEvent::Evidence`. In ask mode claude also calls `approve` about tool
+//! Loopback MCP server for one task: the agent calls `report_status`,
+//! `report_evidence` and `report_result`, and the worker forwards them as
+//! `AgentEvent::Status`, `Evidence` or `Artifact` (a file from its folder, read
+//! here), and `Result`. In ask mode claude also calls `approve` about tool
 //! calls the rules don't allow (`approvals`). Streamable HTTP, JSON replies
 //! only (no SSE): POST `/mcp` with `Authorization: Bearer <token>`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use mis_types::{first_line, github_link, mcp, AgentEvent, Inventory, Link, LinkKind, TaskId};
+use mis_types::evidence::{DraftItem, EvidenceDraft, MAX_EVIDENCE, MAX_TASK_BYTES};
+use mis_types::{
+    first_line, github_link, mcp, AgentEvent, Inventory, Link, LinkKind, TaskId, TaskResult,
+};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use crate::approvals::Approvals;
+use crate::evidence::{self, Files, Reader};
 
 /// Longest status, evidence title or test detail kept; each is one line.
 const MAX_LINE_CHARS: usize = 200;
@@ -28,10 +33,11 @@ pub fn with_hint(prompt: &str, tools: bool, machine: &str) -> String {
     let mut notes = vec![];
     if tools {
         notes.push(
-            "(You have a `report_status` tool: call it with a one-line status at each major \
-             step so the user can follow along. After you push, open a PR, run tests or CI, or \
-             capture screenshots, call `report_evidence` once for each (a screenshot without an \
-             https URL: a note naming its path).)"
+            "(You have reporting tools. `report_status`: a one-line status at each major step. \
+             `report_evidence`: once for each push, PR, test or CI run; for a visual or \
+             performance change, capture before AND after (screenshots, benchmark numbers) and \
+             attach them (compare, table). `report_result`: once at the end, the outcome as a \
+             headline and up to 3 points.)"
                 .to_string(),
         );
     }
@@ -105,13 +111,34 @@ fn is_approve(req: &Value) -> bool {
     req["method"] == "tools/call" && req["params"]["name"] == mis_agent::APPROVE_TOOL
 }
 
+/// Files the task's agent attached so far, against `MAX_EVIDENCE` and `MAX_TASK_BYTES`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Used {
+    pub items: usize,
+    pub bytes: u64,
+}
+
+/// About what `draft` stores: media decoded, tables as JSON, output as text.
+fn stored_bytes(draft: &EvidenceDraft) -> u64 {
+    let b64 = |s: &String| s.len() as u64 / 4 * 3;
+    match &draft.item {
+        DraftItem::Image { data } => b64(data),
+        DraftItem::Compare { before, after } => b64(before) + b64(after),
+        DraftItem::Table { table } => serde_json::to_vec(table).map_or(0, |v| v.len() as u64),
+        DraftItem::Output { text, .. } => text.len() as u64,
+    }
+}
+
 /// One JSON-RPC message in; the reply (None for a notification) and the event
 /// to post, if it was a valid tool call. `ask` lists `approve`; `approved`
-/// answers a call to it.
+/// answers a call to it. `read` gets attached files' bytes; `used` is what the
+/// task attached before.
 pub fn handle(
     req: &Value,
     ask: bool,
     approved: Option<String>,
+    read: Reader,
+    used: Used,
 ) -> (Option<Value>, Option<AgentEvent>) {
     let mut tools = vec![
         json!({
@@ -126,17 +153,37 @@ pub fn handle(
         json!({
             "name": "report_evidence",
             "description": "Show the user proof of your work: a link (pushed commit, PR, CI run, \
-                deployed preview, screenshot), a test or check result, or a short note.",
+                deployed preview), a test or check result, a short note, or a file from your \
+                folder: an image (png/jpg/webp/gif, mp4 up to 20 s), a before/after compare \
+                of two images, a table (.csv/.json/.md or rows) or command output.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "kind": {"type": "string", "enum": ["link", "test", "note"]},
-                    "title": {"type": "string", "description": "e.g. \"cargo test\", \"Preview\""},
+                    "kind": {"type": "string", "enum": ["link", "test", "note", "image", "compare", "table", "output"]},
+                    "title": {"type": "string", "description": "e.g. \"cargo test\", \"Home page\""},
                     "url": {"type": "string", "description": "https; required for a link"},
                     "ok": {"type": "boolean", "description": "a test's verdict"},
                     "detail": {"type": "string", "description": "a test's result, e.g. \"78 passed\""},
+                    "path": {"type": "string", "description": "image, table or output: a file in your folder"},
+                    "before": {"type": "string", "description": "compare: the before image's path; table: the baseline column"},
+                    "after": {"type": "string", "description": "compare: the after image's path; table: the new column"},
+                    "rows": {"type": "array", "items": {"type": "array"}, "description": "table: rows inline, header first"},
+                    "text": {"type": "string", "description": "output: the command's output (its end is kept)"},
                 },
                 "required": ["kind", "title"],
+            },
+        }),
+        json!({
+            "name": "report_result",
+            "description": "Call once at the end: the outcome for the user's phone, a headline \
+                and up to 3 short points to drill into.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "headline": {"type": "string", "description": "at most 12 words"},
+                    "points": {"type": "array", "items": {"type": "string"}, "description": "up to 3 short bullets"},
+                },
+                "required": ["headline"],
             },
         }),
     ];
@@ -148,25 +195,38 @@ pub fn handle(
         if name == mis_agent::APPROVE_TOOL {
             return approved.ok_or_else(|| "nobody to ask".to_string());
         }
-        event = Some(match name {
-            "report_evidence" => AgentEvent::Evidence(evidence(args)?),
+        let (e, said) = match name {
+            "report_evidence" => (evidence(args, read, used)?, "ok".to_string()),
+            "report_result" => {
+                let points: Vec<&str> = (args["points"].as_array().into_iter().flatten())
+                    .filter_map(Value::as_str)
+                    .collect();
+                let (r, cut) = TaskResult::new(args["headline"].as_str().unwrap_or(""), &points)?;
+                let said = match cut.is_empty() {
+                    true => "ok".to_string(),
+                    false => format!("ok ({})", cut.join("; ")),
+                };
+                (AgentEvent::Result(r), said)
+            }
             _ => {
                 let text = first_line(args["text"].as_str().unwrap_or(""), MAX_LINE_CHARS);
                 if text.is_empty() {
                     return Err("text must be a non-empty string".into());
                 }
-                AgentEvent::Status { text }
+                (AgentEvent::Status { text }, "ok".to_string())
             }
-        });
-        Ok("ok".into())
+        };
+        event = Some(e);
+        Ok(said)
     });
     (reply, event)
 }
 
-/// `report_evidence` arguments as an evidence row, text cut to one line. A
-/// GitHub link becomes its PR/commit/CI/issue row, so it dedupes with the same
-/// link found in the agent's output.
-fn evidence(args: &Value) -> Result<Link, String> {
+/// `report_evidence` arguments as an event, text cut to one line: a link, test
+/// or note as an evidence row, a file as a draft. A GitHub link becomes its
+/// PR/commit/CI/issue row, so it dedupes with the same link found in the
+/// agent's output.
+fn evidence(args: &Value, read: Reader, used: Used) -> Result<AgentEvent, String> {
     let line = |k: &str| first_line(args[k].as_str().unwrap_or(""), MAX_LINE_CHARS);
     let label = line("title");
     if label.is_empty() {
@@ -185,18 +245,31 @@ fn evidence(args: &Value) -> Result<Link, String> {
         detail,
         pr: None,
     };
-    match args["kind"].as_str() {
+    let link = match args["kind"].as_str() {
         Some("link") => match url()? {
-            u if u.is_empty() => Err("a link needs a url".into()),
-            u => Ok(github_link(&u).unwrap_or_else(|| row(LinkKind::Url, u, None, None))),
+            u if u.is_empty() => return Err("a link needs a url".into()),
+            u => github_link(&u).unwrap_or_else(|| row(LinkKind::Url, u, None, None)),
         },
         Some("test") => {
             let detail = Some(line("detail")).filter(|d| !d.is_empty());
-            Ok(row(LinkKind::Test, url()?, args["ok"].as_bool(), detail))
+            row(LinkKind::Test, url()?, args["ok"].as_bool(), detail)
         }
-        Some("note") => Ok(row(LinkKind::Note, String::new(), None, None)),
-        _ => Err("kind must be link, test or note".into()),
-    }
+        Some("note") => row(LinkKind::Note, String::new(), None, None),
+        _ => {
+            if used.items >= MAX_EVIDENCE {
+                return Err(format!("at most {MAX_EVIDENCE} files per task"));
+            }
+            let draft = evidence::draft(args, label.clone(), read)?;
+            if used.bytes + stored_bytes(&draft) > MAX_TASK_BYTES {
+                return Err(format!(
+                    "at most {} MB of files per task",
+                    MAX_TASK_BYTES >> 20
+                ));
+            }
+            return Ok(AgentEvent::Artifact(draft));
+        }
+    };
+    Ok(AgentEvent::Evidence(link))
 }
 
 /// `https://<host>[:port]…` with an ASCII DNS-style host (no userinfo or IPv6
@@ -236,14 +309,19 @@ struct Ctx {
     tx: mpsc::Sender<(TaskId, AgentEvent)>,
     /// Ask mode: where `approve` waits for the user.
     approvals: Option<Arc<Approvals>>,
+    /// Where attached files may come from.
+    files: Files,
+    used: Arc<Mutex<Used>>,
 }
 
 /// Listen on a random loopback port with a fresh random token; statuses go to
-/// `tx`; with `approvals`, `approve` is offered and asks the user.
+/// `tx`; with `approvals`, `approve` is offered and asks the user. Attached
+/// files must be within `files`.
 pub async fn serve(
     task: TaskId,
     tx: mpsc::Sender<(TaskId, AgentEvent)>,
     approvals: Option<Arc<Approvals>>,
+    files: Files,
 ) -> std::io::Result<Server> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}/mcp", listener.local_addr()?);
@@ -254,6 +332,8 @@ pub async fn serve(
         token: token.clone(),
         tx,
         approvals,
+        files,
+        used: Default::default(),
     };
     let app = axum::Router::new()
         .route("/mcp", axum::routing::post(post))
@@ -282,7 +362,17 @@ async fn post(State(ctx): State<Ctx>, headers: HeaderMap, body: Bytes) -> Respon
         Some(a) if is_approve(&req) => Some(a.ask(ctx.task, &req["params"]["arguments"]).await),
         _ => None,
     };
-    let (reply, event) = handle(&req, ctx.approvals.is_some(), approved);
+    // Held while files are read, so concurrent calls can't both pass the task's caps.
+    let (reply, event) = {
+        let mut used = ctx.used.lock().unwrap();
+        let read = |p: &str| ctx.files.read(p);
+        let (reply, event) = handle(&req, ctx.approvals.is_some(), approved, &read, *used);
+        if let Some(AgentEvent::Artifact(draft)) = &event {
+            used.items += 1;
+            used.bytes += stored_bytes(draft);
+        }
+        (reply, event)
+    };
     if let Some(event) = event {
         let _ = ctx.tx.send((ctx.task, event)).await;
     }
@@ -325,22 +415,35 @@ mod tests {
         assert_eq!(machine_hint(&Inventory::default(), "claude"), "");
         assert_eq!(with_hint("go", false, ""), "go");
         assert_eq!(with_hint("go", false, "m"), "(m)\n\ngo");
-        assert!(with_hint("go", true, "m").starts_with("(You have a `report_status`"));
+        let hinted = with_hint("go", true, "m");
+        assert!(hinted.starts_with("(You have reporting tools. `report_status`"));
+        assert!(hinted.contains("before AND after") && hinted.contains("`report_result`"));
+    }
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+
+    /// Reads `shot.png`; nothing else exists.
+    fn read(p: &str) -> Result<Vec<u8>, String> {
+        match p {
+            "shot.png" => Ok(PNG.to_vec()),
+            _ => Err(format!("{p}: not found")),
+        }
+    }
+
+    fn call_with(method: &str, params: Value, used: Used) -> (Option<Value>, Option<AgentEvent>) {
+        let req = json!({"jsonrpc": "2.0", "id": 7, "method": method, "params": params});
+        handle(&req, false, None, &read, used)
     }
 
     fn call(method: &str, params: Value) -> (Option<Value>, Option<AgentEvent>) {
-        handle(
-            &json!({"jsonrpc": "2.0", "id": 7, "method": method, "params": params}),
-            false,
-            None,
-        )
+        call_with(method, params, Used::default())
     }
 
     #[test]
     fn approve_is_offered_only_in_ask_mode_and_returns_the_answer() {
         let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
         let names = |ask| {
-            let (r, _) = handle(&list, ask, None);
+            let (r, _) = handle(&list, ask, None, &read, Used::default());
             let tools = r.unwrap()["result"]["tools"].as_array().unwrap().clone();
             tools
                 .iter()
@@ -353,10 +456,10 @@ mod tests {
             "params": {"name": "approve", "arguments": {"tool_name": "Bash", "input": {}}}});
         assert!(is_approve(&req));
         let answer = r#"{"behavior":"deny","message":"no"}"#.to_string();
-        let (r, e) = handle(&req, true, Some(answer.clone()));
+        let (r, e) = handle(&req, true, Some(answer.clone()), &read, Used::default());
         assert_eq!(r.unwrap()["result"]["content"][0]["text"], answer);
         assert_eq!(e, None);
-        let (r, _) = handle(&req, false, None);
+        let (r, _) = handle(&req, false, None, &read, Used::default());
         assert_eq!(r.unwrap()["error"]["message"], "unknown tool");
     }
 
@@ -386,6 +489,97 @@ mod tests {
             panic!("{e:?}")
         };
         link
+    }
+
+    #[test]
+    fn report_evidence_attaches_files_within_the_task_caps() {
+        let args = json!({"kind": "image", "title": "Home\nx", "path": "shot.png"});
+        let (r, e) = tool("report_evidence", args.clone());
+        assert_eq!(r.unwrap()["result"]["content"][0]["text"], "ok");
+        let Some(AgentEvent::Artifact(draft)) = e else {
+            panic!("{e:?}")
+        };
+        assert_eq!(draft.title, "Home");
+        assert!(matches!(draft.item, DraftItem::Image { .. }));
+        assert_eq!(
+            stored_bytes(&draft),
+            18,
+            "16 bytes, padded to base64's 3-byte groups"
+        );
+        let full = Used {
+            items: MAX_EVIDENCE,
+            bytes: 0,
+        };
+        let heavy = Used {
+            items: 0,
+            bytes: MAX_TASK_BYTES,
+        };
+        for (args, used, why) in [
+            (args.clone(), full, "at most 32 files"),
+            (args, heavy, "at most 50 MB"),
+            (
+                json!({"kind": "image", "title": "t", "path": "gone.png"}),
+                Used::default(),
+                "not found",
+            ),
+            (
+                json!({"kind": "image", "title": "t"}),
+                Used::default(),
+                "path must name a file",
+            ),
+            (
+                json!({"kind": "output", "title": " ", "text": "x"}),
+                Used::default(),
+                "title",
+            ),
+        ] {
+            let (r, e) = call_with(
+                "tools/call",
+                json!({"name": "report_evidence", "arguments": args}),
+                used,
+            );
+            let r = r.unwrap();
+            assert_eq!(r["result"]["isError"], true);
+            let text = r["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(text.contains(why), "{text}");
+            assert_eq!(e, None);
+        }
+    }
+
+    #[test]
+    fn report_result_is_cut_politely() {
+        let (r, e) = tool(
+            "report_result",
+            json!({"headline": "Fixed it", "points": ["a", 3, "b"]}),
+        );
+        assert_eq!(r.unwrap()["result"]["content"][0]["text"], "ok");
+        let want = TaskResult {
+            headline: "Fixed it".into(),
+            points: vec!["a".into(), "b".into()],
+        };
+        assert_eq!(e, Some(AgentEvent::Result(want)));
+        let long = "w ".repeat(20);
+        let (r, e) = tool(
+            "report_result",
+            json!({"headline": long, "points": ["1", "2", "3", "4"]}),
+        );
+        let said = r.unwrap()["result"]["content"][0]["text"].clone();
+        assert_eq!(
+            said,
+            "ok (headline cut to 12 words; kept the first 3 points)"
+        );
+        let Some(AgentEvent::Result(r)) = e else {
+            panic!()
+        };
+        assert_eq!((r.headline.split(' ').count(), r.points.len()), (12, 3));
+        let (r, e) = tool("report_result", json!({"points": ["a"]}));
+        assert_eq!(
+            (r.unwrap()["result"]["isError"].clone(), e),
+            (json!(true), None)
+        );
     }
 
     #[test]
@@ -439,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_both_tools() {
+    fn lists_the_reporting_tools() {
         let (r, _) = call("tools/list", json!({}));
         let names: Vec<_> = r.unwrap()["result"]["tools"]
             .as_array()
@@ -447,7 +641,14 @@ mod tests {
             .iter()
             .map(|t| t["name"].clone())
             .collect();
-        assert_eq!(names, [json!("report_status"), json!("report_evidence")]);
+        assert_eq!(
+            names,
+            [
+                json!("report_status"),
+                json!("report_evidence"),
+                json!("report_result")
+            ]
+        );
         let (r, s) = call("tools/call", json!({"name": "rm"}));
         assert_eq!(
             (r.unwrap()["error"]["code"].clone(), s),
@@ -478,7 +679,11 @@ mod tests {
     async fn serves_status_only_with_the_token() {
         let (tx, mut rx) = mpsc::channel(4);
         let task = TaskId::new_v4();
-        let server = serve(task, tx, None).await.unwrap();
+        let files = Files {
+            cwd: std::env::temp_dir(),
+            roots: Arc::new(vec![]),
+        };
+        let server = serve(task, tx, None, files).await.unwrap();
         let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"report_status","arguments":{"text":"hi"}}}"#;
         let url = server.mcp.url.clone();
         assert!(post_raw(&url, None, call).await.starts_with("HTTP/1.1 401"));

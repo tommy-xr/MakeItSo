@@ -162,6 +162,12 @@ struct TaskEntry {
     /// recently mentioned last. Kept apart from `events`, so transcript eviction
     /// never drops them.
     links: Vec<Link>,
+    /// Files the agent attached, stored by the shell (`Ledger::add_evidence`).
+    #[serde(default)]
+    evidence: Vec<Evidence>,
+    /// The agent's own summary (`AgentEvent::Result`).
+    #[serde(default)]
+    result: Option<TaskResult>,
     /// The agent reported a usage limit.
     limited: bool,
     /// A client opened it after it finished.
@@ -256,6 +262,8 @@ impl TaskEntry {
             parent: None,
             pin: None,
             links: vec![],
+            evidence: vec![],
+            result: None,
             limited: false,
             seen: false,
             images: vec![],
@@ -348,6 +356,8 @@ impl TaskEntry {
             activity: self.activity(),
             parent: self.parent,
             links: self.links.clone(),
+            evidence: self.evidence.clone(),
+            result: self.result.clone(),
             attention: self.attention(),
             // Needs the fleet; see `Ledger::status`.
             blocked_until: None,
@@ -1249,6 +1259,20 @@ impl Ledger {
         if t.worker != Some(wid) || t.status != TaskStatus::Running {
             return vec![];
         }
+        // Off the transcript (see `AgentEvent::Result`). An `Artifact` only
+        // counts once the shell has stored its files (`add_evidence`).
+        match event {
+            AgentEvent::Result(r) => {
+                let points: Vec<&str> = r.points.iter().map(String::as_str).collect();
+                if let Ok((r, _)) = TaskResult::new(&r.headline, &points) {
+                    t.result = Some(r);
+                    return vec![Effect::Broadcast(self.status())];
+                }
+                return vec![];
+            }
+            AgentEvent::Artifact(_) => return vec![],
+            _ => {}
+        }
         t.record(&event, now);
         if let AgentEvent::Limited { resets_at } = &event {
             // A later hit never shortens an earlier one.
@@ -1277,9 +1301,12 @@ impl Ledger {
                 TaskStatus::Failed
             };
             t.approvals.clear();
+            // The agent's own result is the summary; else maybe the summarizer's.
             // Truncated: the transcript was too long to be a short answer.
             let wanted = t.truncated || summary::wanted(&t.events, t.summary.as_deref());
-            if *ok && wanted {
+            if let Some(r) = &t.result {
+                t.summary = Some(r.line());
+            } else if *ok && wanted {
                 summarize = Some(Effect::Summarize {
                     task,
                     prompt: summary::prompt(&t.task.prompt, &t.events),
@@ -1371,6 +1398,48 @@ impl Ledger {
         vec![Effect::Broadcast(self.status())]
     }
 
+    /// Evidence `task`'s running agent attached so far; None unless `wid` runs it
+    /// on its live connection `conn`.
+    pub fn attached(&self, wid: WorkerId, conn: ConnId, task: TaskId) -> Option<&[Evidence]> {
+        if !self.workers.get(&wid).is_some_and(|w| w.conn == Some(conn)) {
+            return None;
+        }
+        let t = self.tasks.iter().find(|t| t.task.id == task)?;
+        let running = t.worker == Some(wid) && t.status == TaskStatus::Running;
+        running.then_some(&t.evidence[..])
+    }
+
+    /// An attached file's evidence, its files stored; or why `title` wasn't
+    /// kept, as a note. Only from the running task's worker, on its live connection.
+    pub fn add_evidence(
+        &mut self,
+        wid: WorkerId,
+        conn: ConnId,
+        task: TaskId,
+        evidence: Result<Evidence, (String, String)>,
+    ) -> Vec<Effect> {
+        if self.attached(wid, conn, task).is_none() {
+            return vec![];
+        }
+        let t = self
+            .tasks
+            .iter_mut()
+            .find(|t| t.task.id == task)
+            .expect("attached");
+        match evidence {
+            Ok(e) => t.evidence.push(e),
+            Err((title, why)) => t.add_link(Link {
+                kind: LinkKind::Note,
+                url: String::new(),
+                label: first_line(&format!("{title}: not kept ({why})"), 200),
+                ok: None,
+                detail: None,
+                pr: None,
+            }),
+        }
+        vec![Effect::Broadcast(self.status())]
+    }
+
     /// The user cancels `task`. Planning or queued, it ends now (a late plan finds it
     /// no longer planning). Running, its worker is told to stop it and ends it with
     /// `AgentEvent::Cancelled`; meanwhile it shows as cancelling, its approvals gone.
@@ -1446,7 +1515,7 @@ impl Ledger {
         let Some(t) = self.tasks.iter_mut().find(|t| t.task.id == task) else {
             return vec![];
         };
-        if text.is_empty() || t.status != TaskStatus::Done {
+        if text.is_empty() || t.status != TaskStatus::Done || t.result.is_some() {
             return vec![];
         }
         t.summary = Some(text);
@@ -2550,6 +2619,92 @@ mod tests {
             (Some("Listed files. All fine."), TaskStatus::Done)
         );
         assert!(l.summarized(Uuid::new_v4(), "x").is_empty());
+    }
+
+    #[test]
+    fn agent_result_supersedes_the_summarizer_and_stays_off_the_transcript() {
+        let (mut l, wid, task) = running_setup();
+        let tool = AgentEvent::ToolUse {
+            name: "Bash".into(),
+            input: serde_json::json!({"command": "ls"}),
+        };
+        l.event(wid, 1, task, tool);
+        let result = TaskResult {
+            headline: "Fixed the flaky test".into(),
+            points: vec!["3 retries removed".into()],
+        };
+        assert!(
+            l.event(wid, 2, task, AgentEvent::Result(result.clone()))
+                .is_empty(),
+            "stale conn"
+        );
+        let eff = l.event(wid, 1, task, AgentEvent::Result(result.clone()));
+        assert!(matches!(
+            &eff[..],
+            [Effect::Broadcast(ServerMsg::Status { .. })]
+        ));
+        let finished = AgentEvent::Finished {
+            ok: true,
+            summary: Some("raw".into()),
+        };
+        let eff = l.event(wid, 1, task, finished);
+        assert!(!eff.iter().any(|e| matches!(e, Effect::Summarize { .. })));
+        assert!(l.summarized(task, "Haiku's take.").is_empty());
+        let (s, events, _) = l.show(task).unwrap();
+        assert_eq!(s.result, Some(result));
+        assert_eq!(
+            s.summary.as_deref(),
+            Some("Fixed the flaky test · 3 retries removed")
+        );
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::Result(_))));
+    }
+
+    #[test]
+    fn evidence_is_listed_only_from_the_running_tasks_worker() {
+        use mis_types::evidence::{EvidenceFile, EvidenceItem, FileKind};
+        let (mut l, wid, task) = running_setup();
+        let file = EvidenceFile {
+            id: Uuid::new_v4(),
+            mime: FileKind::Png,
+            bytes: 9,
+        };
+        let shot = Evidence {
+            id: Uuid::new_v4(),
+            title: "Home".into(),
+            at: 1,
+            item: EvidenceItem::Image { file },
+        };
+        // A draft fed straight in is ignored: the shell must store its files first.
+        let draft = EvidenceDraft {
+            title: "x".into(),
+            item: mis_types::evidence::DraftItem::Output {
+                text: "x".into(),
+                truncated: false,
+            },
+        };
+        assert!(l
+            .event(wid, 1, task, AgentEvent::Artifact(draft))
+            .is_empty());
+        assert_eq!(l.attached(wid, 2, task), None, "stale conn");
+        assert_eq!(l.attached(Uuid::new_v4(), 1, task), None, "other worker");
+        assert!(l.add_evidence(wid, 2, task, Ok(shot.clone())).is_empty());
+        let eff = l.add_evidence(wid, 1, task, Ok(shot.clone()));
+        assert!(matches!(
+            &eff[..],
+            [Effect::Broadcast(ServerMsg::Status { .. })]
+        ));
+        l.add_evidence(wid, 1, task, Err(("Big".into(), "at most 50 MB".into())));
+        assert_eq!(l.attached(wid, 1, task), Some(&[shot.clone()][..]));
+        let s = l.show(task).unwrap().0;
+        assert_eq!(s.evidence, std::slice::from_ref(&shot));
+        assert_eq!(s.links[0].label, "Big: not kept (at most 50 MB)");
+        let done = AgentEvent::Finished {
+            ok: true,
+            summary: None,
+        };
+        l.event(wid, 1, task, done);
+        assert_eq!(l.attached(wid, 1, task), None, "finished");
+        assert!(l.add_evidence(wid, 1, task, Ok(shot)).is_empty());
     }
 
     #[test]

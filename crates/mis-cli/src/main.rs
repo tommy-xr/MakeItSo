@@ -495,6 +495,8 @@ fn print_event(task: TaskId, event: &AgentEvent) {
         AgentEvent::Limited { .. } => println!("[{short}] usage limit hit"),
         // Kept by the worker, never forwarded.
         AgentEvent::Limits { .. } => {}
+        // Stored on the task by the orchestrator, never forwarded.
+        AgentEvent::Artifact(_) | AgentEvent::Result(_) => {}
         // Running totals; `mis status` shows the latest.
         AgentEvent::Usage { .. } => {}
         AgentEvent::Finished { ok, summary } => {
@@ -951,6 +953,8 @@ mod tests {
             activity: String::new(),
             parent: None,
             links: vec![],
+            evidence: vec![],
+            result: None,
             attention: Attention::None,
             blocked_until: None,
             approvals: vec![],
