@@ -742,9 +742,13 @@ async fn run(
         .inspect_err(|e| tracing::warn!(%id, "no mcp server: {e}"))
         .ok();
     // A message to the user's own session goes in as typed.
-    let prompt = match &server {
-        Some(_) if task.send_to.is_none() => mcp::with_hint(&task.prompt),
-        _ => task.prompt.clone(),
+    let prompt = match &task.send_to {
+        Some(_) => task.prompt.clone(),
+        None => mcp::with_hint(
+            &task.prompt,
+            server.is_some(),
+            &mcp::machine_hint(&ctx.inventory, agent.name()),
+        ),
     };
     let (atx, mut arx) = mpsc::channel(64);
     let fwd = async {
