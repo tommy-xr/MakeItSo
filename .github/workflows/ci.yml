@@ -15,6 +15,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # A newer push to the same branch or PR cancels this (per matrix leg: one group per job).
+    concurrency:
+      group: check-${{ github.ref }}-${{ matrix.os }}
+      cancel-in-progress: true
+    env:
+      # So the worker's edge fallback test runs (it needs a CI run number baked in).
+      MIS_RUN: ${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -26,7 +33,9 @@ jobs:
       - run: cargo test --workspace --no-fail-fast # every failing test, not just the first crate's
       - run: node --test crates/mis-orchestrator/tests/md.test.mjs # the page's markdown renderer
 
+  # Only pushes (main, tags) publish builds; PRs leave the scarce macOS runners to them.
   build:
+    if: github.event_name == 'push'
     needs: check
     strategy:
       matrix:
@@ -44,9 +53,16 @@ jobs:
             target: x86_64-pc-windows-msvc
             ext: .exe
     runs-on: ${{ matrix.os }}
+    # A newer push to main cancels this run's builds, queued or running; then its edge job,
+    # which needs every build, is skipped, so nothing partial is published.
+    concurrency:
+      group: build-${{ github.ref }}-${{ matrix.target }}
+      cancel-in-progress: true
     env:
       # Marks the binaries as release builds, which may update themselves.
       MIS_RELEASE: "1"
+      # Orders edge builds for workers (edge.json records the same run).
+      MIS_RUN: ${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -97,7 +113,8 @@ jobs:
 
   # Every push to main updates the `edge` prerelease: mis-<target>-<sha7>.tar.gz per build (the
   # newest 10 kept), so a worker can fetch exactly its orchestrator's build, and edge.json naming
-  # the newest.
+  # the newest and its run. Never cancelled: a superseded run that got this far publishes, and
+  # edge only moves forward.
   edge:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
@@ -122,7 +139,7 @@ jobs:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
           ver=$(sh release/version.sh dist/mis-x86_64-unknown-linux-gnu.tar.gz)
-          sh release/edge.sh stage dist "$ver" "$GITHUB_SHA"
+          sh release/edge.sh stage dist "$ver" "$GITHUB_SHA" "$GITHUB_RUN_NUMBER"
           echo "SHA7=${ver##*+}" >>"$GITHUB_ENV"
       - name: Publish
         # bash (not the default) for pipefail; any failed call fails the job.

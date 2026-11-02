@@ -1,7 +1,8 @@
 //! A worker on version A, connected to an orchestrator on B, downloads B's signed build from a
 //! local stand-in for GitHub Releases, swaps its executable, restarts and says Hello as B. One
-//! signed with another key is refused and the worker runs on. Runs a copy in a temp dir; B is
-//! that copy with its version string patched. Unix only: there the restart keeps the pid.
+//! signed with another key is refused and the worker runs on. While the orchestrator's build
+//! isn't published, a newer edge build is taken instead. Runs a copy in a temp dir; B is that
+//! copy with its version string patched. Unix only: there the restart keeps the pid.
 #![cfg(unix)]
 
 use std::path::PathBuf;
@@ -113,8 +114,15 @@ async fn update(ws: &mut Ws) -> WorkerUpdate {
     }
 }
 
+type Setup = (Run, String, Vec<u8>, Arc<Mutex<Vec<String>>>);
+
 /// Worker A and a release server holding B's tarball signed with `key`.
-async fn setup(name: &str, key: &str) -> Option<(Run, String, Vec<u8>, Arc<Mutex<Vec<String>>>)> {
+async fn setup(name: &str, key: &str) -> Option<Setup> {
+    setup_edge(name, key, None).await
+}
+
+/// `setup`, with edge.json naming B as published by CI run `run`.
+async fn setup_edge(name: &str, key: &str, run: Option<u64>) -> Option<Setup> {
     let built = std::path::Path::new(env!("CARGO_BIN_EXE_mis-worker"));
     let Some(a) = release_version(built, "mis-worker") else {
         eprintln!("skipped: this build's version has no clean commit, so it never self-updates");
@@ -129,7 +137,12 @@ async fn setup(name: &str, key: &str) -> Option<(Run, String, Vec<u8>, Arc<Mutex
         &tmp.join("mis-worker"),
     );
     let _ = std::fs::remove_dir_all(&tmp);
-    let (base, hits) = release_server(edge_release("mis-worker", &b_exe, &b, key)).await;
+    let mut files = edge_release("mis-worker", &b_exe, &b, key);
+    if let Some(run) = run {
+        let json = format!(r#"{{"version":"{b}","run":{run}}}"#);
+        files.insert("download/edge/edge.json".into(), json.into_bytes());
+    }
+    let (base, hits) = release_server(files).await;
     println!("A = {a}, B = {b}, release server {base}");
     Some((spawn_a(name, &base).await, b, b_exe, hits))
 }
@@ -194,6 +207,61 @@ async fn worker_refuses_a_build_signed_with_another_key() {
         std::fs::read(&run.exe).unwrap(),
         a_exe,
         "executable untouched"
+    );
+    run.child.start_kill().unwrap();
+    let _ = std::fs::remove_dir_all(&run.dir);
+}
+
+#[tokio::test]
+async fn worker_takes_a_newer_edge_build_while_the_orchestrators_is_unpublished() {
+    let Some(mine) = mis_update::build_run() else {
+        eprintln!("skipped: no CI run baked in (build with MIS_RUN set)");
+        return;
+    };
+    let Some((mut run, b, b_exe, hits)) = setup_edge("fallback", "test.key", Some(mine + 1)).await
+    else {
+        return;
+    };
+    // The orchestrator's build: not on the release server.
+    let c = format!("{}+ddddddd", b.split_once('+').unwrap().0);
+    let ok = tokio::time::timeout(Duration::from_secs(60), async {
+        let (mut ws, _) = hello(&run.orch).await;
+        welcome(&mut ws, &c).await;
+        let u = update(&mut ws).await;
+        println!("orch| update: {u:?}");
+        assert_eq!(
+            u,
+            WorkerUpdate::Failed {
+                version: c.clone(),
+                why: "not published yet".into()
+            }
+        );
+        let u = update(&mut ws).await;
+        println!("orch| update: {u:?}");
+        assert_eq!(u, WorkerUpdate::Pending { version: b.clone() });
+        let held = serde_json::to_string(&OrchMsg::UpdateHeld).unwrap();
+        ws.send(Message::text(held)).await.unwrap();
+        let (_ws, v) = hello(&run.orch).await;
+        println!("orch| hello from {v:?}");
+        assert_eq!(v.as_deref(), Some(b.as_str()), "on B, edge's newest");
+    })
+    .await;
+    let logs = run.logs.lock().unwrap().clone();
+    assert!(ok.is_ok(), "timed out:\n{logs}");
+    let sha = |v: &str| v.split_once('+').unwrap().1.to_string();
+    let line = format!(
+        "orchestrator build {} not on edge yet; updating to newest edge {}",
+        sha(&c),
+        sha(&b)
+    );
+    assert!(logs.contains(&line), "{logs}");
+    assert_eq!(std::fs::read(&run.exe).unwrap(), b_exe);
+    let asked = hits.lock().unwrap().clone();
+    println!("release server served: {asked:?}");
+    assert_eq!(
+        asked.len(),
+        4,
+        "C's signature, edge.json, B's signature and tarball"
     );
     run.child.start_kill().unwrap();
     let _ = std::fs::remove_dir_all(&run.dir);

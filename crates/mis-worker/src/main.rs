@@ -143,7 +143,13 @@ async fn main() -> Result<()> {
         mis_update::CI_BUILD,
         source.custom,
     );
-    let updater = update::Updater::new(VERSION, blocked, &source.base, mis_update::TARGET);
+    let updater = update::Updater::new(
+        VERSION,
+        mis_update::build_run(),
+        blocked,
+        &source.base,
+        mis_update::TARGET,
+    );
     tracing::info!("mis-worker {VERSION}; {}", updater.describe());
     let agents = mis_agent::available();
     if agents.is_empty() {
@@ -225,19 +231,26 @@ async fn main() -> Result<()> {
     Err(mis_update::restart(&exe))
 }
 
-/// Start downloading the orchestrator's build if one is due; the checked executable comes
-/// back on `upd_rx`.
+/// Start the update step that is due, if any (a download, or reading edge.json); its result
+/// comes back on `upd_rx`.
 fn check_update(c: &mut Conn) {
-    let Some(asset) = c.update.due(Instant::now()) else {
+    let Some(step) = c.update.due(Instant::now()) else {
         return;
     };
     let (src, done) = (c.source.clone(), c.upd_tx.clone());
     tokio::spawn(async move {
-        tracing::info!("updating to {} from {}", asset.version, asset.url);
-        let exe = mis_update::fetch(&src, &asset, "mis-worker").await;
-        let _ = done
-            .send((asset.version, exe.map_err(|e| format!("{e:#}"))))
-            .await;
+        let got = match step {
+            update::Step::Fetch(asset) => {
+                tracing::info!("updating to {} from {}", asset.version, asset.url);
+                let exe = mis_update::fetch(&src, &asset, "mis-worker").await;
+                update::Done::Fetched(asset.version, exe.map_err(|e| update::Fail::of(&e)))
+            }
+            update::Step::ReadEdge => {
+                let head = mis_update::edge_head(&src).await;
+                update::Done::Head(head.map_err(|e| format!("{e:#}")))
+            }
+        };
+        let _ = done.send(got).await;
     });
 }
 
@@ -245,7 +258,7 @@ fn check_update(c: &mut Conn) {
 async fn install_update(
     c: &mut Conn,
     version: String,
-    exe: std::result::Result<Vec<u8>, String>,
+    exe: std::result::Result<Vec<u8>, update::Fail>,
 ) -> Option<WorkerUpdate> {
     if exe.is_ok() && !c.update.wants(&version) {
         tracing::info!("orchestrator moved on from {version}; not installing it");
@@ -261,14 +274,27 @@ async fn install_update(
         .await
         .map_err(anyhow::Error::from)
         .and_then(|r| r)
-        .map_err(|e| format!("{e:#}")),
+        .map_err(|e| update::Fail::Failed(format!("{e:#}"))),
         Err(e) => Err(e),
     };
+    let mins = |d: Duration| d.as_secs() / 60;
     match &installed {
         Ok(()) => tracing::info!("installed {version}; restarting once no task runs"),
-        Err(e) => tracing::warn!("update to {version} failed: {e}"),
+        Err(update::Fail::Unpublished) => {} // below: on edge, `head` logs the decision instead
+        Err(update::Fail::Failed(e)) => tracing::warn!(
+            "update to {version} failed: {e}; retry in {}m",
+            mins(update::RETRY_AFTER)
+        ),
     }
-    Some(c.update.fetched(&version, installed, Instant::now()))
+    let unpublished = installed == Err(update::Fail::Unpublished);
+    let update = c.update.fetched(&version, installed, Instant::now());
+    if unpublished && !c.update.reads_edge() {
+        let wait = mins(update::RETRY_UNPUBLISHED);
+        tracing::info!("{version} not published yet; retry in {wait}m");
+    }
+    // Next step at once: on edge, an unpublished build is followed by reading edge.json.
+    check_update(c);
+    Some(update)
 }
 
 /// Each agent's models, from discovery unless worker.toml's `[models]` sets
@@ -347,9 +373,9 @@ struct Conn {
     source: Arc<mis_update::Source>,
     /// This executable, which an update replaces.
     exe: PathBuf,
-    /// Downloads from `check_update`: version, and its checked executable or why not.
-    upd_tx: mpsc::Sender<(String, std::result::Result<Vec<u8>, String>)>,
-    upd_rx: mpsc::Receiver<(String, std::result::Result<Vec<u8>, String>)>,
+    /// Results of `check_update`'s steps.
+    upd_tx: mpsc::Sender<update::Done>,
+    upd_rx: mpsc::Receiver<update::Done>,
     /// Live sessions: parsed files, and what this connection was last sent.
     feed: feed::Feed,
 }
@@ -430,8 +456,18 @@ async fn session(
                     }
                     continue;
                 }
-                Some((version, exe)) = c.upd_rx.recv() => {
-                    if let Some(update) = install_update(c, version, exe).await {
+                Some(done) = c.upd_rx.recv() => {
+                    let update = match done {
+                        update::Done::Fetched(version, exe) => install_update(c, version, exe).await,
+                        update::Done::Head(head) => {
+                            if let Some(line) = c.update.head(head, Instant::now()) {
+                                tracing::info!("{line}");
+                            }
+                            check_update(c);
+                            None
+                        }
+                    };
+                    if let Some(update) = update {
                         sink.send(text(&WorkerMsg::Update { update })).await?;
                     }
                     continue;
