@@ -1,6 +1,7 @@
 //! Worker: connects to the orchestrator, advertises its harnesses, runs
 //! assigned tasks through `mis_agent` and streams events back.
 
+mod app_server;
 mod approvals;
 mod config;
 mod deliver;
@@ -496,7 +497,8 @@ async fn session(
                     let polled = tokio::task::spawn_blocking(move || {
                         let (claude, codex) = sessions::roots();
                         let procs = live::claude_procs(&claude, live::alive);
-                        let all = feed.poll(&claude, &codex, &procs, unix_ms());
+                        let loaded = app_server::loaded(&codex);
+                        let all = feed.poll(&claude, &codex, &procs, &loaded, unix_ms());
                         (feed.changed(all), feed)
                     });
                     let (changed, feed) = polled.await.unwrap_or_default();
@@ -670,17 +672,31 @@ fn answer(query: Query) -> Answer {
 const WAIT_CLOSED: Duration = Duration::from_secs(15 * 60);
 const RECHECK_OPEN: Duration = Duration::from_secs(10);
 
-/// Where a message to a session on this disk runs: the session's own folder (and
-/// its model), once it may be continued as `to.mode` asks (never in place while open).
+/// Where a message to a session on this disk goes.
+enum Placed {
+    /// Continued in the session's own folder (and on its model).
+    Run(PathBuf, Option<String>),
+    /// Into its open terminal (`deliver_open`): the event that ends the task.
+    Delivered(AgentEvent),
+}
+
+/// Where a message to a session on this disk goes, once it may be continued as `to.mode`
+/// asks (never in place while open). Deliver tries the open terminal at each check.
 async fn session_cwd(
     ctx: &Ctx,
     task: &Task,
     to: &SendTo,
+    images: bool,
     tx: &mpsc::Sender<(TaskId, AgentEvent)>,
-) -> std::result::Result<(PathBuf, Option<String>), String> {
+) -> std::result::Result<Placed, String> {
     let deadline = Instant::now() + WAIT_CLOSED;
     let mut waiting = false;
     let (cwd, model) = loop {
+        if to.mode == SendMode::Deliver {
+            if let Some(ev) = deliver_open(ctx, task, to.session, images, tx).await {
+                return Ok(Placed::Delivered(ev));
+            }
+        }
         let (harness, id) = (task.harness.clone(), to.session);
         let (cwd, model, open) = tokio::task::spawn_blocking(move || session_state(&harness, id))
             .await
@@ -707,12 +723,24 @@ async fn session_cwd(
         }
     };
     // Its folder must still exist and sit under a root, like any task's.
-    Ok((roots::resolve_cwd(&ctx.roots, Some(&cwd))?, model))
+    Ok(Placed::Run(
+        roots::resolve_cwd(&ctx.roots, Some(&cwd))?,
+        model,
+    ))
 }
 
-/// Deliver `task` into claude session `session` if a terminal holds it open, under a
-/// peer name: the event that ends the task. None otherwise (closed, codex, or no name to
-/// send to): it is continued in place once it may be.
+/// Where an open session takes a message.
+enum Target {
+    /// A claude terminal, by its peer name.
+    Peer(String),
+    /// A codex terminal's session, loaded on the app-server daemon.
+    Daemon,
+}
+
+/// Deliver `task` into session `session` if a terminal holds it open: claude's under a
+/// peer name, codex's on the app-server daemon. The event that ends the task; None
+/// otherwise (closed, no peer name, not on the daemon): it is continued in place once
+/// it may be.
 async fn deliver_open(
     ctx: &Ctx,
     task: &Task,
@@ -720,18 +748,21 @@ async fn deliver_open(
     images: bool,
     tx: &mpsc::Sender<(TaskId, AgentEvent)>,
 ) -> Option<AgentEvent> {
-    if task.harness != "claude" {
-        return None;
-    }
-    let id = session.to_string();
+    let (id, harness) = (session.to_string(), task.harness.clone());
     let looked = tokio::task::spawn_blocking(move || {
         let (claude, codex) = sessions::roots();
-        let name = live::claude_procs(&claude, live::alive).remove(&id)?.name?;
-        let path = transcript::find(&claude, &codex, "claude", session)?;
-        let cwd = sessions::read_one("claude", &path, unix_ms())?.cwd;
-        Some((claude, path, name, id, cwd))
+        let target = match harness.as_str() {
+            "claude" => Target::Peer(live::claude_procs(&claude, live::alive).remove(&id)?.name?),
+            _ => {
+                app_server::loaded(&codex).contains(&id).then_some(())?;
+                Target::Daemon
+            }
+        };
+        let path = transcript::find(&claude, &codex, &harness, session)?;
+        let cwd = sessions::read_one(&harness, &path, unix_ms())?.cwd;
+        Some((claude, codex, path, target, id, cwd))
     });
-    let (claude, path, name, id, cwd) = looked.await.ok()??;
+    let (claude, codex, path, target, id, cwd) = looked.await.ok()??;
     let fail = |why: String| {
         let summary = Some(why);
         Some(AgentEvent::Finished { ok: false, summary })
@@ -750,13 +781,30 @@ async fn deliver_open(
         session: Some(id.clone()),
         model: None,
     };
-    let status = AgentEvent::Status {
-        text: format!("delivering to {name}"),
-    };
-    for ev in [started, status] {
-        let _ = tx.send((task.id, ev)).await;
+    match target {
+        Target::Peer(name) => {
+            let status = AgentEvent::Status {
+                text: format!("delivering to {name}"),
+            };
+            for ev in [started, status] {
+                let _ = tx.send((task.id, ev)).await;
+            }
+            Some(deliver::deliver(claude, path, id, &name, &task.prompt).await)
+        }
+        // Taken in at once, or not at all (None: it is continued in place instead).
+        #[cfg(unix)]
+        Target::Daemon => {
+            let (text, msg_id) = (task.prompt.clone(), app_server::msg_id(task.id));
+            let ev = deliver::to_codex(codex, id, text, msg_id).await?;
+            let _ = tx.send((task.id, started)).await;
+            Some(ev)
+        }
+        #[cfg(not(unix))]
+        Target::Daemon => {
+            let _ = codex;
+            None
+        }
     }
-    Some(deliver::deliver(claude, path, id, &name, &task.prompt).await)
 }
 
 /// A session's folder, model, and whether it is open. Err when it isn't on this disk.
@@ -768,7 +816,7 @@ fn session_state(harness: &str, id: uuid::Uuid) -> std::result::Result<SessionSt
     let s = sessions::read_one(harness, &path, unix_ms())
         .ok_or_else(|| format!("can't read {harness} session {id}"))?;
     let cwd = s.cwd.ok_or("the session doesn't record its folder")?;
-    let open = sessions::is_open(&claude, harness, &s.id, s.active);
+    let open = sessions::is_open(&claude, &codex, harness, &s.id, s.active);
     Ok((cwd, s.model, open))
 }
 
@@ -825,16 +873,14 @@ async fn run(
         let _ = tx.send(fail(format!("no harness {}", task.harness))).await;
         return;
     };
-    if let Some(to) = (task.send_to.as_ref()).filter(|to| to.mode == SendMode::Deliver) {
-        if let Some(ev) = deliver_open(ctx, &task, to.session, !images.is_empty(), tx).await {
-            let _ = tx.send((id, ev)).await;
-            return;
-        }
-    }
     // A session on this disk runs in its own folder, on its own model.
     let (cwd, model) = match &task.send_to {
-        Some(to) => match session_cwd(ctx, &task, to, tx).await {
-            Ok((cwd, model)) => (Ok(cwd), model),
+        Some(to) => match session_cwd(ctx, &task, to, !images.is_empty(), tx).await {
+            Ok(Placed::Run(cwd, model)) => (Ok(cwd), model),
+            Ok(Placed::Delivered(ev)) => {
+                let _ = tx.send((id, ev)).await;
+                return;
+            }
             Err(why) => (Err(why), None),
         },
         None => (roots::resolve_cwd(&ctx.roots, task.cwd.as_deref()), None),

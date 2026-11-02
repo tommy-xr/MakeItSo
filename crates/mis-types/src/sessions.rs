@@ -81,7 +81,8 @@ pub struct Session {
     /// Started from a terminal UI, not headless (`claude -p`, `codex exec`).
     pub interactive: bool,
     /// In use right now, so it mustn't be resumed in place. Claude: a live
-    /// process holds it. Codex: no such signal; same as `active`.
+    /// process holds it. Codex: Codex's app-server daemon has it loaded (its terminal
+    /// runs there), or it is `active` (a terminal off the daemon may hold it).
     pub open: bool,
 }
 
@@ -107,8 +108,9 @@ pub enum SendMode {
     /// Wait on the worker until it closes, then continue it in place.
     WhenClosed,
     /// Into the session as it is: one open in a claude terminal gets it as a cross-session
-    /// message (`AgentEvent::Delivered`); a closed one is continued in place; an open codex
-    /// one once it goes quiet. Only to workers with `WorkerInfo::deliver`.
+    /// message, one loaded on Codex's app-server daemon as a turn (`AgentEvent::Delivered`);
+    /// a closed one is continued in place; another open codex one once it goes quiet.
+    /// Only to workers with `WorkerInfo::deliver`.
     Deliver,
 }
 
@@ -154,9 +156,10 @@ pub struct LiveSession {
     pub name: Option<String>,
     pub cwd: Option<String>,
     pub model: Option<String>,
-    /// A live claude process holds it. Codex records no such thing: written in the last
-    /// couple of minutes (`Session::active`), so it may be.
+    /// As `Session::open`.
     pub open: bool,
+    /// Codex: loaded on its app-server daemon, so a message goes straight in.
+    pub daemon: bool,
     pub state: LiveState,
     /// What it waits on, in claude's words (`permission prompt`, `dialog open`).
     pub waiting_for: Option<String>,
@@ -168,7 +171,7 @@ pub struct LiveSession {
     pub delivered: Vec<Delivered>,
 }
 
-/// A message delivered into a live claude session, as its transcript shows it.
+/// A message delivered into a live session, as its transcript shows it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Delivered {
     /// As `AgentEvent::Delivered`.

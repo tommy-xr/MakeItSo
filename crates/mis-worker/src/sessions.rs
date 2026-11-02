@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use mis_types::{first_line, Delivered, Session, MAX_DELIVERED, PEER_NAME};
 
-use crate::live;
+use crate::{app_server, live};
 use serde_json::Value;
 
 /// Most sessions listed.
@@ -50,8 +50,9 @@ struct Head {
     turn: TurnEnd,
     /// First line of the latest assistant text.
     last: Option<String>,
-    /// MIS's messages in the conversation, with their sender's address (`origin.from`):
-    /// the session may answer by messaging it back.
+    /// MIS's messages in the conversation, keyed by what answers them: claude, their
+    /// sender's address (`origin.from`), as the session may message it back; codex, the
+    /// turn they went into, whose end answers them.
     delivered: Vec<(String, Delivered)>,
 }
 
@@ -78,6 +79,8 @@ pub(crate) struct FileRead {
     pub last: Option<String>,
     /// As `LiveSession::delivered`.
     pub delivered: Vec<Delivered>,
+    /// Codex messages still unanswered, by turn, for the next read to carry on with.
+    pub pending: Vec<(String, Delivered)>,
     /// Whether it is headless can't change any more (a claude prompt's origin was seen).
     pub settled: bool,
 }
@@ -101,6 +104,16 @@ impl Head {
 
     fn headless(&self) -> Option<bool> {
         self.origin.or(self.entry)
+    }
+
+    /// Note MIS message `d` (under `key`, as `delivered`), once; the latest `MAX_DELIVERED` are kept.
+    fn remember(&mut self, key: String, d: Delivered) {
+        if self.delivered.iter().any(|(_, x)| x.msg_id == d.msg_id) {
+            return;
+        }
+        self.delivered.push((key, d));
+        let over = self.delivered.len().saturating_sub(MAX_DELIVERED);
+        self.delivered.drain(..over);
     }
 
     /// The head has everything it needs; the tail can still add titles.
@@ -169,9 +182,7 @@ fn claude_line(h: &mut Head, line: &str) {
             msg_id: p.msg_id.into(),
             reply: None,
         };
-        h.delivered.push((p.from.into(), d));
-        let over = h.delivered.len().saturating_sub(MAX_DELIVERED);
-        h.delivered.drain(..over);
+        h.remember(p.from.into(), d);
     }
     match v["type"].as_str() {
         Some("custom-title") => h.custom_title = text(&v["customTitle"]).or(h.custom_title.take()),
@@ -323,7 +334,32 @@ fn codex_line(h: &mut Head, line: &str) {
         Some("turn_context") => h.model = text(&p["model"]).or(h.model.take()),
         Some("event_msg") => match p["type"].as_str() {
             Some("task_started") => h.turn = TurnEnd::Running,
-            Some("task_complete" | "turn_aborted") => h.turn = TurnEnd::Ended,
+            Some("task_complete") => {
+                h.turn = TurnEnd::Ended;
+                // A delivered message is answered by the end of its turn (an aborted one
+                // never is).
+                let turn = p["turn_id"].as_str().unwrap_or_default();
+                let said = p["last_agent_message"].as_str().and_then(snippet);
+                let said = said.unwrap_or_else(|| "(ended without a reply)".into());
+                for (_, d) in
+                    (h.delivered.iter_mut()).filter(|(t, d)| t == turn && d.reply.is_none())
+                {
+                    d.reply = Some(said.clone());
+                }
+            }
+            Some("turn_aborted") => h.turn = TurnEnd::Ended,
+            // MIS's message, as the app-server took it in (`app_server::msg_id`).
+            Some("item_completed") if p["item"]["type"] == "UserMessage" => {
+                let id = p["item"]["client_id"].as_str();
+                if let Some(id) = id.filter(|i| app_server::is_mis(i)) {
+                    let turn = p["turn_id"].as_str().unwrap_or_default().to_string();
+                    let d = Delivered {
+                        msg_id: id.into(),
+                        reply: None,
+                    };
+                    h.remember(turn, d);
+                }
+            }
             _ => {}
         },
         // Commentary comes mid-turn too: only `task_complete` ends one.
@@ -374,13 +410,15 @@ pub(crate) fn feed(r: impl Read, mut f: impl FnMut(&str) -> bool) -> u64 {
 }
 
 /// The session id a codex rollout's file stem ends with: `rollout-<time>-<id>`.
-fn codex_id(stem: &str) -> Option<&str> {
+pub(crate) fn codex_id(stem: &str) -> Option<&str> {
     stem.get(stem.len().checked_sub(36)?..)
 }
 
 /// One session file: up to `head` bytes from its start, then its last `tail` bytes
 /// unless the head already covered them, and the session it is a codex copy of. None
 /// for a headless one unless `headless` (a copy is judged by its original, later).
+/// `pending`: a codex file's unanswered messages as last read (`FileRead::pending`), still
+/// answered once their turn ends after scrolling out of the tail.
 pub(crate) fn read_file(
     harness: &str,
     path: &Path,
@@ -388,6 +426,7 @@ pub(crate) fn read_file(
     headless: bool,
     updated_ms: u64,
     now_ms: u64,
+    pending: &[(String, Delivered)],
 ) -> Option<FileRead> {
     let line = match harness {
         "claude" => claude_line,
@@ -419,6 +458,9 @@ pub(crate) fn read_file(
         (h.turn, h.last) = (TurnEnd::Unknown, None);
         h.delivered.clear();
     }
+    for (turn, d) in pending.iter().filter(|_| harness == "codex") {
+        h.remember(turn.clone(), d.clone());
+    }
     if from < len && file.seek(SeekFrom::Start(from)).is_ok() {
         // A first line cut mid-way fails to parse and is skipped. Stop at the old end:
         // a live session may be appending.
@@ -429,6 +471,10 @@ pub(crate) fn read_file(
     }
     let (forked_from, turn, last, settled) =
         (h.forked_from.take(), h.turn, h.last.take(), settled(&h));
+    let pending = (h.delivered.iter())
+        .filter(|(_, d)| harness == "codex" && d.reply.is_none())
+        .cloned()
+        .collect();
     let delivered = h.delivered.drain(..).map(|(_, d)| d).collect();
     let session = h.finish(harness, updated_ms, now_ms)?;
     Some(FileRead {
@@ -437,6 +483,7 @@ pub(crate) fn read_file(
         turn,
         last,
         delivered,
+        pending,
         settled,
     })
 }
@@ -459,7 +506,15 @@ pub(crate) fn resolve_copy(
         let Some((at, path)) = forked_from.as_deref().and_then(&find) else {
             break;
         };
-        let Some(o) = read_file("codex", &path, (HEAD_BYTES, TAIL_BYTES), true, at, now_ms) else {
+        let Some(o) = read_file(
+            "codex",
+            &path,
+            (HEAD_BYTES, TAIL_BYTES),
+            true,
+            at,
+            now_ms,
+            &[],
+        ) else {
             break;
         };
         (original, forked_from) = (Some(o.session), o.forked_from);
@@ -538,6 +593,7 @@ pub(crate) fn files(claude_root: &Path, codex: &Path) -> Vec<(&'static str, (u64
 pub fn list(claude_root: &Path, codex: &Path, headless: bool, now_ms: u64) -> Vec<Session> {
     let files = files(claude_root, codex);
     let held = live::claude_open(claude_root, live::alive);
+    let loaded = app_server::loaded(codex);
     let codex_files: Vec<_> = (files.iter())
         .filter(|(h, _)| *h == "codex")
         .map(|(_, f)| f.clone())
@@ -546,7 +602,9 @@ pub fn list(claude_root: &Path, codex: &Path, headless: bool, now_ms: u64) -> Ve
     files
         .iter()
         .take(MAX_SCANNED)
-        .filter_map(|(h, (at, p))| read_file(h, p, (HEAD_BYTES, TAIL_BYTES), headless, *at, now_ms))
+        .filter_map(|(h, (at, p))| {
+            read_file(h, p, (HEAD_BYTES, TAIL_BYTES), headless, *at, now_ms, &[])
+        })
         .map(|r| {
             resolve_copy(
                 r.session,
@@ -558,26 +616,32 @@ pub fn list(claude_root: &Path, codex: &Path, headless: bool, now_ms: u64) -> Ve
         .filter(|s| headless || s.interactive)
         .take(MAX_SESSIONS)
         .map(|mut s| {
-            s.open = open(&s.harness, &s.id, s.active, &held);
+            let held = if s.harness == "claude" {
+                &held
+            } else {
+                &loaded
+            };
+            s.open = open(&s.harness, &s.id, s.active, held);
             s
         })
         .collect()
 }
 
-/// Claude: a live process holds it (`held`, from `live::claude_open`). Codex: no such
-/// record, so a recent write (`active`) is taken to mean it may be open.
+/// Claude: a live process holds it (`held`: claude's, from `live::claude_open`). Codex:
+/// the app-server daemon has it loaded (`held`: the daemon's, `app_server::loaded`), or a
+/// recent write (`active`) says a terminal off the daemon may have it.
 pub(crate) fn open(harness: &str, id: &str, active: bool, held: &HashSet<String>) -> bool {
     match harness {
         "claude" => held.contains(id),
-        _ => active,
+        _ => active || held.contains(id),
     }
 }
 
-/// [`open`] for one session, reading the live processes only for claude.
-pub(crate) fn is_open(claude: &Path, harness: &str, id: &str, active: bool) -> bool {
+/// [`open`] for one session, asking only its own harness.
+pub(crate) fn is_open(claude: &Path, codex: &Path, harness: &str, id: &str, active: bool) -> bool {
     let held = match harness {
         "claude" => live::claude_open(claude, live::alive),
-        _ => HashSet::new(),
+        _ => app_server::loaded(codex),
     };
     open(harness, id, active, &held)
 }
@@ -585,7 +649,16 @@ pub(crate) fn is_open(claude: &Path, harness: &str, id: &str, active: bool) -> b
 /// One session file's summary, as listed (headless or not).
 pub(crate) fn read_one(harness: &str, path: &Path, now_ms: u64) -> Option<Session> {
     let at = mtime_ms(&std::fs::metadata(path).ok()?);
-    read_file(harness, path, (HEAD_BYTES, TAIL_BYTES), true, at, now_ms).map(|r| r.session)
+    read_file(
+        harness,
+        path,
+        (HEAD_BYTES, TAIL_BYTES),
+        true,
+        at,
+        now_ms,
+        &[],
+    )
+    .map(|r| r.session)
 }
 
 #[cfg(test)]
@@ -741,7 +814,7 @@ mod tests {
                 )
             })
             .into();
-        let r = read_file("codex", &c_path, (1 << 20, 0), false, 0, 0).unwrap();
+        let r = read_file("codex", &c_path, (1 << 20, 0), false, 0, 0, &[]).unwrap();
         let (s, from) = (r.session, r.forked_from);
         assert_eq!(
             (s.id.as_str(), s.interactive, from.as_deref()),
@@ -755,7 +828,7 @@ mod tests {
         // A copy started in a terminal stays interactive, whatever its original.
         let d = "dddddddd-0000-7000-8000-000000000004";
         let d_path = rollout(d, &meta(d, "codex-tui", &format!("\"{b}\"")), "tui copy");
-        let r = read_file("codex", &d_path, (1 << 20, 0), false, 0, 0).unwrap();
+        let r = read_file("codex", &d_path, (1 << 20, 0), false, 0, 0, &[]).unwrap();
         let (s2, from) = (r.session, r.forked_from);
         let s2 = resolve_copy(s2, from, |id| files.get(id).cloned(), 0);
         assert_eq!(
@@ -775,6 +848,83 @@ mod tests {
                 "msg_id": msg_id, "name": name, "body": "add a test"},
             "message": {"content": "<cross-session-message>add a test</cross-session-message>"}})
         .to_string()
+    }
+
+    #[test]
+    fn codex_messages_are_answered_by_the_end_of_their_own_turn() {
+        let sent = |id: &str, turn: &str| {
+            serde_json::json!({"type": "event_msg", "payload": {"type": "item_completed",
+                "turn_id": turn, "item": {"type": "UserMessage", "client_id": id, "content": []}}})
+            .to_string()
+        };
+        let ended = |turn: &str, said: Option<&str>| {
+            serde_json::json!({"type": "event_msg", "payload": {"type": "task_complete",
+                "turn_id": turn, "last_agent_message": said}})
+            .to_string()
+        };
+        let aborted = r#"{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t1"}}"#;
+        let got = |lines: &[&str]| {
+            let d = codex(lines).delivered.into_iter();
+            d.map(|(_, d)| (d.msg_id, d.reply)).collect::<Vec<_>>()
+        };
+        let m1 = sent("mis-phone-1", "t1");
+        let answer = |r: &str| vec![("mis-phone-1".to_string(), Some(r.to_string()))];
+        // Typed by the user, or another client's: not MIS's.
+        assert!(got(&[&sent("user-1", "t1"), &sent("mis-phoney", "t1")]).is_empty());
+        assert_eq!(
+            got(&[&m1, &ended("t1", Some("Paris.\nMore"))]),
+            answer("Paris.")
+        );
+        // Another turn's end doesn't answer it; one without text still ends it.
+        assert_eq!(
+            got(&[&m1, &ended("t0", Some("old"))]),
+            [("mis-phone-1".into(), None)]
+        );
+        assert_eq!(
+            got(&[&m1, &ended("t1", None)]),
+            answer("(ended without a reply)")
+        );
+        // Aborted: never answered, not even by the user's next turn.
+        let next = ended("t2", Some("unrelated"));
+        assert_eq!(got(&[&m1, aborted, &next]), [("mis-phone-1".into(), None)]);
+    }
+
+    #[test]
+    fn a_codex_message_scrolled_out_of_the_tail_is_still_answered() {
+        let dir = temp();
+        let path =
+            dir.join("rollout-2026-11-02T10-00-00-aaaaaaaa-0000-7000-8000-000000000001.jsonl");
+        let meta = r#"{"type":"session_meta","payload":{"cwd":"/r","originator":"codex-tui"}}"#;
+        let m1 = r#"{"type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"UserMessage","client_id":"mis-phone-1","content":[]}}}"#;
+        let filler = format!(
+            r#"{{"type":"response_item","payload":{{"type":"function_call_output","output":"{}"}}}}"#,
+            "x".repeat(500)
+        );
+        std::fs::write(&path, format!("{meta}\n{m1}\n")).unwrap();
+        let read = |pending: &[(String, Delivered)]| {
+            read_file("codex", &path, (300, 1000), true, 0, 0, pending).unwrap()
+        };
+        let first = read(&[]);
+        assert_eq!(first.pending.len(), 1);
+        // A long turn pushes it out of the tail before it ends.
+        let end = r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"Done."}}"#;
+        let more = format!("{filler}\n{filler}\n{filler}\n{end}\n");
+        std::io::Write::write_all(
+            &mut std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap(),
+            more.as_bytes(),
+        )
+        .unwrap();
+        assert!(
+            read(&[]).delivered.is_empty(),
+            "lost without what was pending"
+        );
+        let r = read(&first.pending);
+        assert_eq!(r.delivered[0].reply.as_deref(), Some("Done."));
+        assert!(r.pending.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -898,9 +1048,9 @@ mod tests {
         let tail_title = r#"{"type":"ai-title","aiTitle":"T"}"#;
         let pad = format!("{{\"type\":\"pad\",\"x\":\"{}\"}}\n", "x".repeat(200));
         std::fs::write(&path, format!("{reply}\n{}{tail_title}\n", pad.repeat(10))).unwrap();
-        let r = read_file("claude", &path, (300, 300), true, 0, 0).unwrap();
+        let r = read_file("claude", &path, (300, 300), true, 0, 0, &[]).unwrap();
         assert_eq!((r.turn, r.last), (TurnEnd::Unknown, None));
-        let r = read_file("claude", &path, (1 << 20, 300), true, 0, 0).unwrap();
+        let r = read_file("claude", &path, (1 << 20, 300), true, 0, 0, &[]).unwrap();
         assert_eq!(
             (r.turn, r.last.as_deref()),
             (TurnEnd::Replied, Some("early"))
@@ -980,12 +1130,12 @@ mod tests {
         );
         std::fs::write(&path, body).unwrap();
         // Head ends inside the padding, tail starts after the prompt: only the title is seen.
-        let s = read_file("claude", &path, (100, 400), true, 0, 0)
+        let s = read_file("claude", &path, (100, 400), true, 0, 0, &[])
             .unwrap()
             .session;
         assert_eq!((s.title.as_deref(), s.cwd), (Some("Tail title"), None));
         // A head long enough reaches the prompt and its cwd.
-        let s = read_file("claude", &path, (1 << 20, 400), true, 0, 0)
+        let s = read_file("claude", &path, (1 << 20, 400), true, 0, 0, &[])
             .unwrap()
             .session;
         assert_eq!(
