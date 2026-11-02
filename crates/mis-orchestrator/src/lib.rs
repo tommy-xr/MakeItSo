@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -109,6 +109,8 @@ pub struct App {
     routines_dir: Option<std::path::PathBuf>,
     /// How often routine files are re-read and due ones started.
     routine_every: Duration,
+    /// Clients watching live sessions (`ClientMsg::WatchSessions`); none: no diffing.
+    watchers: Arc<AtomicUsize>,
 }
 
 impl App {
@@ -144,6 +146,7 @@ impl App {
             channel: None,
             routines_dir: None,
             routine_every: ROUTINE_EVERY,
+            watchers: Default::default(),
         }
     }
 
@@ -333,6 +336,13 @@ impl App {
                         tokio::spawn(async move { push.send(task, &title, &body, urgent).await });
                     }
                 }
+            }
+        }
+        // Any transition may change the sessions view (a report, a worker leaving, a
+        // message's task moving on): diffed only while someone watches.
+        if self.watchers.load(Ordering::Relaxed) > 0 {
+            if let Some(Effect::Broadcast(msg)) = self.ledger().sessions_changed() {
+                let _ = self.events.send(msg);
             }
         }
     }
@@ -635,6 +645,20 @@ impl App {
         scope
     }
 
+    /// Admitted with full access; else why not (401, or 403 read-only).
+    async fn admit_full(
+        &self,
+        headers: &HeaderMap,
+        peer: SocketAddr,
+        path: &str,
+    ) -> Result<(), (StatusCode, &'static str)> {
+        match self.admit_scope(headers, peer, path).await {
+            Some(Scope::Full) => Ok(()),
+            Some(Scope::Read) => Err((StatusCode::FORBIDDEN, "read-only token")),
+            None => Err((StatusCode::UNAUTHORIZED, "")),
+        }
+    }
+
     /// Admitted with any scope: enough for read-only routes (`/mcp`).
     async fn admit(&self, headers: &HeaderMap, peer: SocketAddr, path: &str) -> bool {
         self.admit_scope(headers, peer, path).await.is_some()
@@ -816,6 +840,7 @@ pub fn router(app: App) -> Router {
         .route("/api/tasks/{id}/cancel", post(cancel))
         .route("/api/routines", get(routines))
         .route("/api/routines/{name}/{action}", post(routine_action))
+        .route("/api/sessions", get(live_sessions))
         .route("/api/workers/{id}/sessions", get(sessions))
         .route(
             "/api/workers/{id}/sessions/{harness}/{session}",
@@ -1172,8 +1197,21 @@ struct ListParams {
     headless: bool,
 }
 
+/// Every worker's live sessions (`SessionRow`s) in Home's order, offline workers' as last
+/// reported. Session data needs full access: read-only tokens get 403.
+async fn live_sessions(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/sessions").await {
+        return refused.into_response();
+    }
+    Json(app.ledger().sessions()).into_response()
+}
+
 /// Worker `id`'s Claude and Codex sessions, newest first: read from its disk
-/// now, never kept here. Read-only, like transcripts.
+/// now, never kept here. Full access only, like transcripts.
 async fn sessions(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -1181,8 +1219,11 @@ async fn sessions(
     Path(id): Path<WorkerId>,
     Params(p): Params<ListParams>,
 ) -> Response {
-    if !app.admit(&headers, peer, "/api/workers/sessions").await {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if let Err(refused) = app
+        .admit_full(&headers, peer, "/api/workers/sessions")
+        .await
+    {
+        return refused.into_response();
     }
     let query = Query::ListSessions {
         headless: p.headless,
@@ -1203,7 +1244,7 @@ struct ReadParams {
 const TURNS: usize = 30;
 
 /// The last turns of one session on worker `wid`, read from its disk now. `session`
-/// must be a UUID (400 otherwise), so it can't name a path.
+/// must be a UUID (400 otherwise), so it can't name a path. Full access only.
 async fn session(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -1211,8 +1252,11 @@ async fn session(
     Path((wid, harness, id)): Path<(WorkerId, String, uuid::Uuid)>,
     Params(p): Params<ReadParams>,
 ) -> Response {
-    if !app.admit(&headers, peer, "/api/workers/sessions").await {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if let Err(refused) = app
+        .admit_full(&headers, peer, "/api/workers/sessions")
+        .await
+    {
+        return refused.into_response();
     }
     let limit = p.limit.unwrap_or(TURNS).clamp(1, MAX_TURNS);
     match app
@@ -1426,6 +1470,9 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
                         app.transition(|l| ((), l.worker_permissions(wid, conn, permissions)));
                     }
                     Some(WorkerMsg::Answer { req, answer }) => app.answered(conn, req, answer),
+                    Some(WorkerMsg::LiveSessions { sessions }) => {
+                        app.transition(|l| ((), l.live_sessions(wid, conn, sessions)));
+                    }
                     Some(WorkerMsg::Hello { .. }) => {}
                     None => break,
                 }
@@ -1456,6 +1503,8 @@ async fn next_event(sub: Option<&mut broadcast::Receiver<ServerMsg>>) -> ServerM
 
 async fn client_conn(mut sock: WebSocket, app: App, scope: Scope) {
     let mut sub: Option<broadcast::Receiver<ServerMsg>> = None;
+    // Sent `WatchSessions`: gets `ServerMsg::Sessions`, which others never see.
+    let mut watching = false;
     let start = tokio::time::Instant::now() + app.ping_every;
     let mut ping = tokio::time::interval_at(start, app.ping_every);
     loop {
@@ -1464,6 +1513,7 @@ async fn client_conn(mut sock: WebSocket, app: App, scope: Scope) {
         tokio::select! {
             biased;
             ev = next_event(sub.as_mut()) => {
+                if matches!(ev, ServerMsg::Sessions { .. }) && !watching { continue; }
                 if !send_json(&mut sock, &ev).await { break; }
             }
             _ = ping.tick() => {
@@ -1507,6 +1557,17 @@ async fn client_conn(mut sock: WebSocket, app: App, scope: Scope) {
                     send_json(&mut sock, &reply).await;
                 }
                 Some(ClientMsg::Subscribe) => sub = Some(app.events.subscribe()),
+                Some(ClientMsg::WatchSessions) => {
+                    if !watching {
+                        watching = true;
+                        app.watchers.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // Subscribed first, so no change after this snapshot is missed.
+                    sub.get_or_insert_with(|| app.events.subscribe());
+                    // Not counted as pushed: a change still in flight reaches everyone.
+                    let sessions = app.ledger().sessions();
+                    send_json(&mut sock, &ServerMsg::Sessions { sessions }).await;
+                }
                 Some(ClientMsg::Seen { task }) => app.transition(|l| ((), l.seen(task))),
                 Some(ClientMsg::Show { task }) => {
                     let reply = match app.ledger().show(task) {
@@ -1576,6 +1637,9 @@ async fn client_conn(mut sock: WebSocket, app: App, scope: Scope) {
                 None => break,
             },
         }
+    }
+    if watching {
+        app.watchers.fetch_sub(1, Ordering::Relaxed);
     }
 }
 

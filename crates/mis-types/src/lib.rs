@@ -21,7 +21,10 @@ pub mod mcp;
 mod permissions;
 pub use permissions::{Approval, Decision, PermissionMode, Permissions, MAX_APPROVAL_DETAIL};
 mod sessions;
-pub use sessions::{Answer, Query, Role, SendMode, SendTo, Session, Turn, MAX_TURNS};
+pub use sessions::{
+    Answer, LiveSession, LiveState, Query, Role, SendMode, SendTo, Session, SessionMessage,
+    SessionRow, Turn, LIVE_WINDOW_MS, MAX_LIVE, MAX_TURNS, STALL_MS,
+};
 
 pub type WorkerId = Uuid;
 pub type TaskId = Uuid;
@@ -280,6 +283,11 @@ pub enum WorkerMsg {
         req: Uuid,
         answer: Answer,
     },
+    /// Its live sessions, newest first; sent after Hello and whenever they change.
+    /// Orchestrators predating it log and skip it.
+    LiveSessions {
+        sessions: Vec<LiveSession>,
+    },
 }
 
 /// Where release builds of a version are published. Stable: the tag `v<semver>`. Edge: every
@@ -406,6 +414,8 @@ pub enum ClientMsg {
         id: Uuid,
         decision: Decision,
     },
+    /// Send `ServerMsg::Sessions` now and on every change (subscribes too). Full access only.
+    WatchSessions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -690,6 +700,11 @@ pub enum ServerMsg {
     Error {
         message: String,
     },
+    /// Every worker's live sessions, as `GET /api/sessions` lists them; only to clients
+    /// that sent `WatchSessions`.
+    Sessions {
+        sessions: Vec<SessionRow>,
+    },
     /// Answer to `SuggestPurpose`: a draft for the user to edit, or why there is none.
     PurposeDraft {
         worker: WorkerId,
@@ -912,6 +927,44 @@ mod tests {
         };
         let s = serde_json::to_string(&a).unwrap();
         assert_eq!(serde_json::from_str::<WorkerMsg>(&s).unwrap(), a);
+        // Live sessions: reported by workers, listed with their worker and messages.
+        let live = LiveSession {
+            harness: "claude".into(),
+            id: "s".into(),
+            state: LiveState::Waiting,
+            waiting_for: Some("permission prompt".into()),
+            ..Default::default()
+        };
+        let report = WorkerMsg::LiveSessions {
+            sessions: vec![live.clone()],
+        };
+        let s = serde_json::to_string(&report).unwrap();
+        assert!(s.contains(r#""type":"live_sessions""#) && s.contains(r#""state":"waiting""#));
+        assert_eq!(serde_json::from_str::<WorkerMsg>(&s).unwrap(), report);
+        let row = ServerMsg::Sessions {
+            sessions: vec![SessionRow {
+                worker: Uuid::nil(),
+                worker_name: "demo-mac".into(),
+                online: false,
+                session: live,
+                messages: vec![SessionMessage {
+                    task: Uuid::nil(),
+                    status: TaskStatus::Done,
+                    text: "add a test".into(),
+                    answered: true,
+                    at: 1,
+                }],
+            }],
+        };
+        let s = serde_json::to_string(&row).unwrap();
+        // Flat: a row is its session's fields plus the worker's.
+        assert!(
+            s.contains(r#""worker_name":"demo-mac","online":false,"harness":"claude""#),
+            "{s}"
+        );
+        assert_eq!(serde_json::from_str::<ServerMsg>(&s).unwrap(), row);
+        let watch = serde_json::to_string(&ClientMsg::WatchSessions).unwrap();
+        assert_eq!(watch, r#"{"type":"watch_sessions"}"#);
         // Summaries from orchestrators predating timing/tokens/activity still parse.
         let old: TaskSummary = serde_json::from_str(
             r#"{"id":"00000000-0000-0000-0000-000000000000","prompt":"p","status":"done",

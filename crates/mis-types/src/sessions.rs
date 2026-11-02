@@ -106,3 +106,80 @@ pub enum SendMode {
     /// Wait on the worker until it closes, then continue it in place.
     WhenClosed,
 }
+
+/// What a live session is doing, as its files show.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveState {
+    /// Mid-turn and writing.
+    Working,
+    /// Its agent waits on the user: a permission prompt or dialog (claude says so), or
+    /// it replied and its terminal is idle.
+    Waiting,
+    /// Mid-turn, but nothing written for `STALL_MS`.
+    Stalled,
+    #[default]
+    Idle,
+    /// Claude's terminal is in shell mode (`!`).
+    Shell,
+}
+
+/// No write for this long mid-turn: stalled.
+pub const STALL_MS: u64 = 10 * 60 * 1000;
+/// Sessions written this recently are live even when not open.
+pub const LIVE_WINDOW_MS: u64 = 6 * 3600 * 1000;
+/// Most live sessions a worker reports.
+pub const MAX_LIVE: usize = 30;
+
+/// An interactive session open now or written within `LIVE_WINDOW_MS`, as its worker
+/// reports it (`WorkerMsg::LiveSessions`). Headless runs (MIS's own tasks) aren't live.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LiveSession {
+    /// "claude" or "codex".
+    pub harness: String,
+    pub id: String,
+    /// As `Session::title`.
+    pub title: Option<String>,
+    /// Claude's peer name for it (`functor2-fd`), from its process record.
+    pub name: Option<String>,
+    pub cwd: Option<String>,
+    pub model: Option<String>,
+    /// A live claude process holds it. Codex records no such thing: always false.
+    pub open: bool,
+    pub state: LiveState,
+    /// What it waits on, in claude's words (`permission prompt`, `dialog open`).
+    pub waiting_for: Option<String>,
+    /// Unix millis of its latest write (claude: its subagents' too).
+    pub updated_ms: u64,
+    /// First line of its latest assistant text.
+    pub last: Option<String>,
+}
+
+/// A worker's live session as `GET /api/sessions` lists it, with the MIS tasks that messaged it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionRow {
+    pub worker: Uuid,
+    /// The worker's hostname.
+    pub worker_name: String,
+    /// Offline: the sessions it last reported.
+    pub online: bool,
+    #[serde(flatten)]
+    pub session: LiveSession,
+    /// Oldest first.
+    #[serde(default)]
+    pub messages: Vec<SessionMessage>,
+}
+
+/// A task that messaged a session (`Task::send_to`), shown inside its session's row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionMessage {
+    pub task: Uuid,
+    pub status: crate::TaskStatus,
+    /// First line of what was sent.
+    pub text: String,
+    /// The session replied: the task finished done.
+    pub answered: bool,
+    /// Unix millis it was sent.
+    pub at: u64,
+}
