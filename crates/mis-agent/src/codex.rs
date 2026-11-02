@@ -369,8 +369,8 @@ impl Agent for CodexAgent {
                         }
                         _ => {}
                     }
+                    // Nobody listens: `tree` kills it all on return, while the tree is intact.
                     if tx.send(ev).await.is_err() {
-                        let _ = child.kill().await;
                         return Ok(());
                     }
                 }

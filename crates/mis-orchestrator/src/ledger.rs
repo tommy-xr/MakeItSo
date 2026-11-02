@@ -1070,10 +1070,11 @@ impl Ledger {
             t.approvals.clear();
         }
         let mut effects = self.fail_running(wid, running, "worker restarted");
-        // A cancel the worker may have missed while the socket was down.
+        // A cancel it may have missed while the socket was down, also for a task
+        // already ended cancelled when its grace ran out.
         effects.extend(
             (self.tasks.iter())
-                .filter(|t| t.worker == Some(wid) && t.status == TaskStatus::Running && t.cancel)
+                .filter(|t| t.worker == Some(wid) && t.cancel && running.contains(&t.task.id))
                 .map(|t| Effect::Send {
                     conn,
                     msg: OrchMsg::Cancel { task: t.task.id },
@@ -1466,17 +1467,17 @@ impl Ledger {
             .iter_mut()
             .filter(|t| pred(t))
             .flat_map(|t| {
-                let event = match t.cancel {
-                    true => AgentEvent::Cancelled,
-                    false => AgentEvent::Finished {
-                        ok: false,
-                        summary: Some(why.into()),
-                    },
+                let (status, event) = match t.cancel {
+                    true => (TaskStatus::Cancelled, AgentEvent::Cancelled),
+                    false => (
+                        TaskStatus::Failed,
+                        AgentEvent::Finished {
+                            ok: false,
+                            summary: Some(why.into()),
+                        },
+                    ),
                 };
-                t.status = match t.cancel {
-                    true => TaskStatus::Cancelled,
-                    false => TaskStatus::Failed,
-                };
+                t.status = status;
                 t.record(&event, now);
                 let broadcast = Effect::Broadcast(ServerMsg::Event {
                     task: t.task.id,
@@ -2864,6 +2865,11 @@ mod tests {
         assert!(cancelled(&eff, task), "{eff:?}");
         assert!(!eff.iter().any(|e| matches!(e, Effect::Notify { .. })));
         assert_eq!(task_status(&l, task), TaskStatus::Cancelled);
+        // Back after all, still running it: told again.
+        let (_, eff) = l.connect(wid, info(), &[task], 4, T0);
+        assert!(eff
+            .iter()
+            .any(|e| matches!(e, Effect::Send { conn: 4, msg } if *msg == send)));
     }
 
     #[test]

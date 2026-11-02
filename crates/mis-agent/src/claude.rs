@@ -363,8 +363,8 @@ impl Agent for ClaudeAgent {
             while let Some(line) = lines.next_line().await? {
                 for ev in parser.line(&line) {
                     finished |= matches!(ev, AgentEvent::Finished { .. });
+                    // Nobody listens: `tree` kills it all on return, while the tree is intact.
                     if tx.send(ev).await.is_err() {
-                        let _ = child.kill().await;
                         return Ok(());
                     }
                 }

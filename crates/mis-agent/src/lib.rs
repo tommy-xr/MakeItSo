@@ -143,7 +143,11 @@ fn kill_tree(pid: u32) {
     let mut i = 0;
     while i < tree.len() {
         let parent = tree[i];
-        let kids = (sys.processes().iter()).filter(|(_, p)| p.parent() == Some(parent));
+        let born = sys.process(parent).map_or(0, |p| p.start_time());
+        // Started after its parent: Windows keeps a dead parent's pid on its children,
+        // so an older process naming a reused pid as parent isn't a descendant.
+        let kids = (sys.processes().iter())
+            .filter(|(_, p)| p.parent() == Some(parent) && p.start_time() >= born);
         tree.extend(kids.map(|(pid, _)| *pid));
         i += 1;
     }
