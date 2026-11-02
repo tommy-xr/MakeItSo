@@ -136,9 +136,25 @@ test('ansi: colour and bold kept, every other escape and control dropped', () =>
     { text: 'ok', fg: 2, bold: true }, { text: ' done ', fg: null, bold: false }, { text: 'bad', fg: 1, bold: false }, { text: '\n', fg: null, bold: false }]);
   // 256-colour: the first 16 map, the rest are plain; RGB is skipped with its arguments.
   assert.deepEqual(ev.ansi(`${E}[38;5;4ma${E}[38;5;200mb${E}[38;2;1;2;3;1mc`).map((s) => [s.text, s.fg, s.bold]), [['a', 4, false], ['b', null, false], ['c', null, true]]);
-  // Cursor moves, OSC titles (terminated or not), carriage returns, bells and lone ESCs vanish; tabs stay.
-  const plain = ev.ansi(`a${E}[2K${E}[1G${E}]0;title\x07b\r\x07${E}7c\td${E}]8;;x\ne${E}[`).map((s) => s.text).join('');
-  assert.equal(plain, 'abc\td\ne');
+  // The colon form keeps its arguments to itself; RGB is plain like a 256-colour past 15.
+  assert.deepEqual(ev.ansi(`${E}[31m${E}[38:2::1:2:0mx${E}[38:5:2my`).map((s) => [s.text, s.fg, s.bold]), [['x', null, false], ['y', 2, false]]);
+  // The worker's transcript stripper's cases (mis-worker transcript::plain) strip the same here.
+  const plain = (raw) => ev.ansi(raw).map((s) => s.text).join('');
+  for (const [raw, want] of [
+    [`${E}[2m2026-11-01T10:00:00Z${E}[0m ${E}[32m INFO${E}[0m ready`, '2026-11-01T10:00:00Z  INFO ready'],
+    [`${E}[38;2;153;153;153mdim${E}[39m`, 'dim'],
+    [`${E}]8;;https://x.example${E}\\link${E}]8;;${E}\\ ${E}]0;title\x07done`, 'link done'],
+    ['\u009b1mbold\u009b0m', 'bold'],
+    [`before${E}P1;2|payload${E}\\after ${E}_apc\x07!`, 'beforeafter !'],
+    [`cut ${E}Pno end`, 'cut '],
+    [`${E}]0;8-bit end\u009ckept`, 'kept'],
+    [`${E}=keypad ${E}(Bascii`, 'keypad ascii'],
+    [`cut ${E}[38;5`, 'cut '],
+    ['plain é text', 'plain é text'],
+  ]) assert.equal(plain(raw), want, JSON.stringify(raw));
+  // Carriage returns, bells and other controls go too; tabs and newlines stay.
+  assert.equal(plain(`a${E}[2K${E}[1Gb\r\x07${E}7c\td\ne`), 'abc\td\ne');
+  assert.equal(ev.ansi('\u009b1mx')[0].bold, true);
   // Markup is plain text to it; the page sets segments as text.
   assert.equal(ev.ansi('<script>x</script>')[0].text, '<script>x</script>');
 });
@@ -147,6 +163,9 @@ test('better: throughput up, time and size down, unknown neutral; most specific 
   for (const t of ['ops/s', '820 fps', 'req/s', 'score', 'throughput', '12 qps']) assert.equal(ev.better(t), 'up', t);
   for (const t of ['2.4 ms', '3 s', '12 µs', '412 MB', '1.2 KiB', 'bytes', '35%', 'boot time', 'p99 latency']) assert.equal(ev.better(t), 'down', t);
   for (const t of ['draw calls', '412', 'cases']) assert.equal(ev.better(t), '', t);
+  // Rates of success go up even as percentages; other percentages go down.
+  for (const t of ['coverage 81%', 'cache hit rate', 'pass rate 99%', 'accuracy']) assert.equal(ev.better(t), 'up', t);
+  assert.equal(ev.better('cpu 35%'), 'down');
   assert.equal(ev.better('throughput', 'case ms'), 'up');
   assert.equal(ev.better('draw calls', 'before after', 'Frame (ms)'), 'down');
 });
@@ -171,6 +190,10 @@ test('deltas: change, format and tone per row; the biggest change', () => {
   assert.deepEqual(d.rows.map((r) => [r.label, r.delta === null ? null : ev.fmtChange(r.delta), r.tone]),
     [['1080p frame', '−21%', 'good'], ['throughput', '+23%', 'good'], ['peak memory', '+10%', 'bad'], ['draw calls', '+1.5%', ''], ['new', null, '']]);
   assert.equal(d.top.label, 'throughput');
+  // Different units: no delta (900 ms → 1.2 s is slower, not 99.9% faster).
+  const mixed = ev.deltas({ header: ['case', 'before', 'after'], before: 1, after: 2, rows: [[c('load'), c('900 ms'), c('1.2 s')]] });
+  assert.equal(mixed.rows[0].delta, null);
+  assert.equal(mixed.top, null);
   // No before/after columns: no deltas.
   assert.equal(ev.deltas({ header: ['a', 'b'], rows: [[c('1'), c('2')]] }).has, false);
 });

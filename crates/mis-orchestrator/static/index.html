@@ -460,8 +460,8 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .md .code { border-radius: .75rem; background: var(--code); overflow: hidden; }
   .md .code pre { margin: 0; padding-top: 0; border-radius: 0; }
   .code-h { display: flex; align-items: center; justify-content: space-between; padding: .25rem .25rem .25rem .75rem; font-size: .75rem; color: var(--dim); }
-  .code-h button { min-height: 0; height: 1.75rem; padding: 0 .625rem; border-radius: .5rem; background: none; color: var(--soft); font: 500 .75rem var(--sans); }
-  @media (hover: hover) { .code-h button:hover { background: var(--hover); } }
+  :is(.code-h, .evo-h) button { min-height: 0; height: 1.75rem; padding: 0 .625rem; border-radius: .5rem; background: none; color: var(--soft); font: 500 .75rem var(--sans); }
+  @media (hover: hover) { :is(.code-h, .evo-h) button:hover { background: var(--hover); } }
   .md blockquote { padding-left: .875rem; border-left: 3px solid var(--sep); color: var(--soft); }
   .md hr { border: 0; border-top: 1px solid var(--sep); }
   /* Jump to latest: shown when the conversation grew while scrolled up. */
@@ -491,12 +491,14 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .tile :is(img, video) { display: block; width: 100%; height: 100%; object-fit: cover; }
   .tile video { object-fit: contain; background: #000; }
   /* Its title on a dark fade, so it reads over any picture in either theme. */
+  /* A lone picture is shown whole: a tall screenshot letterboxed, not cut to a band. */
+  .tile.wide img { object-fit: contain; }
   .tile .cap { position: absolute; left: 0; right: 0; bottom: 0; padding: 1.25rem .625rem .375rem; background: linear-gradient(transparent, rgba(0, 0, 0, .6)); font: 500 .75rem/1.3 var(--sans); text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
   .tile:has(video) .cap { top: 0; bottom: auto; padding: .375rem 2.75rem 1.25rem .625rem; background: linear-gradient(rgba(0, 0, 0, .6), transparent); }
   .tile .exp { position: absolute; top: .25rem; right: .25rem; width: 2.25rem; height: 2.25rem; border-radius: .625rem; background: rgba(0, 0, 0, .45); color: #fff; }
   .tile .exp svg { width: 1.125rem; height: 1.125rem; }
   /* A file that couldn't be fetched (gone, or no access): a dim word instead. */
-  .gone::after { content: "Unavailable"; position: absolute; inset: 0; display: grid; place-items: center; color: var(--dim); font: .8125rem var(--sans); }
+  .gone::after { content: "Unavailable"; position: absolute; inset: 0; background: var(--raised); display: grid; place-items: center; color: var(--dim); font: .8125rem var(--sans); }
   /* Compare: the before picture over the after, cut at the handle; or the two side by side. */
   .cmp { display: grid; gap: .375rem; }
   .cmp-h { display: flex; align-items: center; gap: .5rem; min-width: 0; }
@@ -538,8 +540,6 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .evo summary { min-height: 2.75rem; }
   .evo summary::after { flex: none; }
   .evo-h { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: 0 .25rem 0 .75rem; font-size: .75rem; color: var(--dim); }
-  .evo-h button { min-height: 0; height: 1.75rem; padding: 0 .625rem; border-radius: .5rem; background: none; color: var(--soft); font: 500 .75rem var(--sans); }
-  @media (hover: hover) { .evo-h button:hover { background: var(--hover); } }
   .evo pre { max-height: 24rem; overflow: auto; margin: 0; padding: .375rem .75rem .75rem; background: var(--code); white-space: pre; word-break: normal; font: .75rem/1.55 var(--mono); color: var(--fg2); }
   .a0 { color: var(--dim); } .a1 { color: var(--bad); } .a2 { color: var(--ok); } .a3 { color: var(--warn); }
   .a4 { color: var(--a-blue); } .a5 { color: var(--a-mag); } .a6 { color: var(--accent); } .a7 { color: var(--fg); } .ab { font-weight: 700; }
@@ -886,8 +886,10 @@ function mdTable(lines, i, out) {
 
 // ev:begin. Evidence, pure: terminal colours, table deltas, Markdown for a PR. tests/md.test.mjs runs this block.
 // Command output as [{ text, fg, bold }]: SGR colour (fg 0-7, bright folded in) and bold kept; every other escape
-// sequence and control character but newline and tab dropped. Callers set it as text, never as HTML.
-const ANSI = /\x1b\[([0-9;:]*)m|\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b\n]*(?:\x07|\x1b\\)?|\x1b[ -/]*[0-~]?|[\x00-\x08\x0b-\x1a\x1c-\x1f\x7f]/g;
+// sequence and control character but newline and tab dropped, as the worker's transcript stripper does: CSI
+// (`ESC [` or 8-bit `\x9b`, up to a final byte), strings (OSC, DCS, SOS, PM, APC: up to BEL, `\x9c` or `ESC \`), other
+// escapes (`ESC ( B`, `ESC =`); one cut off at the end is dropped. Callers set it as text, never as HTML.
+const ANSI = /(?:\x1b\[|\x9b)([^@-~]*)([@-~]|$)|\x1b[\]PX^_][^\x07\x9c\x1b]*(?:[\x07\x9c]|\x1b[\s\S]?|$)|\x1b[ -/][^0-~]*[0-~]?|\x1b[\s\S]?|[\x00-\x08\x0b-\x1a\x1c-\x1f\x7f]/g;
 function ansi(src) {
   const s = String(src), out = [];
   let fg = null, bold = false, last = 0;
@@ -896,17 +898,21 @@ function ansi(src) {
     if (!text) return;
     if (p && p.fg === fg && p.bold === bold) p.text += text; else out.push({ text, fg, bold });
   };
-  s.replace(ANSI, (m, sgr, at) => {
+  s.replace(ANSI, (m, params, final, at) => {
     push(s.slice(last, at));
     last = at + m.length;
-    const c = sgr === undefined ? [] : sgr.split(/[;:]/).map(Number);
+    if (final !== 'm' || !/^[0-9;:]*$/.test(params)) return '';
+    // `;` separates codes; `:` joins a code's own arguments (`38:2::r:g:b`).
+    const c = params.split(';');
     for (let i = 0; i < c.length; i++) {
-      const n = c[i];
+      const sub = c[i].split(':').map(Number), n = sub[0];
       if (n === 0) { fg = null; bold = false; } else if (n === 1) bold = true; else if (n === 22) bold = false;
       else if (n >= 30 && n <= 37) fg = n - 30; else if (n >= 90 && n <= 97) fg = n - 90; else if (n === 39) fg = null;
-      // 256-colour and RGB forms: the first 16 of 256 map; their arguments are skipped either way.
+      // 256-colour and RGB: the first 16 of 256 map, the rest (and RGB) are plain; their arguments are skipped.
       else if (n === 38 || n === 48) {
-        if (c[i + 1] === 5) { if (n === 38) fg = c[i + 2] < 16 ? c[i + 2] % 8 : null; i += 2; } else if (c[i + 1] === 2) i += 4;
+        const [mode, k] = sub.length > 1 ? sub.slice(1) : [Number(c[i + 1]), Number(c[i + 2])];
+        if (n === 38) fg = mode === 5 && k < 16 ? k % 8 : null;
+        if (sub.length === 1) i += mode === 5 ? 2 : mode === 2 ? 4 : 0;
       }
     }
     return '';
@@ -914,9 +920,10 @@ function ansi(src) {
   push(s.slice(last));
   return out;
 }
-// Which way is better for a measure, from its words: 'up' for throughput (ops/s, fps, /s, score), 'down' for time
-// and size (ms, s, MB, bytes, %, time, latency), '' when unknown. Texts go most specific first (row, columns, title).
-const EV_UP = /\/ ?s(?:ec)?\b|\bfps\b|\bscore\b|\bthroughput\b|\b[oqr]ps\b/i;
+// Which way is better for a measure, from its words: 'up' for throughput and rates of success (ops/s, fps, /s,
+// score, coverage, hit or pass rate), 'down' for time and size (ms, s, MB, bytes, %, time, latency), '' when unknown.
+// Up wins, so `coverage 81%` is up while `cpu 35%` is down. Texts go most specific first (row, columns, title).
+const EV_UP = /\/ ?s(?:ec)?\b|\bfps\b|\bscore\b|\bthroughput\b|\b[oqr]ps\b|\bcoverage\b|\baccuracy\b|\b(?:hit|pass|success)(?:es)? ?rate\b|\buptime\b/i;
 const EV_DOWN = /µs|%|\b(?:ns|us|ms|s|secs?|seconds?|min|[kmgt]i?b|bytes?|time|latency|duration|memory|size)\b/i;
 function better(...texts) {
   for (const t of texts) { if (EV_UP.test(t)) return 'up'; if (EV_DOWN.test(t)) return 'down'; }
@@ -934,16 +941,18 @@ function tone(p, dir) {
   if (p === null || !dir || Math.round(p * 10) === 0) return '';
   return (dir === 'down' ? p < 0 : p > 0) ? 'good' : Math.abs(p) >= 10 ? 'bad' : 'warn';
 }
+// A cell's number (the server reads it), or null; the unit after it, e.g. `ms` in `12.5 ms`.
+const cellNum = (c) => (c && typeof c.num === 'number' ? c.num : null);
+const unitOf = (c) => (c ? c.text.trim().replace(/^[\d+\-.,eE]+/, '').trim().toLowerCase() : '');
 // A table's rows with their change ({ cells, label, delta, tone }), whether it has a Δ column (before and after
-// columns given), and its row with the biggest change.
+// columns given), and its row with the biggest change. Numbers in different units (`900 ms`, `1.2 s`) get none.
 function deltas(table, title = '') {
   const { header, rows } = table, b = table.before ?? null, a = table.after ?? null;
   const has = b !== null && a !== null && b !== a && b < header.length && a < header.length;
-  const n = (c) => (c && typeof c.num === 'number' ? c.num : null);
   const out = rows.map((cells) => {
     const label = (cells.find((c, i) => i !== b && i !== a && c.text) || { text: '' }).text;
     if (!has) return { cells, label, delta: null, tone: '' };
-    const delta = change(n(cells[b]), n(cells[a]));
+    const delta = unitOf(cells[b]) === unitOf(cells[a]) ? change(cellNum(cells[b]), cellNum(cells[a])) : null;
     const dir = better([label, cells[b]?.text, cells[a]?.text].join(' '), `${header[b]} ${header[a]}`, title);
     return { cells, label, delta, tone: tone(delta, dir) };
   });
@@ -954,7 +963,7 @@ const mdCell = (s) => String(s).replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
 // A table as a GitHub pipe table, numbers right-aligned, with its Δ column.
 function tableMd(table, title) {
   const d = deltas(table, title), head = [...table.header, ...(d.has ? ['Δ'] : [])];
-  const right = head.map((_, i) => i >= table.header.length || table.rows.some((r) => r[i] && typeof r[i].num === 'number'));
+  const right = head.map((_, i) => i >= table.header.length || table.rows.some((r) => cellNum(r[i]) !== null));
   const line = (cells) => `| ${cells.map(mdCell).join(' | ')} |`;
   return [line(head), `|${right.map((r) => (r ? ' ---: ' : ' --- ')).join('|')}|`,
     ...d.rows.map((r) => line([...table.header.map((_, i) => (r.cells[i] ? r.cells[i].text : '')),
@@ -1749,15 +1758,16 @@ $('refresh-ev').onclick = () => {
   render();
 };
 
-// Evidence files, fetched with the token (an <img> can't send it) and kept by file id, the EV_KEEP most recently
-// used: an object URL for media, the parsed table, an output's text. A failed fetch is forgotten, so it retries
-// next time; a 404 is kept, so a gone file isn't asked for again.
-const evFiles = new Map(), EV_KEEP = 120;
+// Evidence files, fetched with the token (an <img> can't send it) and kept by file id, most recently used last, up
+// to EV_KEEP files and EV_BYTES: an object URL for media, the parsed table, an output's text. Only settled files
+// are evicted, so no URL is made after its entry is gone. A failure is kept EV_RETRY_MS (a 404 for good), so
+// redraws don't ask again at once.
+const evFiles = new Map(), EV_KEEP = 120, EV_BYTES = 64 << 20, EV_RETRY_MS = 30e3;
 const MEDIA = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'video/mp4']);
 function evFile(f) {
   let e = evFiles.get(f.id);
   if (e) { evFiles.delete(f.id); evFiles.set(f.id, e); return e.p; }
-  e = { v: undefined };
+  e = { v: undefined, bytes: f.bytes || 0, settled: false };
   e.p = fetch(`/api/evidence/${f.id}`, { headers: authHeaders() }).then(async (r) => {
     if (!r.ok) throw Object.assign(new Error(`error ${r.status}`), { gone: r.status === 404 });
     // Media gets the type its kind names, never one from the response.
@@ -1765,11 +1775,18 @@ function evFile(f) {
     else e.v = f.mime === 'application/json' ? await r.json() : await r.text();
     return e.v;
   });
-  e.p.catch((err) => { if (!err.gone && evFiles.get(f.id) === e) evFiles.delete(f.id); });
+  e.p.then(() => { e.settled = true; }, (err) => {
+    e.settled = true;
+    if (!err.gone) setTimeout(() => { if (evFiles.get(f.id) === e) evFiles.delete(f.id); }, EV_RETRY_MS);
+  });
   evFiles.set(f.id, e);
+  let bytes = 0;
+  for (const x of evFiles.values()) bytes += x.bytes;
   for (const [id, old] of evFiles) {
-    if (evFiles.size <= EV_KEEP) break;
+    if (evFiles.size <= EV_KEEP && bytes <= EV_BYTES) break;
+    if (!old.settled) continue;
     evFiles.delete(id);
+    bytes -= old.bytes;
     if (typeof old.v === 'string' && old.v.startsWith('blob:')) URL.revokeObjectURL(old.v);
   }
   return e.p;
@@ -1907,13 +1924,13 @@ function evCompare(e, items) {
 // (ascending, descending, back to as sent).
 function evTable(e) {
   const scroll = el('div', { className: 'scroll' }, el('p', { className: 'note' }, 'Loading…'));
-  evFile(e.file).then((t) => drawTable(scroll, t, e.title), () => scroll.replaceChildren(el('p', { className: 'note' }, 'Table unavailable')));
+  evFile(e.file).then((t) => drawTable(scroll, t, e.title)).catch(() => scroll.replaceChildren(el('p', { className: 'note' }, 'Table unavailable')));
   return el('section', { className: 'evt' }, el('div', { className: 'evt-h' }, el('span', { className: 'one' }, e.title),
     el('span', { className: 'dim' }, plural(e.rows, 'row'))), scroll);
 }
 function drawTable(box, table, title) {
-  const d = deltas(table, title), n = (c) => (c && typeof c.num === 'number' ? c.num : null);
-  const cols = [...table.header.map((h, i) => ({ h, key: (r) => n(r.cells[i]) ?? (r.cells[i] ? r.cells[i].text : ''), num: d.rows.some((r) => n(r.cells[i]) !== null) })),
+  const d = deltas(table, title);
+  const cols = [...table.header.map((h, i) => ({ h, key: (r) => cellNum(r.cells[i]) ?? (r.cells[i] ? r.cells[i].text : ''), num: d.rows.some((r) => cellNum(r.cells[i]) !== null) })),
     ...(d.has ? [{ h: 'Δ', key: (r) => r.delta, num: true }] : [])];
   let sort = { col: -1, dir: 0 };
   const cmp = (key) => (x, y) => {
@@ -1939,12 +1956,8 @@ function drawTable(box, table, title) {
 }
 // Command output, collapsible (open when short), its colours kept; Copy takes the plain text.
 function evOutput(e) {
-  const pre = el('pre', {}), copy = el('button', { type: 'button' }, 'Copy');
   let plain = '';
-  copy.onclick = async () => {
-    copy.textContent = (await copyText(plain)) ? 'Copied' : 'Couldn’t copy';
-    setTimeout(() => { copy.textContent = 'Copy'; }, 1400);
-  };
+  const pre = el('pre', {}), copy = copyBtn(() => plain);
   copy.disabled = true;
   evFile(e.file).then((text) => {
     const segs = ansi(text);
@@ -1981,9 +1994,10 @@ function viewAt(i) {
   $('vprev').disabled = view.i === 0;
   $('vnext').disabled = view.i === view.items.length - 1;
 }
-// Zoomed pictures pan at most to their edges.
+// Zoomed pictures pan at most to their edges; videos don't zoom (their controls would grow too).
 function zoom(z, x, y, dx = 0) {
   const m = $('vstage').firstChild, w = m ? m.offsetWidth : 0, h = m ? m.offsetHeight : 0; // layout size, before the transform
+  if (m && m.tagName === 'VIDEO') z = 1;
   view.z = z;
   view.x = Math.max(-(w * (z - 1)) / 2, Math.min((w * (z - 1)) / 2, x));
   view.y = Math.max(-(h * (z - 1)) / 2, Math.min((h * (z - 1)) / 2, y));
@@ -1991,25 +2005,28 @@ function zoom(z, x, y, dx = 0) {
   $('vstage').classList.toggle('zoomed', z > 1);
 }
 $('vclose').onclick = () => $('viewer').close();
-$('vprev').onclick = () => viewAt(view.i - 1);
-$('vnext').onclick = () => viewAt(view.i + 1);
+// Pages by `d`; nothing past either end.
+const page = (d) => { const j = view.i + d; if (j >= 0 && j < view.items.length) viewAt(j); };
+$('vprev').onclick = () => page(-1);
+$('vnext').onclick = () => page(1);
 $('viewer').onclose = () => $('vstage').replaceChildren();
 $('viewer').onkeydown = (e) => {
   if (e.target.tagName === 'VIDEO') return;
-  if (e.key === 'ArrowLeft') { e.preventDefault(); viewAt(view.i - 1); } else if (e.key === 'ArrowRight') { e.preventDefault(); viewAt(view.i + 1); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); page(-1); } else if (e.key === 'ArrowRight') { e.preventDefault(); page(1); }
 };
 {
   const stage = $('vstage'), pts = new Map();
   const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
-  // The gesture: { pinch, d0, z0, x0, y0, m0 } or { sx, sy, x0, y0, dx, t0, far }. `tap`: the last tap, for a double.
+  // The gesture: { pinch, d0, z0, x0, y0, m0 } or { sx, sy, x0, y0, dx, dy, t0, far }. `tap`: the last tap, for a double.
   let g = null, tap = null;
   const begin = () => {
     const p = [...pts.values()];
     g = !p.length ? null : p.length > 1 ? { pinch: true, d0: dist(p[0], p[1]) || 1, z0: view.z, x0: view.x, y0: view.y, m0: { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 } }
-      : { sx: p[0].x, sy: p[0].y, x0: view.x, y0: view.y, dx: 0, t0: performance.now(), far: false };
+      : { sx: p[0].x, sy: p[0].y, x0: view.x, y0: view.y, dx: 0, dy: 0, t0: performance.now(), far: false };
   };
+  // Anywhere on the stage but on a video, whose controls take the touch.
   stage.onpointerdown = (e) => {
-    if (e.target.tagName !== 'IMG') return;
+    if (e.target.tagName === 'VIDEO') return;
     stage.setPointerCapture(e.pointerId);
     pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
     begin();
@@ -2023,15 +2040,20 @@ $('viewer').onkeydown = (e) => {
       const m = { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 };
       zoom(Math.max(1, Math.min(6, (g.z0 * dist(p[0], p[1])) / g.d0)), g.x0 + m.x - g.m0.x, g.y0 + m.y - g.m0.y);
     } else if (!g.pinch && view.z > 1) zoom(view.z, g.x0 + p[0].x - g.sx, g.y0 + p[0].y - g.sy);
-    else if (!g.pinch) { g.dx = p[0].x - g.sx; zoom(1, 0, 0, Math.abs(g.dx) > Math.abs(p[0].y - g.sy) ? g.dx : 0); }
+    else if (!g.pinch) { g.dx = p[0].x - g.sx; g.dy = p[0].y - g.sy; zoom(1, 0, 0, Math.abs(g.dx) > Math.abs(g.dy) ? g.dx : 0); }
   };
   const end = (e) => {
     if (!pts.delete(e.pointerId)) return;
-    const swipe = g && !g.pinch && view.z === 1 ? g.dx : 0, now = performance.now();
+    // A swipe pages when it lifts mostly sideways; a cancelled one only springs back.
+    const up = e.type === 'pointerup', now = performance.now();
+    const swipe = up && g && !g.pinch && view.z === 1 && Math.abs(g.dx) > Math.abs(g.dy) ? g.dx : 0;
     // A double tap (or double click) toggles zoom; pointers, not dblclick, which touch browsers don't all send.
-    if (g && !g.pinch && !g.far && now - g.t0 < 300 && e.type === 'pointerup') {
+    if (up && g && !g.pinch && !g.far && now - g.t0 < 300) {
       if (tap && now - tap.t < 350 && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) < 30) { tap = null; zoom(view.z > 1 ? 1 : 2.5, 0, 0); } else tap = { t: now, x: e.clientX, y: e.clientY };
-    } else if (Math.abs(swipe) > 60) viewAt(view.i + (swipe < 0 ? 1 : -1)); else if (view.z < 1.05) zoom(1, 0, 0);
+    } else {
+      if (Math.abs(swipe) > 60) page(swipe < 0 ? 1 : -1);
+      if (view.z < 1.05) zoom(1, 0, 0);
+    }
     begin();
   };
   stage.onpointerup = stage.onpointercancel = end;
@@ -2039,8 +2061,9 @@ $('viewer').onkeydown = (e) => {
 
 // Home row hint: up to two pictures, then a chip with the first table's biggest change, else how many pictures.
 // Videos and pictures over THUMB_MAX aren't fetched for a row; they count in the chip. A redraw fetches at most
-// HINT_FILES files (well under EV_KEEP), so a long Home never evicts its own thumbnails and fetches them again.
-const THUMB_MAX = 2 << 20, HINT_FILES = 40;
+// HINT_FILES files of at most THUMB_MAX (well under EV_KEEP and EV_BYTES), so a long Home never evicts its own
+// thumbnails and fetches them again.
+const THUMB_MAX = 1 << 20, HINT_FILES = 40;
 let hintBudget = HINT_FILES;
 function evHint(t) {
   const ev = t.evidence || [];
@@ -2058,7 +2081,7 @@ function evHint(t) {
   if (table) evFile(table.file).then((v) => {
     const top = deltas(v, table.title).top;
     if (top) { chip.className = `evc ${top.tone}`; chip.replaceChildren(el('span', {}, `${fmtChange(top.delta)} ${top.label}`)); chip.hidden = false; }
-  }, () => {});
+  }).catch(() => {});
   return el('div', { className: 'evrow' }, ...thumbs, chip);
 }
 
@@ -2161,13 +2184,18 @@ function toast(text) {
   toastTimer = setTimeout(() => { $('toast').hidden = true; }, 1800);
 }
 // Code blocks get a header: their language, and Copy (`Copied` for a moment).
+// A Copy button for `text()`: `Copied` for a moment.
+function copyBtn(text) {
+  const copy = el('button', { type: 'button' }, 'Copy');
+  copy.onclick = async () => {
+    copy.textContent = (await copyText(text())) ? 'Copied' : 'Couldn’t copy';
+    setTimeout(() => { copy.textContent = 'Copy'; }, 1400);
+  };
+  return copy;
+}
 function codeBlocks(body) {
   for (const pre of body.querySelectorAll('pre')) {
-    const copy = el('button', { type: 'button' }, 'Copy');
-    copy.onclick = async () => {
-      copy.textContent = (await copyText(pre.textContent)) ? 'Copied' : 'Couldn’t copy';
-      setTimeout(() => { copy.textContent = 'Copy'; }, 1400);
-    };
+    const copy = copyBtn(() => pre.textContent);
     const box = el('div', { className: 'code' }, el('div', { className: 'code-h' }, el('span', {}, pre.dataset.lang || 'code'), copy));
     pre.before(box);
     box.append(pre);
