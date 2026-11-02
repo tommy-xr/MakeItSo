@@ -1305,7 +1305,7 @@ function renderSay(got) {
   $('say-state').className = saying.error ? 'bad' : 'dim';
   $('say-state').replaceChildren(saying.error || (saying.sent ? el('a', { href: `#task/${saying.sent}` }, `sent as task ${short(saying.sent)}`) : ''));
 }
-async function say(mode) {
+async function sayTo(mode) {
   const text = $('say-text').value.trim();
   if (!text || !sess) return;
   const s = saying, [wid, harness, id] = sess.key.split('/');
@@ -1326,8 +1326,8 @@ async function say(mode) {
   $('say-send').disabled = $('say-queue').disabled = false;
   if (sess && saying === s) renderSay(sess.got);
 }
-$('say').addEventListener('submit', (e) => { e.preventDefault(); say(sess && sess.got && sess.got.open ? 'fork' : 'in_place'); });
-$('say-queue').addEventListener('click', () => say('when_closed'));
+$('say').addEventListener('submit', (e) => { e.preventDefault(); sayTo(sess && sess.got && sess.got.open ? 'fork' : 'in_place'); });
+$('say-queue').addEventListener('click', () => sayTo('when_closed'));
 
 // The worker's build, flagged when it isn't the orchestrator's; its self-update progress.
 function versionLine(w) {
