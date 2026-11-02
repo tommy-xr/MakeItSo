@@ -24,6 +24,7 @@ struct Facts {
     session: Session,
     turn: TurnEnd,
     last: Option<String>,
+    delivered: Vec<mis_types::Delivered>,
 }
 
 /// A parsed file.
@@ -31,7 +32,7 @@ struct Facts {
 enum Parsed {
     /// Listed if it has facts (None: nothing to show yet); re-read once its
     /// (len, mtime) changes.
-    Seen((u64, u64), Option<Facts>),
+    Seen((u64, u64), Option<Box<Facts>>),
     /// Headless for good: never read again, however it grows.
     Headless,
 }
@@ -172,11 +173,13 @@ impl Feed {
                 name: proc.and_then(|p| p.name.clone()),
                 cwd: s.cwd,
                 model: s.model,
-                open: proc.is_some(),
+                // Codex may be open while it writes (worker's clock, so not the orchestrator's).
+                open: proc.is_some() || (harness == "codex" && sessions::active(at, now_ms)),
                 state,
                 waiting_for,
                 updated_ms,
                 last: f.last,
+                delivered: f.delivered,
             });
         }
         // Files gone or out of the window are forgotten.
@@ -215,8 +218,9 @@ fn read(
         session,
         turn: r.turn,
         last: r.last,
+        delivered: r.delivered,
     };
-    Parsed::Seen(key, Some(facts))
+    Parsed::Seen(key, Some(Box::new(facts)))
 }
 
 #[cfg(test)]
@@ -439,6 +443,13 @@ mod tests {
         );
         assert_eq!(by(x1).last, None);
         assert_eq!(by(x2).last.as_deref(), Some("Renamed."));
+        // A codex session just written may be open in its terminal.
+        let rollout = codex.join(format!(
+            "sessions/2026/11/02/rollout-2026-11-02T10-00-00-{x2}.jsonl"
+        ));
+        touch(&rollout, MIN / 2);
+        let again = feed.poll(&claude, &codex, &procs, NOW);
+        assert!(again.iter().any(|s| s.id == x2 && s.open));
         // Secrets in the records are never read into anything sent.
         let wire = serde_json::to_string(&got).unwrap();
         assert!(!wire.contains("SECRET"), "{wire}");

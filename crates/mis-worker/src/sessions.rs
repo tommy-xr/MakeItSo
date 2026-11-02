@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use mis_types::{first_line, Session};
+use mis_types::{first_line, Delivered, Session, MAX_DELIVERED, PEER_NAME};
 
 use crate::live;
 use serde_json::Value;
@@ -50,6 +50,9 @@ struct Head {
     turn: TurnEnd,
     /// First line of the latest assistant text.
     last: Option<String>,
+    /// MIS's messages in the conversation, with their sender's address (`origin.from`):
+    /// the session may answer by messaging it back.
+    delivered: Vec<(String, Delivered)>,
 }
 
 /// Where a transcript's last turn stands, as far as its lines show.
@@ -73,6 +76,8 @@ pub(crate) struct FileRead {
     pub forked_from: Option<String>,
     pub turn: TurnEnd,
     pub last: Option<String>,
+    /// As `LiveSession::delivered`.
+    pub delivered: Vec<Delivered>,
     /// Whether it is headless can't change any more (a claude prompt's origin was seen).
     pub settled: bool,
 }
@@ -159,6 +164,15 @@ fn claude_line(h: &mut Head, line: &str) {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
         return;
     };
+    if let Some(p) = mis_peer(&v) {
+        let d = Delivered {
+            msg_id: p.msg_id.into(),
+            reply: None,
+        };
+        h.delivered.push((p.from.into(), d));
+        let over = h.delivered.len().saturating_sub(MAX_DELIVERED);
+        h.delivered.drain(..over);
+    }
     match v["type"].as_str() {
         Some("custom-title") => h.custom_title = text(&v["customTitle"]).or(h.custom_title.take()),
         Some("ai-title") => h.auto_title = text(&v["aiTitle"]).or(h.auto_title.take()),
@@ -201,6 +215,31 @@ fn claude_line(h: &mut Head, line: &str) {
     }
 }
 
+/// A message MIS delivered (`PEER_NAME`), as the session it went to records it: a meta
+/// user turn, or (taken in mid-turn, beside a tool result) a `queued_command` attachment,
+/// whose `origin` names the sender and holds the text as sent.
+pub(crate) struct Peer<'a> {
+    pub msg_id: &'a str,
+    /// The sender's address, which a reply is sent to.
+    pub from: &'a str,
+    pub body: &'a str,
+}
+
+pub(crate) fn mis_peer(v: &Value) -> Option<Peer<'_>> {
+    let o = match v["type"].as_str()? {
+        "user" => &v["origin"],
+        "attachment" if v["attachment"]["type"] == "queued_command" => &v["attachment"]["origin"],
+        _ => return None,
+    };
+    let mis = o["kind"] == "peer" && o["name"] == PEER_NAME && v["isSidechain"] != true;
+    mis.then_some(())?;
+    Some(Peer {
+        msg_id: o["msg_id"].as_str()?,
+        from: o["from"].as_str().unwrap_or_default(),
+        body: o["body"].as_str()?,
+    })
+}
+
 /// A content block's text; a string content is one text block.
 fn block_text(b: &Value) -> Option<&str> {
     match b {
@@ -224,11 +263,26 @@ fn claude_turn(h: &mut Head, kind: &str, v: &Value) {
     let has = |t: &str| blocks.iter().any(|b| b["type"] == t);
     if kind == "assistant" {
         let said = blocks.iter().find_map(|b| block_text(b)).and_then(snippet);
+        // A delivered message is answered by a message back to its sender...
+        for b in blocks.iter().filter(|b| b["name"] == "SendMessage") {
+            let (to, text) = (b["input"]["to"].as_str(), b["input"]["message"].as_str());
+            for (_, d) in h
+                .delivered
+                .iter_mut()
+                .filter(|(f, _)| Some(f.as_str()) == to)
+            {
+                d.reply = d.reply.take().or(text.and_then(snippet));
+            }
+        }
         // Text written before a tool call carries the call's stop reason.
         if has("tool_use") || v["message"]["stop_reason"] == "tool_use" {
             h.turn = TurnEnd::Running;
         } else if said.is_some() {
             h.turn = TurnEnd::Replied;
+            // ...or by the reply that next ends a turn.
+            for (_, d) in h.delivered.iter_mut().filter(|(_, d)| d.reply.is_none()) {
+                d.reply = said.clone();
+            }
         }
         h.last = said.or(h.last.take());
         return;
@@ -363,6 +417,7 @@ pub(crate) fn read_file(
     // Lines skipped between head and tail: what the head said of the turn is stale.
     if from > used {
         (h.turn, h.last) = (TurnEnd::Unknown, None);
+        h.delivered.clear();
     }
     if from < len && file.seek(SeekFrom::Start(from)).is_ok() {
         // A first line cut mid-way fails to parse and is skipped. Stop at the old end:
@@ -374,12 +429,14 @@ pub(crate) fn read_file(
     }
     let (forked_from, turn, last, settled) =
         (h.forked_from.take(), h.turn, h.last.take(), settled(&h));
+    let delivered = h.delivered.drain(..).map(|(_, d)| d).collect();
     let session = h.finish(harness, updated_ms, now_ms)?;
     Some(FileRead {
         session,
         forked_from,
         turn,
         last,
+        delivered,
         settled,
     })
 }
@@ -709,6 +766,59 @@ mod tests {
         let s = resolve_copy(s, Some("gone".into()), |_| None, 0);
         assert_eq!(s.id, c);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A message MIS delivered, as claude records it in the receiving session.
+    fn peer(msg_id: &str, name: &str) -> String {
+        serde_json::json!({"type": "user", "isMeta": true, "turnOrigin": "peer",
+            "origin": {"kind": "peer", "from": format!("uds:/tmp/{msg_id}.sock"),
+                "msg_id": msg_id, "name": name, "body": "add a test"},
+            "message": {"content": "<cross-session-message>add a test</cross-session-message>"}})
+        .to_string()
+    }
+
+    #[test]
+    fn delivered_messages_are_answered_by_the_next_reply_or_a_message_back() {
+        let got = |lines: &[&str]| {
+            let h = claude(lines);
+            let d = h.delivered.into_iter().map(|(_, d)| (d.msg_id, d.reply));
+            (d.collect::<Vec<_>>(), h.turn, h.prompt)
+        };
+        let prompt = r#"{"type":"user","message":{"content":"fix the build"}}"#;
+        let call = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{}}],"stop_reason":"tool_use"}}"#;
+        let reply = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Added one.\nMore."}],"stop_reason":"end_turn"}}"#;
+        let (m1, other) = (peer("m1", PEER_NAME), peer("m9", "a-peer"));
+        // Taken in while idle: not a prompt, and the turn waits on the reply.
+        let (d, turn, typed) = got(&[&m1, &other]);
+        assert_eq!(d, [("m1".to_string(), None)], "only MIS's");
+        assert_eq!((turn, typed), (TurnEnd::Unknown, None));
+        let answered = [("m1".to_string(), Some("Added one.".to_string()))];
+        assert_eq!(got(&[&m1, reply]).0, answered);
+        // Mid-turn it's taken in beside a tool result, as an attachment. Text before a
+        // tool call doesn't answer it, the reply does.
+        let absorbed = serde_json::json!({"type": "attachment", "attachment": {
+            "type": "queued_command", "origin": {"kind": "peer", "from": "uds:/tmp/m1.sock",
+                "msg_id": "m1", "name": PEER_NAME, "body": "add a test"}, "isMeta": true}})
+        .to_string();
+        let before = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Running it."}],"stop_reason":"tool_use"}}"#;
+        let mid = [prompt, call, &absorbed, before];
+        assert_eq!(got(&mid).0, [("m1".to_string(), None)]);
+        assert_eq!(got(&[&mid[..], &[reply]].concat()).0, answered);
+        // Answered by a message back to its sender (MIS isn't there to hear it).
+        let back = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"SendMessage","input":{"to":"uds:/tmp/m1.sock","message":"Done: added it."}}],"stop_reason":"tool_use"}}"#;
+        let elsewhere = back.replace("m1.sock", "m9.sock");
+        assert_eq!(got(&[&m1, &elsewhere]).0, [("m1".to_string(), None)]);
+        let (d, ..) = got(&[&m1, back, reply]);
+        assert_eq!(d, [("m1".to_string(), Some("Done: added it.".to_string()))]);
+        // An earlier answer stays; only the latest few are kept.
+        let m2 = peer("m2", PEER_NAME);
+        let (d, ..) = got(&[&m1, reply, &m2]);
+        assert_eq!(d[1], ("m2".to_string(), None));
+        assert_eq!(d[0].1.as_deref(), Some("Added one."));
+        let many: Vec<String> = (0..12).map(|i| peer(&format!("n{i}"), PEER_NAME)).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        let (d, ..) = got(&many);
+        assert_eq!((d.len(), d[0].0.as_str()), (MAX_DELIVERED, "n4"));
     }
 
     #[test]

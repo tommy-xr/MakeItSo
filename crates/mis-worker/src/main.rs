@@ -3,6 +3,7 @@
 
 mod approvals;
 mod config;
+mod deliver;
 mod feed;
 mod inventory;
 mod live;
@@ -171,6 +172,8 @@ async fn main() -> Result<()> {
         inventory,
         version: Some(VERSION.into()),
         permissions: perms.clone(),
+        // Where an open claude session can be told from a dead record (see `live::alive`).
+        deliver: cfg!(unix),
     };
     tracing::info!(?info.harnesses, ?info.models, ?info.roots, "connecting to {}", cfg.url);
     tracing::info!("inventory: {}", info.inventory.brief());
@@ -511,7 +514,10 @@ async fn session(
         let Some((task, event)) = next else {
             return Ok(Ended::Closed);
         };
-        let finished = matches!(event, AgentEvent::Finished { .. } | AgentEvent::Cancelled);
+        let finished = matches!(
+            event,
+            AgentEvent::Finished { .. } | AgentEvent::Cancelled | AgentEvent::Delivered { .. }
+        );
         if let Err(e) = sink
             .send(text(&WorkerMsg::Event {
                 task,
@@ -674,18 +680,15 @@ async fn session_cwd(
         match (to.mode, open) {
             (SendMode::Fork, _) | (_, false) => break (cwd, model),
             (SendMode::InPlace, true) => {
-                return Err(
-                    "the session is open right now; send to a copy, or queue until it closes"
-                        .into(),
-                )
+                return Err("the session is open right now; send again once it closes".into())
             }
-            (SendMode::WhenClosed, true) if Instant::now() >= deadline => {
+            (SendMode::WhenClosed | SendMode::Deliver, true) if Instant::now() >= deadline => {
                 return Err(format!(
                     "the session was still open after {} min",
                     WAIT_CLOSED.as_secs() / 60
                 ))
             }
-            (SendMode::WhenClosed, true) => {
+            (SendMode::WhenClosed | SendMode::Deliver, true) => {
                 if !waiting {
                     let text = "waiting for the session to close".to_string();
                     let _ = tx.send((task.id, AgentEvent::Status { text })).await;
@@ -697,6 +700,55 @@ async fn session_cwd(
     };
     // Its folder must still exist and sit under a root, like any task's.
     Ok((roots::resolve_cwd(&ctx.roots, Some(&cwd))?, model))
+}
+
+/// Deliver `task` into claude session `session` if a terminal holds it open, under a
+/// peer name: the event that ends the task. None otherwise (closed, codex, or no name to
+/// send to): it is continued in place once it may be.
+async fn deliver_open(
+    ctx: &Ctx,
+    task: &Task,
+    session: uuid::Uuid,
+    images: bool,
+    tx: &mpsc::Sender<(TaskId, AgentEvent)>,
+) -> Option<AgentEvent> {
+    if task.harness != "claude" {
+        return None;
+    }
+    let id = session.to_string();
+    let looked = tokio::task::spawn_blocking(move || {
+        let (claude, codex) = sessions::roots();
+        let name = live::claude_procs(&claude, live::alive).remove(&id)?.name?;
+        let path = transcript::find(&claude, &codex, "claude", session)?;
+        let cwd = sessions::read_one("claude", &path, unix_ms())?.cwd;
+        Some((claude, path, name, id, cwd))
+    });
+    let (claude, path, name, id, cwd) = looked.await.ok()??;
+    let fail = |why: String| {
+        let summary = Some(why);
+        Some(AgentEvent::Finished { ok: false, summary })
+    };
+    // Like any task here: only in a folder under the worker's roots.
+    let cwd = cwd.ok_or_else(|| "the session doesn't record its folder".to_string());
+    if let Err(why) = cwd.and_then(|c| roots::resolve_cwd(&ctx.roots, Some(&c))) {
+        return fail(why);
+    }
+    if images {
+        return fail(
+            "images can't go into a session open in a terminal; send the text alone".into(),
+        );
+    }
+    let started = AgentEvent::Started {
+        session: Some(id.clone()),
+        model: None,
+    };
+    let status = AgentEvent::Status {
+        text: format!("delivering to {name}"),
+    };
+    for ev in [started, status] {
+        let _ = tx.send((task.id, ev)).await;
+    }
+    Some(deliver::deliver(claude, path, id, &name, &task.prompt).await)
 }
 
 /// A session's folder, model, and whether it is open. Err when it isn't on this disk.
@@ -765,6 +817,12 @@ async fn run(
         let _ = tx.send(fail(format!("no harness {}", task.harness))).await;
         return;
     };
+    if let Some(to) = (task.send_to.as_ref()).filter(|to| to.mode == SendMode::Deliver) {
+        if let Some(ev) = deliver_open(ctx, &task, to.session, !images.is_empty(), tx).await {
+            let _ = tx.send((id, ev)).await;
+            return;
+        }
+    }
     // A session on this disk runs in its own folder, on its own model.
     let (cwd, model) = match &task.send_to {
         Some(to) => match session_cwd(ctx, &task, to, tx).await {

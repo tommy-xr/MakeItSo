@@ -1273,15 +1273,15 @@ async fn session(
 #[derive(serde::Deserialize)]
 struct SessionMessage {
     text: String,
-    #[serde(default = "in_place")]
+    #[serde(default = "deliver")]
     mode: SendMode,
     /// The session's title, as listed, for the task's heading.
     #[serde(default)]
     title: Option<String>,
 }
 
-fn in_place() -> SendMode {
-    SendMode::InPlace
+fn deliver() -> SendMode {
+    SendMode::Deliver
 }
 
 /// Message one of worker `wid`'s sessions: a task, pinned there, that continues it.
@@ -1302,6 +1302,10 @@ async fn message(
         None => return StatusCode::UNAUTHORIZED.into_response(),
     }
     let m = match serde_json::from_slice::<SessionMessage>(&body) {
+        Ok(m) if m.mode == SendMode::Fork => {
+            let why = "messages go into the session itself, not a copy";
+            return (StatusCode::BAD_REQUEST, why).into_response();
+        }
         Ok(m) if !m.text.trim().is_empty() => m,
         Ok(_) => return (StatusCode::BAD_REQUEST, "empty message").into_response(),
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
@@ -1320,7 +1324,7 @@ async fn message(
             Err((StatusCode::SERVICE_UNAVAILABLE, "worker offline".into())),
             vec![],
         ),
-        Some(Some(_)) => match l.send_to_session(wid, harness, m.text, to) {
+        Some(Some(_)) => match l.send_to_session(wid, harness, m.text, to, vec![]) {
             Ok((id, effects)) => (Ok(id), effects),
             Err(why) => (Err((StatusCode::BAD_REQUEST, why)), vec![]),
         },

@@ -101,11 +101,20 @@ pub struct SendTo {
 pub enum SendMode {
     /// Continue the session itself; refused while it is open.
     InPlace,
-    /// Continue a copy (claude `--fork-session`, `codex exec fork`); the original is untouched.
+    /// Continue a copy (claude `--fork-session`, `codex exec fork`); the original is
+    /// untouched. No longer offered; kept so older tasks still load.
     Fork,
     /// Wait on the worker until it closes, then continue it in place.
     WhenClosed,
+    /// Into the session as it is: one open in a claude terminal gets it as a cross-session
+    /// message (`AgentEvent::Delivered`); a closed one is continued in place; an open codex
+    /// one once it goes quiet. Only to workers with `WorkerInfo::deliver`.
+    Deliver,
 }
+
+/// The peer name a delivered message comes from, so its session's transcript tells
+/// MIS's messages from other sessions'.
+pub const PEER_NAME: &str = "mis-phone";
 
 /// What a live session is doing, as its files show.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -145,7 +154,8 @@ pub struct LiveSession {
     pub name: Option<String>,
     pub cwd: Option<String>,
     pub model: Option<String>,
-    /// A live claude process holds it. Codex records no such thing: always false.
+    /// A live claude process holds it. Codex records no such thing: written in the last
+    /// couple of minutes (`Session::active`), so it may be.
     pub open: bool,
     pub state: LiveState,
     /// What it waits on, in claude's words (`permission prompt`, `dialog open`).
@@ -154,7 +164,21 @@ pub struct LiveSession {
     pub updated_ms: u64,
     /// First line of its latest assistant text.
     pub last: Option<String>,
+    /// Messages MIS delivered into its conversation (`PEER_NAME`), oldest first.
+    pub delivered: Vec<Delivered>,
 }
+
+/// A message delivered into a live claude session, as its transcript shows it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Delivered {
+    /// As `AgentEvent::Delivered`.
+    pub msg_id: String,
+    /// First line of the session's answer: its next reply, or what it sent back.
+    pub reply: Option<String>,
+}
+
+/// Most `LiveSession::delivered` a worker reports per session.
+pub const MAX_DELIVERED: usize = 8;
 
 /// A worker's live session as `GET /api/sessions` lists it, with the MIS tasks that messaged it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -180,6 +204,9 @@ pub struct SessionMessage {
     pub text: String,
     /// The session replied: the task finished done.
     pub answered: bool,
+    /// Delivered, but its terminal holds it for the user's approval.
+    #[serde(default)]
+    pub held: bool,
     /// Unix millis it was sent.
     pub at: u64,
 }

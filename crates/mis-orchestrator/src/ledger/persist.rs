@@ -173,7 +173,9 @@ impl Ledger {
     /// Forget tasks that finished over `KEEP_MS` ago; returns their ids.
     pub fn sweep(&mut self) -> (Vec<TaskId>, Vec<Effect>) {
         let cutoff = self.now_ms.saturating_sub(KEEP_MS);
-        let old = |t: &TaskEntry| t.status.finished() && t.finished_at.is_some_and(|f| f < cutoff);
+        // A delivered message's task is over for MIS too, answered or not.
+        let over = |s: TaskStatus| s.finished() || s == TaskStatus::Delivered;
+        let old = |t: &TaskEntry| over(t.status) && t.finished_at.is_some_and(|f| f < cutoff);
         let (gone, kept): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.tasks).into_iter().partition(old);
         self.tasks = kept;

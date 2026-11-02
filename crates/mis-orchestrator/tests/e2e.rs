@@ -2998,9 +2998,13 @@ async fn messaging_a_session_runs_a_task_on_its_worker() {
     req.headers_mut()
         .insert("authorization", "Bearer s".parse().unwrap());
     let (mut worker, _) = connect_async(req).await.unwrap();
+    let info = WorkerInfo {
+        deliver: true,
+        ..info("claude")
+    };
     let hello = WorkerMsg::Hello {
         id: wid,
-        info: info("claude"),
+        info,
         running: vec![],
     };
     send(&mut worker, &hello).await;
@@ -3010,7 +3014,10 @@ async fn messaging_a_session_runs_a_task_on_its_worker() {
 
     let session = uuid::Uuid::new_v4();
     let path = format!("/api/workers/{wid}/sessions/claude/{session}/messages");
-    let body = r#"{"text":"also add coyote time","mode":"fork","title":"Tune jump physics"}"#;
+    let body = r#"{"text":"also add coyote time","title":"Tune jump physics"}"#;
+    // Never into a copy.
+    let fork = r#"{"text":"also add coyote time","mode":"fork"}"#;
+    assert_eq!(post_json(&base, &path, "s", fork).await.0, 400);
     // Acting needs the full token.
     assert_eq!(post_json(&base, &path, "r", body).await.0, 403);
     assert_eq!(post_json(&base, &path, "nope", body).await.0, 401);
@@ -3036,7 +3043,7 @@ async fn messaging_a_session_runs_a_task_on_its_worker() {
     let to = SendTo {
         session,
         title: Some("Tune jump physics".into()),
-        mode: SendMode::Fork,
+        mode: SendMode::Deliver,
     };
     assert_eq!(task.send_to, Some(to));
 }

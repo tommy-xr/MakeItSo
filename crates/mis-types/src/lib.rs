@@ -22,8 +22,9 @@ mod permissions;
 pub use permissions::{Approval, Decision, PermissionMode, Permissions, MAX_APPROVAL_DETAIL};
 mod sessions;
 pub use sessions::{
-    Answer, LiveSession, LiveState, Query, Role, SendMode, SendTo, Session, SessionMessage,
-    SessionRow, Turn, LIVE_WINDOW_MS, MAX_LIVE, MAX_TURNS, STALL_MS,
+    Answer, Delivered, LiveSession, LiveState, Query, Role, SendMode, SendTo, Session,
+    SessionMessage, SessionRow, Turn, LIVE_WINDOW_MS, MAX_DELIVERED, MAX_LIVE, MAX_TURNS,
+    PEER_NAME, STALL_MS,
 };
 
 pub type WorkerId = Uuid;
@@ -115,6 +116,9 @@ pub struct WorkerInfo {
     /// None: the harnesses' headless defaults, which deny writes, shell and MCP.
     #[serde(default)]
     pub permissions: Option<Permissions>,
+    /// Takes `SendMode::Deliver`.
+    #[serde(default)]
+    pub deliver: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -147,6 +151,9 @@ pub enum TaskStatus {
     Planning,
     Queued,
     Running,
+    /// A message is in its open session (`SendMode::Deliver`); the worker is free. Done
+    /// once the session answers.
+    Delivered,
     Done,
     Failed,
     /// The user cancelled it.
@@ -218,6 +225,15 @@ pub enum AgentEvent {
     },
     /// The user cancelled the task: it ends with this in place of `Finished`.
     Cancelled,
+    /// The message reached its open session (`SendMode::Deliver`), the worker's part
+    /// done: it ends the run like `Finished`. `read`: already in its conversation (else
+    /// in its inbox until its next tool round). `held`: its terminal holds it for the
+    /// user's approval.
+    Delivered {
+        msg_id: String,
+        read: bool,
+        held: bool,
+    },
 }
 
 /// Worker -> orchestrator.
@@ -745,6 +761,7 @@ mod tests {
                         },
                     },
                     version: Some("0.1.0+1a2b3c4".into()),
+                    deliver: true,
                     permissions: Some(Permissions {
                         mode: PermissionMode::Folders,
                         folders: vec!["/assets".into()],
@@ -891,6 +908,18 @@ mod tests {
         );
         let s = serde_json::to_string(&AgentEvent::Cancelled).unwrap();
         assert_eq!(s, r#"{"type":"cancelled"}"#);
+        let delivered = AgentEvent::Delivered {
+            msg_id: "m1".into(),
+            read: false,
+            held: true,
+        };
+        let s = serde_json::to_string(&delivered).unwrap();
+        assert_eq!(
+            s,
+            r#"{"type":"delivered","msg_id":"m1","read":false,"held":true}"#
+        );
+        let mode = serde_json::to_string(&SendMode::Deliver).unwrap();
+        assert_eq!(mode, r#""deliver""#);
         let draft = ServerMsg::PurposeDraft {
             worker: Uuid::nil(),
             draft: "d".into(),
@@ -933,6 +962,10 @@ mod tests {
             id: "s".into(),
             state: LiveState::Waiting,
             waiting_for: Some("permission prompt".into()),
+            delivered: vec![Delivered {
+                msg_id: "m1".into(),
+                reply: Some("Done.".into()),
+            }],
             ..Default::default()
         };
         let report = WorkerMsg::LiveSessions {
@@ -952,6 +985,7 @@ mod tests {
                     status: TaskStatus::Done,
                     text: "add a test".into(),
                     answered: true,
+                    held: false,
                     at: 1,
                 }],
             }],
