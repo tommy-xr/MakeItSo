@@ -24,7 +24,9 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
     --arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M0 0h10L5 6z' fill='%23D9F6FF'/%3E%3C/svg%3E");
     --mono: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace;
     /* Labels: a squared geometric face where the system has one; no web fonts, so the page works offline. */
-    --display: "Eurostile", "DIN Alternate", "Bahnschrift", ui-sans-serif, system-ui, sans-serif; }
+    --display: "Eurostile", "DIN Alternate", "Bahnschrift", ui-sans-serif, system-ui, sans-serif;
+    /* Prose: what people and agents wrote, in the system's reading face. */
+    --prose: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; }
   /* Light: the system's choice unless the menu picked Dark; or picked Light. A media query can't be OR'd with a
      selector, so the tokens appear twice: keep both in sync. :where keeps `html.vr` winning. */
   @media (prefers-color-scheme: light) {
@@ -238,7 +240,6 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .thread { display: block; margin: .25rem 0; }
   .bad { color: var(--bad); }
   .back { display: inline-flex; align-items: center; min-height: 2.75rem; padding: 0 1rem; border: 1px solid var(--line); text-decoration: none; }
-  #answer { margin: 1.5rem 0 1rem; }
   /* Evidence: one row per item; kind, text, verdict (tests), chevron (links) in aligned columns. */
   #evidence { margin: 0 0 1rem; }
   #evidence h3 { margin: 0 0 .25rem; }
@@ -297,13 +298,6 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .sess p { margin: .25rem 0 0; }
   .sess li > a { display: block; padding: 0; text-decoration: none; color: inherit; }
   .sess .toggle { margin: 0; min-height: 2.75rem; }
-  /* A session's transcript: prompts marked like answers, tool lines small and dim. */
-  #session h2 { margin: 1rem 0 .25rem; font-size: 1rem; overflow-wrap: anywhere; }
-  #turns li { padding: .625rem 0; overflow-wrap: anywhere; }
-  #turns .who { font-size: .8125rem; color: var(--dim); }
-  #turns .user .txt { padding-left: .875rem; border-left: 2px solid var(--accent); color: var(--accent); }
-  #turns .tool { padding: .25rem 0; border: 0; font-size: .8125rem; color: var(--dim); }
-  #turns .txt { white-space: pre-wrap; }
   .chip.claude { --s: var(--accent); } .chip.codex { --s: var(--fg); }
   .live { margin-right: .375em; font-size: .75em; color: var(--ok); text-shadow: 0 0 6px var(--ok); }
   /* Tools gained since the note was saved; the note's editor on the worker's page. */
@@ -328,6 +322,76 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .lim.warn { --b: var(--warn); } .lim.crit { --b: var(--bad); }
   .lim.stale, .off .lim { color: var(--dim); --b: var(--dim); }
   #clear { display: inline-block; padding: .625rem 0; }
+  /* Home: section labels, then compact rows: dot + title, meta, a dim one-line summary. */
+  .sec { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+  .sec h3 { margin: 1.5rem 0 .25rem; }
+  .sec a { display: inline-flex; align-items: center; min-height: 2.75rem; color: var(--accent); font-size: .8125rem; text-decoration: none; }
+  .rows li > a { padding: .625rem 0; }
+  .one { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .r1 { display: flex; align-items: center; gap: .5rem; }
+  .r1 .one { flex: 1; min-width: 0; font-family: var(--prose); }
+  .r2 { font-size: .8125rem; color: var(--dim); }
+  .r3 { font: .875rem/1.4 var(--prose); color: var(--dim); }
+  .r3.activity { margin: 0; font-family: var(--mono); font-size: .8125rem; color: var(--run); }
+  .rows .r2, .rows .r3 { padding-left: 1rem; }
+  /* Status dot: the state's colour; hollow while waiting to run; lit when it needs you. */
+  .sd { flex: none; box-sizing: border-box; width: .5rem; height: .5rem; border-radius: 50%; background: var(--s); }
+  .sd.queued, .sd.planning { background: none; border: 1.5px solid var(--dim); }
+  .sd.running { box-shadow: 0 0 6px var(--glow); }
+  .sd.att-failed { --s: var(--bad); } .sd.att-limited, .sd.att-approval { --s: var(--warn); } .sd.att-unread { --s: var(--accent); }
+  .sd[class*=att-] { background: var(--s); border: 0; box-shadow: 0 0 6px var(--s); }
+  .rows li.reply > a { padding-left: 1rem; }
+  /* A thread's replies, folded under its first task. */
+  .more { display: flex; align-items: center; gap: .5rem; width: 100%; min-height: 2.75rem; margin: -.375rem 0 .25rem; padding: 0 0 0 1rem; border: 0; background: none; color: var(--dim); font: .8125rem var(--mono); letter-spacing: 0; text-transform: none; text-align: left; }
+  .more .one { flex: 1; min-width: 0; }
+  /* Live sessions: name and age, state chip and where, the last line it wrote, then what you sent it. */
+  .sr > a { padding: .625rem 0; }
+  .sr .r1 { justify-content: space-between; }
+  .sr .r1 strong { font: 600 1rem var(--prose); }
+  .sr .r2 { margin-top: .125rem; }
+  .sr .r2, .sr .r3, .sr .you { padding-left: 0; }
+  .sr a.you { display: flex; align-items: center; gap: .5rem; min-height: 2.25rem; margin-top: -.375rem; font-size: .8125rem; color: var(--accent); text-decoration: none; }
+  .sr a.you .one { flex: 1; min-width: 0; }
+  .sr.off > a { opacity: .55; }
+  .st-working { --s: var(--run); } .st-waiting { --s: var(--warn); } .st-stalled { --s: var(--bad); } .st-shell { --s: var(--fg); } .st-idle, .st-active { --s: var(--dim); }
+  .r2 .why { color: var(--warn); }
+  /* Conversation views: a sticky head, then the turns. */
+  .chead { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: .75rem; margin: 0 calc(-1 * var(--pad)); padding: .5rem var(--pad); background: var(--bg); border-bottom: 1px solid var(--rule); }
+  .chead .back { flex: none; padding: 0 .875rem; }
+  .chead > div { flex: 1; min-width: 0; }
+  .chead .ttl { font: 600 1rem/1.3 var(--prose); }
+  .chead .r2 { margin-top: .125rem; }
+  .convo { padding-top: .5rem; }
+  /* `.toolrun`, not `.run`: the progress line takes `.run` while work runs. */
+  .fold, .toolrun { display: block; width: 100%; min-height: 2.75rem; padding: 0; border: 0; border-bottom: 1px dashed var(--rule); background: none; color: var(--dim); font: .8125rem var(--mono); letter-spacing: 0; text-transform: none; text-align: left; }
+  .toolrun { min-height: 2.25rem; border: 0; }
+  .fold[aria-expanded=true] { color: var(--accent); }
+  .earlier { padding-bottom: .5rem; border-bottom: 1px dashed var(--rule); }
+  .calls { margin: 0 0 .5rem 1.25rem; font-size: .75rem; color: var(--dim); overflow-wrap: anywhere; }
+  .calls div { padding: .125rem 0; }
+  .msg { margin: .75rem 0; }
+  .msg .who { font-size: .75rem; color: var(--dim); }
+  .msg .body { font: 1rem/1.55 var(--prose); overflow-wrap: anywhere; }
+  .msg.user .body { white-space: pre-wrap; padding-left: .875rem; border-left: 2px solid var(--accent); color: var(--accent); }
+  .msg.card .body { padding: .75rem .875rem; border: 1px solid var(--rule); background: var(--field); }
+  .msg.user.card .body { border-left: 2px solid var(--accent); }
+  .msg.working .body { color: var(--run); font-family: var(--mono); font-size: .875rem; }
+  /* Rendered markdown. */
+  .md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }
+  .md p, .md ul, .md ol, .md pre, .md blockquote { margin: 0 0 .75rem; }
+  .md :is(h1, h2, h3, h4, h5, h6) { margin: 1rem 0 .5rem; font: 600 1.0625rem/1.3 var(--prose); color: var(--fg); text-transform: none; letter-spacing: 0; }
+  .md h1 { font-size: 1.25rem; } .md h2 { font-size: 1.125rem; } .md :is(h4, h5, h6) { font-size: 1rem; color: var(--dim); }
+  .md ul, .md ol { padding-left: 1.25rem; } .md ul { list-style: disc; } .md ol { list-style: decimal; }
+  .md ul ul { list-style: circle; }
+  .md li { border: 0; margin: .125rem 0; } .md li > :is(ul, ol) { margin: .125rem 0 0; }
+  .md a { color: var(--accent); }
+  .md code { padding: 0 .25em; font: .875em var(--mono); background: color-mix(in srgb, var(--rule) 55%, transparent); }
+  .md pre { padding: .625rem .75rem; overflow-x: auto; white-space: pre; word-break: normal; border: 1px solid var(--rule); background: var(--bg); font: .8125rem/1.45 var(--mono); }
+  .md pre code { padding: 0; font: inherit; background: none; }
+  .md blockquote { padding-left: .75rem; border-left: 2px solid var(--line); color: var(--dim); }
+  .md hr { border: 0; border-top: 1px solid var(--rule); }
+  /* Jump to latest: shown when the conversation grew while scrolled up. */
+  #latest { position: fixed; z-index: 2; left: 50%; bottom: calc(var(--dock, 0px) + var(--kb, 0px) + .75rem); transform: translateX(-50%); min-height: 2.25rem; padding: 0 .875rem; background: var(--bg); color: var(--accent); border-color: var(--accent); box-shadow: 0 0 10px var(--glow); font-size: .75rem; }
   [hidden] { display: none !important; }
   /* VR panels: bigger type, secondary text pulled toward the foreground. */
   html.vr { font-size: 22px; --dim: color-mix(in srgb, var(--fg) 85%, var(--bg)); }
@@ -351,7 +415,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   <div class="sheet">
     <div class="sheet-top"><span class="title">Make It So</span><button type="button" id="menu-close" aria-label="Close menu">✕</button></div>
     <nav aria-label="Views">
-      <a href="#" data-view="list">Tasks</a>
+      <a href="#" data-view="list">Home</a>
       <a href="#routines" data-view="routines">Routines</a>
       <a href="#workers" data-view="workers">Workers</a>
     </nav>
@@ -371,18 +435,14 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   <div class="row"><button>Connect</button></div>
 </form>
 
-<main id="list" hidden>
-  <ul id="tasks"></ul>
-</main>
+<main id="list" hidden></main>
 
 <main id="detail" hidden>
-  <p><a href="#" class="back">← back</a></p>
+  <div class="chead"><a href="#" class="back" aria-label="Back">←</a><div id="task-head"></div></div>
+  <div id="task-convo" class="convo"></div>
   <section id="approvals" hidden></section>
-  <pre id="answer" class="answer"></pre>
   <div class="row" hidden><button type="button" id="speak">speak</button></div>
   <section id="evidence" hidden><div class="evh"><h3>evidence</h3><button type="button" id="refresh-ev" aria-label="Refresh PR status" hidden>↻</button></div><ul class="evl"></ul></section>
-  <div id="meta" class="meta"></div>
-  <div id="ask" class="meta dim"></div>
   <div id="shots-view" class="shots" hidden></div>
   <div id="thread" class="meta dim"></div>
   <div id="cancel" hidden>
@@ -408,12 +468,11 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
 </main>
 
 <main id="session" hidden>
-  <p><a href="#workers" class="back">← back</a></p>
-  <h2 id="session-title"></h2>
-  <div id="session-meta" class="dim"></div>
-  <ul id="turns"></ul>
+  <div class="chead"><a href="#workers" class="back" aria-label="Back">←</a><div id="session-head"></div></div>
+  <div id="turns" class="convo"></div>
   <p id="session-state" class="dim"></p>
 </main>
+<button type="button" id="latest" hidden>↓ latest</button>
 
 <main id="machine" hidden>
   <p><a href="#workers" class="back">← back</a></p>
@@ -497,6 +556,101 @@ function el(tag, props, ...kids) {
   for (const k of kids) n.append(k);
   return n;
 }
+
+// md:begin. Markdown to HTML for transcript text. All of the text is HTML-escaped first; after that only fixed
+// tags are added, and an href only when it starts with http:// or https://, so nothing in the text can become markup.
+// tests/md.test.mjs runs this block.
+const MD_ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+const MD_LIST = /^( *)([-*+]|\d{1,9}[.)]) +(.*)$/, MD_FENCE = /^ *(```|~~~)/, MD_HEAD = /^(#{1,6}) +(.*?)[ #]*$/;
+const MD_RULE = /^ *([-*_])( *\1){2,} *$/, MD_QUOTE = /^ *&gt;/;
+const mdStarts = (l) => MD_FENCE.test(l) || MD_HEAD.test(l) || MD_RULE.test(l) || MD_QUOTE.test(l) || MD_LIST.test(l);
+function md(src) {
+  const text = String(src).replace(/\0/g, '').replace(/\t/g, '    ').replace(/[&<>"']/g, (c) => MD_ESC[c]);
+  return mdBlocks(text.split(/\r?\n/));
+}
+const mdLink = (href, label) => `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+// Code spans and links are set aside as \0n\0 first, so emphasis never reaches inside them.
+function mdInline(s) {
+  const keep = [], put = (html) => `\0${keep.push(html) - 1}\0`;
+  s = s.replace(/(`+)(.+?)\1/g, (_, __, code) => put(`<code>${code}</code>`))
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)\0]+)\)/gi, (_, label, href) => put(mdLink(href, label)))
+    .replace(/https?:\/\/[^\s\0]+/gi, (url) => {
+      // Trailing punctuation ends the sentence, not the link.
+      const tail = url.match(/(?:[.,;:!?)\]]|&gt;|&quot;|&#39;)*$/)[0], href = url.slice(0, url.length - tail.length);
+      return /^https?:\/\/./i.test(href) ? put(mdLink(href, href)) + tail : url;
+    })
+    // No lookbehind: older iOS Safari can't parse it. `a_b_c` stays as is.
+    .replace(/\*\*(?=\S)(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|\W)__(?=\S)(.+?)__(?!\w)/g, '$1<strong>$2</strong>')
+    .replace(/(^|[^\w*])\*(?=[^\s*])(.+?)\*(?![*\w])/g, '$1<em>$2</em>')
+    .replace(/(^|\W)_(?=[^\s_])(.+?)_(?!\w)/g, '$1<em>$2</em>');
+  const back = (x) => x.replace(/\0(\d+)\0/g, (_, i) => back(keep[i]));
+  return back(s);
+}
+// Quotes and lists nest at most MD_DEPTH deep; deeper lines stay plain text (no runaway recursion).
+const MD_DEPTH = 12;
+function mdBlocks(lines, depth = 0) {
+  if (depth > MD_DEPTH) return `<p>${lines.filter((l) => l.trim()).join('<br>')}</p>`;
+  const out = [];
+  for (let i = 0; i < lines.length;) {
+    const l = lines[i];
+    let m;
+    if (!l.trim()) { i++; continue; }
+    if ((m = l.match(MD_FENCE))) {
+      const body = [];
+      for (i++; i < lines.length && !lines[i].trim().startsWith(m[1]); i++) body.push(lines[i]);
+      i++;
+      out.push(`<pre><code>${body.join('\n')}</code></pre>`);
+    } else if ((m = l.match(MD_HEAD))) {
+      out.push(`<h${m[1].length}>${mdInline(m[2])}</h${m[1].length}>`);
+      i++;
+    } else if (MD_RULE.test(l)) {
+      out.push('<hr>');
+      i++;
+    } else if (MD_QUOTE.test(l)) {
+      const q = [];
+      while (i < lines.length && MD_QUOTE.test(lines[i])) q.push(lines[i++].replace(/^ *&gt; ?/, ''));
+      out.push(`<blockquote>${mdBlocks(q, depth + 1)}</blockquote>`);
+    } else if (MD_LIST.test(l)) {
+      i = mdList(lines, i, out, depth);
+    } else {
+      const p = [l.trim()];
+      for (i++; i < lines.length && lines[i].trim() && !mdStarts(lines[i]); i++) p.push(lines[i].trim());
+      out.push(`<p>${p.map(mdInline).join('<br>')}</p>`);
+    }
+  }
+  return out.join('');
+}
+// One list from lines[i]: items at its indent; deeper lines (nested lists, continuations) go inside the item before
+// them. Returns the index after it.
+function mdList(lines, i, out, depth) {
+  const first = lines[i].match(MD_LIST), base = first[1].length, ordered = /\d/.test(first[2]), items = [];
+  const indent = (l) => l.match(/^ */)[0].length;
+  while (i < lines.length) {
+    const l = lines[i], m = l.match(MD_LIST);
+    if (m && m[1].length <= base + 1) {
+      if (m[1].length < base || /\d/.test(m[2]) !== ordered) break;
+      items.push({ text: m[3], kids: [] });
+      i++;
+    } else if (l.trim() && indent(l) > base) {
+      items[items.length - 1].kids.push(l);
+      i++;
+    } else if (!l.trim()) {
+      // A blank line stays in the list only if the list goes on after it.
+      let j = i;
+      while (j < lines.length && !lines[j].trim()) j++;
+      const n = lines[j], nm = n && n.match(MD_LIST);
+      if (!n || (indent(n) <= base && !(nm && nm[1].length >= base))) break;
+      i = j;
+    } else break;
+  }
+  const kids = (k) => { const d = Math.min(...k.map(indent)); return mdBlocks(k.map((x) => x.slice(d)), depth + 1); };
+  const start = ordered && parseInt(first[2], 10) !== 1 ? ` start="${parseInt(first[2], 10)}"` : '';
+  const tag = ordered ? 'ol' : 'ul';
+  out.push(`<${tag}${start}>${items.map((it) => `<li>${mdInline(it.text)}${it.kids.length ? kids(it.kids) : ''}</li>`).join('')}</${tag}>`);
+  return i;
+}
+// md:end
 
 // One transcript line, matching `mis show` / `mis task --follow`; null for none.
 function eventLine(e) {
@@ -752,7 +906,8 @@ function say(text) {
   speakState();
 }
 function hush() { if (synth && utterance) { utterance = null; synth.cancel(); speakState(); } }
-$('speak').onclick = () => (utterance ? hush() : say($('answer').textContent));
+let speakText = ''; // the open task's answer
+$('speak').onclick = () => (utterance ? hush() : say(speakText));
 const autoread = {
   on() { try { return localStorage.getItem('mis-autoread') === '1'; } catch { return false; } },
   set(v) { try { v ? localStorage.setItem('mis-autoread', '1') : localStorage.removeItem('mis-autoread'); } catch {} },
@@ -926,8 +1081,10 @@ function render() {
   if (shots.some((x) => !x.id)) $('send').disabled = true; // photos still uploading
   $('clip').disabled = shots.length >= MAX_SHOTS || !!pending;
   for (const v in views) $(v).hidden = !everOpen || v !== r.view;
-  if (r.view === 'detail') $('detail').querySelector('.back').href = from;
+  // A conversation's back link returns to the view it was opened from.
+  if (r.view === 'detail' || r.view === 'session') $(r.view).querySelector('.back').href = from;
   else from = location.hash || '#';
+  if (r.view !== 'detail' && r.view !== 'session') { follow.key = null; $('latest').hidden = true; if (detail) detail.sig = null; }
   if (r.view !== 'session') closeSession();
   const onWorkers = r.view === 'workers' || r.view === 'machine' || r.view === 'session';
   const area = onWorkers ? 'workers' : r.view === 'routines' ? 'routines' : 'list';
@@ -997,7 +1154,7 @@ function settle() {
   settleTimer = setTimeout(() => { settleTimer = 0; relist(); }, SETTLE_MS);
 }
 window.addEventListener('pointerdown', (e) => {
-  if (e.button === 0 && ($('tasks').contains(e.target) || $('wbody').contains(e.target))) { presses.add(e.pointerId); settle(); }
+  if (e.button === 0 && ($('list').contains(e.target) || $('wbody').contains(e.target))) { presses.add(e.pointerId); settle(); }
 }, true);
 const lift = (e) => {
   if (!presses.delete(e.pointerId)) return;
@@ -1034,14 +1191,126 @@ function taskRows(ul, rows) {
   if (!rows.length) ul.append(el('li', { className: 'dim' }, 'no tasks yet'));
 }
 
-// A routine run's row: `↻ <routine> · `, the mode it ran in, then its own prompt, past the paragraph of rules the orchestrator puts first.
-const routineHead = (t) => (t.routine ? [`↻ ${t.routine} · `, modeChip(t.routine_mode), t.prompt.split('\n\n').slice(1).join('\n\n') || t.prompt] : [t.prompt]);
+// A routine run's own prompt, past the paragraph of rules the orchestrator puts first.
+const promptOf = (t) => (t.routine ? t.prompt.split('\n\n').slice(1).join('\n\n') || t.prompt : t.prompt);
+// A routine run's row: `↻ <routine> · `, the mode it ran in, then its own prompt.
+const routineHead = (t) => (t.routine ? [`↻ ${t.routine} · `, modeChip(t.routine_mode), promptOf(t)] : [t.prompt]);
 const modeChip = (m) => (m ? el('span', { className: `chip mode-${m}` }, m.replace('_', ' ')) : '');
 // `↪ <session title> · ` before a message to one of a worker's sessions; its link back.
 const sentTo = (t) => (t.send_to ? `↪ ${t.send_to.title || short(t.send_to.session)} · ` : '');
-const sessionHref = (t) => `#session/${t.worker}/${t.harness}/${t.send_to.session}`;
+const sendKey = (t) => `${t.worker}/${t.harness}/${t.send_to.session}`; // the session a message went to
+const sessionHref = (t) => `#session/${sendKey(t)}`;
 
-function renderList() { if (!frozen()) taskRows($('tasks'), heldRows('list', tasks)); }
+// Home: what needs you and what runs, every machine's live sessions, then finished work by day.
+let feed = []; // the sessions feed (`ServerMsg::Sessions`); stays empty for a read-only token
+const repliesOpen = new Set(); // threads whose replies are shown
+const shortHost = (h) => (h || '').split('.')[0];
+const isFinished = (t) => ['done', 'failed', 'cancelled'].includes(t.status);
+const changedAt = (t) => t.finished_at || t.started_at || 0; // when it last changed, as far as rows know
+const dayKey = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+function dayLabel(key, now) {
+  if (key === dayKey(now)) return 'Today';
+  if (key === dayKey(now - 86400e3)) return 'Yesterday';
+  const [y, m, d] = key.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+}
+// A message to a session shows in that session's row (`listed`) instead, unless it needs acting on.
+const STUCK = new Set(['approval', 'failed', 'limited']);
+const secRank = (s) => (s === 'need' ? 0 : s === 'flight' ? 1 : 2);
+// Threads ({ root, replies }) with their section: `need`, `flight`, or `day:<y-m-d>` for finished ones; Home's order.
+function homeThreads(list, listed) {
+  const visible = list.filter((t) => !(listed.has(t.id) && !STUCK.has(t.attention)));
+  const ids = new Set(visible.map((t) => t.id)), at = new Map(visible.map((t, i) => [t.id, i]));
+  const all = (t) => visible.filter((r) => r.parent === t.id).flatMap((r) => [r, ...all(r)]);
+  return visible.filter((t) => !t.parent || !ids.has(t.parent)).map((root) => {
+    const replies = all(root), ts = [root, ...replies], r = Math.min(...ts.map(rank)), when = Math.max(...ts.map(changedAt));
+    return { root, replies, rank: r, when, last: Math.max(...ts.map((t) => at.get(t.id))), sec: r <= 2 ? 'need' : r === 3 ? 'flight' : `day:${dayKey(when)}` };
+  }).sort((a, b) => secRank(a.sec) - secRank(b.sec) || (a.sec === 'need' && a.rank - b.rank) || b.sec.localeCompare(a.sec)
+    || (secRank(a.sec) === 2 ? b.when - a.when : b.last - a.last));
+}
+// While the lists settle, rows keep the order and section they were last shown in; new ones go last in theirs.
+function held(key, rows, id) {
+  const prev = settleTimer && shown.get(key);
+  if (prev) {
+    const at = new Map(prev.map((p, i) => [p.id, [i, p.sec]]));
+    for (const r of rows) if (at.has(id(r)) && r.sec) r.sec = at.get(id(r))[1];
+    rows.sort((a, b) => (at.get(id(a))?.[0] ?? Infinity) - (at.get(id(b))?.[0] ?? Infinity));
+  }
+  shown.set(key, rows.map((r) => ({ id: id(r), sec: r.sec })));
+  return rows;
+}
+// A status dot, lit in its attention colour when the task needs you.
+function statusDot(t) {
+  const a = ATTENTION[t.attention], d = el('span', { className: `sd ${t.status}${a ? ` att-${t.attention}` : ''}` });
+  d.setAttribute('role', 'img');
+  d.setAttribute('aria-label', a ? a[1] : t.status);
+  return d;
+}
+// First non-blank line, without markdown's emphasis and heading marks.
+const snippet = (s) => (s || '').split('\n').find((l) => l.trim())?.replace(/\*\*|__|`/g, '').replace(/^(?:#{1,6} +|> ?|\s+)+/, '') || '';
+// What a task is doing (running, held) or said (its summary), for its row's last line.
+function taskLine(t) {
+  if (!isFinished(t) && t.activity && t.activity !== 'queued') return el('div', { className: 'r3 activity one' }, t.activity);
+  return t.summary ? el('div', { className: 'r3 one' }, snippet(t.summary)) : '';
+}
+function taskRow(t, now, reply) {
+  return el('li', { className: [reply && 'reply', t.status === 'cancelled' && 'cancelled'].filter(Boolean).join(' ') },
+    el('a', { href: `#task/${t.id}` },
+      el('div', { className: 'r1' }, statusDot(t), el('span', { className: 'one' }, reply ? '↳ ' : '', sentTo(t), ...routineHead(t))),
+      el('div', { className: 'r2 one' }, ...dots([t.worker && shortHost(hostOf(t.worker)), t.model, t.status === 'running' ? clock(t) : span(now - changedAt(t))])),
+      taskLine(t)));
+}
+// A thread: its first task, then its replies folded into one line (the most urgent, else the latest); a tap shows them.
+function threadRows(th, now) {
+  const first = taskRow(th.root, now);
+  if (!th.replies.length) return [first];
+  const open = repliesOpen.has(th.root.id), n = th.replies.length;
+  const lead = th.replies.reduce((a, t) => (rank(t) <= rank(a) ? t : a));
+  const said = snippet(lead.summary) || (isFinished(lead) ? lead.status : lead.activity || lead.status);
+  const more = el('button', { type: 'button', className: 'more' }, statusDot(lead), el('span', { className: 'one' }, `↳ ${n} repl${n === 1 ? 'y' : 'ies'} · ${said}`));
+  more.setAttribute('aria-expanded', String(open));
+  more.onclick = () => {
+    if (open) repliesOpen.delete(th.root.id); else repliesOpen.add(th.root.id);
+    clearTimeout(clickTimer); clickTimer = 0; // this tap is the change: draw it now
+    render();
+  };
+  first.append(more);
+  return [first, ...(open ? th.replies.map((r) => taskRow(r, now, true)) : [])];
+}
+const LIVE_STATE = { working: 'working', waiting: 'waiting for you', stalled: 'stalled?', shell: 'in shell', idle: 'idle' };
+const liveKey = (s) => `${s.worker}/${s.harness}/${s.id}`;
+const liveChip = (state) => el('span', { className: `chip st-${state}` }, LIVE_STATE[state] || state);
+// A live session: name and age; state, what it waits on, machine, harness; its last line. Then the latest you sent it,
+// each opening its task: a reply sent to a copy is only there.
+function liveRow(s, now) {
+  const you = s.messages.slice(-2).map((m) => {
+    const t = tasks.find((x) => x.id === m.task);
+    return el('a', { className: 'you', href: `#task/${m.task}` }, t ? statusDot(t) : '',
+      el('span', { className: 'one' }, `you: ${m.text} · ${m.answered ? `answered ${span(now - ((t && t.finished_at) || m.at))}` : m.status}`));
+  });
+  return el('li', { className: `sr${s.online ? '' : ' off'}` }, el('a', { href: `#session/${liveKey(s)}` },
+    el('div', { className: 'r1' }, el('strong', { className: 'one' }, s.name || s.title || short(s.id)), el('span', { className: 'r2' }, span(now - s.updated_ms))),
+    el('div', { className: 'r2 one' }, liveChip(s.state), ...dots([!s.online && 'offline', s.waiting_for && el('span', { className: 'why' }, s.waiting_for),
+      shortHost(s.worker_name), s.harness])),
+    s.last ? el('div', { className: 'r3 one' }, snippet(s.last)) : ''), ...you);
+}
+const secHead = (label, ...end) => el('div', { className: 'sec' }, el('h3', {}, label), ...end);
+function renderList() {
+  if (frozen()) return;
+  const now = Date.now() + skew, listed = new Set(feed.flatMap((s) => s.messages.map((m) => m.task)));
+  const threads = held('home', homeThreads(tasks, listed), (th) => th.root.id);
+  const sessions = held('live', [...feed], liveKey);
+  const label = (sec) => (sec === 'need' ? 'Needs you' : sec === 'flight' ? 'In flight' : dayLabel(sec.slice(4), now));
+  const groups = new Map();
+  for (const th of threads) groups.set(th.sec, [...(groups.get(th.sec) || []), th]);
+  // Sections in Home's order; live sessions after the work in hand.
+  const keys = [...groups.keys()].sort((a, b) => secRank(a) - secRank(b) || b.localeCompare(a));
+  const body = keys.map((k) => [secHead(label(k)), el('ul', { className: 'rows' }, ...groups.get(k).flatMap((th) => threadRows(th, now)))]);
+  const liveAt = keys.filter((k) => secRank(k) < 2).length;
+  if (sessions.length) body.splice(liveAt, 0, [secHead('Live sessions', el('a', { href: '#workers' }, 'All sessions ›')), el('ul', { className: 'rows' }, ...sessions.map((s) => liveRow(s, now)))]);
+  $('list').replaceChildren(...body.flat());
+  if (!body.length) $('list').append(el('p', { className: 'dim' }, 'no tasks yet'));
+}
 
 const KIND = { pr: 'PR', commit: 'commit', ci_run: 'CI', issue: 'issue', url: 'link', test: 'test', note: 'note' };
 const GITHUB = ['pr', 'commit', 'ci_run', 'issue'];
@@ -1159,28 +1428,163 @@ function approvalCard(t, a) {
     a.always && !readOnly ? el('p', { className: 'dim' }, `always: ${a.always}`) : '');
 }
 
+// Conversations (a task's thread, a session's transcript) are items { role: user|assistant|tool, text, call, key, who,
+// time }: `call` marks a tool call (its result is a tool item too); a tool run is known across redraws by its first key.
+// Earlier is everything before your last message; latest is from it on.
+function exchange(items) {
+  const u = items.findLastIndex((x) => x.role === 'user');
+  return u > 0 ? [items.slice(0, u), items.slice(u)] : [[], items];
+}
+// Consecutive tool items as one { run, key }; other items as they are.
+function toolRuns(items) {
+  const out = [];
+  for (const x of items) {
+    const last = out[out.length - 1];
+    if (x.role !== 'tool') out.push(x);
+    else if (last && last.run) last.run.push(x);
+    else out.push({ run: [x], key: x.key });
+  }
+  return out;
+}
+const SHELL = new Set(['Bash', 'shell', 'exec_command', 'local_shell']);
+const toolOf = (text) => text.split(/[:\s]/)[0];
+// What a call ran: `Bash: cargo fmt --all` -> `cargo fmt`, `shell: bash -lc gh run watch 1` -> `gh run watch`; else
+// the tool (`Read src/a.rs` -> `Read`).
+function callName(text) {
+  const name = toolOf(text);
+  if (!SHELL.has(name)) return name;
+  const cmd = text.slice(name.length).replace(/^:?\s*/, '').replace(/^(ba|z)?sh -l?c /, '').replace(/^['"]/, '').replace(/^cd \S+ && /, '');
+  const words = [];
+  for (const w of cmd.split(/\s+/)) {
+    if (words.length === 3 || !/^[a-z][\w.:-]*$/i.test(w)) break;
+    words.push(w);
+  }
+  return words.join(' ') || name;
+}
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+// `⚙ 6 commands · cargo fmt, git commit, gh run watch…`
+function runLabel(run) {
+  const calls = run.filter((x) => x.call), names = [...new Set(calls.map((x) => callName(x.text)))];
+  const noun = !calls.length ? 'tool output' : calls.every((x) => SHELL.has(toolOf(x.text))) ? 'command' : 'tool call';
+  return `⚙ ${plural(calls.length || run.length, noun)}${names.length ? ` · ${names.slice(0, 3).join(', ')}${names.length > 3 ? '…' : ''}` : ''}`;
+}
+// Redraws re-render every turn: keep the HTML per text (a few hundred turns at most are shown).
+const mdCache = new Map();
+function mdCached(text) {
+  if (!mdCache.has(text)) { if (mdCache.size > 500) mdCache.clear(); mdCache.set(text, md(text)); }
+  return mdCache.get(text);
+}
+// Draws a conversation into `box`: earlier turns folded into one line, then your last message and the latest reply
+// as cards with the work between; each tool run folded to a line. `open` ({ earlier, runs }) keeps what the reader
+// unfolded; `more`: older turns exist than were sent; `working`: a last line while it runs.
+function drawConvo(box, items, open, more, working) {
+  const [earlier, latest] = exchange(items), reply = latest.findLast((x) => x.role === 'assistant');
+  const redraw = () => drawConvo(box, items, open, more, working);
+  const toggle = (cls, label, on, flip) => {
+    const b = el('button', { type: 'button', className: cls }, label);
+    b.setAttribute('aria-expanded', String(on));
+    b.onclick = () => { flip(); redraw(); };
+    return b;
+  };
+  const part = (x) => {
+    if (x.run) {
+      const on = open.runs.has(x.key);
+      return [toggle('toolrun one', runLabel(x.run), on, () => (on ? open.runs.delete(x.key) : open.runs.add(x.key))),
+        on ? el('div', { className: 'calls' }, ...x.run.map((c) => el('div', {}, c.text))) : ''];
+    }
+    const body = el('div', { className: 'body' });
+    // md() escapes all of the text before adding its own tags.
+    if (x.role === 'assistant') { body.classList.add('md'); body.innerHTML = mdCached(x.text); } else body.textContent = x.text;
+    const card = x === reply || (x === latest[0] && x.role === 'user');
+    return [el('div', { className: `msg ${x.role}${card ? ' card' : ''}` },
+      el('div', { className: 'who' }, ...dots([x.role === 'user' ? 'you' : x.who || 'agent', x.time])), body)];
+  };
+  const nodes = [];
+  if (earlier.length) {
+    const turns = earlier.filter((x) => x.role !== 'tool').length, calls = earlier.filter((x) => x.call).length;
+    nodes.push(toggle('fold', `${open.earlier ? '▾' : '▸'} ${plural(turns, 'earlier turn')}${calls ? ` · ${plural(calls, 'tool call')}` : ''}`,
+      open.earlier, () => { open.earlier = !open.earlier; }));
+    if (open.earlier) nodes.push(el('div', { className: 'earlier' }, more ? el('p', { className: 'dim' }, 'older turns not shown') : '', ...toolRuns(earlier).flatMap(part)));
+  }
+  nodes.push(...toolRuns(latest).flatMap(part));
+  if (working) nodes.push(el('div', { className: 'msg working' }, el('div', { className: 'body' }, working)));
+  box.replaceChildren(...nodes);
+}
+// Conversation views open on the latest exchange (`toEnd`: at the newest content, e.g. a running task's approvals), then
+// stay at the bottom as it grows unless the reader scrolled up: then `#latest` offers the newest. `sig` names what's drawn.
+let follow = { key: null, sig: null };
+const atBottom = () => innerHeight + scrollY >= document.documentElement.scrollHeight - 80;
+function placeConvo(key, sig, wasAtBottom, box, toEnd) {
+  const end = document.documentElement.scrollHeight;
+  if (follow.key !== key) {
+    follow = { key, sig };
+    $('latest').hidden = true;
+    // The earlier-turns line and your last message under the sticky head; a short exchange just ends at the bottom.
+    const head = box.parentNode.querySelector('.chead'), top = box.querySelector('.fold') || box.querySelector('.msg.user.card');
+    scrollTo(0, top && !toEnd ? top.getBoundingClientRect().top + scrollY - head.offsetHeight - 8 : end);
+    return;
+  }
+  if (follow.sig === sig) return;
+  follow.sig = sig;
+  if (wasAtBottom) scrollTo(0, end); else $('latest').hidden = false;
+}
+$('latest').onclick = () => { $('latest').hidden = true; scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' }); };
+window.addEventListener('scroll', () => { if (!$('latest').hidden && atBottom()) $('latest').hidden = true; });
+
+// `claude/haiku`; just `claude-opus-4-5` when the model names its harness.
+const harnessModel = (h, m) => (!m ? h : m.startsWith(`${h}-`) ? m : `${h}/${m}`);
+// A tool call as session transcripts write it: `Bash: cargo fmt`, `Read src/a.rs`.
+function callText(e) {
+  const i = e.input || {}, cmd = i.command ?? i.cmd;
+  if (e.name.startsWith('mcp__')) return e.name.slice(5).replace('__', ': ');
+  if (cmd != null) return `${e.name}: ${(Array.isArray(cmd) ? cmd.join(' ') : String(cmd)).split('\n')[0]}`;
+  const arg = ['file_path', 'url', 'query', 'path', 'pattern', 'prompt'].map((k) => i[k]).find((v) => typeof v === 'string');
+  return arg ? `${e.name} ${arg}` : e.name;
+}
+// A task's thread as a conversation: the tasks it replies to (prompt, answer), then its prompt and its events.
+function taskItems(t, events) {
+  const items = ancestors(t).flatMap((p) => [{ role: 'user', text: promptOf(p) }, ...(p.summary ? [{ role: 'assistant', text: p.summary, who: p.harness }] : [])]);
+  items.push({ role: 'user', text: promptOf(t) });
+  let said = '';
+  events.forEach((e, i) => {
+    if (e.type === 'text') { items.push({ role: 'assistant', text: e.text, who: t.harness }); said = e.text; }
+    else if (e.type === 'tool_use') items.push({ role: 'tool', call: true, text: callText(e), key: i });
+    else if (e.type === 'tool_result') items.push({ role: 'tool', text: `→ ${(e.content || '').trim().split(/\r?\n/)[0]}`, key: i });
+    // The final answer, unless it repeats the last thing said.
+    else if (e.type === 'finished' && e.summary && e.summary.trim() !== said.trim()) items.push({ role: 'assistant', text: e.summary, who: t.harness });
+  });
+  // No answer in the events (dropped, or set by the orchestrator): the task's summary.
+  if (t.summary && !exchange(items)[1].some((x) => x.role === 'assistant')) items.push({ role: 'assistant', text: t.summary, who: t.harness });
+  return items;
+}
+// The tasks `t` replies to, its thread's first first.
+function ancestors(t) {
+  const out = [];
+  for (let p = tasks.find((x) => x.id === t.parent); p && out.length < 50; p = tasks.find((x) => x.id === p.parent)) out.unshift(p);
+  return out;
+}
+const rootOf = (t) => ancestors(t)[0] || t; // whose prompt titles the thread
 function renderDetail(id) {
   if (!detail || detail.id !== id) {
     // A draft belongs to the thread it was typed in.
     if (replyFor !== id) { replyFor = id; $('reply-text').value = drafts.get(replyDraft(id)); $('reply-error').hidden = true; }
-    detail = { id, task: null, lines: [], ready: false };
+    detail = { id, task: null, events: [], truncated: false, note: '', ready: false, sig: null, open: { earlier: false, runs: new Set() } };
     send({ type: 'show', task: id });
   }
   const t = tasks.find((x) => x.id === id) || detail.task;
   // Looking at a finished task that needs the user settles it; repeats until the Status says so are harmless.
   if (!readOnly && t && ATTENTION[t.attention] && ['done', 'failed'].includes(t.status) && !document.hidden) send({ type: 'seen', task: id });
-  // The answer is what a question-style task is for; everything else is secondary.
-  const answer = t && t.summary ? t.summary : (t && t.status === 'running' ? 'working…' : '');
   const cards = approvalCards(t);
   $('approvals').replaceChildren(...cards);
   $('approvals').hidden = !cards.length;
-  $('answer').textContent = answer;
-  $('answer').hidden = !answer;
-  $('speak').parentNode.hidden = !synth || !(t && t.summary);
+  speakText = (t && t.summary) || '';
+  $('speak').parentNode.hidden = !synth || !speakText;
   renderEvidence(t);
-  $('meta').replaceChildren(...(t ? [chip(t.status),
-    [...placement(t), t.session && `session ${short(t.session)}`].filter(Boolean).join(' · ')] : []));
-  $('ask').textContent = t ? t.prompt : '';
+  const now = Date.now() + skew;
+  $('task-head').replaceChildren(...(t ? [el('div', { className: 'ttl one', title: rootOf(t).prompt }, sentTo(t), ...routineHead(rootOf(t))),
+    el('div', { className: 'r2 one' }, chip(t.status), ...dots([t.worker && shortHost(hostOf(t.worker)), harnessModel(t.harness, t.model),
+      t.status === 'running' ? clock(t) : changedAt(t) && span(now - changedAt(t))]))] : []));
+  drawTask(t);
   renderAttached((t && t.images) || []);
   // Thread links: up to the parent, down to each reply.
   const replies = tasks.filter((x) => x.parent === id);
@@ -1189,13 +1593,29 @@ function renderDetail(id) {
     ...(t && t.routine ? [el('a', { href: '#routines', className: 'thread' }, `↻ routine: ${t.routine}`, t.routine_mode ? ` · ${t.routine_mode.replace('_', ' ')}` : '')] : []),
     ...replies.map((r) => el('a', { href: `#task/${r.id}`, className: 'thread' }, `↳ ${short(r.id)} ${r.prompt.split('\n')[0]}`)));
   // A reply waits for the task to finish; the field takes a draft meanwhile.
-  const finished = t && ['done', 'failed', 'cancelled'].includes(t.status);
+  const finished = t && isFinished(t);
   if (!finished) $('send-reply').disabled = true;
   $('reply-text').placeholder = finished || !t ? 'Reply in this thread…' : 'Reply once it finishes…';
   renderCancel(t);
   $('ids').replaceChildren(...(t ? [['task', t.id], ['session', t.session]] : [])
     .filter(([, v]) => v).flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]));
-  $('log').textContent = detail.ready ? detail.lines.join('\n') : 'loading…';
+  $('log').textContent = !detail.ready ? 'loading…' : detail.note
+    || (detail.truncated ? ['(earlier events dropped)'] : []).concat(detail.events.map(eventLine).filter((l) => l !== null)).join('\n');
+}
+// The task's conversation, redrawn only when it changed.
+function drawTask(t) {
+  if (!t || !detail.ready) {
+    $('task-convo').replaceChildren(el('p', { className: detail.note ? 'bad' : 'dim' }, detail.note || 'loading…'));
+    return;
+  }
+  const items = taskItems(t, detail.events);
+  const working = isFinished(t) ? '' : t.status === 'running' ? t.activity || 'working…' : t.activity || t.status;
+  const sig = JSON.stringify([items.length, items[items.length - 1].text, working]);
+  if (sig === detail.sig) return;
+  const bottom = atBottom();
+  detail.sig = sig;
+  drawConvo($('task-convo'), items, detail.open, false, working);
+  placeConvo(`task/${t.id}`, sig, bottom, $('task-convo'), !isFinished(t));
 }
 
 // Cancel: a tap asks, a second confirms. `cancelAsk` belongs to the task open when it was asked.
@@ -1350,20 +1770,23 @@ const IDLE_REFRESH_MS = 30000;
 // A message to this session is queued or running: its reply lands in the transcript.
 const messaging = (key) => tasks.some((t) => t.send_to && key.endsWith(`/${t.harness}/${t.send_to.session}`)
   && ['queued', 'running'].includes(t.status));
+// What's known of a session: its live row, else its listing on the Workers view.
+const sessionInfo = (key) => feed.find((s) => liveKey(s) === key)
+  || ((sessLists.get(key.split('/')[0]) || {}).list || []).find((x) => x.id === key.split('/')[2]) || {};
 function renderSession(key) {
   if (!everOpen) return; // fetch once connected, with the token in place
   if (!sess || sess.key !== key) {
     closeSession();
-    sess = { key, got: null, drawn: null, timer: 0 };
+    sess = { key, got: null, drawn: null, timer: 0, open: { earlier: false, runs: new Set() } };
     $('turns').replaceChildren();
     loadTranscript(sess);
   }
-  const [wid, harness, id] = key.split('/'), got = sess.got;
-  const listed = ((sessLists.get(wid) || {}).list || []).find((x) => x.id === id) || {};
-  $('session-title').replaceChildren(el('span', { className: `chip ${harness}` }, harness), listed.title || short(id));
-  const live = got && got.active;
-  $('session-meta').replaceChildren(...dots([hostOf(wid), folder(listed.cwd), listed.model,
-    got && got.updated_ms && (live ? el('span', {}, el('span', { className: 'live' }, '●'), 'active') : ago(Date.now() + skew - got.updated_ms))]));
+  const [wid, harness, id] = key.split('/'), got = sess.got, info = sessionInfo(key);
+  const active = got && got.active, state = info.state || (active ? 'active' : '');
+  const updated = Math.max(info.updated_ms || 0, (got && got.updated_ms) || 0);
+  $('session-head').replaceChildren(el('div', { className: 'ttl one', title: info.title || '' }, info.name || info.title || short(id)),
+    el('div', { className: 'r2 one' }, state ? liveChip(state) : '', ...dots([info.waiting_for && el('span', { className: 'why' }, info.waiting_for),
+      shortHost(info.worker_name || hostOf(wid)), harnessModel(harness, info.model), updated && span(Date.now() + skew - updated)])));
   renderSay(got);
   if (!got || !got.turns) {
     $('session-state').className = got ? 'bad' : 'dim';
@@ -1371,19 +1794,21 @@ function renderSession(key) {
     return;
   }
   $('session-state').className = got.error ? 'bad' : 'dim';
-  $('session-state').textContent = got.error || (live ? 'refreshing while active' : '');
+  $('session-state').textContent = got.error || (active ? 'refreshing while active' : '');
+  // Shown, it settles the messages it answered in place: their replies are in this transcript (a copy's aren't).
+  if (!readOnly && !document.hidden && !got.error) for (const t of tasks) {
+    if (t.attention === 'unread' && t.send_to && t.send_to.mode !== 'fork' && sendKey(t) === key) send({ type: 'seen', task: t.id });
+  }
   // Status redraws come often; rebuild the turns only when they changed.
   if (sess.drawn === got) return;
   sess.drawn = got;
-  // Stay pinned to the newest turn if the reader was there.
-  const atEnd = innerHeight + scrollY >= document.documentElement.scrollHeight - 80 || !$('turns').childElementCount;
+  if (!got.turns.length) { $('turns').replaceChildren(el('p', { className: 'dim' }, 'no turns yet')); return; }
+  const bottom = atBottom();
   const time = (at) => (at ? new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) : '');
-  $('turns').replaceChildren(...(got.more ? [el('li', { className: 'dim' }, 'earlier turns not shown')] : []),
-    ...got.turns.map((t) => el('li', { className: t.role },
-      t.role === 'tool' ? '' : el('div', { className: 'who' }, ...dots([t.role, time(t.at)])),
-      el('div', { className: 'txt' }, t.text))));
-  if (!got.turns.length) $('turns').append(el('li', { className: 'dim' }, 'no turns yet'));
-  if (atEnd) scrollTo(0, document.documentElement.scrollHeight);
+  const items = got.turns.map((t) => ({ role: t.role, text: t.text, call: t.role === 'tool' && !/^[→✗] /.test(t.text), key: `${t.at}|${t.text}`, who: harness, time: time(t.at) }));
+  drawConvo($('turns'), items, sess.open, got.more, '');
+  const last = items[items.length - 1];
+  placeConvo(`session/${key}`, `${items.length}|${last.key}`, bottom, $('turns'));
 }
 
 // The session's composer. Not open: the message continues the session itself. Open
@@ -1409,8 +1834,7 @@ async function sayTo(mode) {
   const text = $('say-text').value.trim();
   if (!text || !sess || saying.busy) return;
   micOff();
-  const s = saying, [wid, harness, id] = sess.key.split('/');
-  const listed = ((sessLists.get(wid) || {}).list || []).find((x) => x.id === id) || {};
+  const s = saying, [wid, harness, id] = sess.key.split('/'), listed = sessionInfo(sess.key);
   s.busy = true;
   renderSay(sess.got);
   try {
@@ -1641,21 +2065,18 @@ function onMessage(msg) {
       break;
     }
     case 'task_detail':
-      if (detail && detail.id === msg.task.id) {
-        detail.task = msg.task;
-        detail.lines = (msg.truncated ? ['(earlier events dropped)'] : []).concat(msg.events.map(eventLine));
-        detail.ready = true;
-        detail.refetch = false;
-      }
+      if (detail && detail.id === msg.task.id) Object.assign(detail, { task: msg.task, events: msg.events, truncated: msg.truncated, ready: true, refetch: false, sig: null });
+      break;
+    case 'sessions':
+      feed = msg.sessions;
       break;
     case 'event': {
       // Rows show each task's latest activity and tokens.
       refreshSoon();
       if (msg.event.type === 'finished' && msg.event.summary && mine.delete(msg.task) && synth && !rec && autoread.on()) say(msg.event.summary);
       // Only an open transcript shows events; re-rendering other views would drop focus.
-      const line = eventLine(msg.event);
-      if (!detail || !detail.ready || detail.id !== msg.task || line === null) return;
-      detail.lines.push(line);
+      if (!detail || !detail.ready || detail.id !== msg.task || eventLine(msg.event) === null) return;
+      detail.events.push(msg.event);
       break;
     }
     case 'purpose_draft':
@@ -1701,7 +2122,7 @@ function onMessage(msg) {
       }
       flash(`error: ${msg.message}`);
       // A pending Show failed (unknown task): say so. Otherwise events were dropped: re-fetch.
-      if (detail && (!detail.ready || detail.refetch)) Object.assign(detail, { ready: true, refetch: false, lines: [msg.message] });
+      if (detail && (!detail.ready || detail.refetch)) Object.assign(detail, { ready: true, refetch: false, events: [], note: msg.message, sig: null });
       else detail = null;
       refreshSoon();
       break;
@@ -1741,6 +2162,7 @@ function connect() {
     offlineTimer = 0;
     pending = null; // a submit sent on the old socket gets no reply here; its draft stays
     send({ type: 'subscribe' });
+    if (!readOnly) send({ type: 'watch_sessions' }); // full access only
     send({ type: 'status' });
     // The orchestrator may have restarted with a new key: re-read it before syncing.
     if (push.key) info().then((i) => { if (i.vapid) push.key = i.vapid; pushSync(); }).catch(() => {});
@@ -1903,6 +2325,7 @@ $('clear').onclick = (e) => {
   disconnect();
   everOpen = false;
   readOnly = false;
+  feed = [];
   connMsg = authNeeded ? 'token required' : 'disconnected';
   render();
 };
