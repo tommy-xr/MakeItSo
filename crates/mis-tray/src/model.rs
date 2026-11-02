@@ -319,8 +319,8 @@ fn glyph(s: TaskStatus) -> char {
     }
 }
 
-/// `↻ pr-grooming · next 1h20m · last ✓ 3h ago`, `↻ nightly · running`,
-/// `↻ broken · ⚠ no trigger`. A run in `tasks` beats the fetched view, which lags.
+/// `↻ pr-grooming · next 1h20m · last ✓ 3h ago`, `↻ nightly · running · live`,
+/// `↻ broken · ⚠ no trigger`. Acting routines name their mode (dry run / live). A run in `tasks` beats the fetched view, which lags.
 fn routine_label(r: &RoutineView, tasks: &[TaskSummary], now: u64) -> String {
     let mine = |t: &&TaskSummary| t.routine.as_deref() == Some(r.name.as_str());
     let active = tasks
@@ -349,6 +349,11 @@ fn routine_label(r: &RoutineView, tasks: &[TaskSummary], now: u64) -> String {
             .or(r.last_status);
         let g = status.map_or(String::new(), |s| format!("{} ", glyph(s)));
         parts.push(format!("last {g}{} ago", span(now.saturating_sub(at))));
+    }
+    match r.mode {
+        Some(RoutineMode::DryRun) => parts.push("dry run".into()),
+        Some(RoutineMode::Live) => parts.push("live".into()),
+        Some(RoutineMode::Report) | None => {}
     }
     if let Some(e) = &r.error {
         parts.push(format!("⚠ {}", first_line(e, 40)));
@@ -622,6 +627,7 @@ mod tests {
             last_task: None,
             last_status: None,
             error: None,
+            mode: Some(RoutineMode::Report),
         }
     }
 
@@ -865,8 +871,10 @@ mod tests {
         next.last_status = Some(Failed); // the live task wins
         let mut busy = routine("nightly-ci");
         busy.last_at = Some(NOW - MIN);
+        busy.mode = Some(RoutineMode::Live);
         let mut paused = routine("weekly");
         paused.paused = true;
+        paused.mode = Some(RoutineMode::DryRun);
         let mut due = routine("due");
         due.next_at = Some(NOW);
         due.error = Some("no worker named mac-pro\nmore".into());
@@ -885,8 +893,8 @@ mod tests {
             l[at + 1..at + 6],
             [
                 "↻ pr-grooming · next 1h20m · last ✓ 3h00m ago",
-                "↻ nightly-ci · running",
-                "↻ weekly · paused",
+                "↻ nightly-ci · running · live",
+                "↻ weekly · paused · dry run",
                 "↻ due · due · ⚠ no worker named mac-pro",
                 "↻ broken.md · ⚠ no `every` or `cron`",
             ]
