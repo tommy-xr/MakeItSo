@@ -34,7 +34,8 @@ fn network(conn: Conn, proxy: EventLoopProxy<UserEvent>) {
     });
 }
 
-/// Monochrome template image: three bars and a block cursor (icons/tray.svg).
+/// Monochrome template image of the favicon: block cursor, three arrow bars (icons/tray.svg,
+/// rendered with `sips -s format png tray.svg --out tray.png`).
 fn icon() -> Icon {
     let decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!("../icons/tray.png")));
     let mut reader = decoder.read_info().expect("tray.png");

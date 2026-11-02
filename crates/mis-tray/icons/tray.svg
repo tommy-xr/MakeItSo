@@ -1,6 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" shape-rendering="crispEdges">
-  <rect x="0" y="4" width="16" height="2"/>
-  <rect x="0" y="7" width="16" height="2"/>
-  <rect x="0" y="10" width="16" height="2"/>
-  <rect x="11" y="13" width="4" height="2"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 44 44" shape-rendering="crispEdges">
+  <!-- The favicon's block cursor and three arrow bars, on a 2x pixel grid (22 pt menu bar slot). -->
+  <defs><path id="bar" d="M24 0H37V1H38V2H39V3H40V5H39V6H38V7H37V8H24Z"/></defs>
+  <rect x="4" y="6" width="16" height="32"/>
+  <use href="#bar" y="6"/>
+  <use href="#bar" y="18"/>
+  <use href="#bar" y="30"/>
 </svg>
