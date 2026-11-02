@@ -2947,6 +2947,7 @@ async fn a_session_transcript_is_read_from_the_worker() {
         more: true,
         updated_ms: 7,
         active: false,
+        open: false,
     };
     send(
         &mut worker,
@@ -2978,4 +2979,77 @@ async fn a_session_transcript_is_read_from_the_worker() {
     send(&mut worker, &WorkerMsg::Answer { req, answer }).await;
     let got = get.await.unwrap();
     assert!(got.starts_with("HTTP/1.1 404"), "{got}");
+}
+
+/// Raw HTTP/1.1 POST of a JSON body; returns the raw response.
+async fn http_post(base: &str, path: &str, auth: &str, body: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let addr = base.trim_start_matches("ws://");
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {auth}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    out
+}
+
+#[tokio::test]
+async fn messaging_a_session_runs_a_task_on_its_worker() {
+    let base = start_app(with_read_token()).await;
+    let wid = WorkerId::new_v4();
+    let mut req = format!("{base}/ws/worker").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("authorization", "Bearer s".parse().unwrap());
+    let (mut worker, _) = connect_async(req).await.unwrap();
+    let hello = WorkerMsg::Hello {
+        id: wid,
+        info: info("claude"),
+        running: vec![],
+    };
+    send(&mut worker, &hello).await;
+    let OrchMsg::Welcome { .. } = recv(&mut worker).await else {
+        panic!("welcome")
+    };
+
+    let session = uuid::Uuid::new_v4();
+    let path = format!("/api/workers/{wid}/sessions/claude/{session}/messages");
+    let body = r#"{"text":"also add coyote time","mode":"fork","title":"Tune jump physics"}"#;
+    // Acting needs the full token.
+    let read = http_post(&base, &path, "r", body).await;
+    assert!(read.starts_with("HTTP/1.1 403"), "{read}");
+    let none = http_post(&base, &path, "nope", body).await;
+    assert!(none.starts_with("HTTP/1.1 401"), "{none}");
+    let other = format!(
+        "/api/workers/{}/sessions/claude/{session}/messages",
+        WorkerId::new_v4()
+    );
+    assert!(http_post(&base, &other, "s", body)
+        .await
+        .starts_with("HTTP/1.1 404"));
+    let codex = format!("/api/workers/{wid}/sessions/codex/{session}/messages");
+    assert!(http_post(&base, &codex, "s", body)
+        .await
+        .starts_with("HTTP/1.1 400"));
+
+    let ok = http_post(&base, &path, "s", body).await;
+    assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
+    let OrchMsg::Assign { task, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    assert!(ok.contains(&task.id.to_string()), "{ok}");
+    assert_eq!(
+        (task.harness.as_str(), task.prompt.as_str()),
+        ("claude", "also add coyote time")
+    );
+    assert_eq!(task.resume, Some(session.to_string()));
+    let to = SendTo {
+        session,
+        title: Some("Tune jump physics".into()),
+        mode: SendMode::Fork,
+    };
+    assert_eq!(task.send_to, Some(to));
 }

@@ -248,12 +248,19 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
 
 impl CodexAgent {
     /// `codex` argv for one run: `exec [opts] -- <prompt>`, or
-    /// `exec resume [opts] -- <session> <prompt>` to continue a session. Codex
-    /// can't fork one, so replies to the same task share a single history.
+    /// `exec resume|fork [opts] -- <session> <prompt>` to continue a session or a
+    /// copy of it. Replies continue it, so replies to one task share a history.
     pub fn argv(&self, prompt: &str, o: &RunOpts) -> Vec<String> {
         let mut a: Vec<String> = vec!["exec".into()];
         if o.resume.is_some() {
-            a.push("resume".into());
+            a.push(
+                if o.fork == Some(true) {
+                    "fork"
+                } else {
+                    "resume"
+                }
+                .into(),
+            );
         }
         a.extend(["--json", "--skip-git-repo-check"].map(String::from));
         if let Some(p) = o.permissions {
@@ -594,6 +601,15 @@ mod tests {
                 "-more"
             ]
         );
+        // A copy: `exec fork`, same options; prompt still after the session.
+        let o = RunOpts {
+            resume: Some("t-1"),
+            fork: Some(true),
+            ..Default::default()
+        };
+        let a = CodexAgent.argv("hi", &o);
+        assert_eq!(a[..2], ["exec", "fork"]);
+        assert_eq!(a[a.len() - 3..], ["--", "t-1", "hi"]);
     }
 
     #[test]

@@ -319,6 +319,7 @@ impl TaskEntry {
                 _ => vec![],
             },
             images: self.images.clone(),
+            send_to: self.task.send_to.clone(),
         }
     }
 
@@ -559,6 +560,7 @@ impl Ledger {
                 harness: harness.unwrap_or_default(),
                 model,
                 resume: None,
+                send_to: None,
             },
             self.now_ms,
         );
@@ -608,10 +610,12 @@ impl Ledger {
                 if !w.info.harnesses.contains(&p.task.harness) {
                     return Err(format!("worker {host} no longer runs {}", p.task.harness));
                 }
+                // A reply continues this task's own session (or copy), wherever it ran.
                 let task = Task {
                     id: Uuid::new_v4(),
                     prompt: text,
                     resume: Some(session.clone()),
+                    send_to: None,
                     ..p.task.clone()
                 };
                 let mut entry = TaskEntry::new(task, self.now_ms);
@@ -635,6 +639,37 @@ impl Ledger {
         let t = self.tasks.iter_mut().find(|t| t.task.id == id);
         t.expect("just added").parent = Some(parent);
         Ok((id, effects))
+    }
+
+    /// Message session `to.session`, one of `harness`'s on worker `wid`'s disk: a task
+    /// pinned there that continues it (or a copy). Err if `wid` is offline or lacks `harness`.
+    pub fn send_to_session(
+        &mut self,
+        wid: WorkerId,
+        harness: String,
+        text: String,
+        to: SendTo,
+    ) -> Result<(TaskId, Vec<Effect>), String> {
+        let w = (self.workers.get(&wid).filter(|w| w.conn.is_some()))
+            .ok_or("that worker is offline")?;
+        if !w.info.harnesses.contains(&harness) {
+            return Err(format!("that worker doesn't run {harness}"));
+        }
+        let task = Task {
+            id: Uuid::new_v4(),
+            prompt: text,
+            cwd: None,
+            harness,
+            model: None,
+            resume: Some(to.session.to_string()),
+            send_to: Some(to),
+        };
+        let mut entry = TaskEntry::new(task, self.now_ms);
+        entry.pin = Some(wid);
+        let id = entry.task.id;
+        self.tasks.push(entry);
+        self.queue.push_back(id);
+        Ok((id, self.schedule()))
     }
 
     /// What the planner may choose from: `known_fleet` less the harnesses out of
@@ -2920,6 +2955,49 @@ mod tests {
         };
         assert!(images.is_empty());
         assert!(l.show(reply).unwrap().0.images.is_empty());
+    }
+
+    #[test]
+    fn a_session_message_is_pinned_and_a_reply_to_it_is_a_plain_resume() {
+        let mut l = Ledger::default();
+        let (idle, wid) = (Uuid::new_v4(), Uuid::new_v4());
+        l.connect(idle, info(), &[], 2, T0);
+        l.connect(wid, info(), &[], 1, T0);
+        let session = Uuid::new_v4();
+        let to = SendTo {
+            session,
+            title: Some("t".into()),
+            mode: SendMode::InPlace,
+        };
+        assert!(l
+            .send_to_session(wid, "codex".into(), "hi".into(), to.clone())
+            .is_err());
+        let (task, eff) = l
+            .send_to_session(wid, "claude".into(), "hi".into(), to.clone())
+            .unwrap();
+        // Only its own worker holds the session, though another is idle too.
+        assert_eq!(assigned(&eff), vec![(1, task)]);
+        assert_eq!(l.show(task).unwrap().0.send_to, Some(to));
+        for e in [
+            AgentEvent::Started {
+                session: Some(session.to_string()),
+                model: None,
+            },
+            AgentEvent::Finished {
+                ok: true,
+                summary: None,
+            },
+        ] {
+            l.event(wid, 1, task, e);
+        }
+        let (_, eff) = l.reply(task, "more".into(), vec![], true).unwrap();
+        let [t] = &sent(&eff)[..] else {
+            panic!("{eff:?}")
+        };
+        assert_eq!(
+            (t.resume.clone(), t.send_to.clone()),
+            (Some(session.to_string()), None)
+        );
     }
 
     #[test]

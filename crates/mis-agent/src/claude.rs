@@ -292,9 +292,12 @@ impl ClaudeAgent {
         if let Some(m) = o.model {
             a.push(format!("--model={m}"));
         }
-        // Forked, so two replies to one task don't see each other's turns.
+        // Replies fork, so two replies to one task don't see each other's turns.
         if let Some(s) = o.resume {
-            a.extend([format!("--resume={s}"), "--fork-session".into()]);
+            a.push(format!("--resume={s}"));
+            if o.fork.unwrap_or(true) {
+                a.push("--fork-session".into());
+            }
         }
         a.extend(["--".into(), with_images(prompt, o.images)]); // prompt may start with '-'
         a
@@ -635,6 +638,18 @@ mod tests {
                 "-hi"
             ]
         );
+        // Messaging the session itself: no fork; a copy: forked.
+        let resume = |fork| {
+            let o = RunOpts {
+                resume: Some("s-1"),
+                fork: Some(fork),
+                ..Default::default()
+            };
+            let a = ClaudeAgent::default().argv("hi", &o);
+            a[a.len() - 4..].to_vec()
+        };
+        assert_eq!(resume(false), ["--verbose", "--resume=s-1", "--", "hi"]);
+        assert_eq!(resume(true), ["--resume=s-1", "--fork-session", "--", "hi"]);
         let plain = ClaudeAgent::default().argv("hi", &RunOpts::default());
         assert!(!plain.iter().any(|a| a.starts_with("--resume")));
         assert_eq!(plain.last().unwrap(), "hi");

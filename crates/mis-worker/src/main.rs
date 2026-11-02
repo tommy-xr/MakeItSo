@@ -4,6 +4,7 @@
 mod approvals;
 mod config;
 mod inventory;
+mod live;
 mod mcp;
 mod permissions;
 mod pr;
@@ -571,6 +572,67 @@ fn answer(query: Query) -> Answer {
     }
 }
 
+/// Longest a `SendMode::WhenClosed` message waits for its session to close.
+const WAIT_CLOSED: Duration = Duration::from_secs(3600);
+const RECHECK_OPEN: Duration = Duration::from_secs(10);
+
+/// Where a message to a session on this disk runs: the session's own folder (and
+/// its model), once it may be continued as `to.mode` asks (never in place while open).
+async fn session_cwd(
+    ctx: &Ctx,
+    task: &Task,
+    to: &SendTo,
+    tx: &mpsc::Sender<(TaskId, AgentEvent)>,
+) -> std::result::Result<(PathBuf, Option<String>), String> {
+    let deadline = Instant::now() + WAIT_CLOSED;
+    let mut waiting = false;
+    let (cwd, model) = loop {
+        let (harness, id) = (task.harness.clone(), to.session);
+        let (cwd, model, open) = tokio::task::spawn_blocking(move || session_state(&harness, id))
+            .await
+            .map_err(|e| e.to_string())??;
+        match (to.mode, open) {
+            (SendMode::Fork, _) | (_, false) => break (cwd, model),
+            (SendMode::InPlace, true) => {
+                return Err(
+                    "the session is open right now; send to a copy, or queue until it closes"
+                        .into(),
+                )
+            }
+            (SendMode::WhenClosed, true) if Instant::now() >= deadline => {
+                return Err(format!(
+                    "the session was still open after {} min",
+                    WAIT_CLOSED.as_secs() / 60
+                ))
+            }
+            (SendMode::WhenClosed, true) => {
+                if !waiting {
+                    let text = "waiting for the session to close".to_string();
+                    let _ = tx.send((task.id, AgentEvent::Status { text })).await;
+                    waiting = true;
+                }
+                tokio::time::sleep(RECHECK_OPEN).await;
+            }
+        }
+    };
+    // Its folder must still exist and sit under a root, like any task's.
+    Ok((roots::resolve_cwd(&ctx.roots, Some(&cwd))?, model))
+}
+
+/// A session's folder, model, and whether it is open. Err when it isn't on this disk.
+type SessionState = (String, Option<String>, bool);
+fn session_state(harness: &str, id: uuid::Uuid) -> std::result::Result<SessionState, String> {
+    let (claude, codex) = sessions::roots();
+    let path = transcript::find(&claude, &codex, harness, id)
+        .ok_or_else(|| format!("no {harness} session {id} on this worker"))?;
+    let s = sessions::read_one(harness, &path, unix_ms())
+        .ok_or_else(|| format!("can't read {harness} session {id}"))?;
+    let cwd = s.cwd.ok_or("the session doesn't record its folder")?;
+    let held = live::claude_open(&claude, live::alive);
+    let open = sessions::open(harness, &s.id, s.active, &held);
+    Ok((cwd, s.model, open))
+}
+
 async fn run_task(
     ctx: &Ctx,
     task: Task,
@@ -591,7 +653,16 @@ async fn run_task(
         let _ = tx.send(fail(format!("no harness {}", task.harness))).await;
         return;
     };
-    let cwd = match roots::resolve_cwd(&ctx.roots, task.cwd.as_deref()) {
+    // A session on this disk runs in its own folder, on its own model.
+    let (cwd, model) = match &task.send_to {
+        Some(to) => match session_cwd(ctx, &task, to, &tx).await {
+            Ok((cwd, model)) => (Ok(cwd), model),
+            Err(why) => (Err(why), None),
+        },
+        None => (roots::resolve_cwd(&ctx.roots, task.cwd.as_deref()), None),
+    };
+    let model = task.model.clone().or(model);
+    let cwd = match cwd {
         Ok(c) => c.display().to_string(),
         Err(why) => {
             tracing::warn!(%id, "{why}");
@@ -625,9 +696,10 @@ async fn run_task(
         .await
         .inspect_err(|e| tracing::warn!(%id, "no mcp server: {e}"))
         .ok();
+    // A message to the user's own session goes in as typed.
     let prompt = match &server {
-        Some(_) => mcp::with_hint(&task.prompt),
-        None => task.prompt.clone(),
+        Some(_) if task.send_to.is_none() => mcp::with_hint(&task.prompt),
+        _ => task.prompt.clone(),
     };
     let (atx, mut arx) = mpsc::channel(64);
     let fwd = async {
@@ -650,9 +722,10 @@ async fn run_task(
         &prompt,
         mis_agent::RunOpts {
             cwd: Some(&cwd),
-            model: task.model.as_deref(),
+            model: model.as_deref(),
             mcp: server.as_ref().map(|s| &s.mcp),
             resume: task.resume.as_deref(),
+            fork: (task.send_to.as_ref()).map(|s| s.mode == SendMode::Fork),
             images: &image_paths,
             permissions: perms.as_ref(),
         },

@@ -763,6 +763,10 @@ pub fn router(app: App) -> Router {
             "/api/workers/{id}/sessions/{harness}/{session}",
             get(session),
         )
+        .route(
+            "/api/workers/{id}/sessions/{harness}/{session}/messages",
+            post(message),
+        )
         .with_state(app)
 }
 
@@ -1067,6 +1071,67 @@ async fn session(
         Ok(Answer::NotFound) => (StatusCode::NOT_FOUND, "unknown session").into_response(),
         Ok(_) => StatusCode::BAD_GATEWAY.into_response(),
         Err(why) => why.into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SessionMessage {
+    text: String,
+    #[serde(default = "in_place")]
+    mode: SendMode,
+    /// The session's title, as listed, for the task's heading.
+    #[serde(default)]
+    title: Option<String>,
+}
+
+fn in_place() -> SendMode {
+    SendMode::InPlace
+}
+
+/// Message one of worker `wid`'s sessions: a task, pinned there, that continues it.
+/// Acting, like submitting a task: read-only tokens get 403. Replies `{"task": id}`.
+async fn message(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path((wid, harness, session)): Path<(WorkerId, String, uuid::Uuid)>,
+    body: Bytes,
+) -> Response {
+    match app
+        .admit_scope(&headers, peer, "/api/workers/sessions")
+        .await
+    {
+        Some(Scope::Full) => {}
+        Some(Scope::Read) => return (StatusCode::FORBIDDEN, "read-only token").into_response(),
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    }
+    let m = match serde_json::from_slice::<SessionMessage>(&body) {
+        Ok(m) if !m.text.trim().is_empty() => m,
+        Ok(_) => return (StatusCode::BAD_REQUEST, "empty message").into_response(),
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let to = SendTo {
+        session,
+        title: m.title.map(|t| first_line(&t, 120)),
+        mode: m.mode,
+    };
+    let sent = app.transition(|l| match l.worker_conn(wid) {
+        None => (
+            Err((StatusCode::NOT_FOUND, "unknown worker".into())),
+            vec![],
+        ),
+        Some(None) => (
+            Err((StatusCode::SERVICE_UNAVAILABLE, "worker offline".into())),
+            vec![],
+        ),
+        Some(Some(_)) => match l.send_to_session(wid, harness, m.text, to) {
+            Ok((id, effects)) => (Ok(id), effects),
+            Err(why) => (Err((StatusCode::BAD_REQUEST, why)), vec![]),
+        },
+    });
+    match sent {
+        Ok(task) => Json(serde_json::json!({ "task": task })).into_response(),
+        Err::<_, (StatusCode, String)>(why) => why.into_response(),
     }
 }
 
