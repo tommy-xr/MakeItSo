@@ -42,6 +42,7 @@ pub fn alive(_pid: u32, _start: &str) -> bool {
     true
 }
 
+#[cfg(unix)]
 fn words(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
