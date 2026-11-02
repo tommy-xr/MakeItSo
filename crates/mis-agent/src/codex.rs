@@ -358,6 +358,10 @@ impl Agent for CodexAgent {
             while let Some(line) = lines.next_line().await? {
                 for mut ev in parse_line(&line) {
                     match &mut ev {
+                        // `thread.started` names no model: report the one asked for.
+                        AgentEvent::Started { model, .. } if model.is_none() => {
+                            *model = opts.model.map(String::from)
+                        }
                         AgentEvent::Text { text } => last_text = Some(text.clone()),
                         AgentEvent::Finished { summary, .. } => {
                             finished = true;

@@ -2,7 +2,7 @@
 //! files: `<claude>/projects/<slug>/<id>.jsonl`, `<codex>/sessions/Y/M/D/rollout-*.jsonl`.
 //! Only a bounded head and tail of each file is read; transcripts can be huge.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -37,9 +37,13 @@ struct Head {
     auto_title: Option<String>,
     /// Latest seen.
     model: Option<String>,
-    /// From how it was started (the first entrypoint/originator seen): a later
-    /// `claude -p --resume` doesn't make an interactive session headless.
-    headless: Option<bool>,
+    /// How it was started: [`Head::headless`] prefers the first claude prompt's
+    /// `turnOrigin` (copied prompts keep theirs), else the first entrypoint or originator
+    /// seen, so a later `claude -p --resume` doesn't make an interactive session headless.
+    origin: Option<bool>,
+    entry: Option<bool>,
+    /// The session a codex copy (`exec fork`) was made from; it records no copied history.
+    forked_from: Option<String>,
     /// Not worth listing (a Codex subagent's thread).
     skip: bool,
 }
@@ -53,6 +57,10 @@ impl Head {
         }
     }
 
+    fn headless(&self) -> Option<bool> {
+        self.origin.or(self.entry)
+    }
+
     /// The head has everything it needs; the tail can still add titles.
     fn done(&self) -> bool {
         self.skip || (self.cwd.is_some() && self.prompt.is_some() && self.model.is_some())
@@ -60,6 +68,7 @@ impl Head {
 
     /// None: nothing to list (no cwd and no title, or skipped).
     fn finish(self, harness: &str, updated_ms: u64, now_ms: u64) -> Option<Session> {
+        let interactive = self.headless() != Some(true);
         let title = self.custom_title.or(self.auto_title).or(self.prompt);
         if self.skip || (self.cwd.is_none() && title.is_none()) {
             return None;
@@ -72,7 +81,7 @@ impl Head {
             model: self.model,
             updated_ms,
             active: active(updated_ms, now_ms),
-            interactive: self.headless != Some(true),
+            interactive,
             // Set by `list`, which knows the live processes.
             open: false,
         })
@@ -125,10 +134,13 @@ fn claude_line(h: &mut Head, line: &str) {
             if h.cwd.is_none() {
                 h.cwd = text(&v["cwd"]);
             }
-            // `cli`; `sdk-cli` and the like for `claude -p` and SDK runs.
-            if let (None, Some(e)) = (h.headless, v["entrypoint"].as_str()) {
-                h.headless = Some(e.starts_with("sdk"));
-            }
+            // A prompt's `turnOrigin`: `human` typed, `sdk` for `claude -p` and SDK runs.
+            // `entrypoint`: `cli`, or `sdk-cli` and the like (rewritten in copies).
+            let origin = (kind == "user").then(|| v["turnOrigin"].as_str()).flatten();
+            h.origin = h.origin.or(origin.map(|o| o == "sdk"));
+            h.entry = h
+                .entry
+                .or(v["entrypoint"].as_str().map(|e| e.starts_with("sdk")));
             let msg = &v["message"];
             if kind == "assistant" {
                 // `<synthetic>` marks messages claude made up itself (errors, interrupts).
@@ -158,12 +170,14 @@ fn codex_line(h: &mut Head, line: &str) {
     };
     let p = &v["payload"];
     match v["type"].as_str() {
-        Some("session_meta") => {
+        // The file's own (first) one; a later one may describe another session.
+        Some("session_meta") if h.entry.is_none() => {
             if let Some(id) = text(&p["id"]) {
                 h.id = id;
             }
             h.cwd = text(&p["cwd"]).or(h.cwd.take());
-            h.headless = Some(p["originator"] == "codex_exec");
+            h.entry = Some(p["originator"] == "codex_exec");
+            h.forked_from = text(&p["forked_from_id"]);
             h.skip = p["source"].get("subagent").is_some();
         }
         Some("turn_context") => h.model = text(&p["model"]).or(h.model.take()),
@@ -196,8 +210,14 @@ pub(crate) fn feed(r: impl Read, mut f: impl FnMut(&str) -> bool) -> u64 {
     }
 }
 
+/// The session id a codex rollout's file stem ends with: `rollout-<time>-<id>`.
+fn codex_id(stem: &str) -> Option<&str> {
+    stem.get(stem.len().checked_sub(36)?..)
+}
+
 /// One session file: up to `head` bytes from its start, then its last `tail` bytes
-/// unless the head already covered them. None for a headless one unless `headless`.
+/// unless the head already covered them, and the session it is a codex copy of. None
+/// for a headless one unless `headless` (a copy is judged by its original, later).
 fn read_file(
     harness: &str,
     path: &Path,
@@ -205,7 +225,7 @@ fn read_file(
     headless: bool,
     updated_ms: u64,
     now_ms: u64,
-) -> Option<Session> {
+) -> Option<(Session, Option<String>)> {
     let line = match harness {
         "claude" => claude_line,
         _ => codex_line,
@@ -214,12 +234,15 @@ fn read_file(
     // Codex names files `rollout-<time>-<id>`; session_meta has the id too.
     let id = match harness {
         "claude" => stem.to_string(),
-        _ => stem.get(stem.len().saturating_sub(36)..)?.to_string(),
+        _ => codex_id(&stem)?.to_string(),
     };
     let mut h = Head::new(id);
     let mut file = File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
-    let unwanted = |h: &Head| h.headless == Some(true) && !headless;
+    // Settled once a claude prompt's origin is seen; codex has only its originator.
+    let settled = |h: &Head| h.origin.is_some() || harness == "codex";
+    let unwanted =
+        |h: &Head| h.headless() == Some(true) && settled(h) && h.forked_from.is_none() && !headless;
     let used = feed((&mut file).take(head), |l| {
         line(&mut h, l);
         h.done() || unwanted(&h)
@@ -236,7 +259,42 @@ fn read_file(
             false
         });
     }
-    h.finish(harness, updated_ms, now_ms)
+    let forked_from = h.forked_from.take();
+    Some((h.finish(harness, updated_ms, now_ms)?, forked_from))
+}
+
+/// Copies made of copies: how far back to look for the original.
+const MAX_COPY_DEPTH: usize = 4;
+
+/// A codex copy as listed: its original's title (its own first prompt is the message
+/// that made it), and interactive if either was started so. The original is found by
+/// following `forked_from` through `find` (session id -> its file); if it isn't found
+/// within `MAX_COPY_DEPTH`, `s` is unchanged.
+fn resolve_copy(
+    s: Session,
+    mut forked_from: Option<String>,
+    find: impl Fn(&str) -> Option<(u64, PathBuf)>,
+    now_ms: u64,
+) -> Session {
+    let mut original = None;
+    for _ in 0..MAX_COPY_DEPTH {
+        let Some((at, path)) = forked_from.as_deref().and_then(&find) else {
+            break;
+        };
+        let Some((o, from)) = read_file("codex", &path, (HEAD_BYTES, TAIL_BYTES), true, at, now_ms)
+        else {
+            break;
+        };
+        (original, forked_from) = (Some(o), from);
+    }
+    match original {
+        Some(o) if forked_from.is_none() => Session {
+            title: o.title.or(s.title),
+            interactive: s.interactive || o.interactive,
+            ..s
+        },
+        _ => s,
+    }
 }
 
 /// `*.jsonl` files exactly `depth` directories below `dir`, with their mtimes.
@@ -287,10 +345,20 @@ pub fn list(claude_root: &Path, codex: &Path, headless: bool, now_ms: u64) -> Ve
     let mut files: Vec<_> = claude.chain(codex).collect();
     files.sort_by_key(|(_, (at, _))| std::cmp::Reverse(*at));
     let held = live::claude_open(claude_root, live::alive);
+    // Codex files by session id (`rollout-<time>-<id>.jsonl`), to find a copy's original.
+    let by_id: HashMap<String, (u64, PathBuf)> = (files.iter())
+        .filter(|(h, _)| *h == "codex")
+        .filter_map(|(_, (at, p))| {
+            let stem = p.file_stem()?.to_string_lossy();
+            Some((codex_id(&stem)?.to_string(), (*at, p.clone())))
+        })
+        .collect();
     files
-        .into_iter()
+        .iter()
         .take(MAX_SCANNED)
-        .filter_map(|(h, (at, p))| read_file(h, &p, (HEAD_BYTES, TAIL_BYTES), headless, at, now_ms))
+        .filter_map(|(h, (at, p))| read_file(h, p, (HEAD_BYTES, TAIL_BYTES), headless, *at, now_ms))
+        .map(|(s, from)| resolve_copy(s, from, |id| by_id.get(id).cloned(), now_ms))
+        .filter(|s| headless || s.interactive)
         .take(MAX_SESSIONS)
         .map(|mut s| {
             s.open = open(&s.harness, &s.id, s.active, &held);
@@ -320,7 +388,7 @@ pub(crate) fn is_open(claude: &Path, harness: &str, id: &str, active: bool) -> b
 /// One session file's summary, as listed (headless or not).
 pub(crate) fn read_one(harness: &str, path: &Path, now_ms: u64) -> Option<Session> {
     let at = mtime_ms(&std::fs::metadata(path).ok()?);
-    read_file(harness, path, (HEAD_BYTES, TAIL_BYTES), true, at, now_ms)
+    read_file(harness, path, (HEAD_BYTES, TAIL_BYTES), true, at, now_ms).map(|(s, _)| s)
 }
 
 #[cfg(test)]
@@ -404,6 +472,104 @@ mod tests {
     }
 
     #[test]
+    fn a_claude_copy_counts_as_started_like_its_original() {
+        // `claude -p --resume X --fork-session` rewrites `entrypoint` on the copied lines
+        // but keeps each prompt's `turnOrigin`.
+        let copied = r#"{"type":"user","cwd":"/w","entrypoint":"sdk-cli","turnOrigin":"human","message":{"content":"pick a color"}}"#;
+        let added = r#"{"type":"user","entrypoint":"sdk-cli","turnOrigin":"sdk","message":{"content":"and now?"}}"#;
+        let s = claude(&[copied, added]).finish("claude", 0, 0).unwrap();
+        assert!(s.interactive);
+        assert_eq!(s.title.as_deref(), Some("pick a color"));
+        // A prompt's origin wins over an entrypoint seen first, on any line.
+        let meta = r#"{"type":"user","isMeta":true,"entrypoint":"sdk-cli","message":{"content":"Caveat"}}"#;
+        assert!(
+            claude(&[meta, copied])
+                .finish("claude", 0, 0)
+                .unwrap()
+                .interactive
+        );
+        let headless = r#"{"type":"user","cwd":"/w","entrypoint":"sdk-cli","turnOrigin":"sdk","message":{"content":"p"}}"#;
+        assert!(
+            !claude(&[headless])
+                .finish("claude", 0, 0)
+                .unwrap()
+                .interactive
+        );
+    }
+
+    #[test]
+    fn a_codex_copy_takes_its_originals_title_and_start() {
+        let root = temp();
+        let day = root.join("2026").join("11").join("01");
+        std::fs::create_dir_all(&day).unwrap();
+        let rollout = |id: &str, meta: &str, prompt: &str| {
+            let user = format!(
+                r#"{{"type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{prompt}"}}]}}}}"#
+            );
+            let path = day.join(format!("rollout-2026-11-01T10-00-00-{id}.jsonl"));
+            std::fs::write(&path, format!("{meta}\n{user}\n")).unwrap();
+            path
+        };
+        let (a, b, c) = (
+            "aaaaaaaa-0000-7000-8000-000000000001",
+            "bbbbbbbb-0000-7000-8000-000000000002",
+            "cccccccc-0000-7000-8000-000000000003",
+        );
+        let meta = |id: &str, origin: &str, from: &str| {
+            format!(
+                r#"{{"type":"session_meta","payload":{{"id":"{id}","cwd":"/r","originator":"{origin}","forked_from_id":{from}}}}}"#
+            )
+        };
+        rollout(a, &meta(a, "codex-tui", "null"), "port the renderer");
+        rollout(
+            b,
+            &meta(b, "codex_exec", &format!("\"{a}\"")),
+            "a message to a copy",
+        );
+        // A second session_meta (another session's) doesn't change whose file this is.
+        let c_meta = format!(
+            "{}\n{}",
+            meta(c, "codex_exec", &format!("\"{b}\"")),
+            meta(a, "codex-tui", "null")
+        );
+        let c_path = rollout(c, &c_meta, "a copy of the copy");
+        let files: HashMap<String, (u64, PathBuf)> = [a, b, c]
+            .map(|id| {
+                (
+                    id.to_string(),
+                    (
+                        0,
+                        day.join(format!("rollout-2026-11-01T10-00-00-{id}.jsonl")),
+                    ),
+                )
+            })
+            .into();
+        let (s, from) = read_file("codex", &c_path, (1 << 20, 0), false, 0, 0).unwrap();
+        assert_eq!(
+            (s.id.as_str(), s.interactive, from.as_deref()),
+            (c, false, Some(b))
+        );
+        let s = resolve_copy(s, from, |id| files.get(id).cloned(), 0);
+        assert_eq!(
+            (s.id.as_str(), s.title.as_deref(), s.interactive),
+            (c, Some("port the renderer"), true)
+        );
+        // A copy started in a terminal stays interactive, whatever its original.
+        let d = "dddddddd-0000-7000-8000-000000000004";
+        let d_path = rollout(d, &meta(d, "codex-tui", &format!("\"{b}\"")), "tui copy");
+        let (s2, from) = read_file("codex", &d_path, (1 << 20, 0), false, 0, 0).unwrap();
+        let s2 = resolve_copy(s2, from, |id| files.get(id).cloned(), 0);
+        assert_eq!(
+            (s2.title.as_deref(), s2.interactive),
+            (Some("port the renderer"), true)
+        );
+        // Its original gone: listed as it is.
+        let s = resolve_copy(s, Some("gone".into()), |_| None, 0);
+        assert_eq!(s.id, c);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn missing_fields_are_tolerated() {
         let h = claude(&[
             "not json",
@@ -475,10 +641,10 @@ mod tests {
         );
         std::fs::write(&path, body).unwrap();
         // Head ends inside the padding, tail starts after the prompt: only the title is seen.
-        let s = read_file("claude", &path, (100, 400), true, 0, 0).unwrap();
+        let (s, _) = read_file("claude", &path, (100, 400), true, 0, 0).unwrap();
         assert_eq!((s.title.as_deref(), s.cwd), (Some("Tail title"), None));
         // A head long enough reaches the prompt and its cwd.
-        let s = read_file("claude", &path, (1 << 20, 400), true, 0, 0).unwrap();
+        let (s, _) = read_file("claude", &path, (1 << 20, 400), true, 0, 0).unwrap();
         assert_eq!(
             (s.title.as_deref(), s.cwd.as_deref()),
             (Some("Tail title"), Some("/w"))
