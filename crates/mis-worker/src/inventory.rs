@@ -267,7 +267,7 @@ fn probe_version(f: Found) -> Option<String> {
 /// stdout of `cmd` if it exits ok within `PROBE_TIMEOUT`; killed otherwise.
 /// stdout is read on its own thread: a descendant holding the pipe open must
 /// not outlast the deadline.
-fn output_within(mut cmd: Command) -> Option<String> {
+pub(crate) fn output_within(mut cmd: Command) -> Option<String> {
     let start = Instant::now();
     let mut child = cmd
         .stdin(Stdio::null())

@@ -43,6 +43,9 @@ pub struct RunOpts<'a> {
     pub mcp: Option<&'a Mcp>,
     /// Session to continue (claude `--resume`, codex `exec resume`).
     pub resume: Option<&'a str>,
+    /// Continue a copy of `resume` rather than the session itself. None: the
+    /// harness's default for replies (claude forks, codex continues).
+    pub fork: Option<bool>,
     /// Absolute paths of images attached to the prompt.
     pub images: &'a [String],
     /// What tools may do unasked; must pass `check`. None leaves the harness's

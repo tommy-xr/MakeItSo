@@ -200,6 +200,7 @@ mod tests {
             blocked_until: None,
             approvals: vec![],
             images: vec![],
+            send_to: None,
         }
     }
 

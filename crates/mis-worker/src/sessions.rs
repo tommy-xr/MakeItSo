@@ -2,11 +2,14 @@
 //! files: `<claude>/projects/<slug>/<id>.jsonl`, `<codex>/sessions/Y/M/D/rollout-*.jsonl`.
 //! Only a bounded head and tail of each file is read; transcripts can be huge.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use mis_types::{first_line, Session};
+
+use crate::live;
 use serde_json::Value;
 
 /// Most sessions listed.
@@ -70,6 +73,8 @@ impl Head {
             updated_ms,
             active: active(updated_ms, now_ms),
             interactive: self.headless != Some(true),
+            // Set by `list`, which knows the live processes.
+            open: false,
         })
     }
 }
@@ -272,8 +277,8 @@ pub fn roots() -> (PathBuf, PathBuf) {
 /// The newest `MAX_SESSIONS` sessions under both roots, newest first; headless ones
 /// (`claude -p`, `codex exec`) only if `headless`. Claude subagents live a level
 /// deeper (`<id>/subagents/`) and aren't listed.
-pub fn list(claude: &Path, codex: &Path, headless: bool, now_ms: u64) -> Vec<Session> {
-    let claude = jsonl_at(&claude.join("projects"), 1)
+pub fn list(claude_root: &Path, codex: &Path, headless: bool, now_ms: u64) -> Vec<Session> {
+    let claude = jsonl_at(&claude_root.join("projects"), 1)
         .into_iter()
         .map(|f| ("claude", f));
     let codex = jsonl_at(&codex.join("sessions"), 3)
@@ -281,12 +286,41 @@ pub fn list(claude: &Path, codex: &Path, headless: bool, now_ms: u64) -> Vec<Ses
         .map(|f| ("codex", f));
     let mut files: Vec<_> = claude.chain(codex).collect();
     files.sort_by_key(|(_, (at, _))| std::cmp::Reverse(*at));
+    let held = live::claude_open(claude_root, live::alive);
     files
         .into_iter()
         .take(MAX_SCANNED)
         .filter_map(|(h, (at, p))| read_file(h, &p, (HEAD_BYTES, TAIL_BYTES), headless, at, now_ms))
         .take(MAX_SESSIONS)
+        .map(|mut s| {
+            s.open = open(&s.harness, &s.id, s.active, &held);
+            s
+        })
         .collect()
+}
+
+/// Claude: a live process holds it (`held`, from `live::claude_open`). Codex: no such
+/// record, so a recent write (`active`) is taken to mean it may be open.
+pub(crate) fn open(harness: &str, id: &str, active: bool, held: &HashSet<String>) -> bool {
+    match harness {
+        "claude" => held.contains(id),
+        _ => active,
+    }
+}
+
+/// [`open`] for one session, reading the live processes only for claude.
+pub(crate) fn is_open(claude: &Path, harness: &str, id: &str, active: bool) -> bool {
+    let held = match harness {
+        "claude" => live::claude_open(claude, live::alive),
+        _ => HashSet::new(),
+    };
+    open(harness, id, active, &held)
+}
+
+/// One session file's summary, as listed (headless or not).
+pub(crate) fn read_one(harness: &str, path: &Path, now_ms: u64) -> Option<Session> {
+    let at = mtime_ms(&std::fs::metadata(path).ok()?);
+    read_file(harness, path, (HEAD_BYTES, TAIL_BYTES), true, at, now_ms)
 }
 
 #[cfg(test)]

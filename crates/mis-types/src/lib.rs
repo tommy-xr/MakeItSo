@@ -21,7 +21,7 @@ pub mod mcp;
 mod permissions;
 pub use permissions::{Approval, Decision, PermissionMode, Permissions, MAX_APPROVAL_DETAIL};
 mod sessions;
-pub use sessions::{Answer, Query, Role, Session, Turn, MAX_TURNS};
+pub use sessions::{Answer, Query, Role, SendMode, SendTo, Session, Turn, MAX_TURNS};
 
 pub type WorkerId = Uuid;
 pub type TaskId = Uuid;
@@ -127,6 +127,10 @@ pub struct Task {
     /// Agent session to continue (a reply in a task's thread).
     #[serde(default)]
     pub resume: Option<String>,
+    /// Set when the user messages a session found on the worker's disk: `resume` is
+    /// its id, and the worker runs it in that session's own folder.
+    #[serde(default)]
+    pub send_to: Option<SendTo>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -477,6 +481,9 @@ pub struct TaskSummary {
     /// usage: Unix millis when the first of them frees up.
     #[serde(default)]
     pub blocked_until: Option<u64>,
+    /// The worker's session this task messages, for a link back to it.
+    #[serde(default)]
+    pub send_to: Option<SendTo>,
     /// Approvals its agent waits on, oldest first; empty unless running.
     #[serde(default)]
     pub approvals: Vec<Approval>,
@@ -914,6 +921,7 @@ mod tests {
             blocked_until: None,
             approvals: vec![],
             images: vec![],
+            send_to: None,
         }
     }
 

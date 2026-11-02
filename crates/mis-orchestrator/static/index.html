@@ -227,6 +227,8 @@
   #turns .user .txt { padding-left: .875rem; border-left: 2px solid var(--accent); color: var(--accent); }
   #turns .tool { padding: .25rem 0; border: 0; font-size: .8125rem; color: var(--dim); }
   #turns .txt { white-space: pre-wrap; }
+  #say { margin-top: 1rem; }
+  #say p { margin: .375rem 0 0; overflow-wrap: anywhere; }
   .chip.claude { --s: var(--accent); } .chip.codex { --s: var(--fg); }
   .live { margin-right: .375em; font-size: .75em; color: var(--ok); text-shadow: 0 0 6px var(--ok); }
   /* Tools gained since the note was saved; the note's editor on the worker's page. */
@@ -324,6 +326,12 @@
   <div id="session-meta" class="dim"></div>
   <ul id="turns"></ul>
   <p id="session-state" class="dim"></p>
+  <form id="say" hidden>
+    <textarea id="say-text" aria-label="message" placeholder="Message this session…" required></textarea>
+    <p id="say-open" class="warn" hidden></p>
+    <div class="row"><button id="say-send">Send</button><button type="button" id="say-queue" hidden>Queue until closed</button></div>
+    <p id="say-state" hidden></p>
+  </form>
 </main>
 
 <main id="machine" hidden>
@@ -889,13 +897,17 @@ function heldRows(key, list) {
 function taskRows(ul, rows) {
   ul.replaceChildren(...rows.map(([depth, t]) => el('li', depth ? { className: 'reply', style: `--depth: ${depth}` } : {},
     el('a', { href: `#task/${t.id}` },
-      el('div', { className: 'head clamp2' }, depth ? '↳ ' : '', attDot(t), chip(t.status), t.prompt),
+      el('div', { className: 'head clamp2' }, depth ? '↳ ' : '', attDot(t), chip(t.status), sentTo(t), t.prompt),
       el('div', { className: 'sub dim' }, ...dots([...placement(t), clock(t), tokensOf(t), linksBrief(t)])),
       (t.status === 'running' || t.status === 'queued') && t.activity && t.activity !== 'queued'
         ? el('div', { className: 'activity' }, t.activity) : '',
       t.summary ? el('pre', { className: 'answer clamp3' }, t.summary) : ''))));
   if (!rows.length) ul.append(el('li', { className: 'dim' }, 'no tasks yet'));
 }
+
+// `↪ <session title> · ` before a message to one of a worker's sessions; its link back.
+const sentTo = (t) => (t.send_to ? `↪ ${t.send_to.title || short(t.send_to.session)} · ` : '');
+const sessionHref = (t) => `#session/${t.worker}/${t.harness}/${t.send_to.session}`;
 
 function renderList() { if (!frozen()) taskRows($('tasks'), heldRows('list', tasks)); }
 
@@ -1041,6 +1053,7 @@ function renderDetail(id) {
   // Thread links: up to the parent, down to each reply.
   const replies = tasks.filter((x) => x.parent === id);
   $('thread').replaceChildren(...(t && t.parent ? [el('a', { href: `#task/${t.parent}`, className: 'thread' }, `↑ reply to ${short(t.parent)}`)] : []),
+    ...(t && t.send_to && t.worker ? [el('a', { href: sessionHref(t), className: 'thread' }, `↪ session: ${t.send_to.title || short(t.send_to.session)}`)] : []),
     ...replies.map((r) => el('a', { href: `#task/${r.id}`, className: 'thread' }, `↳ ${short(r.id)} ${r.prompt.split('\n')[0]}`)));
   $('reply').hidden = readOnly || !t || !['done', 'failed'].includes(t.status);
   $('ids').replaceChildren(...(t ? [['task', t.id], ['session', t.session]] : [])
@@ -1143,7 +1156,8 @@ function sessionsLine(w) {
 }
 
 // One session's transcript (`#session/<worker>/<harness>/<id>`): fetched on open, then every
-// REFRESH_MS while the session is active and in view. Nothing is kept once the view closes.
+// REFRESH_MS while the session is active or messaged and in view, else IDLE_REFRESH_MS.
+// Nothing is kept once the view closes.
 const REFRESH_MS = 5000;
 let sess = null; // { key, got: transcript | { error } | null, drawn: the `got` on screen, timer }
 function closeSession() {
@@ -1161,8 +1175,14 @@ async function loadTranscript(s) {
   // A failed refresh keeps the turns shown, and says why.
   s.got = got.error && s.got && s.got.turns ? { ...s.got, error: got.error } : got;
   renderSession(s.key);
-  if (s.got.active) s.timer = setTimeout(() => loadTranscript(s), REFRESH_MS);
+  // Quiet sessions are still re-read now and then: a terminal may open or close one.
+  clearTimeout(s.timer);
+  s.timer = setTimeout(() => loadTranscript(s), s.got.active || messaging(s.key) ? REFRESH_MS : IDLE_REFRESH_MS);
 }
+const IDLE_REFRESH_MS = 30000;
+// A message to this session is queued or running: its reply lands in the transcript.
+const messaging = (key) => tasks.some((t) => t.send_to && key.endsWith(`/${t.harness}/${t.send_to.session}`)
+  && ['queued', 'running'].includes(t.status));
 function renderSession(key) {
   if (!everOpen) return; // fetch once connected, with the token in place
   if (!sess || sess.key !== key) {
@@ -1177,6 +1197,7 @@ function renderSession(key) {
   const live = got && got.active;
   $('session-meta').replaceChildren(...dots([hostOf(wid), folder(listed.cwd), listed.model,
     got && got.updated_ms && (live ? el('span', {}, el('span', { className: 'live' }, '●'), 'active') : ago(Date.now() + skew - got.updated_ms))]));
+  renderSay(got);
   if (!got || !got.turns) {
     $('session-state').className = got ? 'bad' : 'dim';
     $('session-state').textContent = got ? got.error : 'reading…';
@@ -1197,6 +1218,48 @@ function renderSession(key) {
   if (!got.turns.length) $('turns').append(el('li', { className: 'dim' }, 'no turns yet'));
   if (atEnd) scrollTo(0, document.documentElement.scrollHeight);
 }
+
+// The composer under a transcript. Not open: the message continues the session itself. Open
+// (a terminal holds it), it mustn't be: send to a copy (default), or queue until it closes.
+let saying = null; // { key, sent: task id | null, error } for the composer's last send
+function renderSay(got) {
+  const [, harness] = sess.key.split('/');
+  $('say').hidden = readOnly || !got || !got.turns;
+  if (!saying || saying.key !== sess.key) { saying = { key: sess.key, sent: null, error: '' }; $('say-text').value = ''; }
+  const open = !!(got && got.open);
+  // Codex records no open terminals: only a recent write counts.
+  $('say-open').hidden = !open && harness !== 'codex';
+  $('say-open').textContent = !open ? 'Codex can’t tell if a terminal has this open; Send continues it in place.'
+    : `${harness === 'claude' ? 'Open in a terminal right now.' : 'May be open: written in the last 2 minutes.'} Queueing holds this worker until it closes (up to 15 min).`;
+  $('say-send').textContent = open ? 'Send to a copy' : 'Send';
+  $('say-queue').hidden = !open;
+  $('say-state').hidden = !saying.sent && !saying.error;
+  $('say-state').className = saying.error ? 'bad' : 'dim';
+  $('say-state').replaceChildren(saying.error || (saying.sent ? el('a', { href: `#task/${saying.sent}` }, `sent as task ${short(saying.sent)}`) : ''));
+}
+async function say(mode) {
+  const text = $('say-text').value.trim();
+  if (!text || !sess) return;
+  const s = saying, [wid, harness, id] = sess.key.split('/');
+  const listed = ((sessLists.get(wid) || {}).list || []).find((x) => x.id === id) || {};
+  $('say-send').disabled = $('say-queue').disabled = true;
+  try {
+    const r = await fetch(`/api/workers/${wid}/sessions/${harness}/${id}/messages`, {
+      method: 'POST', headers: { ...authHeaders(), 'content-type': 'application/json' },
+      body: JSON.stringify({ text, mode, title: listed.title || null }) });
+    if (r.ok) {
+      Object.assign(s, { sent: (await r.json()).task, error: '' });
+      if (saying === s) $('say-text').value = '';
+      // Follow the reply as it is written.
+      if (sess) { clearTimeout(sess.timer); const t = sess; t.timer = setTimeout(() => loadTranscript(t), REFRESH_MS); }
+    }
+    else s.error = (await r.text()) || `error ${r.status}`;
+  } catch { s.error = 'couldn’t reach the orchestrator'; }
+  $('say-send').disabled = $('say-queue').disabled = false;
+  if (sess && saying === s) renderSay(sess.got);
+}
+$('say').addEventListener('submit', (e) => { e.preventDefault(); say(sess && sess.got && sess.got.open ? 'fork' : 'in_place'); });
+$('say-queue').addEventListener('click', () => say('when_closed'));
 
 // The worker's build, flagged when it isn't the orchestrator's; its self-update progress.
 function versionLine(w) {

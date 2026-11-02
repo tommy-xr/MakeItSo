@@ -2947,6 +2947,7 @@ async fn a_session_transcript_is_read_from_the_worker() {
         more: true,
         updated_ms: 7,
         active: false,
+        open: false,
     };
     send(
         &mut worker,
@@ -2978,4 +2979,64 @@ async fn a_session_transcript_is_read_from_the_worker() {
     send(&mut worker, &WorkerMsg::Answer { req, answer }).await;
     let got = get.await.unwrap();
     assert!(got.starts_with("HTTP/1.1 404"), "{got}");
+}
+
+/// POST a JSON `body` with bearer `auth`; the status and body.
+async fn post_json(base: &str, path: &str, auth: &str, body: &str) -> (u16, String) {
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nAuthorization: Bearer {auth}\r\nContent-Type: application/json"
+    );
+    let (status, _, body) = http(base, &head, body.as_bytes()).await;
+    (status, String::from_utf8(body).unwrap())
+}
+
+#[tokio::test]
+async fn messaging_a_session_runs_a_task_on_its_worker() {
+    let base = start_app(with_read_token()).await;
+    let wid = WorkerId::new_v4();
+    let mut req = format!("{base}/ws/worker").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("authorization", "Bearer s".parse().unwrap());
+    let (mut worker, _) = connect_async(req).await.unwrap();
+    let hello = WorkerMsg::Hello {
+        id: wid,
+        info: info("claude"),
+        running: vec![],
+    };
+    send(&mut worker, &hello).await;
+    let OrchMsg::Welcome { .. } = recv(&mut worker).await else {
+        panic!("welcome")
+    };
+
+    let session = uuid::Uuid::new_v4();
+    let path = format!("/api/workers/{wid}/sessions/claude/{session}/messages");
+    let body = r#"{"text":"also add coyote time","mode":"fork","title":"Tune jump physics"}"#;
+    // Acting needs the full token.
+    assert_eq!(post_json(&base, &path, "r", body).await.0, 403);
+    assert_eq!(post_json(&base, &path, "nope", body).await.0, 401);
+    let other = format!(
+        "/api/workers/{}/sessions/claude/{session}/messages",
+        WorkerId::new_v4()
+    );
+    assert_eq!(post_json(&base, &other, "s", body).await.0, 404);
+    let codex = format!("/api/workers/{wid}/sessions/codex/{session}/messages");
+    assert_eq!(post_json(&base, &codex, "s", body).await.0, 400);
+
+    let (status, ok) = post_json(&base, &path, "s", body).await;
+    assert_eq!(status, 200, "{ok}");
+    let OrchMsg::Assign { task, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    assert!(ok.contains(&task.id.to_string()), "{ok}");
+    assert_eq!(
+        (task.harness.as_str(), task.prompt.as_str()),
+        ("claude", "also add coyote time")
+    );
+    assert_eq!(task.resume, Some(session.to_string()));
+    let to = SendTo {
+        session,
+        title: Some("Tune jump physics".into()),
+        mode: SendMode::Fork,
+    };
+    assert_eq!(task.send_to, Some(to));
 }

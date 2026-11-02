@@ -35,6 +35,8 @@ pub enum Answer {
         /// As in `Session`, so a viewer knows whether to keep refreshing.
         updated_ms: u64,
         active: bool,
+        #[serde(default)]
+        open: bool,
     },
     NotFound,
 }
@@ -78,4 +80,29 @@ pub struct Session {
     pub active: bool,
     /// Started from a terminal UI, not headless (`claude -p`, `codex exec`).
     pub interactive: bool,
+    /// In use right now, so it mustn't be resumed in place. Claude: a live
+    /// process holds it. Codex: no such signal; same as `active`.
+    pub open: bool,
+}
+
+/// A session on a worker's disk that a task messages.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SendTo {
+    /// Its harness is the task's.
+    pub session: Uuid,
+    /// As listed, for the task's heading.
+    #[serde(default)]
+    pub title: Option<String>,
+    pub mode: SendMode,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SendMode {
+    /// Continue the session itself; refused while it is open.
+    InPlace,
+    /// Continue a copy (claude `--fork-session`, `codex exec fork`); the original is untouched.
+    Fork,
+    /// Wait on the worker until it closes, then continue it in place.
+    WhenClosed,
 }
