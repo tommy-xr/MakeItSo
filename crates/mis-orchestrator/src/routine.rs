@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use chrono::TimeZone;
-use mis_types::{RoutineView, TaskId, TaskStatus};
+use mis_types::{RoutineMode, RoutineView, TaskId, TaskStatus};
 use serde::{Deserialize, Serialize};
 
 mod cron;
@@ -38,6 +38,8 @@ pub struct Routine {
     pub cwd: Option<String>,
     /// As the file says; [`State::paused`] overrides it.
     pub paused: bool,
+    /// May act (`act: true`): runs dry until [`State::live`].
+    pub act: bool,
     pub prompt: String,
 }
 
@@ -61,6 +63,8 @@ pub struct State {
     pub last_task: Option<TaskId>,
     /// Paused or resumed from the API; beats the file's `paused`.
     pub paused: Option<bool>,
+    /// Switched live from the API; counts only while the file says `act: true`.
+    pub live: bool,
     /// Why the last attempt couldn't start a task; cleared once one does.
     pub error: Option<String>,
 }
@@ -98,14 +102,40 @@ impl Routine {
         }
     }
 
-    /// The prompt a run gets. Runs start unattended, so they only report.
-    pub fn run_prompt(&self) -> String {
-        format!(
-            "Routine \"{}\" (scheduled run, report only)\n\
-             Investigate and report what you find. Do not push, merge, open, close or \
-             comment on PRs or issues, deploy, or change any other remote state.\n\n{}",
-            self.name, self.prompt
-        )
+    /// Report unless the file says `act: true`; then dry run until switched live.
+    pub fn mode(&self, s: &State) -> RoutineMode {
+        match (self.act, s.live) {
+            (false, _) => RoutineMode::Report,
+            (true, false) => RoutineMode::DryRun,
+            (true, true) => RoutineMode::Live,
+        }
+    }
+
+    /// The prompt a run in `mode` gets: one paragraph saying what it may do, then
+    /// the file's. Runs start unattended, so even live ones never merge.
+    pub fn run_prompt(&self, mode: RoutineMode) -> String {
+        let rules = match mode {
+            RoutineMode::Report => {
+                "(scheduled run, report only)\n\
+                 Investigate and report what you find. Do not push, merge, open, close or \
+                 comment on PRs or issues, deploy, or change any other remote state."
+            }
+            RoutineMode::DryRun => {
+                "(scheduled run, dry run)\n\
+                 This routine may act, but this run is a dry run, so the user can judge it \
+                 before letting it act. Investigate, then list exactly the actions you would \
+                 take: each command, push, comment or label, with its full text. Perform none \
+                 of them: change no files, commits, PRs, issues or other state."
+            }
+            RoutineMode::Live => {
+                "(scheduled run, live)\n\
+                 You may act as the instructions below say, and only that far. Never merge \
+                 PRs, push tags, create releases, or read, change or print secrets or \
+                 credentials. Report every action you take (command, push, comment, label), \
+                 and call `report_evidence` for each PR, commit or comment you made."
+            }
+        };
+        format!("Routine \"{}\" {rules}\n\n{}", self.name, self.prompt)
     }
 }
 
@@ -164,6 +194,7 @@ pub fn view<Tz: TimeZone>(
             worker: r.worker.clone(),
             cwd: r.cwd.clone(),
             paused: r.paused(&s),
+            mode: Some(r.mode(&s)),
             next_at: r.next_at(&s, runs.ended, tz),
             last_at,
             last_task,
@@ -179,6 +210,7 @@ pub fn view<Tz: TimeZone>(
             worker: None,
             cwd: None,
             paused: false,
+            mode: None,
             next_at: None,
             last_at,
             last_task,
@@ -216,7 +248,8 @@ pub fn parse_all(files: Vec<(String, Result<String, String>)>) -> Vec<Def> {
 /// A routine file: `---`, `key: value` lines, `---`, then the prompt.
 /// Keys: `name` (default: the file name less `.md`), `every` (`30m`, `6h`, `1d`) or
 /// `cron` (5 fields), and optional `harness`, `model`, `worker`, `cwd` (a folder on
-/// the worker, as for tasks: absolute or under its root; no `~`), `paused`.
+/// the worker, as for tasks: absolute or under its root; no `~`), `paused`, `act`
+/// (may act once switched live; see [`Routine::mode`]).
 pub fn parse(file: &str, text: &str) -> Result<Routine, String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut lines = text.split_inclusive('\n');
@@ -239,8 +272,8 @@ pub fn parse(file: &str, text: &str) -> Result<Routine, String> {
         let (k, v) =
             (line.split_once(':')).ok_or_else(|| format!("`{line}`: want `key: value`"))?;
         let (k, v) = (k.trim(), unquote(v.trim()));
-        const KEYS: [&str; 8] = [
-            "name", "every", "cron", "harness", "model", "worker", "cwd", "paused",
+        const KEYS: [&str; 9] = [
+            "name", "every", "cron", "harness", "model", "worker", "cwd", "paused", "act",
         ];
         if !KEYS.contains(&k) {
             return Err(format!("unknown key `{k}` (known: {})", KEYS.join(", ")));
@@ -267,11 +300,12 @@ pub fn parse(file: &str, text: &str) -> Result<Routine, String> {
             return Err("needs a trigger: `every: 6h` or `cron: \"0 9 * * 1-5\"`".into())
         }
     };
-    let paused = match get("paused").as_deref() {
-        None | Some("false") => false,
-        Some("true") => true,
-        Some(v) => return Err(format!("paused `{v}`: want true or false")),
+    let flag = |k: &'static str| match get(k).as_deref() {
+        None | Some("false") => Ok(false),
+        Some("true") => Ok(true),
+        Some(v) => Err(format!("{k} `{v}`: want true or false")),
     };
+    let (paused, act) = (flag("paused")?, flag("act")?);
     let prompt = body.trim().to_string();
     if prompt.is_empty() {
         return Err("no prompt after the frontmatter".into());
@@ -285,6 +319,7 @@ pub fn parse(file: &str, text: &str) -> Result<Routine, String> {
         worker: get("worker"),
         cwd: get("cwd"),
         paused,
+        act,
         prompt,
     })
 }
@@ -396,6 +431,7 @@ mod tests {
             ("---\nevery: 6h\nname: a b\n---\nhi", "name `a b`"),
             ("---\nevery: 6h\nname: ..\n---\nhi", "name `..`"),
             ("---\nevery: 6h\npaused: yes\n---\nhi", "paused `yes`"),
+            ("---\nevery: 6h\nact: 1\n---\nhi", "act `1`"),
             (
                 "---\nevery: 6h\nharness claude\n---\nhi",
                 "want `key: value`",
@@ -561,10 +597,40 @@ mod tests {
     }
 
     #[test]
-    fn run_prompt_is_report_only() {
-        let p = parse("x.md", FILE).unwrap().run_prompt();
-        assert!(p.starts_with("Routine \"pr-grooming\" (scheduled run, report only)\n"));
-        assert!(p.contains("Do not push, merge"));
-        assert!(p.ends_with("\n\nGroom the open PRs."));
+    fn mode_needs_act_in_the_file_and_live_in_the_state() {
+        let mut live = State::new(0);
+        live.live = true;
+        let report = parse("x.md", FILE).unwrap();
+        let act = routine("every: 1h\nact: true");
+        assert!(!report.act && act.act);
+        assert_eq!(report.mode(&State::new(0)), RoutineMode::Report);
+        assert_eq!(report.mode(&live), RoutineMode::Report, "act removed");
+        assert_eq!(act.mode(&State::new(0)), RoutineMode::DryRun);
+        assert_eq!(act.mode(&live), RoutineMode::Live);
+        let v = view(&Ok(act), Some(&live), Runs::default(), None, 0, &Utc);
+        assert_eq!(v.mode, Some(RoutineMode::Live));
+    }
+
+    #[test]
+    fn run_prompt_says_what_each_mode_may_do() {
+        let r = parse("x.md", FILE).unwrap();
+        let p = |m| r.run_prompt(m);
+        assert!(p(RoutineMode::Report)
+            .starts_with("Routine \"pr-grooming\" (scheduled run, report only)\n"));
+        assert!(p(RoutineMode::Report).contains("Do not push, merge"));
+        let dry = p(RoutineMode::DryRun);
+        assert!(dry.starts_with("Routine \"pr-grooming\" (scheduled run, dry run)\n"));
+        assert!(
+            dry.contains("list exactly the actions you would take") && dry.contains("Perform none")
+        );
+        let live = p(RoutineMode::Live);
+        assert!(live.starts_with("Routine \"pr-grooming\" (scheduled run, live)\n"));
+        assert!(live.contains("Never merge PRs, push tags, create releases"));
+        assert!(live.contains("report_evidence"));
+        for m in [RoutineMode::Report, RoutineMode::DryRun, RoutineMode::Live] {
+            // One paragraph of rules: the phone shows what follows it as the routine's prompt.
+            let text = p(m);
+            assert_eq!(text.split_once("\n\n").unwrap().1, "Groom the open PRs.");
+        }
     }
 }

@@ -22,6 +22,12 @@ impl Ledger {
                 s.since = now;
             }
         }
+        // Live lasts only while a valid file says `act: true`: dropping `act`, a
+        // rename or a broken file sends it back to dry run once `act` returns.
+        let acts = |name: &str| defs.iter().flatten().any(|r| r.name == name && r.act);
+        for (name, s) in &mut self.routines {
+            s.live &= acts(name);
+        }
         let due = routine::due(
             defs,
             &self.routines,
@@ -73,36 +79,55 @@ impl Ledger {
 
     fn enqueue_routine(&mut self, r: &Routine) -> Result<(TaskId, Vec<Effect>), String> {
         let harness = r.harness.clone().unwrap_or_else(|| DEFAULT_HARNESS.into());
+        let mode = r.mode(self.routines.get(&r.name).unwrap_or(&State::default()));
+        let task = Task {
+            id: Uuid::new_v4(),
+            prompt: r.run_prompt(mode),
+            cwd: r.cwd.clone(),
+            harness,
+            model: r.model.clone(),
+            resume: None,
+            send_to: None,
+            read_only: mode != RoutineMode::Live,
+        };
         let (id, effects) = match &r.worker {
             Some(name) => {
                 let wid = self.worker_named(name)?;
-                let task = Task {
-                    id: Uuid::new_v4(),
-                    prompt: r.run_prompt(),
-                    cwd: r.cwd.clone(),
-                    harness,
-                    model: r.model.clone(),
-                    resume: None,
-                    send_to: None,
-                };
                 (self.enqueue_pinned(wid, task, vec![])).map_err(|why| format!("{name}: {why}"))?
             }
             // Queued for a harness no worker runs, it would hold the routine busy for good.
-            None if !self.known_fleet().contains_key(&harness) => {
-                return Err(format!("no worker runs {harness}"));
+            None if !self.known_fleet().contains_key(&task.harness) => {
+                return Err(format!("no worker runs {}", task.harness));
             }
-            // With a harness, `submit` queues it without planning.
-            None => self.submit(
-                r.run_prompt(),
-                r.cwd.clone(),
-                Some(harness),
-                r.model.clone(),
-                vec![],
-            ),
+            None => {
+                let id = task.id;
+                self.tasks.push(super::TaskEntry::new(task, self.now_ms));
+                self.queue.push_back(id);
+                (id, self.schedule())
+            }
         };
-        let t = self.tasks.iter_mut().find(|t| t.task.id == id);
-        t.expect("just added").routine = Some(r.name.clone());
+        let t = self
+            .tasks
+            .iter_mut()
+            .find(|t| t.task.id == id)
+            .expect("just added");
+        (t.routine, t.routine_mode) = (Some(r.name.clone()), Some(mode));
         Ok((id, effects))
+    }
+
+    /// Switch `r` live (it acts) or back to dry run; Err if its file doesn't say
+    /// `act: true`. Kept in its state, so it outlasts edits that keep `act`.
+    pub fn set_live(&mut self, r: &Routine, live: bool) -> Result<(), String> {
+        if live && !r.act {
+            return Err(format!(
+                "{} only reports: add `act: true` to {}",
+                r.name, r.file
+            ));
+        }
+        let now = self.now_ms;
+        let s = (self.routines.entry(r.name.clone())).or_insert_with(|| State::new(now));
+        s.live = live;
+        Ok(())
     }
 
     /// The worker a routine names: by its card name, else the one online worker
@@ -274,15 +299,86 @@ mod tests {
         assert!(!l.routine_tick(&ds, &Utc).is_empty());
     }
 
+    /// The newest task's prompt, read-only flag and recorded mode.
+    fn last_run(l: &Ledger) -> (String, bool, Option<RoutineMode>) {
+        let t = l.tasks.last().unwrap();
+        (
+            t.task.prompt.clone(),
+            t.task.read_only,
+            t.summary().routine_mode,
+        )
+    }
+
+    #[test]
+    fn acting_routines_run_dry_until_live_and_runs_keep_their_mode() {
+        let mut l = Ledger::default();
+        let report = defs("---\nevery: 1h\n---\ngo");
+        l.routine_tick(&report, &Utc);
+        let (p, ro, mode) = last_run(&l);
+        assert!(p.contains("report only") && ro && mode == Some(RoutineMode::Report));
+        let r = report[0].clone().unwrap();
+        assert!(l
+            .set_live(&r, true)
+            .unwrap_err()
+            .contains("add `act: true`"));
+
+        let act = defs("---\nevery: 1h\nact: true\n---\ngo");
+        let r = act[0].clone().unwrap();
+        l.start_routine(&r).unwrap();
+        let (p, ro, mode) = last_run(&l);
+        assert!(p.contains("dry run") && ro && mode == Some(RoutineMode::DryRun));
+        l.set_live(&r, true).unwrap();
+        assert_eq!(l.routine_views(&act, &Utc)[0].mode, Some(RoutineMode::Live));
+        l.start_routine(&r).unwrap();
+        let (p, ro, mode) = last_run(&l);
+        assert!(p.contains("(scheduled run, live)") && !ro && mode == Some(RoutineMode::Live));
+        // The earlier runs still say how they ran.
+        assert_eq!(l.tasks[1].summary().routine_mode, Some(RoutineMode::DryRun));
+        l.set_live(&r, false).unwrap();
+        assert_eq!(
+            l.routine_views(&act, &Utc)[0].mode,
+            Some(RoutineMode::DryRun)
+        );
+    }
+
+    #[test]
+    fn dropping_act_from_the_file_ends_live() {
+        let mut l = Ledger::default();
+        let act = defs("---\nevery: 1h\nact: true\n---\ngo");
+        l.set_live(act[0].as_ref().unwrap(), true).unwrap();
+        l.routine_tick(&act, &Utc);
+        assert_eq!(last_run(&l).2, Some(RoutineMode::Live));
+        // `act` gone: report only, and live is forgotten...
+        let report = defs("---\nevery: 1h\n---\ngo");
+        assert_eq!(
+            l.routine_views(&report, &Utc)[0].mode,
+            Some(RoutineMode::Report)
+        );
+        l.routine_tick(&report, &Utc);
+        // ...so `act` back means dry run again.
+        assert_eq!(
+            l.routine_views(&act, &Utc)[0].mode,
+            Some(RoutineMode::DryRun)
+        );
+    }
+
     #[test]
     fn state_survives_a_restart() {
         let mut l = Ledger::default();
         let ds = defs("---\nevery: 1h\n---\ngo");
         l.routine_tick(&ds, &Utc);
         l.pause_routine("r", true);
+        let act = defs("---\nevery: 1h\nact: true\n---\ngo");
+        l.set_live(act[0].as_ref().unwrap(), true).unwrap();
         let snap = l.snapshot(&Default::default());
         let r = Ledger::restore(&snap.ledger, |_| None, Default::default(), 0).unwrap();
         assert_eq!(r.ledger.routines, l.routines);
         assert!(r.ledger.routine_runs("r").busy);
+        let v = &r.ledger.routine_views(&act, &Utc)[0];
+        assert_eq!(v.mode, Some(RoutineMode::Live));
+        assert_eq!(
+            r.ledger.tasks[0].summary().routine_mode,
+            Some(RoutineMode::Report)
+        );
     }
 }

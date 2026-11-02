@@ -94,6 +94,54 @@ fn permission_args(p: &Permissions, allowed: &mut Vec<String>) -> Vec<String> {
     a
 }
 
+/// GitHub reads a read-only run may make: none of them has a flag that writes.
+const GH_READS: [&str; 12] = [
+    "gh pr list",
+    "gh pr view",
+    "gh pr diff",
+    "gh pr checks",
+    "gh pr status",
+    "gh issue list",
+    "gh issue view",
+    "gh run list",
+    "gh run view",
+    "gh repo view",
+    "gh release list",
+    "gh search",
+];
+
+/// Told to a read-only run, so it keeps investigating past a denial.
+const READ_ONLY_NOTE: &str = "This run is read-only: edits, and shell commands that could \
+    change anything (writes, commits, `git config`), are denied. Read-only ones such as \
+    `git log`, `ls` and `gh pr list` work.";
+
+/// Flags for a read-only run under `p`, never more than `p` allows. `dontAsk`
+/// denies what no rule allows; claude itself allows reading files and read-only
+/// git; `allowed` gets the `GH_READS` that `p` lets run (all in full mode, else
+/// those its commands cover). Folders keep their sandbox and dirs. `p`'s MCP
+/// servers and asking are left out: either could act.
+fn read_only_args(p: &Permissions, allowed: &mut Vec<String>) -> Vec<String> {
+    let full = p.mode == PermissionMode::Full;
+    let covers =
+        |r: &str| full || (p.commands.iter()).any(|c| r == c || r.starts_with(&format!("{c} ")));
+    allowed.extend(
+        (GH_READS.iter())
+            .filter(|r| covers(r))
+            .map(|r| format!("Bash({r} *)")),
+    );
+    let mut a: Vec<String> = ["--permission-mode", "dontAsk", "--append-system-prompt"]
+        .map(String::from)
+        .to_vec();
+    a.push(READ_ONLY_NOTE.into());
+    if !full {
+        a.extend(["--settings".into(), SANDBOX.into()]);
+        for f in &p.folders {
+            a.extend(["--add-dir".into(), f.clone()]);
+        }
+    }
+    a
+}
+
 /// Map one stream-json line to zero or more events, without token usage
 /// (that needs the whole stream; see `Parser`).
 pub fn parse_line(line: &str) -> Vec<AgentEvent> {
@@ -274,7 +322,9 @@ impl ClaudeAgent {
             ]);
             allowed.push(format!("mcp__{MCP_SERVER}"));
         }
-        if let Some(p) = o.permissions {
+        if let Some(p) = o.permissions.filter(|_| o.read_only) {
+            a.extend(read_only_args(p, &mut allowed));
+        } else if let Some(p) = o.permissions {
             a.extend(permission_args(p, &mut allowed));
             // Ask: what the rules don't allow goes to the worker's `approve` tool.
             if p.mode == PermissionMode::Ask && o.mcp.is_some() {
@@ -735,6 +785,61 @@ mod tests {
         let o = RunOpts { mcp: None, ..o };
         let a = ClaudeAgent::default().argv("hi", &o);
         assert!(!a.iter().any(|x| x == "--permission-prompt-tool"));
+    }
+
+    #[test]
+    fn read_only_denies_all_but_reads_and_never_widens_the_workers_rules() {
+        let mcp = crate::Mcp {
+            url: "http://127.0.0.1:9/mcp".into(),
+            token: "t".into(),
+        };
+        let argv = |p: &Permissions| {
+            let o = RunOpts {
+                mcp: Some(&mcp),
+                permissions: Some(p),
+                read_only: true,
+                ..Default::default()
+            };
+            ClaudeAgent::default().argv("hi", &o)
+        };
+        let allowed = |a: &[String]| -> Vec<String> {
+            let i = a.iter().position(|x| x == "--allowedTools").unwrap();
+            a[i + 1..a.len() - 2].to_vec()
+        };
+        // Full: no bypass, but every GitHub read.
+        let full = Permissions {
+            mode: PermissionMode::Full,
+            ..Default::default()
+        };
+        let a = argv(&full);
+        assert!(!a.iter().any(|x| x.contains("dangerously")));
+        assert_eq!(a[6..8], ["--permission-mode", "dontAsk"]);
+        assert_eq!(a[9], READ_ONLY_NOTE);
+        let all = allowed(&a);
+        assert_eq!(all.len(), 1 + GH_READS.len());
+        assert!(all.contains(&"Bash(gh pr list *)".into()) && all[0] == "mcp__mis");
+        // Ask with `gh pr` and python3 allowed: only the `gh pr` reads, in its sandbox;
+        // no python3, no blender, no asking.
+        let ask = Permissions {
+            mode: PermissionMode::Ask,
+            folders: vec!["/u/game".into()],
+            mcp: vec!["blender".into()],
+            commands: vec!["gh pr".into(), "python3".into()],
+        };
+        let a = argv(&ask);
+        assert_eq!(a[10..14], ["--settings", SANDBOX, "--add-dir", "/u/game"]);
+        assert!(!a.iter().any(|x| x == "--permission-prompt-tool"));
+        let got = allowed(&a);
+        assert!(got
+            .iter()
+            .all(|r| r == "mcp__mis" || r.starts_with("Bash(gh pr ")));
+        assert_eq!(got.len(), 6, "{got:?}");
+        // Nothing covering gh: no gh at all.
+        let none = Permissions {
+            commands: vec!["ghx".into()],
+            ..ask
+        };
+        assert_eq!(allowed(&argv(&none)), ["mcp__mis"]);
     }
 
     #[test]

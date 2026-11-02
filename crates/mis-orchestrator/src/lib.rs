@@ -1000,8 +1000,8 @@ async fn routines(
     Json(app.ledger().routine_views(&defs, &chrono::Local)).into_response()
 }
 
-/// `run` (replies `{"task": id}`), `pause` or `resume` routine `name`. Acting,
-/// like submitting a task: read-only tokens get 403.
+/// `run` (replies `{"task": id}`), `pause`, `resume`, `live` or `dry-run` routine
+/// `name`. Acting, like submitting a task: read-only tokens get 403.
 async fn routine_action(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -1041,6 +1041,15 @@ async fn routine_action(
         }),
         "pause" | "resume" => {
             app.ledger().pause_routine(&name, action == "pause");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        "live" | "dry-run" => {
+            if let Err(why) = app.ledger().set_live(&r, action == "live") {
+                return (StatusCode::BAD_REQUEST, why).into_response();
+            }
+            // Saved now: a crash mustn't bring back a live it was switched out of.
+            let a = app.clone();
+            let _ = tokio::task::spawn_blocking(move || a.save()).await;
             StatusCode::NO_CONTENT.into_response()
         }
         _ => StatusCode::NOT_FOUND.into_response(),

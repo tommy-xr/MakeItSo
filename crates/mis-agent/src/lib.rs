@@ -51,6 +51,9 @@ pub struct RunOpts<'a> {
     /// What tools may do unasked; must pass `check`. None leaves the harness's
     /// headless default, which denies writes, shell and MCP.
     pub permissions: Option<&'a Permissions>,
+    /// Narrow `permissions` to reads (see `claude::read_only_args`). Codex ignores
+    /// it: its read-only sandbox also cuts the network `gh` needs.
+    pub read_only: bool,
 }
 
 pub trait Agent: Send + Sync {

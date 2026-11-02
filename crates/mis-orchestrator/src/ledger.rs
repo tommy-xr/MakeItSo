@@ -181,6 +181,9 @@ struct TaskEntry {
     /// The routine this is a run of.
     #[serde(default)]
     routine: Option<String>,
+    /// How that run was allowed to act.
+    #[serde(default)]
+    routine_mode: Option<RoutineMode>,
 }
 
 /// What a task needs from the user: an answer while its agent waits for one;
@@ -243,6 +246,7 @@ impl TaskEntry {
             approvals: vec![],
             cancel: false,
             routine: None,
+            routine_mode: None,
         }
     }
 
@@ -332,6 +336,7 @@ impl TaskEntry {
             images: self.images.clone(),
             send_to: self.task.send_to.clone(),
             routine: self.routine.clone(),
+            routine_mode: self.routine_mode,
         }
     }
 
@@ -586,6 +591,7 @@ impl Ledger {
                 model,
                 resume: None,
                 send_to: None,
+                read_only: false,
             },
             self.now_ms,
         );
@@ -638,6 +644,8 @@ impl Ledger {
                     prompt: text,
                     resume: Some(session.clone()),
                     send_to,
+                    // The user replies: their worker's permissions, not the run's.
+                    read_only: false,
                     ..p.task.clone()
                 };
                 self.enqueue_pinned(wid, task, images)
@@ -675,6 +683,7 @@ impl Ledger {
             model: None,
             resume: Some(to.session.to_string()),
             send_to: Some(to),
+            read_only: false,
         };
         self.enqueue_pinned(wid, task, vec![])
     }

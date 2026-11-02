@@ -777,6 +777,7 @@ async fn run(
             fork: (task.send_to.as_ref()).map(|s| s.mode == SendMode::Fork),
             images: &image_paths,
             permissions: perms.as_ref(),
+            read_only: task.read_only,
         },
         atx,
     );
