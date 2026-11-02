@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#050A12">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -11,7 +11,9 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <title>Make It So</title>
 <!-- Quest browser: VR panels are read at arm's length, so `html.vr` enlarges type. In head to avoid a 16px first paint. -->
-<script>if (/OculusBrowser|Quest/.test(navigator.userAgent)) document.documentElement.classList.add('vr');</script>
+<script>if (/OculusBrowser|Quest/.test(navigator.userAgent)) document.documentElement.classList.add('vr');
+// A theme chosen in the menu overrides the system's; set before first paint.
+try { const t = localStorage.getItem('mis-theme'); if (t) document.documentElement.dataset.theme = t; } catch {}</script>
 <style>
   /* Theme: every colour and face is a token here; a new theme redefines this block. Grid: near-black blue ground,
      thin cyan edges that glow, orange for warnings and limits, red for failures. Daylight grid for light schemes. */
@@ -23,17 +25,22 @@
     --mono: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace;
     /* Labels: a squared geometric face where the system has one; no web fonts, so the page works offline. */
     --display: "Eurostile", "DIN Alternate", "Bahnschrift", ui-sans-serif, system-ui, sans-serif; }
+  /* Light: the system's choice unless the menu picked Dark; or picked Light. :where keeps `html.vr` winning. */
   @media (prefers-color-scheme: light) {
-    :root { color-scheme: light; --bg: #EAF3F7; --field: #FFFFFF; --fg: #0B2233; --dim: #4A6577; --line: #6A889B; --rule: #C3D6E0;
+    :root:where(:not([data-theme=dark])) { color-scheme: light; --bg: #EAF3F7; --field: #FFFFFF; --fg: #0B2233; --dim: #4A6577; --line: #6A889B; --rule: #C3D6E0;
       --accent: #00687A; --glow: rgba(0, 104, 122, .18); --grid: rgba(0, 104, 122, .06); --run: #00687A; --ok: #1F6B45; --warn: #9A4800; --bad: #B3261E;
       --idle: color-mix(in srgb, var(--accent) 70%, var(--bg));
       --arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M0 0h10L5 6z' fill='%230B2233'/%3E%3C/svg%3E"); }
   }
+  :root:where([data-theme=light]) { color-scheme: light; --bg: #EAF3F7; --field: #FFFFFF; --fg: #0B2233; --dim: #4A6577; --line: #6A889B; --rule: #C3D6E0;
+    --accent: #00687A; --glow: rgba(0, 104, 122, .18); --grid: rgba(0, 104, 122, .06); --run: #00687A; --ok: #1F6B45; --warn: #9A4800; --bad: #B3261E;
+    --idle: color-mix(in srgb, var(--accent) 70%, var(--bg));
+    --arrow: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M0 0h10L5 6z' fill='%230B2233'/%3E%3C/svg%3E"); }
   /* Faint grid lines behind everything. */
   html { min-height: 100%; background: linear-gradient(90deg, var(--grid) 1px, transparent 0) 0 0 / 3rem 3rem, linear-gradient(var(--grid) 1px, transparent 0) 0 0 / 3rem 3rem, var(--bg); }
-  body { --pad: 1.25rem; box-sizing: border-box; margin: 0 auto; max-width: 46rem; min-height: 100svh; padding: 0 var(--pad) 3rem; color: var(--fg); font: 1rem/1.55 var(--mono); }
+  body { --pad: 1.25rem; box-sizing: border-box; margin: 0 auto; max-width: 46rem; min-height: 100svh; padding: 0 var(--pad) calc(var(--dock, 0px) + 1.5rem); color: var(--fg); font: 1rem/1.55 var(--mono); }
   @media (min-width: 64rem) { body { --pad: 2.5rem; border-inline: 1px solid var(--rule); } }
-  /* Title strip: dot, wordmark and tabs; then the ticker of live work; then the light-cycle line. */
+  /* Title strip: dot, wordmark, needs-you badge and menu; then the ticker of live work; then the light-cycle line. */
   .strip { position: relative; margin: 0 calc(-1 * var(--pad)) 1.25rem; padding: calc(1rem + env(safe-area-inset-top, 0px)) var(--pad) 0; background: linear-gradient(var(--field), transparent); }
   .top { display: flex; flex-wrap: wrap; align-items: center; gap: .625rem; }
   .title { font: 700 1rem/1 var(--display); text-transform: uppercase; letter-spacing: .16em; white-space: nowrap; color: var(--accent); text-shadow: 0 0 10px var(--glow); }
@@ -45,16 +52,20 @@
   .dot.hollow { background: none; border: 2px solid var(--dim); }
   .dot.down { background: var(--warn); }
   .dot.listen { background: var(--warn); box-shadow: 0 0 10px var(--warn); }
-  #tabs { display: flex; margin-left: auto; border: 1px solid var(--rule); }
-  /* Limit gauges: the fullest fresh window per harness. They grow into the room left beside the tabs from zero,
+  /* Needs-you badge and menu button at the row's right end. */
+  .end { display: flex; gap: .5rem; margin-left: auto; }
+  #menu-btn { display: grid; place-items: center; width: 2.75rem; padding: 0; }
+  #menu-btn svg { width: 1.25rem; height: 1.25rem; }
+  /* Needs you: the count, lit in the most urgent kind's colour (its .att class); a tap opens that task. */
+  #need { margin: 0; display: inline-flex; align-items: center; gap: .375rem; min-height: 2.75rem; padding: 0 .625rem; border: 1px solid var(--a); color: var(--a); text-decoration: none; font: 600 .8125rem/1 var(--display); letter-spacing: .1em; box-shadow: 0 0 8px color-mix(in srgb, var(--a) 35%, transparent); }
+  #need::before { content: "●"; font-size: .75em; text-shadow: 0 0 6px var(--a); }
+  /* Limit gauges: the fullest fresh window per harness. They grow into the room left beside the badge and menu from zero,
      and the negative margin cancels their gap, so showing them never starts a new line (a narrow screen clips
      them). They stretch to the row's height for a taller tap target (it opens Workers) without setting it. */
   .gauges { flex: 1 1 0; align-self: stretch; min-width: 0; margin-left: -.625rem; display: flex; justify-content: flex-end; align-items: center; gap: .375rem; overflow: hidden; text-decoration: none; }
   .gz { display: inline-flex; align-items: flex-end; gap: 3px; font: 600 .5625rem/1 var(--display); color: var(--dim); --b: var(--accent); }
   .gz i { width: 5px; height: 12px; background: linear-gradient(to top, var(--b) var(--v, 0%), var(--rule) 0); }
   .gz.warn { --b: var(--warn); } .gz.crit { --b: var(--bad); }
-  [role=tab] { display: inline-flex; align-items: center; justify-content: center; min-height: 2.75rem; min-width: 2.75rem; padding: 0 .75rem; color: var(--dim); text-decoration: none; text-transform: uppercase; letter-spacing: .14em; font: 600 .8125rem var(--display); }
-  [role=tab][aria-selected=true] { color: var(--bg); background: var(--accent); box-shadow: 0 0 10px var(--glow); }
   #ticker { display: flex; align-items: center; min-height: 2.75rem; color: var(--dim); text-decoration: none; overflow-wrap: anywhere; }
   /* One line while work runs; the activity is the part the ellipsis cuts. */
   #ticker.run, #ticker.ask { white-space: pre; overflow: hidden; color: var(--run); } #ticker.ask { color: var(--warn); }
@@ -63,7 +74,7 @@
   #ticker[href]::after { content: " ›"; white-space: pre; }
   /* Light cycle: a short bright segment rides the line while work runs; still when idle or offline. */
   .cycle { position: relative; height: 2px; margin: 0 calc(-1 * var(--pad)); background: var(--rule); overflow: hidden; }
-  /* Idle: no ticker, so the tabs need room above the line. */
+  /* Idle: no ticker, so the top row needs room above the line. */
   #ticker[hidden] + .cycle { margin-top: 1rem; }
   .cycle.run::after { content: ""; position: absolute; inset: 0 auto 0 0; width: 34%; background: linear-gradient(90deg, transparent, var(--accent)); animation: ride 4s linear infinite; }
   /* Update from `mis-up --watch`: a tag riding the line's right end, out of the flow so it never moves the strip.
@@ -92,9 +103,7 @@
   button[type=button] { background: none; color: var(--fg); border-color: var(--line); }
   .row { display: flex; gap: .5rem; margin: .5rem 0 1.5rem; }
   .row button { flex: 1; }
-  .row input { flex: 1; min-width: 0; min-height: 2.75rem; padding: 0 .75rem; }
-  .row.tight { margin-bottom: 0; }
-  .row .mic, .row .clip, #speak { flex: none; }
+  #speak { flex: none; }
   .clip { display: grid; place-items: center; width: 2.75rem; padding: 0; }
   .clip svg { width: 1.25rem; height: 1.25rem; }
   /* Attached photos: fixed squares, so loading never reflows; dim with a spinner until uploaded. */
@@ -105,6 +114,56 @@
   .shot.busy::after { content: ""; position: absolute; inset: 0; margin: auto; width: 1.25rem; height: 1.25rem; border: 2px solid var(--accent); border-right-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; }
   .shot .x { position: absolute; top: 0; right: 0; width: 1.75rem; height: 1.75rem; min-height: 0; padding: 0; border: 0; background: color-mix(in srgb, var(--bg) 70%, transparent); color: var(--fg); font: 1rem/1 var(--mono); letter-spacing: 0; }
   #shots-view { margin-top: .5rem; }
+  /* Composer dock: pinned to the bottom of every view, inside the safe area; lifted by --kb over an iOS keyboard.
+     Each view shows its own form (new task, reply, message a session); the page pads its foot by the dock's height. */
+  #dock { position: fixed; z-index: 2; left: 0; right: 0; bottom: 0; --pad: 1.25rem; padding: .5rem max(var(--pad), env(safe-area-inset-right, 0px)) calc(.5rem + env(safe-area-inset-bottom, 0px)) max(var(--pad), env(safe-area-inset-left, 0px)); background: var(--bg); border-top: 1px solid var(--rule); transform: translateY(calc(-1 * var(--kb, 0px))); }
+  /* Above a keyboard the home indicator is covered, so its inset is wasted room. */
+  #dock.kb { padding-bottom: .5rem; }
+  @media (min-width: 64rem) { #dock { --pad: 2.5rem; } }
+  .composer { max-width: calc(46rem - 2 * var(--pad)); margin: 0 auto; }
+  /* One bordered box: [attach] text [mic] [send]; buttons stay at the foot as the text grows to six lines. */
+  .box { position: relative; display: flex; align-items: flex-end; border: 1px solid var(--line); background: var(--field); }
+  .box:focus-within, form.listening .box { border-color: var(--accent); box-shadow: 0 0 10px var(--glow); }
+  .box textarea { flex: 1; min-width: 0; min-height: 2.75rem; max-height: calc(6 * 1.55rem + 1.25rem); padding: .625rem .5rem; border: 0; background: none; resize: none; overflow-y: auto; }
+  .box textarea:focus { box-shadow: none; }
+  .box .clip, .box .mic { flex: none; }
+  :where(.box) button[type=button] { border-color: transparent; }
+  .box .go { flex: none; display: grid; place-items: center; width: 2.75rem; padding: 0; }
+  .go svg { width: 1.25rem; height: 1.25rem; }
+  /* Above the box: the harness chip, a reply's error, a session's open-terminal choice. */
+  .ctx { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .75rem; margin: 0 0 .5rem; font-size: .8125rem; overflow-wrap: anywhere; }
+  .ctx p { flex: 1 1 12rem; margin: 0; }
+  .ctx:not(:has(> :not([hidden]))) { display: none; }
+  /* Harness/model chip; its ::after widens the tap target. The popover opens above it. */
+  #opt { position: relative; max-width: 100%; min-height: 0; height: 1.75rem; padding: 0 .5rem; border-color: var(--rule); color: var(--dim); font: 600 .6875rem/1 var(--display); letter-spacing: .12em; }
+  #opt span { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  #opt::after { content: ""; position: absolute; inset: -.5rem -.25rem; }
+  #opt[aria-expanded=true] { color: var(--accent); border-color: var(--accent); }
+  #opts { position: absolute; z-index: 1; left: 0; bottom: calc(100% + .375rem); display: grid; gap: .5rem; width: min(20rem, 100%); box-sizing: border-box; padding: .625rem; border: 1px solid var(--line); background: var(--bg); box-shadow: 0 0 14px var(--glow); }
+  #opts input { min-height: 2.75rem; padding: 0 .75rem; width: 100%; }
+  #say-queue { min-height: 2.25rem; padding: 0 .625rem; font-size: .6875rem; }
+  /* Menu: a sheet from the right over a dimmed page; Escape, a backdrop tap or ✕ close it. */
+  #menu { inset: 0; margin: 0 0 0 auto; width: min(19rem, 86vw); max-width: none; height: 100%; max-height: none; padding: 0; border: 0; border-left: 1px solid var(--line); color: var(--fg); background: var(--bg); box-shadow: 0 0 24px var(--glow); }
+  #menu::backdrop { background: rgba(0, 0, 0, .55); }
+  #menu[open] { animation: slide .16s ease-out; }
+  @keyframes slide { from { transform: translateX(100%); } }
+  @media (prefers-reduced-motion: reduce) { #menu[open] { animation: none; } }
+  .sheet { display: flex; flex-direction: column; gap: 1.25rem; box-sizing: border-box; min-height: 100%; padding: calc(1rem + env(safe-area-inset-top, 0px)) calc(1.25rem + env(safe-area-inset-right, 0px)) calc(1rem + env(safe-area-inset-bottom, 0px)) 1.25rem; }
+  .sheet-top { display: flex; align-items: center; justify-content: space-between; }
+  #menu-close { width: 2.75rem; padding: 0; font: 1.1rem/1 var(--mono); letter-spacing: 0; }
+  #menu nav { display: grid; border-top: 1px solid var(--rule); }
+  #menu nav a { display: flex; align-items: center; min-height: 3rem; padding: 0 .75rem; border-bottom: 1px solid var(--rule); text-decoration: none; font: 600 .875rem var(--display); text-transform: uppercase; letter-spacing: .14em; color: var(--dim); }
+  #menu nav a[aria-current=page] { color: var(--bg); background: var(--accent); box-shadow: 0 0 10px var(--glow); }
+  #menu fieldset { margin: 0; padding: 0; border: 0; }
+  #menu legend { padding: 0 0 .375rem; color: var(--dim); font: 600 .75rem var(--display); text-transform: uppercase; letter-spacing: .14em; }
+  /* Theme: three segments; the checked one lit. */
+  .seg { display: flex; border: 1px solid var(--line); }
+  .seg label { flex: 1; display: grid; place-items: center; min-height: 2.75rem; cursor: pointer; font: 600 .75rem var(--display); text-transform: uppercase; letter-spacing: .12em; color: var(--dim); }
+  .seg label + label { border-left: 1px solid var(--line); }
+  .seg input { position: absolute; opacity: 0; pointer-events: none; }
+  .seg label:has(:checked) { color: var(--bg); background: var(--accent); }
+  .seg label:has(:focus-visible) { outline: 2px solid var(--accent); outline-offset: -4px; }
+  .sheet-foot { margin-top: auto; font-size: .8125rem; overflow-wrap: anywhere; }
   #shots-view a { display: block; width: 100%; height: 100%; }
   /* No scroll, selection or callout under a held finger. */
   .mic { display: grid; place-items: center; width: 2.75rem; padding: 0; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
@@ -112,11 +171,10 @@
   button:disabled { opacity: .5; cursor: default; }
   /* Listening / speaking: lit edge. */
   .mic[aria-pressed=true], #speak.on { color: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--glow), 0 0 12px var(--glow); }
-  /* Recording: warn fill. A finger hides it, so the field glows, the dot turns warn and the recording bar replaces Submit. */
+  /* Recording: warn fill. A finger hides it, so the box glows, the dot turns warn and the recording bar shows above the box. */
   .mic[data-mic=live] { background: var(--warn); border-color: var(--warn); color: var(--bg); box-shadow: 0 0 12px var(--warn); }
-  form.listening textarea { border-color: var(--accent); box-shadow: 0 0 10px var(--glow); }
-  /* Recording bar in Submit's box, so nothing moves under the finger: ✕, a pulse running along a row of dots, the label. */
-  .recbar { flex: 1; display: flex; align-items: center; gap: .5rem; min-width: 0; box-sizing: border-box; height: 2.75rem; padding-right: .5rem; border: 1px solid var(--accent); background: var(--field); }
+  /* Recording bar laid over the space above the box, so nothing moves under the finger: ✕, a pulse running along a row of dots, the label. */
+  .recbar { position: absolute; z-index: 1; left: -1px; right: -1px; bottom: calc(100% + .5rem); display: flex; align-items: center; gap: .5rem; min-width: 0; box-sizing: border-box; height: 2.75rem; padding-right: .5rem; border: 1px solid var(--accent); background: var(--field); }
   .recbar .x { flex: none; width: 2.75rem; height: 100%; min-height: 0; padding: 0; border: 0; color: var(--dim); font: 1.1rem/1 var(--mono); }
   .recbar .dots { flex: 1; min-width: 0; display: flex; justify-content: space-between; align-items: center; padding: 0 .25rem; overflow: hidden; }
   .recbar .dots i { width: .375rem; height: .375rem; border-radius: 50%; background: var(--accent); opacity: .25; animation: pulse 1.4s ease-in-out infinite; animation-delay: calc(var(--i) * 90ms); }
@@ -132,7 +190,7 @@
   .recbar[data-say=cancel] .label { color: var(--bad); }
   .recbar[data-say=cancel] .dots i { background: var(--bad); animation-play-state: paused; opacity: .35; }
   @media (prefers-reduced-motion: reduce) { .recbar .dots i { animation: none; opacity: .6; } }
-  .toggle { display: flex; align-items: center; gap: .5rem; min-height: 2.75rem; margin: -1rem 0 1rem; }
+  .toggle { display: flex; align-items: center; gap: .5rem; min-height: 2.75rem; margin: 0; }
   .toggle input { width: 1.25rem; height: 1.25rem; margin: 0; accent-color: var(--accent); }
   #notify-row { margin: 0 0 .5rem; }
   .dim { color: var(--dim); }
@@ -175,7 +233,6 @@
   /* Replies sit under their parent, indented per level. */
   li.reply > a { padding-left: calc(var(--depth) * 1.25rem); }
   .thread { display: block; margin: .25rem 0; }
-  #reply { margin-top: 1.25rem; }
   .bad { color: var(--bad); }
   .back { display: inline-flex; align-items: center; min-height: 2.75rem; padding: 0 1rem; border: 1px solid var(--line); text-decoration: none; }
   #answer { margin: 1.5rem 0 1rem; }
@@ -244,8 +301,6 @@
   #turns .user .txt { padding-left: .875rem; border-left: 2px solid var(--accent); color: var(--accent); }
   #turns .tool { padding: .25rem 0; border: 0; font-size: .8125rem; color: var(--dim); }
   #turns .txt { white-space: pre-wrap; }
-  #say { margin-top: 1rem; }
-  #say p { margin: .375rem 0 0; overflow-wrap: anywhere; }
   .chip.claude { --s: var(--accent); } .chip.codex { --s: var(--fg); }
   .live { margin-right: .375em; font-size: .75em; color: var(--ok); text-shadow: 0 0 6px var(--ok); }
   /* Tools gained since the note was saved; the note's editor on the worker's page. */
@@ -269,7 +324,6 @@
   .lim .v { text-align: right; }
   .lim.warn { --b: var(--warn); } .lim.crit { --b: var(--bad); }
   .lim.stale, .off .lim { color: var(--dim); --b: var(--dim); }
-  body > p.dim { margin-top: 1.5rem; }
   #clear { display: inline-block; padding: .625rem 0; }
   [hidden] { display: none !important; }
   /* VR panels: bigger type, secondary text pulled toward the foreground. */
@@ -282,16 +336,31 @@
     <span id="dot" class="dot hollow" role="img" aria-label="connecting" title="connecting"></span>
     <span class="title">Make It So</span>
     <a id="gauges" class="gauges" href="#workers" hidden></a>
-    <nav id="tabs" role="tablist" aria-label="View" hidden>
-      <a href="#" id="tab-tasks" role="tab" aria-selected="true">Tasks</a>
-      <a href="#routines" id="tab-routines" role="tab" aria-selected="false">Routines</a>
-      <a href="#workers" id="tab-workers" role="tab" aria-selected="false">Workers</a>
-    </nav>
+    <span class="end"><a id="need" hidden></a>
+    <button type="button" id="menu-btn" aria-label="Menu" aria-haspopup="dialog" aria-expanded="false" aria-controls="menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button></span>
   </div>
   <a id="ticker">connecting…</a>
   <div id="cycle" class="cycle" aria-hidden="true"></div>
   <button type="button" id="upd" class="upd" aria-expanded="false" hidden><span></span></button>
 </header>
+
+<dialog id="menu" aria-label="Menu">
+  <div class="sheet">
+    <div class="sheet-top"><span class="title">Make It So</span><button type="button" id="menu-close" aria-label="Close menu">✕</button></div>
+    <nav aria-label="Views">
+      <a href="#" data-view="list">Tasks</a>
+      <a href="#routines" data-view="routines">Routines</a>
+      <a href="#workers" data-view="workers">Workers</a>
+    </nav>
+    <fieldset><legend>Theme</legend><div class="seg">
+      <label><input type="radio" name="theme" value="">System</label>
+      <label><input type="radio" name="theme" value="dark">Dark</label>
+      <label><input type="radio" name="theme" value="light">Light</label>
+    </div></fieldset>
+    <label class="toggle" hidden><input type="checkbox" id="autoread"> Auto-read answers</label>
+    <div class="sheet-foot dim"><a href="#" id="clear" hidden>disconnect / clear token</a><div id="ver"></div></div>
+  </div>
+</dialog>
 
 <form id="auth" hidden>
   <p>This orchestrator needs its token (MIS_TOKEN).</p>
@@ -300,16 +369,6 @@
 </form>
 
 <main id="list" hidden>
-  <form id="new">
-    <div id="shots" class="shots" hidden></div>
-    <textarea id="prompt" placeholder="New task…" required></textarea>
-    <div class="row tight">
-      <select id="harness" aria-label="harness"><option value="">auto</option></select>
-      <input id="model" aria-label="model" placeholder="model (optional)" autocapitalize="off" autocorrect="off" spellcheck="false">
-    </div>
-    <div class="row"><button id="send">Submit</button><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" id="clip" class="clip" aria-label="Attach photos"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M20 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.4 8.4a1.7 1.7 0 0 1-2.4-2.4l7.7-7.7"/></svg></button><input type="file" id="pick" accept="image/*" multiple hidden><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button></div>
-    <label class="toggle dim" hidden><input type="checkbox" id="autoread"> auto-read answers</label>
-  </form>
   <ul id="tasks"></ul>
 </main>
 
@@ -331,11 +390,6 @@
     </div>
     <p id="cancel-state" class="dim" hidden></p>
   </div>
-  <form id="reply" hidden>
-    <textarea id="reply-text" aria-label="reply" placeholder="Reply in this thread…" required></textarea>
-    <div class="row"><button id="send-reply">Reply</button><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button></div>
-    <p id="reply-error" class="bad" hidden></p>
-  </form>
   <details><summary>transcript</summary><pre id="log"></pre></details>
   <details><summary>ids</summary><dl id="ids"></dl></details>
 </main>
@@ -356,12 +410,6 @@
   <div id="session-meta" class="dim"></div>
   <ul id="turns"></ul>
   <p id="session-state" class="dim"></p>
-  <form id="say" hidden>
-    <textarea id="say-text" aria-label="message" placeholder="Message this session…" required></textarea>
-    <p id="say-open" class="warn" hidden></p>
-    <div class="row"><button id="say-send">Send</button><button type="button" id="say-queue" hidden>Queue until closed</button></div>
-    <p id="say-state" hidden></p>
-  </form>
 </main>
 
 <main id="machine" hidden>
@@ -369,7 +417,27 @@
   <div id="wbody"></div>
 </main>
 
-<p class="dim"><a href="#" id="clear" hidden>disconnect / clear token</a> <span id="ver"></span></p>
+<footer id="dock" hidden>
+  <form id="new" class="composer">
+    <div id="shots" class="shots" hidden></div>
+    <div class="ctx">
+      <button type="button" id="opt" aria-haspopup="true" aria-expanded="false" aria-controls="opts"><span>auto ▾</span></button>
+      <div id="opts" role="group" aria-label="Harness and model" hidden>
+        <select id="harness" aria-label="harness"><option value="">auto</option></select>
+        <input id="model" aria-label="model" placeholder="model (optional)" autocapitalize="off" autocorrect="off" spellcheck="false">
+      </div>
+    </div>
+    <div class="box"><button type="button" id="clip" class="clip" aria-label="Attach photos"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M20 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.4 8.4a1.7 1.7 0 0 1-2.4-2.4l7.7-7.7"/></svg></button><input type="file" id="pick" accept="image/*" multiple hidden><textarea id="prompt" rows="1" aria-label="new task" placeholder="New task…" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><button id="send" class="go" aria-label="Submit" title="Submit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg></button></div>
+  </form>
+  <form id="reply" class="composer" hidden>
+    <div class="ctx"><p id="reply-error" class="bad" hidden></p></div>
+    <div class="box"><textarea id="reply-text" rows="1" aria-label="reply" placeholder="Reply in this thread…" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><button id="send-reply" class="go" aria-label="Reply" title="Reply"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg></button></div>
+  </form>
+  <form id="say" class="composer" hidden>
+    <div class="ctx"><p id="say-open" class="warn" hidden></p><button type="button" id="say-queue" hidden>Queue until closed</button><p id="say-state" hidden></p></div>
+    <div class="box"><textarea id="say-text" rows="1" aria-label="message" placeholder="Message this session…" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><button id="say-send" class="go" aria-label="Send" title="Send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg></button></div>
+  </form>
+</footer>
 
 <script>
 'use strict';
@@ -387,6 +455,7 @@ let connMsg = 'connecting…'; // shown in the ticker until the first socket ope
 let orchVersion = ''; // from /api/info; workers on another build are flagged
 let skew = 0; // orchestrator clock minus ours, from the last Status; task times are on its clock
 let from = '#'; // last list view, so a task's back link returns to Workers when opened from there
+let wantNew = false; // `#new` was opened: focus the new-task field once it shows
 // The one submit awaiting its Submitted, as { key, text }: its draft key and what was sent.
 // A reply's Submitted opens the new task.
 let pending = null;
@@ -413,9 +482,9 @@ const drafts = {
     } catch {}
   },
 };
-// Saves a composer field under its view's key; typing and dictation both land here.
+// Saves a composer field under its view's key; typing and dictation both land here. A session message keeps none.
 function keepDraft(field) {
-  const key = field.id === 'prompt' ? 'draft:new' : replyFor && replyDraft(replyFor);
+  const key = field.id === 'prompt' ? 'draft:new' : field.id === 'reply-text' && replyFor && replyDraft(replyFor);
   if (key) drafts.set(key, field.value);
 }
 
@@ -501,7 +570,7 @@ function flash(text) {
   renderStrip();
 }
 
-// Dictation into a composer's field; a recording bar stands in for Submit. Hold the mic: release sends; slide
+// Dictation into a composer's field; a recording bar shows above it. Hold the mic: release sends; slide
 // left toward ✕ and release to discard. Tap it: hands-free until a second tap sends or ✕ discards.
 // Absent API (e.g. some iOS home-screen apps): the buttons stay hidden; keyboard dictation still works.
 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -526,7 +595,6 @@ function micShow(s) {
   s.btn.setAttribute('aria-label', !on ? 'Start dictation' : s.live ? 'Send dictation' : 'Starting dictation');
   s.form.classList.toggle('listening', on && s.live);
   const bar = s.form.querySelector('.recbar');
-  s.form.querySelector('button:not([type=button])').hidden = on;
   if (on && bar.hidden) { bar.hidden = false; fillDots(bar); }
   bar.hidden = !on;
   bar.dataset.say = barSay(s);
@@ -541,7 +609,7 @@ function fillDots(bar) {
 function deliver(s) {
   if (!hasNewText(s.base, s.field.value)) return;
   const submit = s.form.querySelector('button:not([type=button])');
-  if (submit.disabled) flash('offline · text kept'); else submit.click();
+  if (submit.disabled) flash('not sent · text kept'); else submit.click();
 }
 // Settles a session once: on onend, an error, the watchdogs, or micOff. A held release sends here.
 function micEnd(s) {
@@ -562,6 +630,7 @@ function micStart(btn, held) {
     const said = [...e.results].map((x) => x[0].transcript).join('').trim();
     field.value = s.base && said ? `${s.base} ${said}` : s.base || said;
     keepDraft(field);
+    fit(field);
   };
   // Live only once the browser hears, so the user knows when to speak.
   r.onstart = r.onaudiostart = () => { if (rec === s && !s.live) { s.live = true; clearTimeout(s.timer); micShow(s); } };
@@ -607,6 +676,7 @@ function micOff() {
 function micDrop(s) {
   s.send = false;
   s.field.value = s.draft;
+  fit(s.field);
   if (rec === s) { s.dead = true; s.r.abort(); micEnd(s); }
   flash('cancelled');
 }
@@ -758,10 +828,23 @@ function ticker() {
     return { parts: dots([planning && `${planning} planning`, wait]), cls: 'warn', open: held.id };
   }
   if (queued || planning) return { parts: dots([planning && `${planning} planning`, queued && `${queued} queued`]), cls: 'run' };
-  // A tap opens the most urgent, newest first; opening it settles it, so the next tap opens the next.
-  const need = tasks.filter((t) => ATTENTION[t.attention]).reverse().sort((a, b) => rank(a) - rank(b));
+  const need = needYou();
   if (need.length) return { parts: [`${need.length} need${need.length === 1 ? 's' : ''} you`], cls: 'need', open: need[0].id };
   return { parts: [], cls: '' };
+}
+
+// Tasks that need the user, most urgent first, newest first within a kind. A tap opens the first;
+// opening it settles it, so the next tap opens the next.
+const needYou = () => tasks.filter((t) => ATTENTION[t.attention]).reverse().sort((a, b) => rank(a) - rank(b));
+// The header badge: how many need you, lit in the most urgent one's colour.
+function renderNeed() {
+  const need = everOpen ? needYou() : [], b = $('need');
+  b.hidden = !need.length;
+  if (!need.length) return;
+  b.textContent = need.length;
+  b.className = `att ${need[0].attention}`;
+  b.href = `#task/${need[0].id}`;
+  b.setAttribute('aria-label', `${need.length} need${need.length === 1 ? 's' : ''} you`);
 }
 
 // Dot, then the ticker: a flash wins, then the connection until a socket has opened, then offline, then work.
@@ -788,6 +871,7 @@ function renderStrip() {
   if (t.open) tk.href = `#task/${t.open}`; else tk.removeAttribute('href');
   $('cycle').classList.toggle('run', everOpen && !offline && tasks.some((x) => x.status === 'running'));
   renderGauges();
+  renderNeed();
   renderUpdate();
 }
 
@@ -810,7 +894,8 @@ $('upd').onclick = (e) => {
   renderUpdate();
 };
 
-// `#` tasks, `#task/<id>`, `#routines`, `#workers`, `#worker/<id>`.
+// `#` tasks, `#task/<id>`, `#routines`, `#workers`, `#worker/<id>`, `#session/<worker>/<harness>/<id>`.
+// `#new` (see takeNew) is Tasks with the composer focused.
 function route() {
   const m = location.hash.match(/^#(task|worker)\/([0-9a-f-]{36})$/);
   if (m) return { view: m[1] === 'task' ? 'detail' : 'machine', id: m[2] };
@@ -824,8 +909,12 @@ function render() {
   const live = ws && ws.readyState === WebSocket.OPEN;
   const views = { list: renderList, detail: renderDetail, routines: renderRoutines, workers: renderWorkers, machine: renderMachine, session: renderSession };
   $('auth').hidden = live || !authNeeded || !!store.get();
-  $('new').hidden = readOnly; // a read-only token can't submit
-  $('tabs').hidden = !everOpen;
+  // The dock's form follows the view: a reply in a task, a message in a session, else a new task.
+  // A read-only token can't send, so it gets none.
+  const form = { detail: 'reply', session: 'say' }[r.view] || 'new';
+  $('dock').hidden = !everOpen || readOnly;
+  for (const f of ['new', 'reply', 'say']) $(f).hidden = f !== form;
+  if (form !== 'new') showOpts(false);
   renderStrip();
   document.body.classList.toggle('stale', everOpen && offline);
   // Sending needs a socket and no submit in flight; drafts stay in their fields meanwhile.
@@ -837,11 +926,14 @@ function render() {
   else from = location.hash || '#';
   if (r.view !== 'session') closeSession();
   const onWorkers = r.view === 'workers' || r.view === 'machine' || r.view === 'session';
-  $('tab-tasks').setAttribute('aria-selected', String(!onWorkers && r.view !== 'routines'));
-  $('tab-routines').setAttribute('aria-selected', String(r.view === 'routines'));
-  $('tab-workers').setAttribute('aria-selected', String(onWorkers));
+  const area = onWorkers ? 'workers' : r.view === 'routines' ? 'routines' : 'list';
+  for (const a of $('menu').querySelectorAll('nav a')) {
+    if (a.dataset.view === area) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+  }
   $('clear').hidden = !store.get();
   views[r.view](r.id);
+  fitAll();
+  if (wantNew && !$('dock').hidden) { wantNew = false; $('prompt').focus(); }
 }
 
 // `claude · sonnet · host`, leaving out what isn't known yet.
@@ -1092,7 +1184,10 @@ function renderDetail(id) {
     ...(t && t.send_to && t.worker ? [el('a', { href: sessionHref(t), className: 'thread' }, `↪ session: ${t.send_to.title || short(t.send_to.session)}`)] : []),
     ...(t && t.routine ? [el('a', { href: '#routines', className: 'thread' }, `↻ routine: ${t.routine}`, t.routine_mode ? ` · ${t.routine_mode.replace('_', ' ')}` : '')] : []),
     ...replies.map((r) => el('a', { href: `#task/${r.id}`, className: 'thread' }, `↳ ${short(r.id)} ${r.prompt.split('\n')[0]}`)));
-  $('reply').hidden = readOnly || !t || !['done', 'failed', 'cancelled'].includes(t.status);
+  // A reply waits for the task to finish; the field takes a draft meanwhile.
+  const finished = t && ['done', 'failed', 'cancelled'].includes(t.status);
+  if (!finished) $('send-reply').disabled = true;
+  $('reply-text').placeholder = finished || !t ? 'Reply in this thread…' : 'Reply once it finishes…';
   renderCancel(t);
   $('ids').replaceChildren(...(t ? [['task', t.id], ['session', t.session]] : [])
     .filter(([, v]) => v).flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]));
@@ -1287,19 +1382,20 @@ function renderSession(key) {
   if (atEnd) scrollTo(0, document.documentElement.scrollHeight);
 }
 
-// The composer under a transcript. Not open: the message continues the session itself. Open
+// The session's composer. Not open: the message continues the session itself. Open
 // (a terminal holds it), it mustn't be: send to a copy (default), or queue until it closes.
-let saying = null; // { key, sent: task id | null, error } for the composer's last send
+let saying = null; // { key, sent: task id | null, error, busy: a send in flight } for the composer's last send
 function renderSay(got) {
   const [, harness] = sess.key.split('/');
-  $('say').hidden = readOnly || !got || !got.turns;
-  if (!saying || saying.key !== sess.key) { saying = { key: sess.key, sent: null, error: '' }; $('say-text').value = ''; }
+  if (!saying || saying.key !== sess.key) { saying = { key: sess.key, sent: null, error: '', busy: false }; $('say-text').value = ''; }
+  // Sends once the transcript is read.
+  $('say-send').disabled = $('say-queue').disabled = !got || !got.turns || saying.busy;
   const open = !!(got && got.open);
   // Codex records no open terminals: only a recent write counts.
   $('say-open').hidden = !open && harness !== 'codex';
-  $('say-open').textContent = !open ? 'Codex can’t tell if a terminal has this open; Send continues it in place.'
-    : `${harness === 'claude' ? 'Open in a terminal right now.' : 'May be open: written in the last 2 minutes.'} Queueing holds this worker until it closes (up to 15 min).`;
-  $('say-send').textContent = open ? 'Send to a copy' : 'Send';
+  $('say-open').textContent = !open ? 'Codex can’t tell if a terminal has this open; ↑ continues it in place.'
+    : `${harness === 'claude' ? 'Open in a terminal right now.' : 'May be open: written in the last 2 minutes.'} ↑ sends to a copy; queueing holds this worker until it closes (up to 15 min).`;
+  $('say-send').ariaLabel = $('say-send').title = open ? 'Send to a copy' : 'Send';
   $('say-queue').hidden = !open;
   $('say-state').hidden = !saying.sent && !saying.error;
   $('say-state').className = saying.error ? 'bad' : 'dim';
@@ -1307,23 +1403,25 @@ function renderSay(got) {
 }
 async function sayTo(mode) {
   const text = $('say-text').value.trim();
-  if (!text || !sess) return;
+  if (!text || !sess || saying.busy) return;
+  micOff();
   const s = saying, [wid, harness, id] = sess.key.split('/');
   const listed = ((sessLists.get(wid) || {}).list || []).find((x) => x.id === id) || {};
-  $('say-send').disabled = $('say-queue').disabled = true;
+  s.busy = true;
+  renderSay(sess.got);
   try {
     const r = await fetch(`/api/workers/${wid}/sessions/${harness}/${id}/messages`, {
       method: 'POST', headers: { ...authHeaders(), 'content-type': 'application/json' },
       body: JSON.stringify({ text, mode, title: listed.title || null }) });
     if (r.ok) {
       Object.assign(s, { sent: (await r.json()).task, error: '' });
-      if (saying === s) $('say-text').value = '';
+      if (saying === s) { $('say-text').value = ''; fit($('say-text')); }
       // Follow the reply as it is written.
       if (sess) { clearTimeout(sess.timer); const t = sess; t.timer = setTimeout(() => loadTranscript(t), REFRESH_MS); }
     }
     else s.error = (await r.text()) || `error ${r.status}`;
   } catch { s.error = 'couldn’t reach the orchestrator'; }
-  $('say-send').disabled = $('say-queue').disabled = false;
+  s.busy = false;
   if (sess && saying === s) renderSay(sess.got);
 }
 $('say').addEventListener('submit', (e) => { e.preventDefault(); sayTo(sess && sess.got && sess.got.open ? 'fork' : 'in_place'); });
@@ -1520,6 +1618,7 @@ function onMessage(msg) {
       const sel = $('harness'), keep = sel.value;
       sel.replaceChildren(el('option', { value: '' }, 'auto'), ...harnesses.map((h) => el('option', { value: h }, h)));
       sel.value = harnesses.includes(keep) ? keep : '';
+      optLabel();
       break;
     }
     case 'submitted': {
@@ -1795,6 +1894,7 @@ $('reply').onsubmit = (e) => {
 };
 $('clear').onclick = (e) => {
   e.preventDefault();
+  $('menu').close();
   store.set('');
   disconnect();
   everOpen = false;
@@ -1806,8 +1906,75 @@ for (const f of [$('prompt'), $('reply-text')]) f.addEventListener('input', () =
 $('prompt').value = drafts.get('draft:new');
 // Leaving a view stops dictation into it and any readback.
 // A press's click has landed once the view changes: nothing left to hold for.
-window.onhashchange = () => { micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); render(); };
+window.onhashchange = () => { takeNew(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); render(); };
 setInterval(tick, 1000);
+
+// `#new` (the tray's "New task…") is Tasks with the composer focused; the hash becomes `#` so back links don't refocus.
+function takeNew() { if (location.hash === '#new') { history.replaceState(null, '', '#'); wantNew = true; } }
+takeNew();
+
+// Composer fields grow with their text from one line to six (the CSS cap); refit when the text or width changes.
+const composerFields = [$('prompt'), $('reply-text'), $('say-text')], fitted = new WeakMap();
+function fit(f) {
+  if (!f.offsetParent) return; // hidden: fit once shown
+  const key = `${f.clientWidth}:${f.value}`;
+  if (fitted.get(f) === key) return;
+  fitted.set(f, key);
+  f.style.height = 'auto';
+  f.style.height = `${f.scrollHeight}px`;
+}
+function fitAll() { composerFields.forEach(fit); }
+window.addEventListener('resize', fitAll);
+// Enter sends with a hardware keyboard; Shift+Enter, and Enter on a touch screen, add a line.
+const coarse = matchMedia('(pointer: coarse)');
+for (const f of composerFields) {
+  f.addEventListener('input', () => fit(f));
+  f.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.shiftKey || e.isComposing || coarse.matches) return;
+    e.preventDefault();
+    if (f.value.trim()) f.form.querySelector('button:not([type=button])').click();
+  });
+}
+
+// Harness and model behind one chip: `auto ▾`, `codex ▾`, `claude · opus ▾`; a popover holds the fields.
+function optLabel() { $('opt').firstChild.textContent = `${[$('harness').value || 'auto', $('model').value.trim()].filter(Boolean).join(' · ')} ▾`; }
+function showOpts(on) { $('opts').hidden = !on; $('opt').setAttribute('aria-expanded', String(on)); }
+$('opt').onclick = () => { const on = $('opts').hidden; showOpts(on); if (on) $('harness').focus(); };
+$('harness').addEventListener('change', optLabel);
+$('model').addEventListener('input', optLabel);
+document.addEventListener('pointerdown', (e) => { if (!$('opts').hidden && !e.target.closest('#opts, #opt')) showOpts(false); });
+$('new').addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('opts').hidden) { showOpts(false); $('opt').focus(); } });
+
+// Menu: a modal sheet, so focus stays inside and Escape closes it; a backdrop tap or a view link closes it too.
+$('menu-btn').onclick = () => { $('menu').showModal(); $('menu-btn').setAttribute('aria-expanded', 'true'); };
+$('menu').addEventListener('close', () => $('menu-btn').setAttribute('aria-expanded', 'false'));
+$('menu-close').onclick = () => $('menu').close();
+$('menu').addEventListener('click', (e) => { if (e.target === $('menu') || e.target.closest('nav a')) $('menu').close(); });
+// Theme, per viewer: System follows the device; Dark or Light set `data-theme`, which the token blocks key on.
+const theme = {
+  get() { try { return localStorage.getItem('mis-theme') || ''; } catch { return ''; } },
+  set(v) { try { v ? localStorage.setItem('mis-theme', v) : localStorage.removeItem('mis-theme'); } catch {} },
+};
+for (const r of document.querySelectorAll('input[name=theme]')) {
+  r.checked = r.value === theme.get();
+  r.onchange = () => {
+    theme.set(r.value);
+    if (r.value) document.documentElement.dataset.theme = r.value; else delete document.documentElement.dataset.theme;
+  };
+}
+
+// The page's foot clears the dock (--dock). An iOS keyboard shrinks only the visual viewport, leaving a fixed
+// dock under it: while a dock field has focus, lift it by the covered height (--kb).
+const dock = $('dock'), vv = window.visualViewport;
+new ResizeObserver(() => document.documentElement.style.setProperty('--dock', `${dock.offsetHeight}px`)).observe(dock);
+function liftDock() {
+  const kb = vv && dock.contains(document.activeElement) ? Math.max(0, Math.round(document.documentElement.clientHeight - vv.height - vv.offsetTop)) : 0;
+  dock.style.setProperty('--kb', `${kb}px`);
+  dock.classList.toggle('kb', kb > 0);
+}
+if (vv) { vv.addEventListener('resize', liftDock); vv.addEventListener('scroll', liftDock); }
+dock.addEventListener('focusin', liftDock);
+dock.addEventListener('focusout', () => setTimeout(liftDock));
 
 // Push notifications: offered where the browser has push (on iOS, only once added to the Home Screen),
 // the orchestrator has a key and the token may act. Permission is asked only from the toggle's tap.
