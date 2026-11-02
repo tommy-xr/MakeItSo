@@ -282,7 +282,9 @@ mod tests {
             assert!(f.read(p).unwrap_err().contains("outside"), "{p}");
         }
         assert!(f.read("missing.png").is_err());
-        assert!(f.read(".").unwrap_err().contains("not a regular file"));
+        // A folder is refused; Windows fails earlier, at open ("Access is denied").
+        let e = f.read(".").unwrap_err();
+        assert!(!cfg!(unix) || e.contains("not a regular file"), "{e}");
         let big = t.0.join("root/task/big.png");
         std::fs::write(&big, vec![0; MAX_FILE_BYTES + 1]).unwrap();
         assert!(f.read("big.png").unwrap_err().contains("10 MB"));
