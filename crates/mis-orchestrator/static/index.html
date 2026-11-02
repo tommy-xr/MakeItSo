@@ -362,8 +362,9 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .chead .ttl { font: 600 1rem/1.3 var(--prose); }
   .chead .r2 { margin-top: .125rem; }
   .convo { padding-top: .5rem; }
-  .fold, .run { display: block; width: 100%; min-height: 2.75rem; padding: 0; border: 0; border-bottom: 1px dashed var(--rule); background: none; color: var(--dim); font: .8125rem var(--mono); letter-spacing: 0; text-transform: none; text-align: left; }
-  .run { min-height: 2.25rem; border: 0; }
+  /* `.toolrun`, not `.run`: the progress line takes `.run` while work runs. */
+  .fold, .toolrun { display: block; width: 100%; min-height: 2.75rem; padding: 0; border: 0; border-bottom: 1px dashed var(--rule); background: none; color: var(--dim); font: .8125rem var(--mono); letter-spacing: 0; text-transform: none; text-align: left; }
+  .toolrun { min-height: 2.25rem; border: 0; }
   .fold[aria-expanded=true] { color: var(--accent); }
   .earlier { padding-bottom: .5rem; border-bottom: 1px dashed var(--rule); }
   .calls { margin: 0 0 .5rem 1.25rem; font-size: .75rem; color: var(--dim); overflow-wrap: anywhere; }
@@ -1488,7 +1489,7 @@ function drawConvo(box, items, open, more, working) {
   const part = (x) => {
     if (x.run) {
       const on = open.runs.has(x.key);
-      return [toggle('run one', runLabel(x.run), on, () => (on ? open.runs.delete(x.key) : open.runs.add(x.key))),
+      return [toggle('toolrun one', runLabel(x.run), on, () => (on ? open.runs.delete(x.key) : open.runs.add(x.key))),
         on ? el('div', { className: 'calls' }, ...x.run.map((c) => el('div', {}, c.text))) : ''];
     }
     const body = el('div', { className: 'body' });
