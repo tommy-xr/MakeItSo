@@ -28,3 +28,16 @@ core, the process runner around it is shell. Match that shape.
 - Run `cargo fmt`, `cargo clippy -D warnings`, `cargo test` before pushing.
 - Commits and PR titles use Conventional Commits: `feat:`, `fix:`, `ci:`, `docs:`,
   `refactor:`, `test:`, `chore:`. Imperative, lower-case subject, no period.
+
+## PR evidence
+
+- Every PR body shows before/after proof: output, logs, measurements.
+- UI changes add before/after screenshots at phone width (390 px, dark), from the
+  base branch and the PR branch with the same data; a GIF for flows.
+- Synthetic data only: fixture sessions, tasks and routines in temp dirs
+  (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `--state-dir`, `--routines-dir`,
+  `MIS_STATE_DIR`) and `MIS_HOSTNAME=demo-mac`. Never real sessions, transcripts,
+  task history, paths or hostnames from the machine.
+- Host images with `scripts/pr-media "<desc>" before.png after.png flow.gif`
+  (secret gist; prints Markdown). A GIF from stills:
+  `ffmpeg -framerate 1 -i f%d.png -vf "split[a][b];[a]palettegen[p];[b][p]paletteuse" flow.gif`.
