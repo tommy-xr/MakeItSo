@@ -246,7 +246,8 @@ fn blocks(v: &Value) -> impl Iterator<Item = &Value> {
     v["message"]["content"].as_array().into_iter().flatten()
 }
 
-fn tool_result_text(c: &Value) -> String {
+/// A tool result's text: a string, or its text blocks joined.
+pub fn tool_result_text(c: &Value) -> String {
     match c {
         Value::String(s) => s.clone(),
         Value::Array(parts) => parts

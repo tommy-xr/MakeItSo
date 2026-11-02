@@ -11,6 +11,9 @@ use serde_json::Value;
 
 /// Most sessions listed.
 const MAX_SESSIONS: usize = 50;
+/// Most files read for one list, so asking for interactive sessions only stays cheap
+/// where headless runs dominate.
+const MAX_SCANNED: usize = 1000;
 /// Codex writes ~150 KB of instructions (more with images) before the first prompt.
 const HEAD_BYTES: u64 = 1 << 20;
 /// Claude appends its generated titles as the session goes on.
@@ -31,7 +34,9 @@ struct Head {
     auto_title: Option<String>,
     /// Latest seen.
     model: Option<String>,
-    headless: bool,
+    /// From how it was started (the first entrypoint/originator seen): a later
+    /// `claude -p --resume` doesn't make an interactive session headless.
+    headless: Option<bool>,
     /// Not worth listing (a Codex subagent's thread).
     skip: bool,
 }
@@ -63,10 +68,15 @@ impl Head {
             title: title.map(|t| first_line(&t, TITLE_CHARS)),
             model: self.model,
             updated_ms,
-            active: now_ms.saturating_sub(updated_ms) < ACTIVE_MS,
-            interactive: !self.headless,
+            active: active(updated_ms, now_ms),
+            interactive: self.headless != Some(true),
         })
     }
+}
+
+/// Written in the last `ACTIVE_MS`.
+pub(crate) fn active(updated_ms: u64, now_ms: u64) -> bool {
+    now_ms.saturating_sub(updated_ms) < ACTIVE_MS
 }
 
 fn text(v: &Value) -> Option<String> {
@@ -77,11 +87,20 @@ fn text(v: &Value) -> Option<String> {
 }
 
 /// Text the user typed, not what the harness injected under the user's role:
-/// `<command-name>`, `<system-reminder>`, `<environment_context>`, AGENTS.md, interrupts.
-fn typed(s: &str) -> Option<String> {
+/// tagged blocks (`<command-name>`, `<system-reminder>`, `<environment_context>`,
+/// `<INSTRUCTIONS>`, `<image …>`), AGENTS.md, interrupts. `<div> overflows` is typed.
+pub(crate) fn typed(s: &str) -> Option<String> {
     let s = s.trim();
-    let injected = ["<", "[Request interrupted", "# AGENTS.md instructions"];
-    (!s.is_empty() && !injected.iter().any(|p| s.starts_with(p))).then(|| s.to_string())
+    let injected = ["[Request interrupted", "# AGENTS.md instructions"];
+    let tag = s.strip_prefix('<').map(|t| {
+        let name = t
+            .split(|c: char| c == '>' || c.is_whitespace())
+            .next()
+            .unwrap_or("");
+        name.contains(['-', '_']) || name == "image" || name.chars().all(|c| c.is_ascii_uppercase())
+    });
+    let skip = s.is_empty() || tag == Some(true) || injected.iter().any(|p| s.starts_with(p));
+    (!skip).then(|| s.to_string())
 }
 
 /// One line of a Claude transcript. Unparseable lines (a cut-off last one) are skipped.
@@ -102,8 +121,8 @@ fn claude_line(h: &mut Head, line: &str) {
                 h.cwd = text(&v["cwd"]);
             }
             // `cli`; `sdk-cli` and the like for `claude -p` and SDK runs.
-            if let Some(e) = v["entrypoint"].as_str() {
-                h.headless = e.starts_with("sdk");
+            if let (None, Some(e)) = (h.headless, v["entrypoint"].as_str()) {
+                h.headless = Some(e.starts_with("sdk"));
             }
             let msg = &v["message"];
             if kind == "assistant" {
@@ -111,7 +130,7 @@ fn claude_line(h: &mut Head, line: &str) {
                 if let Some(m) = text(&msg["model"]).filter(|m| !m.starts_with('<')) {
                     h.model = Some(m);
                 }
-            } else if h.prompt.is_none() && v["isMeta"] != true {
+            } else if h.prompt.is_none() && v["isMeta"] != true && v["isCompactSummary"] != true {
                 h.prompt = match &msg["content"] {
                     Value::String(s) => typed(s),
                     // The first typed text block; tool results come as other block types.
@@ -139,7 +158,7 @@ fn codex_line(h: &mut Head, line: &str) {
                 h.id = id;
             }
             h.cwd = text(&p["cwd"]).or(h.cwd.take());
-            h.headless = p["originator"] == "codex_exec";
+            h.headless = Some(p["originator"] == "codex_exec");
             h.skip = p["source"].get("subagent").is_some();
         }
         Some("turn_context") => h.model = text(&p["model"]).or(h.model.take()),
@@ -157,7 +176,7 @@ fn codex_line(h: &mut Head, line: &str) {
 }
 
 /// Feed `r`'s lines to `f` until it's exhausted or `f` says stop; returns bytes consumed.
-fn feed(r: impl Read, mut f: impl FnMut(&str) -> bool) -> u64 {
+pub(crate) fn feed(r: impl Read, mut f: impl FnMut(&str) -> bool) -> u64 {
     let mut r = BufReader::new(r);
     let (mut buf, mut used) = (Vec::new(), 0);
     loop {
@@ -173,11 +192,12 @@ fn feed(r: impl Read, mut f: impl FnMut(&str) -> bool) -> u64 {
 }
 
 /// One session file: up to `head` bytes from its start, then its last `tail` bytes
-/// unless the head already covered them.
+/// unless the head already covered them. None for a headless one unless `headless`.
 fn read_file(
     harness: &str,
     path: &Path,
     (head, tail): (u64, u64),
+    headless: bool,
     updated_ms: u64,
     now_ms: u64,
 ) -> Option<Session> {
@@ -194,10 +214,14 @@ fn read_file(
     let mut h = Head::new(id);
     let mut file = File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
+    let unwanted = |h: &Head| h.headless == Some(true) && !headless;
     let used = feed((&mut file).take(head), |l| {
         line(&mut h, l);
-        h.done()
+        h.done() || unwanted(&h)
     });
+    if unwanted(&h) {
+        return None;
+    }
     let from = used.max(len.saturating_sub(tail));
     if from < len && file.seek(SeekFrom::Start(from)).is_ok() {
         // A first line cut mid-way fails to parse and is skipped. Stop at the old end:
@@ -211,7 +235,7 @@ fn read_file(
 }
 
 /// `*.jsonl` files exactly `depth` directories below `dir`, with their mtimes.
-fn jsonl_at(dir: &Path, depth: usize) -> Vec<(u64, PathBuf)> {
+pub(crate) fn jsonl_at(dir: &Path, depth: usize) -> Vec<(u64, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return vec![];
     };
@@ -228,7 +252,7 @@ fn jsonl_at(dir: &Path, depth: usize) -> Vec<(u64, PathBuf)> {
     out
 }
 
-fn mtime_ms(meta: &std::fs::Metadata) -> u64 {
+pub(crate) fn mtime_ms(meta: &std::fs::Metadata) -> u64 {
     let since = meta
         .modified()
         .ok()
@@ -245,9 +269,10 @@ pub fn roots() -> (PathBuf, PathBuf) {
     (claude, codex)
 }
 
-/// The newest `MAX_SESSIONS` sessions under both roots, newest first. Claude
-/// subagents live a level deeper (`<id>/subagents/`) and aren't listed.
-pub fn list(claude: &Path, codex: &Path, now_ms: u64) -> Vec<Session> {
+/// The newest `MAX_SESSIONS` sessions under both roots, newest first; headless ones
+/// (`claude -p`, `codex exec`) only if `headless`. Claude subagents live a level
+/// deeper (`<id>/subagents/`) and aren't listed.
+pub fn list(claude: &Path, codex: &Path, headless: bool, now_ms: u64) -> Vec<Session> {
     let claude = jsonl_at(&claude.join("projects"), 1)
         .into_iter()
         .map(|f| ("claude", f));
@@ -258,7 +283,8 @@ pub fn list(claude: &Path, codex: &Path, now_ms: u64) -> Vec<Session> {
     files.sort_by_key(|(_, (at, _))| std::cmp::Reverse(*at));
     files
         .into_iter()
-        .filter_map(|(h, (at, p))| read_file(h, &p, (HEAD_BYTES, TAIL_BYTES), at, now_ms))
+        .take(MAX_SCANNED)
+        .filter_map(|(h, (at, p))| read_file(h, &p, (HEAD_BYTES, TAIL_BYTES), headless, at, now_ms))
         .take(MAX_SESSIONS)
         .collect()
 }
@@ -322,6 +348,25 @@ mod tests {
         ]);
         let s = h.finish("claude", 0, 0).unwrap();
         assert_eq!((s.title.as_deref(), s.interactive), (Some("Mine"), false));
+    }
+
+    #[test]
+    fn headless_is_how_it_started_and_tags_are_told_from_html() {
+        let cli = r#"{"type":"user","cwd":"/w","entrypoint":"cli","message":{"content":"<div> overflows"}}"#;
+        let resumed = r#"{"type":"user","entrypoint":"sdk-cli","message":{"content":"x"}}"#;
+        let s = claude(&[cli, resumed]).finish("claude", 0, 0).unwrap();
+        assert!(s.interactive);
+        assert_eq!(s.title.as_deref(), Some("<div> overflows"));
+        let tags = [
+            "<command-name>/clear</command-name>",
+            "<system-reminder>x</system-reminder>",
+            "<environment_context>",
+            "<INSTRUCTIONS>",
+            "<image name=[Image #1]>",
+        ];
+        for t in tags {
+            assert_eq!(typed(t), None, "{t}");
+        }
     }
 
     #[test]
@@ -396,10 +441,10 @@ mod tests {
         );
         std::fs::write(&path, body).unwrap();
         // Head ends inside the padding, tail starts after the prompt: only the title is seen.
-        let s = read_file("claude", &path, (100, 400), 0, 0).unwrap();
+        let s = read_file("claude", &path, (100, 400), true, 0, 0).unwrap();
         assert_eq!((s.title.as_deref(), s.cwd), (Some("Tail title"), None));
         // A head long enough reaches the prompt and its cwd.
-        let s = read_file("claude", &path, (1 << 20, 400), 0, 0).unwrap();
+        let s = read_file("claude", &path, (1 << 20, 400), true, 0, 0).unwrap();
         assert_eq!(
             (s.title.as_deref(), s.cwd.as_deref()),
             (Some("Tail title"), Some("/w"))
@@ -422,7 +467,7 @@ mod tests {
         let day = codex.join("sessions").join("2026").join("11").join("01");
         std::fs::create_dir_all(&day).unwrap();
         let id = "019a0000-0000-7000-8000-000000000001";
-        let meta = r#"{"type":"session_meta","payload":{"cwd":"/r"}}"#;
+        let meta = r#"{"type":"session_meta","payload":{"cwd":"/r","originator":"codex_exec"}}"#;
         std::fs::write(
             day.join(format!("rollout-2026-11-01T10-00-00-{id}.jsonl")),
             meta,
@@ -440,7 +485,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
-        let got = list(&claude, &codex, now);
+        let got = list(&claude, &codex, true, now);
         let ids: Vec<_> = got
             .iter()
             .map(|s| (s.harness.as_str(), s.id.as_str()))
@@ -448,8 +493,12 @@ mod tests {
         assert_eq!(ids, [("codex", id), ("claude", "c1")]);
         assert!(got[0].active && !got[1].active);
         assert_eq!(got[1].title.as_deref(), Some("claude task"));
+        // Interactive only: the `codex exec` run is left out.
+        let got = list(&claude, &codex, false, now);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "c1");
         // Missing roots list nothing.
-        assert!(list(&claude.join("none"), &codex.join("none"), now).is_empty());
+        assert!(list(&claude.join("none"), &codex.join("none"), true, now).is_empty());
         for d in [claude, codex] {
             std::fs::remove_dir_all(d).unwrap();
         }

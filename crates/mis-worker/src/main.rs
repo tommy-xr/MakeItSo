@@ -12,6 +12,7 @@ mod rules;
 mod sessions;
 mod setup;
 mod stats;
+mod transcript;
 mod update;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -558,10 +559,14 @@ fn handle_incoming(
 
 fn answer(query: Query) -> Answer {
     match query {
-        Query::ListSessions => {
+        Query::ListSessions { headless } => {
             let (claude, codex) = sessions::roots();
-            let sessions = sessions::list(&claude, &codex, unix_ms());
+            let sessions = sessions::list(&claude, &codex, headless, unix_ms());
             Answer::Sessions { sessions }
+        }
+        Query::ReadSession { harness, id, limit } => {
+            let (claude, codex) = sessions::roots();
+            transcript::read(&claude, &codex, &harness, id, limit, unix_ms())
         }
     }
 }
