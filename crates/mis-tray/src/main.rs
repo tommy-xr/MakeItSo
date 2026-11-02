@@ -62,27 +62,53 @@ pub async fn session(conn: &Conn, on_status: impl Fn(Fleet)) -> Result<()> {
     let mut tick = interval_at(Instant::now() + THROTTLE, THROTTLE);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let (mut dirty, mut ticks) = (false, 0);
+    // No redirects: they could carry the Access headers elsewhere.
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let (mut routines, mut runs, mut read_at) = (vec![], None, None::<Instant>);
+    // Routines are read beside the socket, never holding up statuses; the first
+    // status waits for the first read so the menu (and --print) starts complete.
+    let (mut routines, mut read, mut runs, mut asked_at) = (vec![], false, vec![], None);
+    let mut fetch = None;
+    let mut last: Option<Fleet> = None;
+    let emit = |f: &Fleet, routines: &Vec<RoutineView>| {
+        on_status(Fleet {
+            routines: routines.clone(),
+            ..f.clone()
+        })
+    };
     loop {
         tokio::select! {
+            r = async { fetch.as_mut().expect("guarded").await }, if fetch.is_some() => {
+                fetch = None;
+                match r {
+                    Ok(r) => routines = r,
+                    // Keep the last list; the error names the URL, never the token.
+                    Err(e) => eprintln!("mis-tray: routines: {e}"),
+                }
+                read = true;
+                if let Some(f) = &last {
+                    emit(f, &routines);
+                }
+            }
             m = ws.next() => match m {
                 // Skip messages this build doesn't know rather than reconnect.
                 Some(Ok(Message::Text(t))) => match serde_json::from_str(&t) {
                     Ok(ServerMsg::Status { workers, tasks, now_ms, .. }) => {
                         let now_ms = now_ms.unwrap_or_else(unix_ms);
-                        let new_runs = Some(model::routine_runs(&tasks));
-                        if new_runs != runs || read_at.is_none_or(|t| t.elapsed() >= ROUTINES_EVERY) {
-                            match fetch_routines(&http, conn).await {
-                                Ok(r) => routines = r,
-                                // Keep the last list; the error names the URL, never the token.
-                                Err(e) => eprintln!("mis-tray: routines: {e}"),
-                            }
-                            (runs, read_at) = (new_runs, Some(Instant::now()));
+                        let new_runs = model::routine_runs(&tasks);
+                        let due = new_runs != runs
+                            || asked_at.is_none_or(|t: Instant| t.elapsed() >= ROUTINES_EVERY);
+                        if due && fetch.is_none() {
+                            fetch = Some(Box::pin(fetch_routines(&http, conn)));
+                            (runs, asked_at) = (new_runs, Some(Instant::now()));
                         }
-                        on_status(Fleet { workers, tasks, now_ms, routines: routines.clone() });
+                        let f = Fleet { workers, tasks, now_ms, routines: vec![] };
+                        if read {
+                            emit(&f, &routines);
+                        }
+                        last = Some(f);
                     }
                     Ok(ServerMsg::Event { .. }) => dirty = true,
                     // E.g. "dropped N events; re-run status".

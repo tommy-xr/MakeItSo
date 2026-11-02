@@ -294,19 +294,12 @@ fn running_label(t: &TaskSummary, f: &Fleet) -> String {
     format!("● {}", parts.join(" · "))
 }
 
-/// `● 3m12s  counting tests`: status glyph, elapsed, then what a running task
-/// is doing or else the prompt's first line.
+/// `✓ 3m12s  tune physics`: status glyph, elapsed, what it is for.
 fn task_label(t: &TaskSummary, now_ms: u64) -> String {
     let time = t.started_at.map_or(String::new(), |s| {
         fmt_elapsed(t.finished_at.unwrap_or(now_ms).saturating_sub(s)) + " "
     });
-    let activity = t.activity.strip_prefix("status: ").unwrap_or(&t.activity);
-    let about = about(t);
-    let what = match t.status {
-        TaskStatus::Running if !activity.is_empty() => activity,
-        _ => &about,
-    };
-    format!("{} {time} {}", glyph(t.status), first_line(what, 50))
+    format!("{} {time} {}", glyph(t.status), first_line(&about(t), 50))
 }
 
 /// What a task is for: `↻ <routine>` for a routine run (its prompt is boilerplate), else its prompt.
@@ -423,16 +416,16 @@ fn limit_line(harness: &str, mut ws: Vec<&LimitWindow>, now: u64) -> Option<Stri
     Some(format!("{name}: {}", ws.join(" · ")))
 }
 
-/// Length of a window named `5h`, `7d` or `90m`; unknown names sort last.
+/// Length of a window named `5h`, `7d` or `90m`; other names sort last.
 fn minutes(name: &str) -> u64 {
-    let (n, unit) = name.split_at(name.len().saturating_sub(1));
-    let n: u64 = n.parse().unwrap_or(u64::MAX / 1440);
-    match unit {
-        "m" => n,
-        "h" => n * 60,
-        "d" => n * 1440,
-        _ => u64::MAX,
-    }
+    let unit = |u, per: u64| {
+        let n: u64 = name.strip_suffix(u)?.parse().ok()?;
+        Some(n.saturating_mul(per))
+    };
+    unit('m', 1)
+        .or_else(|| unit('h', 60))
+        .or_else(|| unit('d', 1440))
+        .unwrap_or(u64::MAX)
 }
 
 /// `5h 62%, resets 2h10m`; `(stale)` for a reading too old to trust, `(overage)`
@@ -997,9 +990,12 @@ mod tests {
         assert_eq!(span(4 * MIN), "4m");
         assert_eq!(span(80 * MIN), "1h20m");
         assert_eq!(span(51 * 60 * MIN), "2d03h");
-        let mut names = ["7d", "x", "90m", "5h", "1d"];
+        let mut names = ["7d", "x", "90m", "5時", "5h", "1d", "99999999999999999999d"];
         names.sort_by_key(|n| minutes(n));
-        assert_eq!(names, ["90m", "5h", "1d", "7d", "x"]);
+        assert_eq!(
+            names,
+            ["90m", "5h", "1d", "7d", "x", "5時", "99999999999999999999d"]
+        );
     }
 
     #[test]
