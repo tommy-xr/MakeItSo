@@ -391,30 +391,34 @@ mod tests {
         let procs = crate::live::claude_procs(&claude, |_, _| true);
         let mut feed = Feed::default();
         let got = feed.poll(&claude, &codex, &procs, NOW);
-        let states: Vec<_> = got
-            .iter()
+        let mut states: Vec<_> = (got.iter())
             .map(|s| (s.id.as_str(), s.state, s.open))
             .collect();
         let x1 = "aaaaaaaa-0000-7000-8000-000000000001";
         let x2 = "bbbbbbbb-0000-7000-8000-000000000002";
-        assert_eq!(
-            states,
-            [
-                ("busy", Working, true),
-                ("delegating", Working, true),
-                ("closed-running", Working, false),
-                ("closed-done", Idle, false),
-                (x1, Working, false),
-                (x2, Idle, false),
-                ("stuck", Stalled, true),
-                ("perm", Waiting, true),
-                ("closed-quiet", Stalled, false),
-                ("replied", Waiting, true),
-                ("shell", Shell, true),
-                ("old-open", Waiting, true),
-            ]
-        );
-        let busy = &got[0];
+        let mut want = vec![
+            ("busy", Working, true),
+            ("delegating", Working, true),
+            ("closed-running", Working, false),
+            ("closed-done", Idle, false),
+            (x1, Working, false),
+            (x2, Idle, false),
+            ("stuck", Stalled, true),
+            ("perm", Waiting, true),
+            ("closed-quiet", Stalled, false),
+            ("replied", Waiting, true),
+            ("shell", Shell, true),
+        ];
+        // Open beyond the window counts only where dead processes' records can be
+        // told apart (unix; see `live::alive`). File order is the platform's too.
+        if cfg!(unix) {
+            want.push(("old-open", Waiting, true));
+        }
+        states.sort_by_key(|s| s.0);
+        want.sort_by_key(|s| s.0);
+        assert_eq!(states, want);
+        let by = |id: &str| got.iter().find(|s| s.id == id).unwrap();
+        let busy = by("busy");
         assert_eq!(
             (
                 busy.name.as_deref(),
@@ -428,9 +432,13 @@ mod tests {
         assert_eq!(perm.waiting_for.as_deref(), Some("permission prompt"));
         let replied = got.iter().find(|s| s.id == "replied").unwrap();
         assert_eq!(replied.last.as_deref(), Some("Fixed it."));
-        assert_eq!(got[1].updated_ms, NOW - MIN, "its subagent's write");
-        assert_eq!(got[4].last, None);
-        assert_eq!(got[5].last.as_deref(), Some("Renamed."));
+        assert_eq!(
+            by("delegating").updated_ms,
+            NOW - MIN,
+            "its subagent's write"
+        );
+        assert_eq!(by(x1).last, None);
+        assert_eq!(by(x2).last.as_deref(), Some("Renamed."));
         // Secrets in the records are never read into anything sent.
         let wire = serde_json::to_string(&got).unwrap();
         assert!(!wire.contains("SECRET"), "{wire}");
@@ -448,7 +456,7 @@ mod tests {
         let mut feed = Feed::default();
         let first = feed.poll(&claude, &codex, &procs, NOW);
         // The headless one is parsed once too; the one out of the window never.
-        assert_eq!(feed.parsed, 13);
+        assert_eq!(feed.parsed, if cfg!(unix) { 13 } else { 12 });
         assert_eq!(feed.poll(&claude, &codex, &procs, NOW), first);
         assert_eq!(feed.parsed, 0);
         // A headless run writing on isn't read again.
