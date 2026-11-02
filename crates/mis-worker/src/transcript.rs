@@ -30,7 +30,7 @@ fn clip(s: &str, max: usize) -> String {
 /// `s` without ANSI/VT control sequences, e.g. the colors in logged tool output: CSI
 /// (`ESC [ … final`, or 8-bit `U+009B … final`), strings such as OSC (`ESC ] … BEL` or
 /// `… ESC \`) and DCS, and other escapes (`ESC =`, `ESC ( B`). One cut off at the end is dropped.
-fn plain(s: &str) -> String {
+pub(crate) fn plain(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars();
     // CSI parameters and intermediates run up to a final byte in `@`..=`~`.

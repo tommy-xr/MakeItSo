@@ -12,6 +12,7 @@ use crate::{note, plan, routine, summary};
 
 pub mod persist;
 mod routines;
+mod sessions;
 
 /// Opaque handle for one worker connection; the shell maps it to a socket.
 pub type ConnId = u64;
@@ -445,6 +446,10 @@ pub struct Ledger {
     update: Update,
     /// Each routine's schedule state, by name (see `routines`).
     routines: BTreeMap<String, routine::State>,
+    /// Each worker's live sessions as it last reported them; outlives the worker.
+    live: BTreeMap<WorkerId, sessions::Live>,
+    /// `sessions()` as last pushed to watchers.
+    pushed: Option<Vec<SessionRow>>,
 }
 
 impl Ledger {

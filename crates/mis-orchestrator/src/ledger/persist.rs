@@ -33,6 +33,9 @@ struct Saved<'a> {
     /// `Ledger::routines`.
     #[serde(default)]
     routines: Cow<'a, BTreeMap<String, routine::State>>,
+    /// `Ledger::live`.
+    #[serde(default)]
+    live: Cow<'a, BTreeMap<WorkerId, super::sessions::Live>>,
 }
 
 /// One save: the ledger file and each transcript that may have changed.
@@ -76,6 +79,7 @@ impl Ledger {
                 .collect(),
             tasks: Cow::Borrowed(&self.tasks),
             routines: Cow::Borrowed(&self.routines),
+            live: Cow::Borrowed(&self.live),
         };
         let transcripts = (self.tasks.iter())
             .filter(|t| !written.contains(&t.task.id))
@@ -134,6 +138,7 @@ impl Ledger {
         l.noted = saved.noted.into_iter().collect();
         l.tasks = saved.tasks.into_owned();
         l.routines = saved.routines.into_owned();
+        l.live = saved.live.into_owned();
         let written = (l.tasks.iter())
             .filter(|t| t.status.finished())
             .map(|t| t.task.id)
@@ -426,6 +431,31 @@ mod tests {
             unreachable!()
         };
         assert_eq!(workers[0].new_tools, ["Houdini"]);
+    }
+
+    #[test]
+    fn live_sessions_survive_a_restart_offline() {
+        let mut l = Ledger::default();
+        let w = Uuid::new_v4();
+        l.connect(w, info(), &[], 1, NOW);
+        let s = LiveSession {
+            harness: "claude".into(),
+            id: "s1".into(),
+            state: LiveState::Waiting,
+            waiting_for: Some("permission prompt".into()),
+            ..Default::default()
+        };
+        l.live_sessions(w, 1, vec![s.clone()]);
+        let (r, _) = round_trip(&l);
+        let rows = r.sessions();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((&rows[0].session, rows[0].online), (&s, false));
+        // Saved before live sessions existed: loads with none.
+        let old = l.snapshot(&HashSet::new()).ledger;
+        let at = old.find(r#","live":"#).unwrap();
+        let old = format!("{}}}", &old[..at]);
+        let r = Ledger::restore(&old, |_| None, NOW, 0).unwrap().ledger;
+        assert!(r.sessions().is_empty());
     }
 
     #[test]

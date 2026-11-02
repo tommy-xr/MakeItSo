@@ -3270,3 +3270,86 @@ async fn acting_routine_runs_dry_until_switched_live() {
     assert_eq!(mode("fix").await, Some(RoutineMode::DryRun));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn live_sessions_need_full_access_and_outlast_their_worker() {
+    let base = start_app(with_read_token()).await;
+    let wid = WorkerId::new_v4();
+    let mut req = format!("{base}/ws/worker").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("authorization", "Bearer s".parse().unwrap());
+    let (mut worker, _) = connect_async(req).await.unwrap();
+    let hello = WorkerMsg::Hello {
+        id: wid,
+        info: info("claude"),
+        running: vec![],
+    };
+    send(&mut worker, &hello).await;
+    let OrchMsg::Welcome { .. } = recv(&mut worker).await else {
+        panic!("welcome")
+    };
+    // A full client watches; a read-only one may not.
+    let (mut full, _) = connect_async(client_req(&base, &[("authorization", "Bearer s")]))
+        .await
+        .unwrap();
+    send(&mut full, &ClientMsg::WatchSessions).await;
+    let ServerMsg::Sessions { sessions } = recv(&mut full).await else {
+        panic!("snapshot")
+    };
+    assert!(sessions.is_empty());
+    let (mut read, _) = connect_async(client_req(&base, &[("authorization", "Bearer r")]))
+        .await
+        .unwrap();
+    send(&mut read, &ClientMsg::Subscribe).await;
+    send(&mut read, &ClientMsg::WatchSessions).await;
+    let ServerMsg::Error { message } = recv(&mut read).await else {
+        panic!("refused")
+    };
+    assert_eq!(message, "read-only token");
+
+    let s = LiveSession {
+        harness: "claude".into(),
+        id: "s-1".into(),
+        title: Some("Tune jump physics".into()),
+        state: LiveState::Waiting,
+        waiting_for: Some("permission prompt".into()),
+        updated_ms: 7,
+        ..Default::default()
+    };
+    let report = WorkerMsg::LiveSessions {
+        sessions: vec![s.clone()],
+    };
+    send(&mut worker, &report).await;
+    let ServerMsg::Sessions { sessions } = recv(&mut full).await else {
+        panic!("pushed")
+    };
+    assert_eq!((&sessions[0].session, sessions[0].online), (&s, true));
+
+    assert_eq!(get_json(&base, "/api/sessions", "r").await.0, 403);
+    assert_eq!(get_json(&base, "/api/sessions", "nope").await.0, 401);
+    for old in [
+        format!("/api/workers/{wid}/sessions"),
+        format!(
+            "/api/workers/{wid}/sessions/claude/{}",
+            uuid::Uuid::new_v4()
+        ),
+    ] {
+        assert_eq!(get_json(&base, &old, "r").await.0, 403, "{old}");
+    }
+    // Gone: its sessions stay, offline, and watchers hear of it.
+    drop(worker);
+    let ServerMsg::Sessions { sessions } = recv(&mut full).await else {
+        panic!("pushed")
+    };
+    assert!(!sessions[0].online);
+    let (status, body) = get_json(&base, "/api/sessions", "s").await;
+    assert_eq!(status, 200, "{body}");
+    let rows: Vec<SessionRow> = serde_json::from_str(&body).unwrap();
+    assert_eq!(rows, sessions);
+    assert_eq!((rows[0].worker, rows[0].worker_name.as_str()), (wid, "w"));
+    // The read-only client never saw a session.
+    send(&mut read, &ClientMsg::Status).await;
+    let ServerMsg::Status { .. } = recv(&mut read).await else {
+        panic!("only status")
+    };
+}

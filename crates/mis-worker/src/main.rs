@@ -3,6 +3,7 @@
 
 mod approvals;
 mod config;
+mod feed;
 mod inventory;
 mod live;
 mod mcp;
@@ -205,6 +206,7 @@ async fn main() -> Result<()> {
         exe: exe.clone(),
         upd_tx,
         upd_rx,
+        feed: Default::default(),
     };
 
     loop {
@@ -348,6 +350,8 @@ struct Conn {
     /// Downloads from `check_update`: version, and its checked executable or why not.
     upd_tx: mpsc::Sender<(String, std::result::Result<Vec<u8>, String>)>,
     upd_rx: mpsc::Receiver<(String, std::result::Result<Vec<u8>, String>)>,
+    /// Live sessions: parsed files, and what this connection was last sent.
+    feed: Arc<Mutex<feed::Feed>>,
 }
 
 /// How a session ended without error.
@@ -399,6 +403,10 @@ async fn session(
     let mut beat = tokio::time::interval(STATS_INTERVAL);
     // After a stall (e.g. laptop sleep), send one beat, not a burst.
     beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Live sessions: sent on the first tick, then when they change.
+    c.feed.lock().unwrap().reconnected();
+    let mut poll = tokio::time::interval(feed::POLL_EVERY);
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         if c.update.restart_due(c.running.is_empty()) {
@@ -439,6 +447,26 @@ async fn session(
                         .unwrap_or_default();
                     tracing::debug!(?s, took = ?t.elapsed(), "sending stats");
                     sink.send(text(&WorkerMsg::Stats(s))).await?;
+                    continue;
+                }
+                _ = poll.tick() => {
+                    let t = std::time::Instant::now();
+                    let feed = c.feed.clone();
+                    // File reads: off the runtime's threads.
+                    let changed = tokio::task::spawn_blocking(move || {
+                        let (claude, codex) = sessions::roots();
+                        let procs = live::claude_procs(&claude, live::alive);
+                        let mut feed = feed.lock().unwrap();
+                        let all = feed.poll(&claude, &codex, &procs, unix_ms());
+                        feed.changed(all)
+                    });
+                    let changed = changed.await.ok().flatten();
+                    tracing::debug!(took = ?t.elapsed(), changed = changed.is_some(), "live sessions read");
+                    if let Some(sessions) = changed {
+                        let msg = text(&WorkerMsg::LiveSessions { sessions });
+                        tracing::debug!(bytes = msg.len(), "sending live sessions");
+                        sink.send(msg).await?;
+                    }
                     continue;
                 }
             },
