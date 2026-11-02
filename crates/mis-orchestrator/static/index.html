@@ -133,14 +133,16 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .go svg { width: 1.25rem; height: 1.25rem; }
   /* Above the box: the harness chip, a reply's error, a session's open-terminal choice. */
   .ctx { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .75rem; margin: 0 0 .5rem; font-size: .8125rem; overflow-wrap: anywhere; }
-  .ctx p { flex: 1 1 12rem; margin: 0; }
+  .ctx p { flex: 1 1 10rem; margin: 0; }
   .ctx:not(:has(> :not([hidden]))) { display: none; }
   /* Harness/model chip; its ::after widens the tap target. The popover opens above it. */
-  #opt { position: relative; max-width: 100%; min-height: 0; height: 1.75rem; padding: 0 .5rem; border-color: var(--rule); color: var(--dim); font: 600 .6875rem/1 var(--display); letter-spacing: .12em; }
+  #opt { position: relative; max-width: 100%; min-height: 0; height: 1.75rem; padding: 0 .5rem; border-color: var(--rule); color: var(--dim); font: 600 .75rem/1 var(--mono); letter-spacing: 0; text-transform: none; }
   #opt span { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   #opt::after { content: ""; position: absolute; inset: -.5rem -.25rem; }
   #opt[aria-expanded=true] { color: var(--accent); border-color: var(--accent); }
   #opts { position: absolute; z-index: 1; left: 0; bottom: calc(100% + .375rem); display: grid; gap: .5rem; width: min(20rem, 100%); box-sizing: border-box; padding: .625rem; border: 1px solid var(--line); background: var(--bg); box-shadow: 0 0 14px var(--glow); }
+  /* 16px: iOS zooms the page into smaller fields. */
+  #opts select, #opts input { font-size: 1rem; }
   #opts input { min-height: 2.75rem; padding: 0 .75rem; width: 100%; }
   #say-queue { min-height: 2.25rem; padding: 0 .625rem; font-size: .6875rem; }
   /* Menu: a sheet from the right over a dimmed page; Escape, a backdrop tap or ✕ close it. */
@@ -422,7 +424,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   <form id="new" class="composer">
     <div id="shots" class="shots" hidden></div>
     <div class="ctx">
-      <button type="button" id="opt" aria-haspopup="true" aria-expanded="false" aria-controls="opts"><span>auto ▾</span></button>
+      <button type="button" id="opt" aria-expanded="false" aria-controls="opts"><span>auto ▾</span></button>
       <div id="opts" role="group" aria-label="Harness and model" hidden>
         <select id="harness" aria-label="harness"><option value="">auto</option></select>
         <input id="model" aria-label="model" placeholder="model (optional)" autocapitalize="off" autocorrect="off" spellcheck="false">
@@ -435,7 +437,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
     <div class="box"><textarea id="reply-text" rows="1" aria-label="reply" placeholder="Reply in this thread…" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><button id="send-reply" class="go" aria-label="Reply" title="Reply"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg></button></div>
   </form>
   <form id="say" class="composer" hidden>
-    <div class="ctx"><p id="say-open" class="warn" hidden></p><button type="button" id="say-queue" hidden>Queue until closed</button><p id="say-state" hidden></p></div>
+    <div class="ctx"><p id="say-open" class="warn" hidden></p><button type="button" id="say-queue" title="Holds this worker until the session closes (up to 15 min)" hidden>Queue until closed</button><p id="say-state" hidden></p></div>
     <div class="box"><textarea id="say-text" rows="1" aria-label="message" placeholder="Message this session…" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11.1" y="17" width="1.8" height="4"/></svg></button><button id="say-send" class="go" aria-label="Send" title="Send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg></button></div>
   </form>
 </footer>
@@ -1395,8 +1397,8 @@ function renderSay(got) {
   const open = !!(got && got.open);
   // Codex records no open terminals: only a recent write counts.
   $('say-open').hidden = !open && harness !== 'codex';
-  $('say-open').textContent = !open ? 'Codex can’t tell if a terminal has this open; ↑ continues it in place.'
-    : `${harness === 'claude' ? 'Open in a terminal right now.' : 'May be open: written in the last 2 minutes.'} ↑ sends to a copy; queueing holds this worker until it closes (up to 15 min).`;
+  $('say-open').textContent = !open ? 'Codex can’t tell if it’s open · ↑ continues it'
+    : `${harness === 'claude' ? 'Open in a terminal' : 'May be open (written < 2 min ago)'} · ↑ sends a copy`;
   $('say-send').ariaLabel = $('say-send').title = open ? 'Send to a copy' : 'Send';
   $('say-queue').hidden = !open;
   $('say-state').hidden = !saying.sent && !saying.error;
@@ -1911,7 +1913,7 @@ $('prompt').value = drafts.get('draft:new');
 window.onhashchange = () => { takeNew(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); render(); };
 setInterval(tick, 1000);
 
-// `#new` (the tray's "New task…") is Tasks with the composer focused; the hash becomes `#` so back links don't refocus.
+// `#new`, a link into the page for a new task, is Tasks with the composer focused; the hash becomes `#` so back links don't refocus.
 function takeNew() { if (location.hash === '#new') { history.replaceState(null, '', '#'); wantNew = true; } }
 takeNew();
 
@@ -1955,7 +1957,9 @@ $('new').addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('opts
 $('menu-btn').onclick = () => { $('menu').showModal(); $('menu-btn').setAttribute('aria-expanded', 'true'); };
 $('menu').addEventListener('close', () => $('menu-btn').setAttribute('aria-expanded', 'false'));
 $('menu-close').onclick = () => $('menu').close();
-$('menu').addEventListener('click', (e) => { if (e.target === $('menu') || e.target.closest('nav a')) $('menu').close(); });
+let downOnBackdrop = false;
+$('menu').addEventListener('pointerdown', (e) => { downOnBackdrop = e.target === $('menu'); });
+$('menu').addEventListener('click', (e) => { if ((e.target === $('menu') && downOnBackdrop) || e.target.closest('nav a')) $('menu').close(); });
 // Theme, per viewer: System follows the device; Dark or Light set `data-theme`, which the token blocks key on.
 const theme = {
   get() { try { return localStorage.getItem('mis-theme') || ''; } catch { return ''; } },
