@@ -308,6 +308,15 @@ pub(crate) fn open(harness: &str, id: &str, active: bool, held: &HashSet<String>
     }
 }
 
+/// [`open`] for one session, reading the live processes only for claude.
+pub(crate) fn is_open(claude: &Path, harness: &str, id: &str, active: bool) -> bool {
+    let held = match harness {
+        "claude" => live::claude_open(claude, live::alive),
+        _ => HashSet::new(),
+    };
+    open(harness, id, active, &held)
+}
+
 /// One session file's summary, as listed (headless or not).
 pub(crate) fn read_one(harness: &str, path: &Path, now_ms: u64) -> Option<Session> {
     let at = mtime_ms(&std::fs::metadata(path).ok()?);

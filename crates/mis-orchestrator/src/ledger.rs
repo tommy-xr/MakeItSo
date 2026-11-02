@@ -601,30 +601,22 @@ impl Ledger {
         let by_planner = p.task.harness == "planner" || p.task.harness.is_empty();
         let (id, effects) = match (&p.session, p.worker) {
             (Some(session), Some(wid)) if !by_planner => {
-                let host = &wid.to_string()[..8];
-                let Some(w) = self.workers.get(&wid).filter(|w| w.conn.is_some()) else {
-                    return Err(format!(
-                        "worker {host} is offline; task {short}'s session lives there"
-                    ));
-                };
-                if !w.info.harnesses.contains(&p.task.harness) {
-                    return Err(format!("worker {host} no longer runs {}", p.task.harness));
-                }
-                // A reply continues this task's own session (or copy), wherever it ran.
+                // A reply continues this task's session, in its folder. One that messaged a
+                // session on the worker's disk continues a copy: that session may be open again.
+                let send_to = (p.task.send_to.as_ref()).map(|to| SendTo {
+                    session: session.parse().unwrap_or(to.session),
+                    mode: SendMode::Fork,
+                    ..to.clone()
+                });
                 let task = Task {
                     id: Uuid::new_v4(),
                     prompt: text,
                     resume: Some(session.clone()),
-                    send_to: None,
+                    send_to,
                     ..p.task.clone()
                 };
-                let mut entry = TaskEntry::new(task, self.now_ms);
-                entry.pin = Some(wid);
-                entry.images = images;
-                let id = entry.task.id;
-                self.tasks.push(entry);
-                self.queue.push_back(id);
-                (id, self.schedule())
+                self.enqueue_pinned(wid, task, images)
+                    .map_err(|why| format!("{why}; task {short}'s session lives there"))?
             }
             _ => {
                 let prompt = reply_context(&p.task.prompt, p.summary.as_deref(), &text);
@@ -650,11 +642,6 @@ impl Ledger {
         text: String,
         to: SendTo,
     ) -> Result<(TaskId, Vec<Effect>), String> {
-        let w = (self.workers.get(&wid).filter(|w| w.conn.is_some()))
-            .ok_or("that worker is offline")?;
-        if !w.info.harnesses.contains(&harness) {
-            return Err(format!("that worker doesn't run {harness}"));
-        }
         let task = Task {
             id: Uuid::new_v4(),
             prompt: text,
@@ -664,8 +651,26 @@ impl Ledger {
             resume: Some(to.session.to_string()),
             send_to: Some(to),
         };
+        self.enqueue_pinned(wid, task, vec![])
+    }
+
+    /// Queue `task` for worker `wid` only, where the session it resumes lives.
+    /// Err if `wid` is offline or doesn't run the task's harness.
+    fn enqueue_pinned(
+        &mut self,
+        wid: WorkerId,
+        task: Task,
+        images: Vec<Uuid>,
+    ) -> Result<(TaskId, Vec<Effect>), String> {
+        let host = &wid.to_string()[..8];
+        let w = (self.workers.get(&wid).filter(|w| w.conn.is_some()))
+            .ok_or_else(|| format!("worker {host} is offline"))?;
+        if !w.info.harnesses.contains(&task.harness) {
+            return Err(format!("worker {host} no longer runs {}", task.harness));
+        }
         let mut entry = TaskEntry::new(task, self.now_ms);
         entry.pin = Some(wid);
+        entry.images = images;
         let id = entry.task.id;
         self.tasks.push(entry);
         self.queue.push_back(id);
@@ -2958,7 +2963,7 @@ mod tests {
     }
 
     #[test]
-    fn a_session_message_is_pinned_and_a_reply_to_it_is_a_plain_resume() {
+    fn a_session_message_is_pinned_and_a_reply_to_it_continues_a_copy() {
         let mut l = Ledger::default();
         let (idle, wid) = (Uuid::new_v4(), Uuid::new_v4());
         l.connect(idle, info(), &[], 2, T0);
@@ -2994,10 +2999,14 @@ mod tests {
         let [t] = &sent(&eff)[..] else {
             panic!("{eff:?}")
         };
-        assert_eq!(
-            (t.resume.clone(), t.send_to.clone()),
-            (Some(session.to_string()), None)
-        );
+        // It continues a copy, found and run on the worker like the message was.
+        let copy = SendTo {
+            session,
+            title: Some("t".into()),
+            mode: SendMode::Fork,
+        };
+        assert_eq!(t.resume, Some(session.to_string()));
+        assert_eq!(t.send_to, Some(copy));
     }
 
     #[test]

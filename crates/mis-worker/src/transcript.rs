@@ -8,9 +8,8 @@ use mis_types::{first_line, Answer, Role, Turn, MAX_TURNS};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::live;
 use crate::rules;
-use crate::sessions::{active, feed, jsonl_at, mtime_ms, open, typed};
+use crate::sessions::{active, feed, is_open, jsonl_at, mtime_ms, typed};
 
 /// Bytes read from the end of the file; older turns are reported as `more`.
 const WINDOW: u64 = 2 << 20;
@@ -235,13 +234,12 @@ pub fn read(
     let (turns, dropped) = last(turns, limit);
     let updated_ms = mtime_ms(&meta);
     let active = active(updated_ms, now_ms);
-    let held = live::claude_open(claude, live::alive);
     Answer::Transcript {
         turns,
         more: dropped || from > 0,
         updated_ms,
         active,
-        open: open(harness, &id.to_string(), active, &held),
+        open: is_open(claude, harness, &id.to_string(), active),
     }
 }
 

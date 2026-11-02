@@ -2981,20 +2981,13 @@ async fn a_session_transcript_is_read_from_the_worker() {
     assert!(got.starts_with("HTTP/1.1 404"), "{got}");
 }
 
-/// Raw HTTP/1.1 POST of a JSON body; returns the raw response.
-async fn http_post(base: &str, path: &str, auth: &str, body: &str) -> String {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let addr = base.trim_start_matches("ws://");
-    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {auth}\r\n\
-         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
+/// POST a JSON `body` with bearer `auth`; the status and body.
+async fn post_json(base: &str, path: &str, auth: &str, body: &str) -> (u16, String) {
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nAuthorization: Bearer {auth}\r\nContent-Type: application/json"
     );
-    s.write_all(req.as_bytes()).await.unwrap();
-    let mut out = String::new();
-    s.read_to_string(&mut out).await.unwrap();
-    out
+    let (status, _, body) = http(base, &head, body.as_bytes()).await;
+    (status, String::from_utf8(body).unwrap())
 }
 
 #[tokio::test]
@@ -3019,24 +3012,18 @@ async fn messaging_a_session_runs_a_task_on_its_worker() {
     let path = format!("/api/workers/{wid}/sessions/claude/{session}/messages");
     let body = r#"{"text":"also add coyote time","mode":"fork","title":"Tune jump physics"}"#;
     // Acting needs the full token.
-    let read = http_post(&base, &path, "r", body).await;
-    assert!(read.starts_with("HTTP/1.1 403"), "{read}");
-    let none = http_post(&base, &path, "nope", body).await;
-    assert!(none.starts_with("HTTP/1.1 401"), "{none}");
+    assert_eq!(post_json(&base, &path, "r", body).await.0, 403);
+    assert_eq!(post_json(&base, &path, "nope", body).await.0, 401);
     let other = format!(
         "/api/workers/{}/sessions/claude/{session}/messages",
         WorkerId::new_v4()
     );
-    assert!(http_post(&base, &other, "s", body)
-        .await
-        .starts_with("HTTP/1.1 404"));
+    assert_eq!(post_json(&base, &other, "s", body).await.0, 404);
     let codex = format!("/api/workers/{wid}/sessions/codex/{session}/messages");
-    assert!(http_post(&base, &codex, "s", body)
-        .await
-        .starts_with("HTTP/1.1 400"));
+    assert_eq!(post_json(&base, &codex, "s", body).await.0, 400);
 
-    let ok = http_post(&base, &path, "s", body).await;
-    assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
+    let (status, ok) = post_json(&base, &path, "s", body).await;
+    assert_eq!(status, 200, "{ok}");
     let OrchMsg::Assign { task, .. } = recv(&mut worker).await else {
         panic!("assign")
     };

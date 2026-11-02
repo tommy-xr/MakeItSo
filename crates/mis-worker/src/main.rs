@@ -572,8 +572,9 @@ fn answer(query: Query) -> Answer {
     }
 }
 
-/// Longest a `SendMode::WhenClosed` message waits for its session to close.
-const WAIT_CLOSED: Duration = Duration::from_secs(3600);
+/// Longest a `SendMode::WhenClosed` message waits for its session to close. It holds
+/// this worker meanwhile (one task at a time), so not long.
+const WAIT_CLOSED: Duration = Duration::from_secs(15 * 60);
 const RECHECK_OPEN: Duration = Duration::from_secs(10);
 
 /// Where a message to a session on this disk runs: the session's own folder (and
@@ -628,8 +629,7 @@ fn session_state(harness: &str, id: uuid::Uuid) -> std::result::Result<SessionSt
     let s = sessions::read_one(harness, &path, unix_ms())
         .ok_or_else(|| format!("can't read {harness} session {id}"))?;
     let cwd = s.cwd.ok_or("the session doesn't record its folder")?;
-    let held = live::claude_open(&claude, live::alive);
-    let open = sessions::open(harness, &s.id, s.active, &held);
+    let open = sessions::is_open(&claude, harness, &s.id, s.active);
     Ok((cwd, s.model, open))
 }
 

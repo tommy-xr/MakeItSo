@@ -35,6 +35,7 @@ pub enum Answer {
         /// As in `Session`, so a viewer knows whether to keep refreshing.
         updated_ms: u64,
         active: bool,
+        #[serde(default)]
         open: bool,
     },
     NotFound,

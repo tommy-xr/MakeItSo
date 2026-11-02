@@ -26,31 +26,34 @@ pub fn claude_open(claude: &Path, alive: impl Fn(u32, &str) -> bool) -> HashSet<
         .collect()
 }
 
-/// `pid` runs and started at `start`, as `ps -o lstart` prints it in UTC (claude's
-/// `procStart`), so a reused pid doesn't count.
+/// `pid` runs and, where claude wrote `start` as `ps -o lstart` prints it in UTC
+/// (macOS), started then, so a reused pid doesn't count. A `start` in another form
+/// can't be compared: a live pid is enough, as a missed open session is the worse error.
 #[cfg(unix)]
 pub fn alive(pid: u32, start: &str) -> bool {
-    let words = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    proc_start(pid).is_some_and(|s| s == words(start))
+    let start = words(start);
+    let lstart = start.split(' ').count() == 5 && start.matches(':').count() == 2;
+    proc_start(pid).is_some_and(|s| s == start || !lstart)
 }
 
-/// Can't tell on Windows: nothing counts as open there.
+/// Can't tell on Windows: every recorded session counts as open, so it is sent to a copy.
 #[cfg(not(unix))]
 pub fn alive(_pid: u32, _start: &str) -> bool {
-    false
+    true
 }
 
+fn words(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// When `pid` started, `Sat Oct 31 17:14:04 2026` in UTC; None if it isn't running.
 #[cfg(unix)]
 fn proc_start(pid: u32) -> Option<String> {
-    let out = std::process::Command::new("ps")
-        .args(["-o", "lstart=", "-p", &pid.to_string()])
-        .env("TZ", "UTC")
-        .env("LC_ALL", "C")
-        .output()
-        .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
-    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    (out.status.success() && !s.is_empty()).then_some(s)
+    let mut ps = std::process::Command::new("ps");
+    ps.args(["-o", "lstart=", "-p", &pid.to_string()]);
+    ps.env("TZ", "UTC").env("LC_ALL", "C");
+    let s = words(&crate::inventory::output_within(ps)?);
+    (!s.is_empty()).then_some(s)
 }
 
 #[cfg(all(test, unix))]
@@ -74,12 +77,14 @@ mod tests {
         };
         file(me, "live", &format!("  {started} "));
         file(me, "reused-pid", "Mon Jan  1 00:00:00 2001");
+        // Not in `ps` form (another platform's): a live pid is enough.
+        file(me, "other-form", "1793570000");
         file(u32::MAX >> 1, "dead", &started);
         // Never opened: not JSON, and not ours to read.
         std::fs::write(sessions.join(format!("{me}.abc.key")), "{").unwrap();
         assert_eq!(
             claude_open(&dir, alive),
-            HashSet::from(["live".to_string()])
+            HashSet::from(["live".to_string(), "other-form".to_string()])
         );
         assert!(claude_open(&dir.join("none"), alive).is_empty());
         std::fs::remove_dir_all(dir).unwrap();
