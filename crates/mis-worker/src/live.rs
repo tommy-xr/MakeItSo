@@ -16,14 +16,25 @@ struct Record {
     session_id: String,
     pid: u32,
     proc_start: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     status: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     waiting_for: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     status_updated_at: Option<u64>,
+}
+
+/// None for a value of another shape, so a display field claude changes can't hide
+/// that a process holds the session.
+fn lenient<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).ok())
 }
 
 /// A live claude process holding a session.
@@ -121,6 +132,10 @@ mod tests {
             .unwrap();
         };
         file(me, "live", &format!("  {started} "));
+        // Display fields of an unexpected shape don't hide it.
+        let odd = serde_json::json!({"pid": me, "sessionId": "odd", "procStart": started,
+            "status": 3, "name": {"a": 1}, "statusUpdatedAt": "soon", "peerToken": "SECRET"});
+        std::fs::write(sessions.join(format!("{me}-odd.json")), odd.to_string()).unwrap();
         file(me, "reused-pid", "Mon Jan  1 00:00:00 2001");
         // Not in `ps` form (another platform's): a live pid is enough.
         file(me, "other-form", "1793570000");
@@ -129,7 +144,7 @@ mod tests {
         std::fs::write(sessions.join(format!("{me}.abc.key")), "{").unwrap();
         assert_eq!(
             claude_open(&dir, alive),
-            HashSet::from(["live".to_string(), "other-form".to_string()])
+            HashSet::from(["live", "other-form", "odd"].map(String::from))
         );
         assert!(claude_open(&dir.join("none"), alive).is_empty());
         std::fs::remove_dir_all(dir).unwrap();

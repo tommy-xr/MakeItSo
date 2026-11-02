@@ -1564,7 +1564,8 @@ async fn client_conn(mut sock: WebSocket, app: App, scope: Scope) {
                     }
                     // Subscribed first, so no change after this snapshot is missed.
                     sub.get_or_insert_with(|| app.events.subscribe());
-                    let sessions = app.ledger().watch_sessions();
+                    // Not counted as pushed: a change still in flight reaches everyone.
+                    let sessions = app.ledger().sessions();
                     send_json(&mut sock, &ServerMsg::Sessions { sessions }).await;
                 }
                 Some(ClientMsg::Seen { task }) => app.transition(|l| ((), l.seen(task))),

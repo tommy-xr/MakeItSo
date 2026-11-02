@@ -351,7 +351,7 @@ struct Conn {
     upd_tx: mpsc::Sender<(String, std::result::Result<Vec<u8>, String>)>,
     upd_rx: mpsc::Receiver<(String, std::result::Result<Vec<u8>, String>)>,
     /// Live sessions: parsed files, and what this connection was last sent.
-    feed: Arc<Mutex<feed::Feed>>,
+    feed: feed::Feed,
 }
 
 /// How a session ended without error.
@@ -404,7 +404,7 @@ async fn session(
     // After a stall (e.g. laptop sleep), send one beat, not a burst.
     beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Live sessions: sent on the first tick, then when they change.
-    c.feed.lock().unwrap().reconnected();
+    c.feed.reconnected();
     let mut poll = tokio::time::interval(feed::POLL_EVERY);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -451,16 +451,17 @@ async fn session(
                 }
                 _ = poll.tick() => {
                     let t = std::time::Instant::now();
-                    let feed = c.feed.clone();
-                    // File reads: off the runtime's threads.
-                    let changed = tokio::task::spawn_blocking(move || {
+                    let mut feed = std::mem::take(&mut c.feed);
+                    // File reads: off the runtime's threads. A panic there loses the cache only.
+                    let polled = tokio::task::spawn_blocking(move || {
                         let (claude, codex) = sessions::roots();
                         let procs = live::claude_procs(&claude, live::alive);
-                        let mut feed = feed.lock().unwrap();
                         let all = feed.poll(&claude, &codex, &procs, unix_ms());
-                        (feed.changed(all), feed.parsed)
+                        (feed.changed(all), feed)
                     });
-                    let (changed, parsed) = changed.await.unwrap_or_default();
+                    let (changed, feed) = polled.await.unwrap_or_default();
+                    let parsed = feed.parsed;
+                    c.feed = feed;
                     tracing::debug!(took = ?t.elapsed(), parsed, changed = changed.is_some(), "live sessions read");
                     if let Some(sessions) = changed {
                         let msg = text(&WorkerMsg::LiveSessions { sessions });

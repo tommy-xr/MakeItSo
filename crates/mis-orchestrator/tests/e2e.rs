@@ -3313,7 +3313,11 @@ async fn live_sessions_need_full_access_and_outlast_their_worker() {
         title: Some("Tune jump physics".into()),
         state: LiveState::Waiting,
         waiting_for: Some("permission prompt".into()),
-        updated_ms: 7,
+        // Just written: an offline worker's sessions are kept for its live window.
+        updated_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
         ..Default::default()
     };
     let report = WorkerMsg::LiveSessions {

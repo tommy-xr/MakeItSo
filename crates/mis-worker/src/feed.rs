@@ -16,8 +16,6 @@ use crate::sessions::{self, TurnEnd};
 pub const POLL_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 /// A longer tail than listing reads: one big tool result can fill 64 KB.
 const TAIL_BYTES: u64 = 256 << 10;
-/// Most files parsed in one poll; the rest wait for the next.
-const MAX_SCANNED: usize = 1000;
 const WAITING_FOR_CHARS: usize = 60;
 
 /// What one file says, kept until its size or mtime changes.
@@ -28,10 +26,20 @@ struct Facts {
     last: Option<String>,
 }
 
+/// A parsed file.
+#[derive(Clone)]
+enum Parsed {
+    /// Listed if it has facts (None: nothing to show yet); re-read once its
+    /// (len, mtime) changes.
+    Seen((u64, u64), Option<Facts>),
+    /// Headless for good: never read again, however it grows.
+    Headless,
+}
+
 #[derive(Default)]
 pub struct Feed {
-    /// By path: (len, mtime) when parsed, and its facts; None for files not listed (headless).
-    cache: HashMap<PathBuf, ((u64, u64), Option<Facts>)>,
+    /// By path.
+    cache: HashMap<PathBuf, Parsed>,
     /// Last sent this connection; None until the first send.
     sent: Option<Vec<LiveSession>>,
     /// Files the last poll parsed (the rest came from the cache).
@@ -108,24 +116,24 @@ impl Feed {
         procs: &HashMap<String, Proc>,
         now_ms: u64,
     ) -> Vec<LiveSession> {
-        let stem = |p: &Path| p.file_stem().map(|s| s.to_string_lossy().into_owned());
-        let claude_files = sessions::jsonl_at(&claude.join("projects"), 1);
-        let codex_files = sessions::jsonl_at(&codex.join("sessions"), 3);
-        let held = |p: &Path| stem(p).is_some_and(|id| procs.contains_key(&id));
-        let recent = |at: u64| now_ms.saturating_sub(at) < LIVE_WINDOW_MS;
-        let mut files: Vec<_> = (claude_files.into_iter())
-            .filter(|(at, p)| recent(*at) || held(p))
-            .map(|f| ("claude", f))
-            .chain(
-                codex_files
-                    .iter()
-                    .filter(|(at, _)| recent(*at))
-                    .cloned()
-                    .map(|f| ("codex", f)),
-            )
+        let all = sessions::files(claude, codex);
+        let codex_files: Vec<_> = (all.iter())
+            .filter(|(h, _)| *h == "codex")
+            .map(|(_, f)| f.clone())
             .collect();
-        files.sort_by_key(|(_, (at, _))| std::cmp::Reverse(*at));
-        files.truncate(MAX_SCANNED);
+        // Open claude sessions count however old, but only where a dead process's
+        // record can be told apart (see `live::alive`).
+        let held = |h: &str, p: &Path| {
+            let id = p.file_stem().map(|s| s.to_string_lossy());
+            cfg!(unix) && h == "claude" && id.is_some_and(|id| procs.contains_key(id.as_ref()))
+        };
+        let recent = |at: u64| now_ms.saturating_sub(at) < LIVE_WINDOW_MS;
+        let mut files: Vec<_> = (all.into_iter())
+            .filter(|(h, (at, p))| recent(*at) || held(h, p))
+            .collect();
+        // Open ones first, so no number of newer files crowds them out of the scan.
+        files.sort_by_key(|(h, (_, p))| !held(h, p));
+        files.truncate(sessions::MAX_SCANNED);
         // Built on first need: a codex copy's original, by session id.
         let mut by_id: Option<HashMap<String, (u64, PathBuf)>> = None;
         let mut cache = HashMap::new();
@@ -136,15 +144,18 @@ impl Feed {
                 continue;
             };
             let key = (meta.len(), at);
-            let facts = match self.cache.remove(&path) {
-                Some((k, facts)) if k == key => facts,
+            let parsed = match self.cache.remove(&path) {
+                Some(p @ Parsed::Headless) => p,
+                Some(p @ Parsed::Seen(k, _)) if k == key => p,
                 _ => {
                     self.parsed += 1;
-                    read(harness, &path, at, now_ms, &codex_files, &mut by_id)
+                    read(harness, &path, key, now_ms, &codex_files, &mut by_id)
                 }
             };
-            cache.insert(path.clone(), (key, facts.clone()));
-            let Some(f) = facts else { continue };
+            cache.insert(path.clone(), parsed.clone());
+            let Parsed::Seen(_, Some(f)) = parsed else {
+                continue;
+            };
             let proc = procs.get(&f.session.id).filter(|_| harness == "claude");
             let working = proc.is_some_and(|p| p.status.as_deref() == Some("busy"))
                 || f.turn == TurnEnd::Running;
@@ -174,23 +185,19 @@ impl Feed {
     }
 }
 
-/// Parse one file; None if it isn't listed (headless, or nothing to show).
+/// Parse one file whose (len, mtime) is `key`.
 fn read(
     harness: &str,
     path: &Path,
-    at: u64,
+    key: (u64, u64),
     now_ms: u64,
     codex_files: &[(u64, PathBuf)],
     by_id: &mut Option<HashMap<String, (u64, PathBuf)>>,
-) -> Option<Facts> {
-    let r = sessions::read_file(
-        harness,
-        path,
-        (sessions::HEAD_BYTES, TAIL_BYTES),
-        false,
-        at,
-        now_ms,
-    )?;
+) -> Parsed {
+    let bytes = (sessions::HEAD_BYTES, TAIL_BYTES);
+    let Some(r) = sessions::read_file(harness, path, bytes, true, key.1, now_ms) else {
+        return Parsed::Seen(key, None);
+    };
     let session = match r.forked_from {
         None => r.session,
         from => {
@@ -198,11 +205,18 @@ fn read(
             sessions::resolve_copy(r.session, from, |id| ids.get(id).cloned(), now_ms)
         }
     };
-    session.interactive.then_some(Facts {
+    if !session.interactive {
+        return match r.settled {
+            true => Parsed::Headless,
+            false => Parsed::Seen(key, None),
+        };
+    }
+    let facts = Facts {
         session,
         turn: r.turn,
         last: r.last,
-    })
+    };
+    Parsed::Seen(key, Some(facts))
 }
 
 #[cfg(test)]
@@ -428,6 +442,7 @@ mod tests {
 
     #[test]
     fn unchanged_files_are_not_parsed_again() {
+        use std::io::Write;
         let (claude, codex) = fixture();
         let procs = crate::live::claude_procs(&claude, |_, _| true);
         let mut feed = Feed::default();
@@ -435,6 +450,18 @@ mod tests {
         // The headless one is parsed once too; the one out of the window never.
         assert_eq!(feed.parsed, 13);
         assert_eq!(feed.poll(&claude, &codex, &procs, NOW), first);
+        assert_eq!(feed.parsed, 0);
+        // A headless run writing on isn't read again.
+        let headless = claude.join("projects/-w/headless.jsonl");
+        let more = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"more"}]}}"#;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&headless)
+            .unwrap()
+            .write_all(format!("{more}\n").as_bytes())
+            .unwrap();
+        touch(&headless, MIN / 4);
+        feed.poll(&claude, &codex, &procs, NOW);
         assert_eq!(feed.parsed, 0);
         // The busy session replies: only its file is read again.
         let path = claude.join("projects/-w/busy.jsonl");

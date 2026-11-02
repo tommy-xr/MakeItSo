@@ -19,8 +19,6 @@ pub struct Live {
 /// Messages shown per session; the latest win.
 const MAX_MESSAGES: usize = 20;
 const MESSAGE_CHARS: usize = 140;
-/// Copies of copies: how far back to look for the session a copy was made from.
-const MAX_COPY_DEPTH: usize = 8;
 
 /// Home's order: needing the user (waiting, stalled) first, then working, then the rest;
 /// newest first within each.
@@ -45,13 +43,15 @@ impl Ledger {
             return vec![];
         };
         let host = w.info.hostname.clone();
+        let sessions = sessions.into_iter().take(MAX_LIVE).collect();
         self.live.insert(wid, Live { host, sessions });
         vec![]
     }
 
     /// Every worker's live sessions in Home's order, each with the tasks that messaged it.
     /// A copy MIS made to message a session (fork mode) isn't listed itself: its messages
-    /// go with the session it was copied from.
+    /// go with the session it was copied from. An offline worker's sessions are kept until
+    /// they would have left its own window (`LIVE_WINDOW_MS` after their last write).
     pub fn sessions(&self) -> Vec<SessionRow> {
         let mut rows = vec![];
         for (wid, live) in &self.live {
@@ -65,8 +65,9 @@ impl Ledger {
                 .filter_map(|(t, to)| Some((t.session.clone()?, to.session.to_string())))
                 .filter(|(copy, of)| copy != of)
                 .collect();
+            // Each step is one copy, so this many steps reach the original (or a cycle).
             let root = |mut id: String| {
-                for _ in 0..MAX_COPY_DEPTH {
+                for _ in 0..copy_of.len() {
                     match copy_of.get(&id) {
                         Some(of) => id = of.clone(),
                         None => break,
@@ -74,10 +75,12 @@ impl Ledger {
                 }
                 id
             };
-            for s in live
-                .sessions
-                .iter()
+            let recent = |s: &&LiveSession| {
+                online || self.now_ms.saturating_sub(s.updated_ms) < LIVE_WINDOW_MS
+            };
+            for s in (live.sessions.iter())
                 .filter(|s| !copy_of.contains_key(&s.id))
+                .filter(recent)
             {
                 let mut messages: Vec<SessionMessage> = (sent.iter())
                     .filter(|(t, to)| {
@@ -114,13 +117,6 @@ impl Ledger {
         }
         self.pushed = Some(now.clone());
         Some(Effect::Broadcast(ServerMsg::Sessions { sessions: now }))
-    }
-
-    /// For a new watcher: the sessions now, counted as pushed.
-    pub fn watch_sessions(&mut self) -> Vec<SessionRow> {
-        let now = self.sessions();
-        self.pushed = Some(now.clone());
-        now
     }
 }
 
@@ -196,6 +192,9 @@ mod tests {
         let rows = l.sessions();
         assert_eq!((ids(&rows), rows[0].online), (vec!["s"], false));
         assert_eq!(rows[0].worker_name, "studio");
+        // Until they'd have left the worker's own window.
+        l.now_ms = 5 + LIVE_WINDOW_MS;
+        assert!(l.sessions().is_empty());
     }
 
     #[test]
@@ -264,11 +263,47 @@ mod tests {
     }
 
     #[test]
+    fn a_long_reply_chain_stays_with_the_original() {
+        let mut l = Ledger::default();
+        let w = Uuid::new_v4();
+        l.connect(w, info("studio"), &[], 1, NOW);
+        let orig = Uuid::new_v4();
+        let to = SendTo {
+            session: orig,
+            title: None,
+            mode: SendMode::Fork,
+        };
+        let (mut task, _) = (l.send_to_session(w, "claude".into(), "m0".into(), to)).unwrap();
+        // Each message runs in a copy of the last one's copy.
+        for i in 1..=12 {
+            let session = Some(Uuid::new_v4().to_string());
+            l.event(
+                w,
+                1,
+                task,
+                AgentEvent::Started {
+                    session,
+                    model: None,
+                },
+            );
+            let ok = AgentEvent::Finished {
+                ok: true,
+                summary: None,
+            };
+            l.event(w, 1, task, ok);
+            task = l.reply(task, format!("m{i}"), vec![], false).unwrap().0;
+        }
+        l.live_sessions(w, 1, vec![live(&orig.to_string(), LiveState::Idle, 1)]);
+        assert_eq!(l.sessions()[0].messages.len(), 13);
+    }
+
+    #[test]
     fn watchers_get_only_changes() {
         let mut l = Ledger::default();
         let w = Uuid::new_v4();
         l.connect(w, info("studio"), &[], 1, NOW);
-        assert!(l.watch_sessions().is_empty());
+        // The first diff is pushed, even empty.
+        assert!(l.sessions_changed().is_some());
         assert_eq!(l.sessions_changed(), None);
         l.live_sessions(w, 1, vec![live("s", LiveState::Working, 5)]);
         let Some(Effect::Broadcast(ServerMsg::Sessions { sessions })) = l.sessions_changed() else {

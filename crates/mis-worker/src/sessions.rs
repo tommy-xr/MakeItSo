@@ -16,7 +16,7 @@ use serde_json::Value;
 const MAX_SESSIONS: usize = 50;
 /// Most files read for one list, so asking for interactive sessions only stays cheap
 /// where headless runs dominate.
-const MAX_SCANNED: usize = 1000;
+pub(crate) const MAX_SCANNED: usize = 1000;
 /// Codex writes ~150 KB of instructions (more with images) before the first prompt.
 pub(crate) const HEAD_BYTES: u64 = 1 << 20;
 /// Claude appends its generated titles as the session goes on.
@@ -73,6 +73,8 @@ pub(crate) struct FileRead {
     pub forked_from: Option<String>,
     pub turn: TurnEnd,
     pub last: Option<String>,
+    /// Whether it is headless can't change any more (a claude prompt's origin was seen).
+    pub settled: bool,
 }
 
 /// The live feed's snippet of assistant text.
@@ -188,14 +190,10 @@ fn claude_line(h: &mut Head, line: &str) {
                     h.model = Some(m);
                 }
             } else if h.prompt.is_none() && v["isMeta"] != true && v["isCompactSummary"] != true {
+                // The first typed text block; tool results come as other block types.
                 h.prompt = match &msg["content"] {
-                    Value::String(s) => typed(s),
-                    // The first typed text block; tool results come as other block types.
-                    Value::Array(blocks) => blocks
-                        .iter()
-                        .filter(|b| b["type"] == "text")
-                        .find_map(|b| b["text"].as_str().and_then(typed)),
-                    _ => None,
+                    Value::Array(blocks) => blocks.iter().filter_map(block_text).find_map(typed),
+                    c => block_text(c).and_then(typed),
                 };
             }
         }
@@ -225,12 +223,14 @@ fn claude_turn(h: &mut Head, kind: &str, v: &Value) {
     };
     let has = |t: &str| blocks.iter().any(|b| b["type"] == t);
     if kind == "assistant" {
-        if has("tool_use") {
+        let said = blocks.iter().find_map(|b| block_text(b)).and_then(snippet);
+        // Text written before a tool call carries the call's stop reason.
+        if has("tool_use") || v["message"]["stop_reason"] == "tool_use" {
             h.turn = TurnEnd::Running;
-        } else if let Some(t) = blocks.iter().find_map(|b| block_text(b)).and_then(snippet) {
+        } else if said.is_some() {
             h.turn = TurnEnd::Replied;
-            h.last = Some(t);
         }
+        h.last = said.or(h.last.take());
         return;
     }
     if blocks
@@ -269,19 +269,16 @@ fn codex_line(h: &mut Head, line: &str) {
         Some("turn_context") => h.model = text(&p["model"]).or(h.model.take()),
         Some("event_msg") => match p["type"].as_str() {
             Some("task_started") => h.turn = TurnEnd::Running,
-            Some("task_complete" | "turn_aborted") if h.turn != TurnEnd::Replied => {
-                h.turn = TurnEnd::Ended
-            }
+            Some("task_complete" | "turn_aborted") => h.turn = TurnEnd::Ended,
             _ => {}
         },
+        // Commentary comes mid-turn too: only `task_complete` ends one.
         Some("response_item") if p["type"] == "message" && p["role"] == "assistant" => {
             let parts = p["content"].as_array().into_iter().flatten();
             let said = parts
                 .filter(|c| c["type"] == "output_text")
                 .find_map(|c| c["text"].as_str().and_then(snippet));
-            if let Some(t) = said {
-                (h.turn, h.last) = (TurnEnd::Replied, Some(t));
-            }
+            h.last = said.or(h.last.take());
         }
         Some("response_item")
             if matches!(
@@ -375,13 +372,15 @@ pub(crate) fn read_file(
             false
         });
     }
-    let (forked_from, turn, last) = (h.forked_from.take(), h.turn, h.last.take());
+    let (forked_from, turn, last, settled) =
+        (h.forked_from.take(), h.turn, h.last.take(), settled(&h));
     let session = h.finish(harness, updated_ms, now_ms)?;
     Some(FileRead {
         session,
         forked_from,
         turn,
         last,
+        settled,
     })
 }
 
@@ -466,7 +465,8 @@ pub fn roots() -> (PathBuf, PathBuf) {
 /// The newest `MAX_SESSIONS` sessions under both roots, newest first; headless ones
 /// (`claude -p`, `codex exec`) only if `headless`. Claude subagents live a level
 /// deeper (`<id>/subagents/`) and aren't listed.
-pub fn list(claude_root: &Path, codex: &Path, headless: bool, now_ms: u64) -> Vec<Session> {
+/// Every session file under both roots with its harness and mtime, newest first.
+pub(crate) fn files(claude_root: &Path, codex: &Path) -> Vec<(&'static str, (u64, PathBuf))> {
     let claude = jsonl_at(&claude_root.join("projects"), 1)
         .into_iter()
         .map(|f| ("claude", f));
@@ -475,6 +475,11 @@ pub fn list(claude_root: &Path, codex: &Path, headless: bool, now_ms: u64) -> Ve
         .map(|f| ("codex", f));
     let mut files: Vec<_> = claude.chain(codex).collect();
     files.sort_by_key(|(_, (at, _))| std::cmp::Reverse(*at));
+    files
+}
+
+pub fn list(claude_root: &Path, codex: &Path, headless: bool, now_ms: u64) -> Vec<Session> {
+    let files = files(claude_root, codex);
     let held = live::claude_open(claude_root, live::alive);
     let codex_files: Vec<_> = (files.iter())
         .filter(|(h, _)| *h == "codex")
@@ -726,6 +731,8 @@ mod tests {
         assert_eq!(turn(&[prompt, call, result]).0, TurnEnd::Running);
         let replied = (TurnEnd::Replied, Some("Fixed it.".to_string()));
         assert_eq!(turn(&[prompt, call, result, reply, done, meta]), replied);
+        let before_call = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Running it."}],"stop_reason":"tool_use"}}"#;
+        assert_eq!(turn(&[prompt, before_call]).0, TurnEnd::Running);
         // Text before a tool call is a snippet, not the end.
         let (end, last) = turn(&[prompt, reply, call]);
         assert_eq!(
@@ -760,10 +767,13 @@ mod tests {
         let complete = r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#;
         let aborted = r#"{"type":"event_msg","payload":{"type":"turn_aborted"}}"#;
         assert_eq!(codex(&[started, call]).turn, TurnEnd::Running);
+        // Commentary mid-turn doesn't end it.
+        assert_eq!(codex(&[started, said, call]).turn, TurnEnd::Running);
+        assert_eq!(codex(&[started, call, said]).turn, TurnEnd::Running);
         let h = codex(&[started, call, said, complete]);
         assert_eq!(
             (h.turn, h.last.as_deref()),
-            (TurnEnd::Replied, Some("Renamed."))
+            (TurnEnd::Ended, Some("Renamed."))
         );
         assert_eq!(codex(&[started, call, aborted]).turn, TurnEnd::Ended);
         let prompt = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}}"#;
