@@ -108,6 +108,56 @@ pub async fn run_guarded(
         .await;
 }
 
+/// Kills a process and everything it started when dropped, unless disarmed. Held over
+/// a running agent so a cancelled (dropped) run takes its tools' processes with it:
+/// claude starts each Bash command in a process group of its own, so killing the
+/// agent's group would miss them.
+pub(crate) struct Tree(Option<u32>);
+
+impl Tree {
+    pub(crate) fn new(pid: Option<u32>) -> Self {
+        Self(pid)
+    }
+
+    /// The process exited and was reaped: its pid may be reused, so leave it be.
+    pub(crate) fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for Tree {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            kill_tree(pid);
+        }
+    }
+}
+
+/// SIGKILL (on Windows, terminate) `pid` and its descendants, found by parent pid.
+/// Best effort: a process forked after the snapshot survives.
+fn kill_tree(pid: u32) {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    let mut tree = vec![Pid::from_u32(pid)];
+    let mut i = 0;
+    while i < tree.len() {
+        let parent = tree[i];
+        let born = sys.process(parent).map_or(0, |p| p.start_time());
+        // Started after its parent: Windows keeps a dead parent's pid on its children,
+        // so an older process naming a reused pid as parent isn't a descendant.
+        let kids = (sys.processes().iter())
+            .filter(|(_, p)| p.parent() == Some(parent) && p.start_time() >= born);
+        tree.extend(kids.map(|(pid, _)| *pid));
+        i += 1;
+    }
+    for pid in tree {
+        if let Some(p) = sys.process(pid) {
+            p.kill();
+        }
+    }
+}
+
 /// Decode `images` into `dir` (created, owner-only) as `<id>.<ext>`; their
 /// absolute paths, in order. Err on bytes that aren't base64 of an accepted image.
 pub fn write_images(dir: &Path, images: &[ImageFile]) -> anyhow::Result<Vec<String>> {
@@ -202,6 +252,47 @@ pub fn which(bin: &str) -> bool {
 mod tests {
     use super::*;
     use base64ct::{Base64, Encoding};
+
+    /// Whether `pid` still runs (a zombie waiting to be reaped doesn't count).
+    #[cfg(unix)]
+    fn alive(pid: u32) -> bool {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System};
+        let mut sys = System::new();
+        let pid = Pid::from_u32(pid);
+        let kind = ProcessRefreshKind::nothing();
+        sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, kind);
+        sys.process(pid)
+            .is_some_and(|p| p.status() != ProcessStatus::Zombie)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropped_tree_kills_grandchildren_in_their_own_process_group() {
+        use std::io::BufRead;
+        // `set -m`: the background sleep gets a process group of its own, like claude's Bash calls.
+        let mut sh = std::process::Command::new("sh")
+            .args(["-c", "set -m; sleep 37 & echo $!; wait"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(sh.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let sleep: u32 = line.trim().parse().unwrap();
+        assert!(alive(sleep));
+        let mut kept = Tree::new(Some(sh.id()));
+        kept.disarm();
+        drop(kept);
+        assert!(alive(sleep), "a disarmed tree is left alone");
+        drop(Tree::new(Some(sh.id())));
+        sh.wait().unwrap();
+        let gone = (0..50).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            !alive(sleep)
+        });
+        assert!(gone, "sleep {sleep} outlived its tree");
+    }
 
     #[test]
     fn check_refuses_entries_that_widen_or_inject_rules() {

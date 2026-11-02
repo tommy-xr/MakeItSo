@@ -30,7 +30,7 @@ pub fn list() -> Vec<Value> {
                 "type": "object",
                 "properties": {"status": {
                     "type": "string",
-                    "enum": ["planning", "queued", "running", "done", "failed"],
+                    "enum": ["planning", "queued", "running", "done", "failed", "cancelled"],
                     "description": "Only tasks in this state.",
                 }},
             },

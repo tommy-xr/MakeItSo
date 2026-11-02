@@ -54,10 +54,6 @@ pub struct Restored {
     pub written: HashSet<TaskId>,
 }
 
-fn finished(status: TaskStatus) -> bool {
-    matches!(status, TaskStatus::Done | TaskStatus::Failed)
-}
-
 fn to_json<T: Serialize + ?Sized>(v: &T) -> String {
     serde_json::to_string(v).expect("ledger types serialize")
 }
@@ -80,7 +76,7 @@ impl Ledger {
             .filter(|t| !written.contains(&t.task.id))
             .map(|t| Transcript {
                 task: t.task.id,
-                done: finished(t.status),
+                done: t.status.finished(),
                 json: to_json(&t.events),
             })
             .collect();
@@ -133,7 +129,7 @@ impl Ledger {
         l.noted = saved.noted.into_iter().collect();
         l.tasks = saved.tasks.into_owned();
         let written = (l.tasks.iter())
-            .filter(|t| finished(t.status))
+            .filter(|t| t.status.finished())
             .map(|t| t.task.id)
             .collect();
         for t in &mut l.tasks {
@@ -166,7 +162,7 @@ impl Ledger {
     /// Forget tasks that finished over `KEEP_MS` ago; returns their ids.
     pub fn sweep(&mut self) -> (Vec<TaskId>, Vec<Effect>) {
         let cutoff = self.now_ms.saturating_sub(KEEP_MS);
-        let old = |t: &TaskEntry| finished(t.status) && t.finished_at.is_some_and(|f| f < cutoff);
+        let old = |t: &TaskEntry| t.status.finished() && t.finished_at.is_some_and(|f| f < cutoff);
         let (gone, kept): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.tasks).into_iter().partition(old);
         self.tasks = kept;
@@ -318,6 +314,28 @@ mod tests {
             }],
             "worker gets the reconnect grace"
         );
+    }
+
+    #[test]
+    fn a_cancel_in_flight_reaches_the_worker_after_a_restart() {
+        let (mut l, w, [_, _, running, _]) = busy_ledger();
+        l.cancel(running).unwrap();
+        let (mut r, _) = round_trip(&l);
+        let (_, eff) = r.connect(w, info(), &[running], 9, NOW);
+        let send = OrchMsg::Cancel { task: running };
+        assert!(eff
+            .iter()
+            .any(|e| matches!(e, Effect::Send { conn: 9, msg } if *msg == send)));
+        // Saved before cancelling existed: loads, nothing cancelling.
+        let new = l.snapshot(&HashSet::new()).ledger;
+        let old = new
+            .replace(r#","cancel":true"#, "")
+            .replace(r#","cancel":false"#, "");
+        assert!(!old.contains(r#""cancel""#));
+        let r = Ledger::restore(&old, |_| None, NOW, l.now_ms)
+            .unwrap()
+            .ledger;
+        assert_eq!(status_of(&r, running).activity, "hm");
     }
 
     #[test]

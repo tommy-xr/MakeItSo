@@ -135,6 +135,7 @@ fn task_label(t: &TaskSummary, now_ms: u64) -> String {
         TaskStatus::Planning | TaskStatus::Queued => '○',
         TaskStatus::Done => '✓',
         TaskStatus::Failed => '✗',
+        TaskStatus::Cancelled => '⊘',
     };
     let time = t.started_at.map_or(String::new(), |s| {
         fmt_elapsed(t.finished_at.unwrap_or(now_ms).saturating_sub(s)) + " "

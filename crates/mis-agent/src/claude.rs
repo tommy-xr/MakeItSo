@@ -354,6 +354,8 @@ impl Agent for ClaudeAgent {
                 .stderr(std::process::Stdio::inherit())
                 .kill_on_drop(true);
             let mut child = cmd.spawn().context("spawning claude")?;
+            // Declared after `child`, so it drops first, while the tree still hangs off it.
+            let mut tree = crate::Tree::new(child.id());
             let stdout = child.stdout.take().unwrap();
             let mut lines = BufReader::new(stdout).lines();
             let mut finished = false;
@@ -361,13 +363,14 @@ impl Agent for ClaudeAgent {
             while let Some(line) = lines.next_line().await? {
                 for ev in parser.line(&line) {
                     finished |= matches!(ev, AgentEvent::Finished { .. });
+                    // Nobody listens: `tree` kills it all on return, while the tree is intact.
                     if tx.send(ev).await.is_err() {
-                        let _ = child.kill().await;
                         return Ok(());
                     }
                 }
             }
             let status = child.wait().await;
+            tree.disarm();
             if finished {
                 return Ok(());
             }

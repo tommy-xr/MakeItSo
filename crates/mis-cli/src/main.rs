@@ -73,6 +73,11 @@ enum Cmd {
         /// Task id or unambiguous prefix (as `mis status` prints).
         id: String,
     },
+    /// Cancel a task: a queued one is dropped, a running one's worker stops its agent.
+    Cancel {
+        /// Task id or unambiguous prefix (as `mis status` prints).
+        id: String,
+    },
     /// Stream all task events.
     Tail,
     /// Ask a local model about the fleet; it reads the orchestrator's MCP tools.
@@ -324,6 +329,30 @@ async fn connect(args: &Args) -> Result<Ws> {
     Ok(ws)
 }
 
+/// `POST /api/tasks/<task>/cancel`; the status the task is left in.
+async fn cancel(args: &Args, task: TaskId) -> Result<TaskStatus> {
+    let url = format!("{}/api/tasks/{task}/cancel", http_url(&args.url));
+    let mut req = reqwest::Client::new().post(&url);
+    if let Some(t) = &args.token {
+        req = req.bearer_auth(t);
+    }
+    let access = access_headers(
+        args.cf_access_client_id.as_deref(),
+        args.cf_access_client_secret.as_deref(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    for (k, v) in access {
+        req = req.header(k, v);
+    }
+    let res = req.send().await.with_context(|| format!("POST {url}"))?;
+    let (code, body) = (res.status(), res.text().await?);
+    if !code.is_success() {
+        bail!("{code}: {body}");
+    }
+    let body: serde_json::Value = serde_json::from_str(&body)?;
+    Ok(serde_json::from_value(body["status"].clone())?)
+}
+
 async fn send(ws: &mut Ws, m: &ClientMsg) -> Result<()> {
     ws.send(Message::Text(serde_json::to_string(m)?.into()))
         .await?;
@@ -378,6 +407,7 @@ fn print_event(task: TaskId, event: &AgentEvent) {
                 summary.as_deref().unwrap_or("")
             )
         }
+        AgentEvent::Cancelled => println!("[{short}] cancelled"),
     }
 }
 
@@ -455,11 +485,10 @@ async fn follow_task(ws: &mut Ws, task: TaskId) -> Result<()> {
         match recv(ws).await? {
             ServerMsg::Event { task: t, event, .. } if t == task => {
                 print_event(t, &event);
-                if let AgentEvent::Finished { ok, .. } = event {
-                    if !ok {
-                        std::process::exit(1);
-                    }
-                    return Ok(());
+                match event {
+                    AgentEvent::Finished { ok: true, .. } => return Ok(()),
+                    AgentEvent::Finished { .. } | AgentEvent::Cancelled => std::process::exit(1),
+                    _ => {}
                 }
             }
             ServerMsg::Error { message } => eprintln!("warning: {message}"),
@@ -481,14 +510,14 @@ fn wait_step(task: TaskId, msg: ServerMsg) -> Wait {
     match msg {
         ServerMsg::Event {
             task: t,
-            event: AgentEvent::Finished { .. },
+            event: AgentEvent::Finished { .. } | AgentEvent::Cancelled,
             ..
         } if t == task => Wait::Check,
         // e.g. "dropped N events" when this subscriber lagged.
         ServerMsg::Error { .. } => Wait::Check,
         ServerMsg::Status { tasks, .. } => tasks
             .into_iter()
-            .find(|t| t.id == task && matches!(t.status, TaskStatus::Done | TaskStatus::Failed))
+            .find(|t| t.id == task && t.status.finished())
             .map_or(Wait::Pending, |t| Wait::Over(Box::new(t))),
         _ => Wait::Pending,
     }
@@ -756,6 +785,18 @@ async fn run(args: Args) -> Result<Option<TaskSummary>> {
                 follow_task(&mut ws, task).await?;
             }
         }
+        Cmd::Cancel { id } => {
+            send(&mut ws, &ClientMsg::Status).await?;
+            let ServerMsg::Status { tasks, .. } = recv(&mut ws).await? else {
+                bail!("unexpected reply")
+            };
+            let task = resolve_task(&tasks, id).map_err(anyhow::Error::msg)?;
+            let short = &task.to_string()[..8];
+            match cancel(&args, task).await? {
+                TaskStatus::Cancelled => println!("cancelled {short}"),
+                _ => println!("cancelling {short}: its worker is stopping it"),
+            }
+        }
         Cmd::Tail => {
             send(&mut ws, &ClientMsg::Subscribe).await?;
             loop {
@@ -864,8 +905,14 @@ mod tests {
             event: AgentEvent::Text { text: "hi".into() },
         };
         assert_eq!(wait_step(id, text), Wait::Pending);
+        let cancelled = ServerMsg::Event {
+            task: id,
+            worker: None,
+            event: AgentEvent::Cancelled,
+        };
+        assert_eq!(wait_step(id, cancelled), Wait::Check);
         assert_eq!(wait_step(id, status(TaskStatus::Running)), Wait::Pending);
-        for s in [TaskStatus::Done, TaskStatus::Failed] {
+        for s in [TaskStatus::Done, TaskStatus::Failed, TaskStatus::Cancelled] {
             let Wait::Over(t) = wait_step(id, status(s)) else {
                 panic!("{s:?}")
             };
