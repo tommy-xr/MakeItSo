@@ -24,6 +24,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --no-fail-fast # every failing test, not just the first crate's
+      - run: node --test crates/mis-orchestrator/tests/md.test.mjs # the page's markdown renderer
 
   build:
     needs: check
