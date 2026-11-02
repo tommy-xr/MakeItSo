@@ -3278,6 +3278,19 @@ async fn acting_routine_runs_dry_until_switched_live() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// The next sessions push that changes `seen`. A watcher may get its view twice: the
+/// liveness tick's diff can land after a `WatchSessions` snapshot it doesn't know of.
+async fn next_sessions(ws: &mut Ws, seen: &[SessionRow]) -> Vec<SessionRow> {
+    loop {
+        let ServerMsg::Sessions { sessions } = recv(ws).await else {
+            panic!("pushed")
+        };
+        if sessions != seen {
+            return sessions;
+        }
+    }
+}
+
 #[tokio::test]
 async fn live_sessions_need_full_access_and_outlast_their_worker() {
     let base = start_app(with_read_token()).await;
@@ -3331,9 +3344,7 @@ async fn live_sessions_need_full_access_and_outlast_their_worker() {
         sessions: vec![s.clone()],
     };
     send(&mut worker, &report).await;
-    let ServerMsg::Sessions { sessions } = recv(&mut full).await else {
-        panic!("pushed")
-    };
+    let sessions = next_sessions(&mut full, &sessions).await;
     assert_eq!((&sessions[0].session, sessions[0].online), (&s, true));
 
     assert_eq!(get_json(&base, "/api/sessions", "r").await.0, 403);
@@ -3349,9 +3360,7 @@ async fn live_sessions_need_full_access_and_outlast_their_worker() {
     }
     // Gone: its sessions stay, offline, and watchers hear of it.
     drop(worker);
-    let ServerMsg::Sessions { sessions } = recv(&mut full).await else {
-        panic!("pushed")
-    };
+    let sessions = next_sessions(&mut full, &sessions).await;
     assert!(!sessions[0].online);
     let (status, body) = get_json(&base, "/api/sessions", "s").await;
     assert_eq!(status, 200, "{body}");
