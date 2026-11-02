@@ -280,7 +280,7 @@ pub fn read(
         more: dropped || from > 0,
         updated_ms,
         active,
-        open: is_open(claude, harness, &id.to_string(), active),
+        open: is_open(claude, codex, harness, &id.to_string(), active),
     }
 }
 

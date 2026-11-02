@@ -4,7 +4,7 @@
 //! mtime changed; deciding a session's state ([`state`]), which are listed ([`pick`]) and
 //! whether to send ([`Feed::changed`]) is pure.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use mis_types::{LiveSession, LiveState, Session, LIVE_WINDOW_MS, MAX_LIVE, STALL_MS};
@@ -25,6 +25,8 @@ struct Facts {
     turn: TurnEnd,
     last: Option<String>,
     delivered: Vec<mis_types::Delivered>,
+    /// `FileRead::pending`, carried into the next read.
+    pending: Vec<(String, mis_types::Delivered)>,
 }
 
 /// A parsed file.
@@ -109,12 +111,13 @@ impl Feed {
     }
 
     /// Live sessions under both roots now; `procs` are claude's open sessions
-    /// (`live::claude_procs`).
+    /// (`live::claude_procs`), `loaded` codex's (`app_server::loaded`).
     pub fn poll(
         &mut self,
         claude: &Path,
         codex: &Path,
         procs: &HashMap<String, Proc>,
+        loaded: &HashSet<String>,
         now_ms: u64,
     ) -> Vec<LiveSession> {
         let all = sessions::files(claude, codex);
@@ -122,11 +125,17 @@ impl Feed {
             .filter(|(h, _)| *h == "codex")
             .map(|(_, f)| f.clone())
             .collect();
-        // Open claude sessions count however old, but only where a dead process's
-        // record can be told apart (see `live::alive`).
+        // Open sessions count however old: claude's only where a dead process's record
+        // can be told apart (see `live::alive`); codex's file names end with their id.
         let held = |h: &str, p: &Path| {
-            let id = p.file_stem().map(|s| s.to_string_lossy());
-            cfg!(unix) && h == "claude" && id.is_some_and(|id| procs.contains_key(id.as_ref()))
+            let stem = p
+                .file_stem()
+                .map(|s| s.to_string_lossy())
+                .unwrap_or_default();
+            match h {
+                "claude" => cfg!(unix) && procs.contains_key(stem.as_ref()),
+                _ => sessions::codex_id(&stem).is_some_and(|id| loaded.contains(id)),
+            }
         };
         let recent = |at: u64| now_ms.saturating_sub(at) < LIVE_WINDOW_MS;
         let mut files: Vec<_> = (all.into_iter())
@@ -148,9 +157,21 @@ impl Feed {
             let parsed = match self.cache.remove(&path) {
                 Some(p @ Parsed::Headless) => p,
                 Some(p @ Parsed::Seen(k, _)) if k == key => p,
-                _ => {
+                old => {
                     self.parsed += 1;
-                    read(harness, &path, key, now_ms, &codex_files, &mut by_id)
+                    let pending = match &old {
+                        Some(Parsed::Seen(_, Some(f))) => &f.pending[..],
+                        _ => &[],
+                    };
+                    read(
+                        harness,
+                        &path,
+                        key,
+                        now_ms,
+                        pending,
+                        &codex_files,
+                        &mut by_id,
+                    )
                 }
             };
             cache.insert(path.clone(), parsed.clone());
@@ -166,6 +187,7 @@ impl Feed {
             };
             let (state, waiting_for) = state(proc, f.turn, updated_ms, now_ms);
             let s = f.session;
+            let daemon = harness == "codex" && loaded.contains(&s.id);
             out.push(LiveSession {
                 harness: s.harness,
                 id: s.id,
@@ -173,8 +195,12 @@ impl Feed {
                 name: proc.and_then(|p| p.name.clone()),
                 cwd: s.cwd,
                 model: s.model,
-                // Codex may be open while it writes (worker's clock, so not the orchestrator's).
-                open: proc.is_some() || (harness == "codex" && sessions::active(at, now_ms)),
+                // Codex may be open off the daemon while it writes (worker's clock, so not
+                // the orchestrator's).
+                open: proc.is_some()
+                    || daemon
+                    || (harness == "codex" && sessions::active(at, now_ms)),
+                daemon,
                 state,
                 waiting_for,
                 updated_ms,
@@ -188,17 +214,18 @@ impl Feed {
     }
 }
 
-/// Parse one file whose (len, mtime) is `key`.
+/// Parse one file whose (len, mtime) is `key`, carrying on with its `pending` messages.
 fn read(
     harness: &str,
     path: &Path,
     key: (u64, u64),
     now_ms: u64,
+    pending: &[(String, mis_types::Delivered)],
     codex_files: &[(u64, PathBuf)],
     by_id: &mut Option<HashMap<String, (u64, PathBuf)>>,
 ) -> Parsed {
     let bytes = (sessions::HEAD_BYTES, TAIL_BYTES);
-    let Some(r) = sessions::read_file(harness, path, bytes, true, key.1, now_ms) else {
+    let Some(r) = sessions::read_file(harness, path, bytes, true, key.1, now_ms, pending) else {
         return Parsed::Seen(key, None);
     };
     let session = match r.forked_from {
@@ -219,6 +246,7 @@ fn read(
         turn: r.turn,
         last: r.last,
         delivered: r.delivered,
+        pending: r.pending,
     };
     Parsed::Seen(key, Some(Box::new(facts)))
 }
@@ -386,6 +414,16 @@ mod tests {
             &[meta, user, started, said, complete],
             5 * MIN,
         );
+        // Quiet for hours, but its terminal is open on the app-server daemon: a message
+        // MIS delivered there, and its answer.
+        let mis = r#"{"type":"event_msg","payload":{"type":"item_completed","turn_id":"u1","item":{"type":"UserMessage","client_id":"mis-phone-t1","content":[]}}}"#;
+        let answered = r#"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"u1","last_agent_message":"Paris."}}"#;
+        let x3 = "cccccccc-0000-7000-8000-000000000003";
+        write(
+            &rollout(x3),
+            &[meta, user, started, mis, answered],
+            8 * 60 * MIN,
+        );
         (claude, codex)
     }
 
@@ -394,12 +432,14 @@ mod tests {
         let (claude, codex) = fixture();
         let procs = crate::live::claude_procs(&claude, |_, _| true);
         let mut feed = Feed::default();
-        let got = feed.poll(&claude, &codex, &procs, NOW);
+        let x1 = "aaaaaaaa-0000-7000-8000-000000000001";
+        let x2 = "bbbbbbbb-0000-7000-8000-000000000002";
+        let x3 = "cccccccc-0000-7000-8000-000000000003";
+        let loaded = HashSet::from([x3.to_string()]);
+        let got = feed.poll(&claude, &codex, &procs, &loaded, NOW);
         let mut states: Vec<_> = (got.iter())
             .map(|s| (s.id.as_str(), s.state, s.open))
             .collect();
-        let x1 = "aaaaaaaa-0000-7000-8000-000000000001";
-        let x2 = "bbbbbbbb-0000-7000-8000-000000000002";
         let mut want = vec![
             ("busy", Working, true),
             ("delegating", Working, true),
@@ -407,6 +447,7 @@ mod tests {
             ("closed-done", Idle, false),
             (x1, Working, false),
             (x2, Idle, false),
+            (x3, Idle, true),
             ("stuck", Stalled, true),
             ("perm", Waiting, true),
             ("closed-quiet", Stalled, false),
@@ -443,12 +484,19 @@ mod tests {
         );
         assert_eq!(by(x1).last, None);
         assert_eq!(by(x2).last.as_deref(), Some("Renamed."));
+        let on = |id| (by(id).daemon, by(id).delivered.clone());
+        let answer = mis_types::Delivered {
+            msg_id: "mis-phone-t1".into(),
+            reply: Some("Paris.".into()),
+        };
+        assert_eq!(on(x3), (true, vec![answer]));
+        assert_eq!(on(x2), (false, vec![]));
         // A codex session just written may be open in its terminal.
         let rollout = codex.join(format!(
             "sessions/2026/11/02/rollout-2026-11-02T10-00-00-{x2}.jsonl"
         ));
         touch(&rollout, MIN / 2);
-        let again = feed.poll(&claude, &codex, &procs, NOW);
+        let again = feed.poll(&claude, &codex, &procs, &loaded, NOW);
         assert!(again.iter().any(|s| s.id == x2 && s.open));
         // Secrets in the records are never read into anything sent.
         let wire = serde_json::to_string(&got).unwrap();
@@ -465,10 +513,13 @@ mod tests {
         let (claude, codex) = fixture();
         let procs = crate::live::claude_procs(&claude, |_, _| true);
         let mut feed = Feed::default();
-        let first = feed.poll(&claude, &codex, &procs, NOW);
+        let first = feed.poll(&claude, &codex, &procs, &HashSet::new(), NOW);
         // The headless one is parsed once too; the one out of the window never.
         assert_eq!(feed.parsed, if cfg!(unix) { 13 } else { 12 });
-        assert_eq!(feed.poll(&claude, &codex, &procs, NOW), first);
+        assert_eq!(
+            feed.poll(&claude, &codex, &procs, &HashSet::new(), NOW),
+            first
+        );
         assert_eq!(feed.parsed, 0);
         // A headless run writing on isn't read again.
         let headless = claude.join("projects/-w/headless.jsonl");
@@ -480,13 +531,13 @@ mod tests {
             .write_all(format!("{more}\n").as_bytes())
             .unwrap();
         touch(&headless, MIN / 4);
-        feed.poll(&claude, &codex, &procs, NOW);
+        feed.poll(&claude, &codex, &procs, &HashSet::new(), NOW);
         assert_eq!(feed.parsed, 0);
         // The busy session replies: only its file is read again.
         let path = claude.join("projects/-w/busy.jsonl");
         write(&path, &[PROMPT, CALL, REPLY], MIN / 2);
         let idle = HashMap::from([("busy".to_string(), proc("idle", None))]);
-        let got = feed.poll(&claude, &codex, &idle, NOW);
+        let got = feed.poll(&claude, &codex, &idle, &HashSet::new(), NOW);
         assert_eq!(feed.parsed, 1);
         let busy = got.iter().find(|s| s.id == "busy").unwrap();
         assert_eq!(

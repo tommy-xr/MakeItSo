@@ -145,8 +145,9 @@ impl Ledger {
         (effects, changed)
     }
 
-    /// `t` messages a codex session that may be open (mid-turn, or written in the last
-    /// couple of minutes, as its worker reports): it waits in the queue until it goes quiet.
+    /// `t` messages a codex session that may be open off the app-server daemon (mid-turn,
+    /// or written in the last couple of minutes, as its worker reports): it waits in the
+    /// queue until it goes quiet. One on the daemon goes now, straight in.
     pub(super) fn session_busy(&self, t: &TaskEntry) -> bool {
         let (Some(to), Some(wid)) = (&t.task.send_to, t.pin) else {
             return false;
@@ -161,7 +162,10 @@ impl Ledger {
             .map(|l| &l.sessions[..])
             .unwrap_or_default();
         sessions.iter().any(|s| {
-            s.harness == "codex" && s.id == id && (s.open || s.state == LiveState::Working)
+            s.harness == "codex"
+                && s.id == id
+                && !s.daemon
+                && (s.open || s.state == LiveState::Working)
         })
     }
 
@@ -619,6 +623,45 @@ mod tests {
         // Quiet, by its worker's clock: sent, to be continued in place.
         let eff = l.live_sessions(w, 1, vec![codex(LiveState::Idle, false)]);
         assert!(matches!(&eff[..], [Effect::Assign { task: t, .. }] if t.id == task));
+    }
+
+    #[test]
+    fn a_message_to_a_codex_session_on_the_daemon_goes_straight_in_and_is_answered() {
+        let mut l = Ledger::default();
+        let w = Uuid::new_v4();
+        let mut i = info("studio");
+        i.deliver = true;
+        l.connect(w, i, &[], 1, NOW);
+        let s = Uuid::new_v4();
+        let codex = |delivered| LiveSession {
+            harness: "codex".into(),
+            id: s.to_string(),
+            state: LiveState::Working,
+            open: true,
+            daemon: true,
+            delivered,
+            ..Default::default()
+        };
+        l.live_sessions(w, 1, vec![codex(vec![])]);
+        let to = SendTo {
+            session: s,
+            title: None,
+            mode: SendMode::Deliver,
+        };
+        let (task, eff) = l
+            .send_to_session(w, "codex".into(), "rename it".into(), to, vec![])
+            .unwrap();
+        assert!(matches!(&eff[..], [Effect::Assign { task: t, .. }] if t.id == task));
+        let (msg_id, read, held) = ("mis-phone-1".to_string(), true, false);
+        l.event(w, 1, task, AgentEvent::Delivered { msg_id, read, held });
+        assert_eq!(status(&l, task).0, TaskStatus::Delivered);
+        let answer = Delivered {
+            msg_id: "mis-phone-1".into(),
+            reply: Some("Renamed.".into()),
+        };
+        l.live_sessions(w, 1, vec![codex(vec![answer])]);
+        assert_eq!(status(&l, task).0, TaskStatus::Done);
+        assert_eq!(status(&l, task).2.as_deref(), Some("Renamed."));
     }
 
     #[test]

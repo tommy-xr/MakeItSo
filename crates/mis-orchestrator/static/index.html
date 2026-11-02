@@ -2002,8 +2002,9 @@ function sentHere(key) {
   return out;
 }
 
-// The session's composer: one Send, always into the session itself. Open in a claude terminal, the message goes
-// straight in; otherwise the session is continued where it is, once it's quiet (codex) or closed (older workers).
+// The session's composer: one Send, always into the session itself. Open in a claude terminal, or in a codex one on
+// Codex's shared app-server, the message goes straight in; otherwise the session is continued where it is, once it's
+// quiet (other codex) or closed (older workers).
 let saying = null; // { key, sent: { task, text } | null, error, busy: a send in flight } for the composer's last send
 function renderSay(got) {
   const [wid, harness] = sess.key.split('/');
@@ -2011,9 +2012,10 @@ function renderSay(got) {
   // Sends once the transcript is read.
   $('say-send').disabled = !got || !got.turns || saying.busy;
   const open = !!(got && got.open), w = workers.find((x) => x.id === wid), live = w && w.info.deliver;
-  // Codex records no open terminals: only a recent write counts.
+  // Codex off the app-server records no open terminals: only a recent write counts.
+  const daemon = harness === 'codex' && sessionInfo(sess.key).daemon;
   $('say-open').hidden = !open;
-  $('say-open').textContent = harness === 'codex' ? 'May be open (written < 2 min ago) · goes in once it’s quiet'
+  $('say-open').textContent = harness === 'codex' && !daemon ? 'May be open (written < 2 min ago) · goes in once it’s quiet'
     : live ? 'Open in a terminal · goes straight in' : 'Open in a terminal · goes in once it closes (this worker is older)';
   $('say-state').hidden = !saying.error;
   $('say-state').className = 'bad';

@@ -1,7 +1,8 @@
-//! A `SendMode::Deliver` message to a claude session open in a terminal: sent as a
+//! A `SendMode::Deliver` message to a session open in a terminal. Claude: sent as a
 //! cross-session message (`mis_agent::deliver`), then confirmed in the session's own
 //! transcript, which records it as it arrives. Reading what was appended is [`seen`]'s,
-//! pure; sending and polling is [`deliver`]'s.
+//! pure; sending and polling is [`deliver`]'s. Codex: started as a turn on the shared
+//! app-server that hosts its terminal ([`to_codex`]).
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -10,6 +11,7 @@ use std::time::Duration;
 use mis_types::{first_line, AgentEvent, PEER_NAME};
 use serde_json::Value;
 
+use crate::app_server::Sent;
 use crate::live;
 use crate::sessions::mis_peer;
 
@@ -138,6 +140,48 @@ pub async fn deliver(
     ))
 }
 
+/// Send `text` to codex session `id`, loaded on the app-server daemon under `codex_home`,
+/// as `msg_id`: `Delivered` once the daemon takes it into the conversation (a new turn,
+/// or the running one), or unconfirmed (the live feed then finds it, or the session
+/// closes and it is sent again in place); a failed `Finished` if the daemon refuses it.
+/// None when nothing was sent (no daemon, or it hasn't loaded the session): continue it
+/// in place instead.
+#[cfg(unix)]
+pub async fn to_codex(
+    codex_home: PathBuf,
+    id: String,
+    text: String,
+    msg_id: String,
+) -> Option<AgentEvent> {
+    let sent = tokio::task::spawn_blocking(move || {
+        let mut c = crate::app_server::Client::connect(&codex_home).ok()?;
+        codex_event(c.send(&id, &text, &msg_id), msg_id)
+    });
+    sent.await.ok()?
+}
+
+/// The event that ends a send to codex as `msg_id` (see [`to_codex`]).
+#[cfg_attr(not(unix), allow(dead_code))]
+fn codex_event(sent: Sent, msg_id: String) -> Option<AgentEvent> {
+    let delivered = |read| AgentEvent::Delivered {
+        msg_id,
+        read,
+        held: false,
+    };
+    match sent {
+        Sent::Taken => Some(delivered(true)),
+        Sent::Unconfirmed(why) => {
+            tracing::warn!("codex delivery unconfirmed: {why}");
+            Some(delivered(false))
+        }
+        Sent::Refused(why) => Some(AgentEvent::Finished {
+            ok: false,
+            summary: Some(format!("codex refused it: {why}")),
+        }),
+        Sent::NotLoaded => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +204,25 @@ mod tests {
         let content = format!("Held peer message — from uds:/tmp/s.sock [verified pid 1] (peer claims name: {name}); preview: «fix it» — not delivered to Claude (1 held).");
         serde_json::json!({"type": "system", "subtype": "informational", "content": content})
             .to_string()
+    }
+
+    #[test]
+    fn a_codex_send_is_delivered_unless_refused_or_not_taken() {
+        let ev = |s| codex_event(s, "m1".into());
+        let delivered = |read| AgentEvent::Delivered {
+            msg_id: "m1".into(),
+            read,
+            held: false,
+        };
+        assert_eq!(ev(Sent::Taken), Some(delivered(true)));
+        // It may be in: the feed (or the session closing) settles it.
+        assert_eq!(
+            ev(Sent::Unconfirmed("timed out".into())),
+            Some(delivered(false))
+        );
+        assert!(matches!(ev(Sent::Refused("bad input".into())),
+            Some(AgentEvent::Finished { ok: false, summary: Some(s) }) if s.contains("bad input")));
+        assert_eq!(ev(Sent::NotLoaded), None);
     }
 
     #[test]
