@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#0E1217" media="(prefers-color-scheme: dark)">
-<meta name="theme-color" content="#F7F6F2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#EAF3F7" media="(prefers-color-scheme: light)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="manifest" href="/manifest.webmanifest">
@@ -17,7 +17,7 @@
 try { const t = localStorage.getItem('mis-theme'); if (t) document.documentElement.dataset.theme = t; } catch {}</script>
 <style>
   /* Theme: every colour and face is a token here; a new theme redefines this block. Soft: a dark slate ground, grouped
-     rounded cards, tinted pills; cyan for work, amber for waiting, red for failures. */
+     rounded cards, tinted pills; cyan for work, amber for waiting, red for failures. Light: a cool blue-grey twin. */
   :root { color-scheme: dark; --bg: #0E1217; --card: #151A21; --raised: #1A2029; --composer: #1A2029; --bubble: #1F2731; --code: #10151B;
     --sep: #222A35; --hover: #1C232C; --seg-on: #2A3340; --track: #2A3340;
     --fg: #E7ECF2; --fg2: #C9D2DC; --soft: #AEB8C4; --dim: #8D99A8; --faint: #6C7785;
@@ -31,19 +31,19 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   /* Light: the system's choice unless the menu picked Dark; or picked Light. A media query can't be OR'd with a
      selector, so the tokens appear twice: keep both in sync. :where keeps `html.vr` winning. */
   @media (prefers-color-scheme: light) {
-    :root:where(:not([data-theme=dark])) { color-scheme: light; --bg: #F7F6F2; --card: #FFFFFF; --raised: #EDEBE5; --composer: #FFFFFF; --bubble: #ECEAE4; --code: #F2F0EB;
-      --sep: #E7E4DD; --hover: #F0EEE9; --seg-on: #FFFFFF; --track: #D6D3CB;
-      --fg: #1D1C1A; --fg2: #44413C; --soft: #57534D; --dim: #6B675F; --faint: #8C877E;
-      --accent: #0E7C89; --on-accent: #FFFFFF; --link: #0B6B77; --run: #0E7C89; --ok: #2F7D4F; --warn: #A35A00; --bad: #C23B30;
-      --t-run: #DDF0F2; --f-run: #0B6470; --t-warn: #FBEBD3; --t-bad: #FBE4E1; --f-bad: #B3261E; --t-ok: #E1F1E6; --t-n: #ECEAE4; --edge-warn: #DDB074;
-      --ring: rgba(14, 124, 137, .16); --shadow: 0 4px 18px rgba(30, 25, 15, .1), 0 1px 3px rgba(30, 25, 15, .06); --scrim: rgba(20, 18, 14, .32); }
+    :root:where(:not([data-theme=dark])) { color-scheme: light; --bg: #EAF3F7; --card: #FFFFFF; --raised: #DCE8EE; --composer: #FFFFFF; --bubble: #D9E8F0; --code: #F5F9FB;
+      --sep: #C3D6E0; --hover: #E1EDF3; --seg-on: #FFFFFF; --track: #B8CCD7;
+      --fg: #0B2233; --fg2: #22404F; --soft: #3A5566; --dim: #4A6577; --faint: #546F7F;
+      --accent: #00687A; --on-accent: #FFFFFF; --link: #00687A; --run: #00687A; --ok: #1F6B45; --warn: #9A4800; --bad: #B3261E;
+      --t-run: #D3ECF0; --f-run: #00586A; --t-warn: #FFE9D1; --t-bad: #FBE0DE; --f-bad: #A3221B; --t-ok: #D7EEE2; --t-n: #DCE8EE; --edge-warn: #D9A066;
+      --ring: rgba(0, 104, 122, .16); --shadow: 0 4px 18px rgba(11, 34, 51, .1), 0 1px 3px rgba(11, 34, 51, .06); --scrim: rgba(11, 34, 51, .32); }
   }
-  :root:where([data-theme=light]) { color-scheme: light; --bg: #F7F6F2; --card: #FFFFFF; --raised: #EDEBE5; --composer: #FFFFFF; --bubble: #ECEAE4; --code: #F2F0EB;
-    --sep: #E7E4DD; --hover: #F0EEE9; --seg-on: #FFFFFF; --track: #D6D3CB;
-    --fg: #1D1C1A; --fg2: #44413C; --soft: #57534D; --dim: #6B675F; --faint: #8C877E;
-    --accent: #0E7C89; --on-accent: #FFFFFF; --link: #0B6B77; --run: #0E7C89; --ok: #2F7D4F; --warn: #A35A00; --bad: #C23B30;
-    --t-run: #DDF0F2; --f-run: #0B6470; --t-warn: #FBEBD3; --t-bad: #FBE4E1; --f-bad: #B3261E; --t-ok: #E1F1E6; --t-n: #ECEAE4; --edge-warn: #DDB074;
-    --ring: rgba(14, 124, 137, .16); --shadow: 0 4px 18px rgba(30, 25, 15, .1), 0 1px 3px rgba(30, 25, 15, .06); --scrim: rgba(20, 18, 14, .32); }
+  :root:where([data-theme=light]) { color-scheme: light; --bg: #EAF3F7; --card: #FFFFFF; --raised: #DCE8EE; --composer: #FFFFFF; --bubble: #D9E8F0; --code: #F5F9FB;
+    --sep: #C3D6E0; --hover: #E1EDF3; --seg-on: #FFFFFF; --track: #B8CCD7;
+    --fg: #0B2233; --fg2: #22404F; --soft: #3A5566; --dim: #4A6577; --faint: #546F7F;
+    --accent: #00687A; --on-accent: #FFFFFF; --link: #00687A; --run: #00687A; --ok: #1F6B45; --warn: #9A4800; --bad: #B3261E;
+    --t-run: #D3ECF0; --f-run: #00586A; --t-warn: #FFE9D1; --t-bad: #FBE0DE; --f-bad: #A3221B; --t-ok: #D7EEE2; --t-n: #DCE8EE; --edge-warn: #D9A066;
+    --ring: rgba(0, 104, 122, .16); --shadow: 0 4px 18px rgba(11, 34, 51, .1), 0 1px 3px rgba(11, 34, 51, .06); --scrim: rgba(11, 34, 51, .32); }
   html { min-height: 100%; background: var(--bg); -webkit-tap-highlight-color: transparent; }
   body { --pad: .75rem; box-sizing: border-box; margin: 0 auto; max-width: 46rem; min-height: 100svh; padding: 0 var(--pad) calc(var(--dock, 0px) + var(--kb, 0px) + 1.5rem); color: var(--fg); font: 1rem/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
   @media (min-width: 64rem) { body { --pad: 1.5rem; } }
@@ -2599,7 +2599,7 @@ for (const r of document.querySelectorAll('input[name=theme]')) {
 }
 // The phone's status bar: the picked theme's ground, else each scheme's own.
 function barColour() {
-  const t = theme.get(), bg = { dark: '#0E1217', light: '#F7F6F2' };
+  const t = theme.get(), bg = { dark: '#0E1217', light: '#EAF3F7' };
   for (const m of document.querySelectorAll('meta[name=theme-color]')) m.content = bg[t] || bg[m.media.includes('dark') ? 'dark' : 'light'];
 }
 barColour();
