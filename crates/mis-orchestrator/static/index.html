@@ -213,6 +213,13 @@
   details.caps { position: relative; margin: 0; border: 0; font-size: .875rem; }
   .caps summary { padding: .625rem 0; margin: -.375rem 0 -.625rem; font: inherit; text-transform: none; letter-spacing: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .caps dl { margin: .5rem 0 0; gap: .125rem .75rem; }
+  /* Sessions on the worker's disk: harness, title, then folder · model · age; headless runs dimmed. */
+  .sess ul { margin: .25rem 0 0; }
+  .sess li { padding: .5rem 0; color: var(--fg); }
+  .sess li.headless { color: var(--dim); }
+  .sess p { margin: .25rem 0 0; }
+  .chip.claude { --s: var(--accent); } .chip.codex { --s: var(--fg); }
+  .live { margin-right: .375em; font-size: .75em; color: var(--ok); text-shadow: 0 0 6px var(--ok); }
   /* Tools gained since the note was saved; the note's editor on the worker's page. */
   .new { margin: .25rem 0 0; color: var(--warn); overflow-wrap: anywhere; }
   .ver { margin-top: .25rem; font-size: .875rem; overflow-wrap: anywhere; }
@@ -1070,6 +1077,44 @@ function capsLine(w) {
   return d;
 }
 
+// Sessions on a worker's disk, fetched each time its line is opened; kept across Status redraws.
+// Each is { list } once loaded, { error } if not, missing while loading.
+const sessOpen = new Set(), sessLists = new Map();
+const folder = (p) => (p || '').split(/[\\/]/).filter(Boolean).pop() || '';
+const redrawWorkers = () => route().view === 'workers' && renderWorkers();
+async function loadSessions(id) {
+  sessLists.delete(id);
+  redrawWorkers();
+  let got;
+  try {
+    const r = await fetch(`/api/workers/${id}/sessions`, { headers: authHeaders() });
+    got = r.ok ? { list: await r.json() } : { error: (await r.text()) || `error ${r.status}` };
+  } catch { got = { error: 'couldn’t reach the orchestrator' }; }
+  sessLists.set(id, got);
+  redrawWorkers();
+}
+function sessionRow(s, now) {
+  const age = span(now - s.updated_ms);
+  return el('li', { className: s.interactive ? '' : 'headless' },
+    el('div', { className: 'clamp2' }, s.active ? el('span', { className: 'live', title: 'active' }, '●') : '',
+      el('span', { className: `chip ${s.harness}` }, s.harness), s.title || short(s.id)),
+    el('div', { className: 'dim', title: s.cwd || '' },
+      ...dots([folder(s.cwd), s.model, age === 'now' ? age : `${age} ago`, !s.interactive && 'headless'])));
+}
+function sessionsLine(w) {
+  if (!w.online) return '';
+  const open = sessOpen.has(w.id), got = sessLists.get(w.id), now = Date.now() + skew;
+  const body = !got ? el('p', {}, 'reading…') : got.error ? el('p', { className: 'bad' }, got.error)
+    : got.list.length ? el('ul', {}, ...got.list.map((s) => sessionRow(s, now))) : el('p', {}, 'no sessions found');
+  const d = el('details', { className: 'caps sess dim', open }, el('summary', {}, 'sessions'), body);
+  // Also fires when a redraw creates it open; only a new opening fetches.
+  d.addEventListener('toggle', () => {
+    if (!d.open) sessOpen.delete(w.id);
+    else if (!sessOpen.has(w.id)) { sessOpen.add(w.id); loadSessions(w.id); }
+  });
+  return d;
+}
+
 // The worker's build, flagged when it isn't the orchestrator's; its self-update progress.
 function versionLine(w) {
   const v = w.info.version || 'older build', u = w.update || {};
@@ -1109,7 +1154,7 @@ function renderWorkers() {
       run ? el('div', { className: 'activity' }, ...dots([clock(run), tokensOf(run), run.activity])) : '',
       w.info.purpose ? el('div', { className: 'purpose' }, w.info.purpose) : '',
       (w.new_tools || []).length ? el('div', { className: 'new' }, `new: ${w.new_tools.join(', ')}`) : '',
-      permLine(w), capsLine(w), meterLine(w), limitRows(w), versionLine(w));
+      permLine(w), capsLine(w), sessionsLine(w), meterLine(w), limitRows(w), versionLine(w));
   }));
   if (!workers.length) $('machines').append(el('li', { className: 'dim' }, 'no workers connected'));
 }
