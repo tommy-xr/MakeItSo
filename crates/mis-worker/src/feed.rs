@@ -24,6 +24,7 @@ struct Facts {
     session: Session,
     turn: TurnEnd,
     last: Option<String>,
+    delivered: Vec<mis_types::Delivered>,
 }
 
 /// A parsed file.
@@ -177,6 +178,7 @@ impl Feed {
                 waiting_for,
                 updated_ms,
                 last: f.last,
+                delivered: f.delivered,
             });
         }
         // Files gone or out of the window are forgotten.
@@ -215,6 +217,7 @@ fn read(
         session,
         turn: r.turn,
         last: r.last,
+        delivered: r.delivered,
     };
     Parsed::Seen(key, Some(facts))
 }

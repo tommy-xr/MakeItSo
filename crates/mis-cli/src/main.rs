@@ -505,6 +505,10 @@ fn print_event(task: TaskId, event: &AgentEvent) {
             )
         }
         AgentEvent::Cancelled => println!("[{short}] cancelled"),
+        AgentEvent::Delivered { held: false, .. } => println!("[{short}] delivered"),
+        AgentEvent::Delivered { held: true, .. } => {
+            println!("[{short}] delivered; waiting for approval in the terminal")
+        }
     }
 }
 

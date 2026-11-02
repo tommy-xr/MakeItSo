@@ -107,10 +107,17 @@ pub fn claude_turns(line: &str) -> Vec<Turn> {
         Some("assistant") => Role::Assistant,
         _ => return vec![],
     };
+    let at = &v["timestamp"];
+    // A message MIS delivered is the user's, as they wrote it.
+    if let Some(p) = crate::sessions::mis_peer(&v) {
+        return said(role, p.body)
+            .map(|s| turn(role, s, at))
+            .into_iter()
+            .collect();
+    }
     if v["isMeta"] == true || v["isSidechain"] == true || v["isCompactSummary"] == true {
         return vec![];
     }
-    let at = &v["timestamp"];
     let blocks = match &v["message"]["content"] {
         Value::String(s) => {
             return said(role, s)
@@ -308,6 +315,9 @@ mod tests {
                 r#"{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"subagent"}]}}"#,
                 r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Fixed it."}]}}"#,
                 r#"{"type":"system","subtype":"turn_duration"}"#,
+                // A message MIS delivered reads as the user's own; another session's doesn't.
+                r#"{"type":"user","isMeta":true,"origin":{"kind":"peer","msg_id":"m1","name":"mis-phone","body":"and docs"},"message":{"content":"<cross-session-message>and docs</cross-session-message>"}}"#,
+                r#"{"type":"user","isMeta":true,"origin":{"kind":"peer","msg_id":"m2","name":"a-peer","body":"hi"},"message":{"content":"<cross-session-message>hi</cross-session-message>"}}"#,
                 "cut off {\"type\":\"user",
             ],
         );
@@ -319,6 +329,7 @@ mod tests {
                 (Role::Tool, "→ error[E0308]: mismatched types"),
                 (Role::Tool, "✗ denied"),
                 (Role::Assistant, "Fixed it."),
+                (Role::User, "and docs"),
             ]
         );
         assert_eq!(turns[0].at.as_deref(), Some("2026-11-01T10:00:00Z"));

@@ -185,6 +185,22 @@ struct TaskEntry {
     /// How that run was allowed to act.
     #[serde(default)]
     routine_mode: Option<RoutineMode>,
+    /// Its message is in its session (`TaskStatus::Delivered`).
+    #[serde(default)]
+    delivery: Option<Delivery>,
+}
+
+/// A message delivered into an open session, followed in its worker's live sessions
+/// (`Ledger::follow`) until the session answers.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Delivery {
+    msg_id: String,
+    /// Its terminal holds it for the user's approval.
+    held: bool,
+    /// Seen in the session's conversation.
+    read: bool,
+    /// Unix millis it was delivered.
+    at: u64,
 }
 
 /// What a task needs from the user: an answer while its agent waits for one;
@@ -248,6 +264,7 @@ impl TaskEntry {
             cancel: false,
             routine: None,
             routine_mode: None,
+            delivery: None,
         }
     }
 
@@ -284,6 +301,10 @@ impl TaskEntry {
             TaskStatus::Queued => "queued".into(),
             TaskStatus::Running if self.cancel => "cancelling…".into(),
             TaskStatus::Running => self.step.clone().unwrap_or_else(|| "started".into()),
+            TaskStatus::Delivered if self.delivery.as_ref().is_some_and(|d| d.held) => {
+                "waiting for approval in the terminal".into()
+            }
+            TaskStatus::Delivered => "delivered".into(),
             TaskStatus::Done => "done".into(),
             TaskStatus::Failed => "FAILED".into(),
             TaskStatus::Cancelled => "cancelled".into(),
@@ -638,24 +659,29 @@ impl Ledger {
             .find(|t| t.task.id == parent)
             .ok_or_else(|| format!("unknown task {parent}"))?;
         let short = &parent.to_string()[..8];
+        // A message to a session: the reply is another message to it, never to a copy.
+        if let (Some(to), Some(wid)) = (p.task.send_to.clone(), p.pin) {
+            let to = SendTo {
+                mode: SendMode::Deliver,
+                ..to
+            };
+            let harness = p.task.harness.clone();
+            let (id, effects) = self.send_to_session_with(wid, harness, text, to, images)?;
+            let t = self.tasks.iter_mut().find(|t| t.task.id == id);
+            t.expect("just added").parent = Some(parent);
+            return Ok((id, effects));
+        }
         if !p.status.finished() {
             return Err(format!("task {short} hasn't finished; reply once it has"));
         }
         let by_planner = p.task.harness == "planner" || p.task.harness.is_empty();
         let (id, effects) = match (&p.session, p.worker) {
             (Some(session), Some(wid)) if !by_planner => {
-                // A reply continues this task's session, in its folder. One that messaged a
-                // session on the worker's disk continues a copy: that session may be open again.
-                let send_to = (p.task.send_to.as_ref()).map(|to| SendTo {
-                    session: session.parse().unwrap_or(to.session),
-                    mode: SendMode::Fork,
-                    ..to.clone()
-                });
+                // A reply continues this task's session, in its folder.
                 let task = Task {
                     id: Uuid::new_v4(),
                     prompt: text,
                     resume: Some(session.clone()),
-                    send_to,
                     // The user replies: their worker's permissions, not the run's.
                     read_only: false,
                     ..p.task.clone()
@@ -679,7 +705,8 @@ impl Ledger {
     }
 
     /// Message session `to.session`, one of `harness`'s on worker `wid`'s disk: a task
-    /// pinned there that continues it (or a copy). Err if `wid` is offline or lacks `harness`.
+    /// pinned there that continues it (or a copy). A worker that can't deliver into an
+    /// open session continues it once closed instead. Err if `wid` is offline or lacks `harness`.
     pub fn send_to_session(
         &mut self,
         wid: WorkerId,
@@ -687,6 +714,21 @@ impl Ledger {
         text: String,
         to: SendTo,
     ) -> Result<(TaskId, Vec<Effect>), String> {
+        self.send_to_session_with(wid, harness, text, to, vec![])
+    }
+
+    fn send_to_session_with(
+        &mut self,
+        wid: WorkerId,
+        harness: String,
+        text: String,
+        mut to: SendTo,
+        images: Vec<Uuid>,
+    ) -> Result<(TaskId, Vec<Effect>), String> {
+        let delivers = self.workers.get(&wid).is_some_and(|w| w.info.deliver);
+        if to.mode == SendMode::Deliver && !delivers {
+            to.mode = SendMode::WhenClosed;
+        }
         let task = Task {
             id: Uuid::new_v4(),
             prompt: text,
@@ -697,7 +739,7 @@ impl Ledger {
             send_to: Some(to),
             read_only: false,
         };
-        self.enqueue_pinned(wid, task, vec![])
+        self.enqueue_pinned(wid, task, images)
     }
 
     /// Queue `task` for worker `wid` only, where the session it resumes lives.
@@ -1167,14 +1209,16 @@ impl Ledger {
             .filter(|(_, w)| now.saturating_sub(w.last_seen) > stale_after)
             .filter_map(|(wid, w)| Some((*wid, w.conn?)))
             .collect();
-        stale
-            .into_iter()
+        let mut effects: Vec<Effect> = (stale.into_iter())
             .flat_map(|(wid, conn)| {
                 let mut effects = self.disconnect(wid, conn);
                 effects.push(Effect::Close { conn });
                 effects
             })
-            .collect()
+            .collect();
+        // A message waiting for its codex session to go quiet waits on the clock.
+        effects.extend(self.schedule());
+        effects
     }
 
     /// Grace period ended. Drops the worker and fails its tasks unless it came back.
@@ -1258,6 +1302,16 @@ impl Ledger {
         if event == AgentEvent::Cancelled {
             t.status = TaskStatus::Cancelled;
             t.approvals.clear();
+        }
+        if let AgentEvent::Delivered { msg_id, held } = &event {
+            t.status = TaskStatus::Delivered;
+            t.approvals.clear();
+            t.delivery = Some(Delivery {
+                msg_id: msg_id.clone(),
+                held: *held,
+                read: false,
+                at: now,
+            });
         }
         let mut effects = vec![Effect::Broadcast(ServerMsg::Event {
             task,
@@ -1424,6 +1478,10 @@ impl Ledger {
             let Some(ti) = self.tasks.iter().position(|t| t.task.id == id) else {
                 continue;
             };
+            if self.session_busy(&self.tasks[ti]) {
+                remaining.push_back(id);
+                continue;
+            }
             let harness = &self.tasks[ti].task.harness;
             let pin = self.tasks[ti].pin;
             // Out-of-usage workers are skipped; a pinned reply waits for its own.
@@ -3175,7 +3233,7 @@ mod tests {
     }
 
     #[test]
-    fn a_session_message_is_pinned_and_a_reply_to_it_continues_a_copy() {
+    fn a_session_message_is_pinned_and_a_reply_to_it_goes_to_the_same_session() {
         let mut l = Ledger::default();
         let (idle, wid) = (Uuid::new_v4(), Uuid::new_v4());
         l.connect(idle, info(), &[], 2, T0);
@@ -3211,14 +3269,15 @@ mod tests {
         let [t] = &sent(&eff)[..] else {
             panic!("{eff:?}")
         };
-        // It continues a copy, found and run on the worker like the message was.
-        let copy = SendTo {
+        // Another message to the session itself, on its worker; this one can't deliver
+        // into an open session, so it waits for it to close.
+        let again = SendTo {
             session,
             title: Some("t".into()),
-            mode: SendMode::Fork,
+            mode: SendMode::WhenClosed,
         };
         assert_eq!(t.resume, Some(session.to_string()));
-        assert_eq!(t.send_to, Some(copy));
+        assert_eq!(t.send_to, Some(again));
     }
 
     #[test]

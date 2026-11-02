@@ -313,6 +313,7 @@ fn glyph(s: TaskStatus) -> char {
     match s {
         TaskStatus::Running => '●',
         TaskStatus::Planning | TaskStatus::Queued => '○',
+        TaskStatus::Delivered => '↪',
         TaskStatus::Done => '✓',
         TaskStatus::Failed => '✗',
         TaskStatus::Cancelled => '⊘',

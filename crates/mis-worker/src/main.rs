@@ -3,6 +3,7 @@
 
 mod approvals;
 mod config;
+mod deliver;
 mod feed;
 mod inventory;
 mod live;
@@ -165,6 +166,8 @@ async fn main() -> Result<()> {
         inventory,
         version: Some(VERSION.into()),
         permissions: perms.clone(),
+        // Where an open claude session can be told from a dead record (see `live::alive`).
+        deliver: cfg!(unix),
     };
     tracing::info!(?info.harnesses, ?info.models, ?info.roots, "connecting to {}", cfg.url);
     tracing::info!("inventory: {}", info.inventory.brief());
@@ -475,7 +478,10 @@ async fn session(
         let Some((task, event)) = next else {
             return Ok(Ended::Closed);
         };
-        let finished = matches!(event, AgentEvent::Finished { .. } | AgentEvent::Cancelled);
+        let finished = matches!(
+            event,
+            AgentEvent::Finished { .. } | AgentEvent::Cancelled | AgentEvent::Delivered { .. }
+        );
         if let Err(e) = sink
             .send(text(&WorkerMsg::Event {
                 task,
@@ -643,13 +649,13 @@ async fn session_cwd(
                         .into(),
                 )
             }
-            (SendMode::WhenClosed, true) if Instant::now() >= deadline => {
+            (SendMode::WhenClosed | SendMode::Deliver, true) if Instant::now() >= deadline => {
                 return Err(format!(
                     "the session was still open after {} min",
                     WAIT_CLOSED.as_secs() / 60
                 ))
             }
-            (SendMode::WhenClosed, true) => {
+            (SendMode::WhenClosed | SendMode::Deliver, true) => {
                 if !waiting {
                     let text = "waiting for the session to close".to_string();
                     let _ = tx.send((task.id, AgentEvent::Status { text })).await;
@@ -661,6 +667,48 @@ async fn session_cwd(
     };
     // Its folder must still exist and sit under a root, like any task's.
     Ok((roots::resolve_cwd(&ctx.roots, Some(&cwd))?, model))
+}
+
+/// Deliver `task` into claude session `session` if a terminal holds it open: the event
+/// that ends the task. None when it isn't open (or isn't claude's): continue it in place.
+async fn deliver_open(
+    task: &Task,
+    session: uuid::Uuid,
+    images: bool,
+    tx: &mpsc::Sender<(TaskId, AgentEvent)>,
+) -> Option<AgentEvent> {
+    if task.harness != "claude" {
+        return None;
+    }
+    let id = session.to_string();
+    let looked = tokio::task::spawn_blocking(move || {
+        let (claude, codex) = sessions::roots();
+        let proc = live::claude_procs(&claude, live::alive).remove(&id)?;
+        let path = transcript::find(&claude, &codex, "claude", session);
+        Some((claude, path, proc.name, id))
+    });
+    let (claude, path, name, id) = looked.await.ok()??;
+    let fail = |why: &str| {
+        let summary = Some(why.into());
+        Some(AgentEvent::Finished { ok: false, summary })
+    };
+    if images {
+        return fail("images can't go into a session open in a terminal; send the text alone");
+    }
+    let (Some(path), Some(name)) = (path, name) else {
+        return fail("the open session has no transcript or peer name to send to");
+    };
+    let started = AgentEvent::Started {
+        session: Some(id.clone()),
+        model: None,
+    };
+    let status = AgentEvent::Status {
+        text: format!("delivering to {name}"),
+    };
+    for ev in [started, status] {
+        let _ = tx.send((task.id, ev)).await;
+    }
+    Some(deliver::deliver(claude, path, id, &name, &task.prompt).await)
 }
 
 /// A session's folder, model, and whether it is open. Err when it isn't on this disk.
@@ -729,6 +777,12 @@ async fn run(
         let _ = tx.send(fail(format!("no harness {}", task.harness))).await;
         return;
     };
+    if let Some(to) = (task.send_to.as_ref()).filter(|to| to.mode == SendMode::Deliver) {
+        if let Some(ev) = deliver_open(&task, to.session, !images.is_empty(), tx).await {
+            let _ = tx.send((id, ev)).await;
+            return;
+        }
+    }
     // A session on this disk runs in its own folder, on its own model.
     let (cwd, model) = match &task.send_to {
         Some(to) => match session_cwd(ctx, &task, to, tx).await {
