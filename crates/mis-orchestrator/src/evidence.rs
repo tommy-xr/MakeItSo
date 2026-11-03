@@ -1,5 +1,6 @@
 //! Evidence files agents attach: checked again here (a worker's word is never
 //! trusted), stored as `<dir>/<uuid>.<ext>`, served back, swept with their task.
+//! Task diffs live beside them as `<dir>/diff-<task id>.json`.
 //! `check` is pure; `Store` is the filesystem shell around it.
 
 use std::path::PathBuf;
@@ -7,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use base64ct::{Base64, Encoding};
 use mis_types::evidence::*;
-use mis_types::{first_line, Evidence, EvidenceDraft};
+use mis_types::{first_line, Evidence, EvidenceDraft, TaskDiff};
 use uuid::Uuid;
 
 use crate::images::{private_dir, sweep_dir};
@@ -152,6 +153,21 @@ impl Store {
     pub fn read(&self, id: Uuid) -> Option<(FileKind, Vec<u8>)> {
         let kind = (FileKind::ALL.into_iter()).find(|k| self.path(id, *k).is_file())?;
         Some((kind, std::fs::read(self.path(id, kind)).ok()?))
+    }
+
+    fn diff_path(&self, task: Uuid) -> PathBuf {
+        self.dir.join(format!("diff-{task}.json"))
+    }
+
+    /// Keep `task`'s diff as served, replacing any it had; swept like the rest.
+    pub fn store_diff(&self, task: Uuid, diff: &TaskDiff) -> std::io::Result<()> {
+        let json = serde_json::to_vec(diff).expect("a diff serializes");
+        crate::push::write_private(&self.diff_path(task), &json)
+    }
+
+    /// `task`'s diff as JSON, if it is still here.
+    pub fn read_diff(&self, task: Uuid) -> Option<Vec<u8>> {
+        std::fs::read(self.diff_path(task)).ok()
     }
 
     /// Delete expired files; how many went.
