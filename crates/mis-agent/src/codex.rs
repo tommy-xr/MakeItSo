@@ -4,7 +4,10 @@ use anyhow::Context;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use mis_types::{AgentEvent, LimitWindow, PermissionMode, Permissions, TaskId, TASK_ENV};
+use mis_types::{
+    bound_plan, AgentEvent, LimitWindow, PermissionMode, Permissions, PlanItem, PlanStatus, TaskId,
+    TASK_ENV,
+};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -216,6 +219,10 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                 text: format!("error: {}", item["message"].as_str().unwrap_or("")),
             }]
         }
+        // Its plan tool (`update_plan`), each update the whole list.
+        (Some("item.started" | "item.updated" | "item.completed"), Some("todo_list")) => {
+            todo_plan(&item["items"]).map_or(vec![], |items| vec![AgentEvent::Plan { items }])
+        }
         (Some("item.started"), Some("command_execution")) => vec![AgentEvent::ToolUse {
             name: "shell".into(),
             input: serde_json::json!({ "command": item["command"] }),
@@ -246,6 +253,28 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
     }
 }
 
+/// A `todo_list` item's `[{text, completed}]` as a plan. Codex marks no row in
+/// progress, so the first open one is taken to be.
+fn todo_plan(items: &Value) -> Option<Vec<PlanItem>> {
+    let mut current = false;
+    let rows = items.as_array()?.iter().map(|i| {
+        let status = match i["completed"].as_bool()? {
+            true => PlanStatus::Completed,
+            false if !current => {
+                current = true;
+                PlanStatus::InProgress
+            }
+            false => PlanStatus::Pending,
+        };
+        Some(PlanItem {
+            text: i["text"].as_str()?.into(),
+            status,
+            active_form: None,
+        })
+    });
+    Some(bound_plan(rows.collect::<Option<_>>()?))
+}
+
 impl CodexAgent {
     /// `codex` argv for one run: `exec [opts] -- <prompt>`, or
     /// `exec resume|fork [opts] -- <session> <prompt>` to continue a session or a
@@ -263,6 +292,8 @@ impl CodexAgent {
             );
         }
         a.extend(["--json", "--skip-git-repo-check"].map(String::from));
+        // Its plan tool is off by default for current models.
+        a.extend(["-c", "tools.update_plan={enabled=true}"].map(String::from));
         if let Some(p) = o.permissions {
             a.extend(permission_args(p));
         }
@@ -569,6 +600,37 @@ mod tests {
         assert!(parse_line(r#"{"type":"turn.started"}"#).is_empty());
     }
 
+    /// `exec --json` 0.163 with `tools.update_plan` on (gpt-6-luna, told to plan
+    /// 3 steps and tick them off): one `todo_list` item, started then updated.
+    #[test]
+    fn todo_list_items_become_plans() {
+        use PlanStatus::*;
+        let fixture = include_str!("../tests/fixtures/codex-todo.jsonl");
+        let got: Vec<Vec<PlanStatus>> = (fixture.lines().flat_map(parse_line))
+            .filter_map(|e| match e {
+                AgentEvent::Plan { items } => Some(items.iter().map(|i| i.status).collect()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                [InProgress, Pending, Pending],
+                [Completed, InProgress, Pending],
+                [Completed, Completed, InProgress],
+                [Completed, Completed, Completed],
+                [Completed, Completed, Completed],
+            ]
+        );
+        let first = fixture.lines().flat_map(parse_line).find_map(|e| match e {
+            AgentEvent::Plan { items } => Some(items),
+            _ => None,
+        });
+        assert_eq!(first.unwrap()[0].text, "Run `echo one`");
+        let bad = r#"{"type":"item.updated","item":{"type":"todo_list","items":[{"text":"a"}]}}"#;
+        assert!(parse_line(bad).is_empty());
+    }
+
     #[test]
     fn argv_new_and_resumed() {
         let full = Permissions {
@@ -586,6 +648,8 @@ mod tests {
                 "exec",
                 "--json",
                 "--skip-git-repo-check",
+                "-c",
+                "tools.update_plan={enabled=true}",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--model=gpt-5",
                 "--",
@@ -603,6 +667,8 @@ mod tests {
                 "resume",
                 "--json",
                 "--skip-git-repo-check",
+                "-c",
+                "tools.update_plan={enabled=true}",
                 "--",
                 "t-1",
                 "-more"

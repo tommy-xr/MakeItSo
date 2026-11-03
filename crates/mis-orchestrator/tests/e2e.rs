@@ -1573,6 +1573,53 @@ async fn reported_evidence_reaches_status_and_show() {
     assert_eq!(info.links, [test]);
 }
 
+#[tokio::test]
+async fn agent_plan_reaches_watchers_and_show() {
+    let base = start().await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    send(&mut client, &ClientMsg::Subscribe).await;
+    let mut worker = join(&base, uuid::Uuid::new_v4(), "claude", vec![]).await;
+    let task = submit_claude(&mut client, &mut worker, "fix the test").await;
+    let items = vec![
+        PlanItem {
+            text: "Reproduce the failure".into(),
+            status: PlanStatus::Completed,
+            active_form: Some("Reproducing the failure".into()),
+        },
+        PlanItem {
+            text: "Fix the race".into(),
+            status: PlanStatus::InProgress,
+            active_form: Some("Fixing the race".into()),
+        },
+    ];
+    let event = AgentEvent::Plan {
+        items: items.clone(),
+    };
+    send(&mut worker, &WorkerMsg::Event { task, event }).await;
+    // Pushed to the watching client unasked, as its task's latest plan.
+    loop {
+        match recv(&mut client).await {
+            ServerMsg::Status { tasks, .. } if !tasks[0].plan.is_empty() => {
+                assert_eq!(tasks[0].plan, items);
+                break;
+            }
+            ServerMsg::Event { event, .. } => {
+                assert!(!matches!(event, AgentEvent::Plan { .. }), "off the stream")
+            }
+            _ => {}
+        }
+    }
+    send(&mut client, &ClientMsg::Show { task }).await;
+    let ServerMsg::TaskDetail {
+        task: info, events, ..
+    } = recv(&mut client).await
+    else {
+        panic!()
+    };
+    assert_eq!(info.plan, items);
+    assert!(events.is_empty(), "not on the transcript");
+}
+
 /// POST a JSON-RPC body to `/mcp` with extra headers; returns (status line, JSON body if any).
 async fn mcp_post(
     base: &str,

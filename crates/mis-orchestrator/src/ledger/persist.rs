@@ -270,6 +270,13 @@ mod tests {
                 detail: None,
                 pr: None,
             }),
+            AgentEvent::Plan {
+                items: vec![PlanItem {
+                    text: "fix it".into(),
+                    status: PlanStatus::Completed,
+                    active_form: Some("Fixing it".into()),
+                }],
+            },
             AgentEvent::Usage {
                 input: 10,
                 output: 20,
@@ -320,6 +327,7 @@ mod tests {
         assert_eq!(done.summary.as_deref(), Some("did it"));
         assert_eq!(done.links.len(), 2);
         assert!(done.links[0].pr.is_some(), "PR status kept");
+        assert_eq!(done.plan[0].active_form.as_deref(), Some("Fixing it"));
         assert_eq!(done.attention, Attention::None, "seen kept");
         assert_eq!(status_of(&r, ids[1]).attention, Attention::Limited);
         let ServerMsg::Status { workers, .. } = r.status() else {

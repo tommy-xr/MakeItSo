@@ -1,7 +1,10 @@
 //! Claude Code backend: `claude -p <prompt> --output-format stream-json --verbose --include-partial-messages`.
 
 use anyhow::Context;
-use mis_types::{AgentEvent, LimitWindow, PermissionMode, Permissions, TaskId, TASK_ENV};
+use mis_types::{
+    bound_plan, AgentEvent, LimitWindow, PermissionMode, Permissions, PlanItem, PlanStatus, TaskId,
+    TASK_ENV,
+};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -200,16 +203,39 @@ fn usage(u: &Value) -> Option<(u64, u64)> {
     })
 }
 
+/// Claude's checklist tool: each call holds the whole list.
+const TODO_WRITE: &str = "TodoWrite";
+
 /// Calls to the worker's own tools (`report_status`, `report_evidence`),
-/// including claude's lookup of them: the worker already reports them as
-/// events, so the echo is noise (and would make every task look like it used tools).
+/// including claude's lookup of them (or of `TodoWrite`): the worker already
+/// reports them as events, so the echo is noise (and would make every task look
+/// like it used tools).
 fn is_own_tool(block: &Value) -> bool {
     let own = |name: &str| name.starts_with(&format!("mcp__{MCP_SERVER}__"));
     let name = block["name"].as_str().unwrap_or("");
     let lookup = block["input"]["query"]
         .as_str()
         .and_then(|q| q.strip_prefix("select:"));
-    own(name) || (name == "ToolSearch" && lookup.is_some_and(|q| q.split(',').all(own)))
+    let looked_up = |q: &str| q.split(',').all(|n| own(n) || n == TODO_WRITE);
+    own(name) || (name == "ToolSearch" && lookup.is_some_and(looked_up))
+}
+
+/// A `TodoWrite` input (`{todos: [{content, status, activeForm}]}`) as a plan;
+/// None if any row isn't one.
+fn todo_plan(input: &Value) -> Option<Vec<PlanItem>> {
+    let rows = input["todos"].as_array()?.iter().map(|t| {
+        Some(PlanItem {
+            text: t["content"].as_str()?.into(),
+            status: match t["status"].as_str()? {
+                "pending" => PlanStatus::Pending,
+                "in_progress" => PlanStatus::InProgress,
+                "completed" => PlanStatus::Completed,
+                _ => return None,
+            },
+            active_form: t["activeForm"].as_str().map(String::from),
+        })
+    });
+    Some(bound_plan(rows.collect::<Option<_>>()?))
 }
 
 /// Events for one line. Tool calls hidden by `is_own_tool` go into `hidden`,
@@ -230,6 +256,18 @@ fn events(v: &Value, hidden: &mut HashSet<String>) -> Vec<AgentEvent> {
                 "tool_use" if is_own_tool(b) => {
                     hidden.insert(b["id"].as_str()?.to_string());
                     None
+                }
+                // The main agent's checklist (a subagent's isn't the task's), its
+                // "modified successfully" result hidden.
+                "tool_use" if b["name"] == TODO_WRITE && v["parent_tool_use_id"].is_null() => {
+                    let Some(items) = todo_plan(&b["input"]) else {
+                        return Some(AgentEvent::ToolUse {
+                            name: TODO_WRITE.into(),
+                            input: b["input"].clone(),
+                        });
+                    };
+                    hidden.insert(b["id"].as_str()?.to_string());
+                    Some(AgentEvent::Plan { items })
                 }
                 "tool_use" => Some(AgentEvent::ToolUse {
                     name: b["name"].as_str()?.to_string(),
@@ -420,6 +458,10 @@ impl Agent for ClaudeAgent {
                 cmd.current_dir(d);
             }
             cmd.env(TASK_ENV, task.to_string());
+            // Current models get no checklist tool unless asked; tasks off picks
+            // `TodoWrite` (one call, whole list) over the TaskCreate/TaskUpdate set.
+            cmd.env("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1")
+                .env("CLAUDE_CODE_ENABLE_TASKS", "0");
             // stderr inherits so it can't fill a pipe and block; kill_on_drop so a
             // dropped task can't leave claude running headless.
             cmd.stdin(std::process::Stdio::null())
@@ -512,6 +554,73 @@ mod tests {
         // A subagent's text streams under its Task call: not the reply.
         let sub = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}},"parent_tool_use_id":"toolu_1"}"#;
         assert!(parse_line(sub).is_empty());
+    }
+
+    /// A real run (haiku, `CLAUDE_CODE_ENABLE_TODO_TOOLS=1 CLAUDE_CODE_ENABLE_TASKS=0`,
+    /// told to plan 3 steps and tick them off; ids zeroed, deltas dropped): each
+    /// `TodoWrite` is a whole plan; its lookup and results are hidden.
+    #[test]
+    fn todo_write_calls_become_plans() {
+        use PlanStatus::*;
+        let mut p = Parser::default();
+        let fixture = include_str!("../tests/fixtures/claude-todowrite.jsonl");
+        let got: Vec<String> = fixture
+            .lines()
+            .flat_map(|l| p.line(l))
+            .filter_map(|e| match e {
+                AgentEvent::Plan { items } => Some(
+                    (items.iter())
+                        .map(|i| match i.status {
+                            Pending => "○",
+                            InProgress => "◐",
+                            Completed => "✓",
+                        })
+                        .collect(),
+                ),
+                AgentEvent::ToolUse { name, .. } => Some(format!("tool {name}")),
+                AgentEvent::ToolResult { content } => Some(format!("result {content}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "◐○○",
+                "tool Bash",
+                "result one",
+                "✓◐○",
+                "tool Bash",
+                "result two",
+                "✓✓◐",
+                "✓✓✓",
+            ]
+        );
+        let first = fixture.lines().flat_map(parse_line).find_map(|e| match e {
+            AgentEvent::Plan { items } => Some(items),
+            _ => None,
+        });
+        assert_eq!(
+            first.unwrap()[0],
+            PlanItem {
+                text: "Run 'echo one'".into(),
+                status: InProgress,
+                active_form: Some("Running 'echo one'".into()),
+            }
+        );
+        // A subagent's list isn't the task's; a malformed one stays a tool call.
+        let call = |parent: &str, status: &str| {
+            format!(
+                r#"{{"type":"assistant","parent_tool_use_id":{parent},"message":{{"content":[{{"type":"tool_use","id":"t","name":"TodoWrite","input":{{"todos":[{{"content":"a","status":"{status}"}}]}}}}]}}}}"#
+            )
+        };
+        let tool = |l: &str| matches!(&parse_line(l)[..], [AgentEvent::ToolUse { .. }]);
+        assert!(tool(&call(r#""toolu_1""#, "pending")));
+        assert!(tool(&call("null", "blocked")));
+        let plan = parse_line(&call("null", "pending"));
+        let [AgentEvent::Plan { items }] = &plan[..] else {
+            panic!("{plan:?}")
+        };
+        assert_eq!((items.len(), items[0].active_form.as_ref()), (1, None));
     }
 
     #[test]

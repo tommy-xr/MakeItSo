@@ -502,7 +502,10 @@ fn print_event(task: TaskId, event: &AgentEvent) {
         // Kept by the worker, never forwarded.
         AgentEvent::Limits { .. } => {}
         // Stored on the task by the orchestrator, never forwarded.
-        AgentEvent::Artifact(_) | AgentEvent::Result(_) | AgentEvent::Diff(_) => {}
+        AgentEvent::Artifact(_)
+        | AgentEvent::Result(_)
+        | AgentEvent::Diff(_)
+        | AgentEvent::Plan { .. } => {}
         // Running totals; `mis status` shows the latest.
         AgentEvent::Usage { .. } => {}
         AgentEvent::Finished { ok, summary } => {
