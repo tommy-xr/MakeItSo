@@ -724,7 +724,7 @@ mod tests {
         let a = CodexAgent.argv("hi", &o);
         assert!(!a.iter().any(|x| x.contains("dangerously")));
         assert_eq!(
-            a[4..],
+            a[6..],
             [
                 "-c",
                 r#"sandbox_mode="workspace-write""#,

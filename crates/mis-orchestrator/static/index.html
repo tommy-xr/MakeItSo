@@ -503,6 +503,30 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .rfoot button { display: inline-flex; align-items: center; gap: .375rem; min-height: 2.25rem; padding: 0 .625rem; border-radius: .625rem; background: none; color: var(--soft); font: 500 .8125rem var(--sans); }
   .rfoot svg { width: 1rem; height: 1rem; }
   @media (hover: hover) { .rfoot button:hover { background: var(--hover); } }
+  /* Plan: the agent's checklist in a card under the result; a thin bar of its progress under the head. */
+  #plan { margin: 1rem 0 .5rem; border-radius: 1rem; background: var(--card); overflow: hidden; }
+  .ph { display: flex; align-items: center; gap: .5rem; width: 100%; min-height: 2.75rem; padding: 0 .75rem 0 1rem; border-radius: 0; background: none; color: var(--fg); text-align: left; }
+  .ph:active { transform: none; background: var(--hover); }
+  .ph h3 { margin: 0; padding: 0; color: var(--fg); font: 600 1rem/1.35 var(--sans); }
+  .ph .pn { margin-left: auto; font: .8125rem var(--sans); color: var(--soft); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .ph .chev { flex: none; width: 1rem; height: 1rem; color: var(--dim); transition: transform .15s; }
+  .ph[aria-expanded=true] .chev { transform: rotate(180deg); }
+  .pbar { display: block; height: .1875rem; margin: 0 1rem .75rem; border-radius: 999px; background: linear-gradient(var(--accent), var(--accent)) 0 0 / var(--v, 0%) 100% no-repeat, var(--sep); transition: background-size .3s ease-out; }
+  .pl { margin: -.25rem 0 0; padding: 0 0 .5rem; list-style: none; }
+  .pi { display: flex; align-items: flex-start; gap: .625rem; padding: .3125rem 1rem; font-size: .9375rem; line-height: 1.4; color: var(--fg2); }
+  .pt { min-width: 0; overflow-wrap: anywhere; }
+  /* Row marks: an open ring to do, a half-filled one in progress (turning while it runs), a filled check done. */
+  .pk { flex: none; display: grid; place-items: center; box-sizing: border-box; width: 1rem; height: 1rem; margin-top: .125rem; border: 1.5px solid var(--faint); border-radius: 50%; }
+  .pk svg { width: .625rem; height: .625rem; }
+  .pi.in_progress .pk { border-color: var(--run); background: conic-gradient(var(--run) 0 50%, transparent 0); }
+  .pi.live .pk { border: 2px solid var(--t-run); border-top-color: var(--run); background: none; animation: spin .9s linear infinite; }
+  .pi.live .pt { color: var(--fg); font-weight: 500; }
+  .pi.completed .pk { border-color: var(--ok); background: var(--ok); color: var(--card); }
+  .pi.completed .pt { color: var(--dim); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--dim) 55%, transparent); }
+  /* Home: a running task's plan in one line, a short bar before it. */
+  .r3.pline { margin: .125rem 0 0; color: var(--link); }
+  .pline b { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .pmini { display: inline-block; width: 1.5rem; height: .25rem; margin-right: .375rem; vertical-align: .125rem; border-radius: 999px; background: linear-gradient(var(--accent), var(--accent)) 0 0 / var(--v, 0%) 100% no-repeat, var(--sep); }
   /* Files changed: a card under the result; each file row folds open to its patch, which scrolls sideways. */
   #diff { margin: 1rem 0 .5rem; padding-top: .75rem; border-radius: 1rem; background: var(--card); overflow: hidden; }
   .dh { display: flex; align-items: baseline; gap: .5rem; padding: 0 1rem; }
@@ -638,6 +662,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
     *, *::before, *::after, ::backdrop { animation: none !important; transition: none !important; }
     .shot.busy::after, #refresh-ev:disabled { animation: spin 1s linear infinite !important; }
     .recbar .dots i { opacity: .6; }
+    .pi.live .pk { border: 1.5px solid var(--run); background: conic-gradient(var(--run) 0 50%, transparent 0); }
   }
   /* VR panels: bigger type, secondary text pulled toward the foreground. */
   html.vr { font-size: 22px; --dim: color-mix(in srgb, var(--fg) 85%, var(--bg)); }
@@ -693,6 +718,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
 <main id="detail" hidden>
   <div class="chead"><a href="#" class="back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a><div id="task-head"></div></div>
   <section id="result" aria-label="Result" hidden></section>
+  <section id="plan" aria-label="Plan" hidden></section>
   <section id="diff" aria-label="Files changed" hidden></section>
   <div id="task-convo" class="convo"></div>
   <section id="approvals" hidden></section>
@@ -1793,6 +1819,7 @@ const lastLine = (s) => snippet(s.split('\n').filter((l) => l.trim() && !MD_FENC
 const snippet = (s) => (s || '').split('\n').find((l) => l.trim())?.replace(/\*\*|__|`/g, '').replace(/^(?:#{1,6} +|> ?|\s+)+/, '') || '';
 // What a task is doing (running, held) or said (its summary), for its row's last line.
 function taskLine(t) {
+  if (t.status === 'running' && t.plan && t.plan.length) return planLine(t);
   const writing = !isFinished(t) && writingOf(t.id);
   if (writing || (!isFinished(t) && t.activity && t.activity !== 'queued')) {
     const line = el('div', { className: 'r3 activity one' }, writing ? lastLine(writing) : t.activity);
@@ -2021,6 +2048,46 @@ function renderResult(t) {
   const foot = el('div', { className: 'rfoot' }, copy);
   box.replaceChildren(r ? el('div', { className: 'rcard' }, el('h2', {}, r.headline),
     r.points.length ? el('ul', {}, ...r.points.map((p) => el('li', {}, p))) : '', foot) : foot, ev.length ? evStrip(ev) : '');
+}
+// Plan: the agent's latest checklist, open while it runs, folded to its progress once finished (a tap flips either).
+const planDone = (p) => p.filter((i) => i.status === 'completed').length;
+const planNow = (p) => p.find((i) => i.status === 'in_progress') || p.find((i) => i.status === 'pending');
+const PLAN_MARK = { pending: 'to do', in_progress: 'in progress', completed: 'done' };
+let planKey = '', planUi = { id: null, open: null };
+function progressBar(cls, done, n) {
+  const b = el('i', { className: cls });
+  b.style.setProperty('--v', `${(done / n) * 100}%`);
+  return b;
+}
+function renderPlan(t) {
+  const box = $('plan'), p = (t && t.plan) || [];
+  if (!p.length) { box.hidden = true; box.replaceChildren(); planKey = ''; return; }
+  if (planUi.id !== t.id) planUi = { id: t.id, open: null };
+  const running = t.status === 'running', open = planUi.open ?? running;
+  const key = JSON.stringify([t.id, p, running, open]);
+  if (key === planKey) return;
+  planKey = key;
+  box.hidden = false;
+  const done = planDone(p);
+  const head = el('button', { type: 'button', className: 'ph', onclick: () => { planUi.open = !open; render(); } },
+    el('h3', {}, 'Plan'), el('span', { className: 'pn' }, `${done} of ${p.length}`), chev());
+  head.setAttribute('aria-expanded', String(open));
+  const bar = progressBar('pbar', done, p.length);
+  Object.assign(bar, { role: 'progressbar', ariaLabel: 'Plan progress', ariaValueMin: '0', ariaValueMax: String(p.length), ariaValueNow: String(done) });
+  // The step in progress reads as what it's doing, while it runs.
+  const row = (i) => {
+    const live = running && i.status === 'in_progress';
+    return el('li', { className: `pi ${i.status}${live ? ' live' : ''}` },
+      el('span', { className: 'pk', role: 'img', ariaLabel: PLAN_MARK[i.status] }, i.status === 'completed' ? svg(ICON.check, 3) : ''),
+      el('span', { className: 'pt' }, live ? i.active_form || i.text : i.text));
+  };
+  box.replaceChildren(head, bar, open ? el('ol', { className: 'pl' }, ...p.map(row)) : '');
+}
+// A running task's plan on Home: `3/7 · Running the tests`.
+function planLine(t) {
+  const p = t.plan, cur = planNow(p), done = planDone(p);
+  return el('div', { className: 'r3 pline one' }, progressBar('pmini', done, p.length), el('b', {}, `${done}/${p.length}`), ' · ',
+    !cur ? 'All done' : (cur.status === 'in_progress' && cur.active_form) || cur.text);
 }
 // Files changed: a task's diff (fetched once per diff from `/api/tasks/<id>/diff`), its file rows folding open to their
 // patch; under them the Push / Open PR offers, each asking in place before its reply goes to the agent.
@@ -2469,7 +2536,7 @@ function runLabel(run) {
   return [head, names.length ? ` · ${names.slice(0, 3).join(', ')}${names.length > 3 ? '…' : ''}` : ''];
 }
 const svg = (d, w = 2) => { const n = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); n.setAttribute('viewBox', '0 0 24 24'); n.setAttribute('aria-hidden', 'true'); n.innerHTML = `<path d="${d}" fill="none" stroke="currentColor" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round"/>`; return n; };
-const ICON = { term: 'M5 8l4 4-4 4M12 16h7', chev: 'M6 9l6 6 6-6', expand: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5', copy: 'M9 9h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2zM5 15V5a2 2 0 0 1 2-2h8', retry: 'M4 12a8 8 0 1 0 3-6.2M4 4v5h5', bell: 'M6 9a6 6 0 0 1 12 0c0 6 2.5 8 2.5 8h-17S6 15 6 9M10 20.5a2.2 2.2 0 0 0 4 0' };
+const ICON = { term: 'M5 8l4 4-4 4M12 16h7', chev: 'M6 9l6 6 6-6', expand: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5', copy: 'M9 9h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2zM5 15V5a2 2 0 0 1 2-2h8', retry: 'M4 12a8 8 0 1 0 3-6.2M4 4v5h5', check: 'M5 12.5l4.5 4.5L19 7.5', bell: 'M6 9a6 6 0 0 1 12 0c0 6 2.5 8 2.5 8h-17S6 15 6 9M10 20.5a2.2 2.2 0 0 0 4 0' };
 const chev = () => { const n = svg(ICON.chev); n.classList.add('chev'); return n; };
 const iconBtn = (icon, label, onclick) => { const b = el('button', { type: 'button', className: 'ibtn', title: label, onclick }, svg(ICON[icon])); b.setAttribute('aria-label', label); return b; };
 
@@ -2684,6 +2751,7 @@ function renderDetail(id) {
     el('div', { className: 'r2 one' }, ...dots([t.worker && shortHost(hostOf(t.worker)), harnessModel(t.harness, t.model),
       t.status === 'running' ? clock(t) : changedAt(t) && span(now - changedAt(t))]))] : []));
   renderResult(t);
+  renderPlan(t);
   renderDiff(t);
   drawTask(t);
   renderAttached((t && t.images) || []);
