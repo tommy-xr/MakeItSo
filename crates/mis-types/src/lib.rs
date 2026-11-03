@@ -20,7 +20,12 @@ mod inventory;
 pub use image::{ImageFile, ImageKind, MAX_IMAGES, MAX_IMAGE_BYTES};
 pub use inventory::{InstalledApp, Inventory, Machine};
 mod links;
+pub mod merge;
 pub use links::{github_link, github_links, Checks, Link, LinkKind, PrState, PrStatus};
+pub use merge::{
+    is_merge_label, merge_label, MergeApprove, MergeFacts, MergeMethod, MergePolicy, MergeRule,
+    MERGE_TOOL,
+};
 pub mod mcp;
 mod permissions;
 mod plan;
@@ -152,6 +157,9 @@ pub struct Task {
     /// against it. None: the worker records where this task starts.
     #[serde(default)]
     pub diff_base: Option<Box<DiffBase>>,
+    /// How it may merge PRs: routine runs only through `merge_pr`, if at all.
+    #[serde(default)]
+    pub merge: MergeRule,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -636,6 +644,19 @@ pub struct RoutineView {
     /// None for a bad file.
     #[serde(default)]
     pub mode: Option<RoutineMode>,
+    /// Its `merge:` block: what `merge_pr` may merge.
+    #[serde(default)]
+    pub merge: Option<MergePolicy>,
+    /// Its file changed since it went live, so it runs dry until switched live again.
+    #[serde(default)]
+    pub changed: bool,
+    /// Hash of what going live approves (prompt, merge policy, placement); send it
+    /// back to go live, so a file changed since it was read isn't approved unseen.
+    #[serde(default)]
+    pub pin: Option<String>,
+    /// Its prompt, which going live approves with the rest.
+    #[serde(default)]
+    pub prompt: Option<String>,
     /// Unix millis; None while paused, for a bad file, or a cron that never matches.
     pub next_at: Option<u64>,
     pub last_at: Option<u64>,

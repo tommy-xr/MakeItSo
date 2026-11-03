@@ -116,30 +116,29 @@ enum RoutineCmd {
 async fn routines(args: &Args, cmd: Option<&RoutineCmd>) -> Result<()> {
     let base = http_url(&args.url);
     let client = reqwest::Client::new();
-    let mut req = match cmd {
+    let req = match cmd {
         None => client.get(format!("{base}/api/routines")),
         Some(RoutineCmd::Run { name }) => client.post(format!("{base}/api/routines/{name}/run")),
-        Some(RoutineCmd::Live { name }) => client.post(format!("{base}/api/routines/{name}/live")),
+        // Shows the routine, and approves that version (its pin): an edit since is refused.
+        Some(RoutineCmd::Live { name }) => {
+            let list = call(args, client.get(format!("{base}/api/routines"))).await?;
+            let list: Vec<RoutineView> = serde_json::from_str(&list)?;
+            let r = (list.iter().find(|r| &r.name == name))
+                .with_context(|| format!("no routine {name}"))?;
+            println!("{}", routine_line(r, unix_ms()));
+            if let Some(p) = &r.prompt {
+                println!("{p}\n");
+            }
+            client
+                .post(format!("{base}/api/routines/{name}/live"))
+                .header("content-type", "application/json")
+                .body(serde_json::json!({ "pin": r.pin }).to_string())
+        }
         Some(RoutineCmd::DryRun { name }) => {
             client.post(format!("{base}/api/routines/{name}/dry-run"))
         }
     };
-    let access = access_headers(
-        args.cf_access_client_id.as_deref(),
-        args.cf_access_client_secret.as_deref(),
-    );
-    for (k, v) in access.map_err(anyhow::Error::msg)? {
-        req = req.header(k, v);
-    }
-    if let Some(t) = &args.token {
-        req = req.bearer_auth(t);
-    }
-    let resp = (req.send().await).with_context(|| format!("connecting to {base}"))?;
-    let status = resp.status();
-    let body = resp.text().await?;
-    if !status.is_success() {
-        bail!("{status}: {body}");
-    }
+    let body = call(args, req).await?;
     match cmd {
         None => {
             let list: Vec<RoutineView> = serde_json::from_str(&body)?;
@@ -161,6 +160,27 @@ async fn routines(args: &Args, cmd: Option<&RoutineCmd>) -> Result<()> {
     Ok(())
 }
 
+/// Send `req` with the token and Access headers; its body, or Err with the status.
+async fn call(args: &Args, mut req: reqwest::RequestBuilder) -> Result<String> {
+    let access = access_headers(
+        args.cf_access_client_id.as_deref(),
+        args.cf_access_client_secret.as_deref(),
+    );
+    for (k, v) in access.map_err(anyhow::Error::msg)? {
+        req = req.header(k, v);
+    }
+    if let Some(t) = &args.token {
+        req = req.bearer_auth(t);
+    }
+    let resp = (req.send().await).with_context(|| format!("connecting to {}", args.url))?;
+    let status = resp.status();
+    let body = resp.text().await?;
+    if !status.is_success() {
+        bail!("{status}: {body}");
+    }
+    Ok(body)
+}
+
 /// `pr-grooming · every 6h · next in 2h05m · last 3m12s ago: done (ab12cd34)`, then
 /// its error on a line of its own.
 fn routine_line(r: &RoutineView, now: u64) -> String {
@@ -170,6 +190,12 @@ fn routine_line(r: &RoutineView, now: u64) -> String {
         Some(RoutineMode::DryRun) => parts.push("dry run".into()),
         Some(RoutineMode::Live) => parts.push("LIVE".into()),
         Some(RoutineMode::Report) | None => {}
+    }
+    if r.changed {
+        parts.push("changed since it went live".into());
+    }
+    if let Some(m) = &r.merge {
+        parts.push(format!("merges {}", m.repos.join(", ")));
     }
     if r.paused {
         parts.push("paused".into());
@@ -1180,6 +1206,10 @@ mod tests {
             cwd: None,
             paused: false,
             mode: Some(RoutineMode::Report),
+            merge: None,
+            changed: false,
+            pin: None,
+            prompt: None,
             next_at: Some(3_600_000 + 65_000),
             last_at: Some(3_600_000 - 192_000),
             last_task: Some(task),

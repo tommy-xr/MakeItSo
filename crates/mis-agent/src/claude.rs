@@ -54,8 +54,8 @@ fn mcp_config(url: &str, headers: &[(&str, String)]) -> String {
         "url": url,
         "headers": headers,
         // Lifts claude's 60 s per-request and 5 min idle limits for this server,
-        // so `approve` can wait for a person (the worker answers by APPROVAL_WAIT).
-        "timeout": (crate::APPROVAL_WAIT + std::time::Duration::from_secs(60)).as_millis() as u64,
+        // so `approve` and `merge_pr` can wait for a person.
+        "timeout": crate::MCP_CALL_WAIT.as_millis() as u64,
     }}});
     config.to_string()
 }
@@ -146,6 +146,32 @@ fn read_only_args(p: &Permissions, allowed: &mut Vec<String>) -> Vec<String> {
     }
     a
 }
+
+/// Denied in a live routine run, whatever else allows them: shell routes to
+/// merging a PR or moving a branch that skip `merge_pr`'s checks (gh's merge,
+/// API merges, ref and file writes, gh aliases, pushes to main or master), and
+/// the token a direct API call would need. Each matches anywhere in a command, so wrappers
+/// (`sh -c "…"`, `xargs`, `cd x && …`) are caught too, at the cost of some reads
+/// (`gh api …/merge`). Best effort: a shell that reaches GitHub another way, say
+/// a script it writes, isn't sandboxed.
+pub const NO_MERGE: [&str; 16] = [
+    "Bash(*gh pr merge*)",
+    "Bash(*gh api*merge*)",
+    "Bash(*gh api*Merge*)",
+    "Bash(*gh api*PUT*)",
+    "Bash(*gh api*git/refs*)",
+    "Bash(*gh alias set*)",
+    "Bash(*gh auth token*)",
+    "Bash(*gh auth status*)",
+    "Bash(*--show-token*)",
+    "Bash(*credential fill*)",
+    "Bash(*git*push*main)",
+    "Bash(*git*push*main *)",
+    "Bash(*git*push*master)",
+    "Bash(*git*push*master *)",
+    "Bash(*git*push*--mirror*)",
+    "Bash(*git*push*--all*)",
+];
 
 /// Map one stream-json line to zero or more events, without token usage
 /// (that needs the whole stream; see `Parser`).
@@ -397,6 +423,10 @@ impl ClaudeAgent {
         if !allowed.is_empty() {
             a.push("--allowedTools".into());
             a.extend(allowed);
+        }
+        if o.no_merge {
+            a.push("--disallowedTools".into());
+            a.extend(NO_MERGE.map(String::from));
         }
         a.extend(self.extra_args.iter().cloned());
         // One `=` token each, so a value starting with '-' can't be read as a flag.
@@ -1027,6 +1057,31 @@ mod tests {
             ..ask
         };
         assert_eq!(allowed(&argv(&none)), ["mcp__mis"]);
+    }
+
+    #[test]
+    fn live_routine_runs_deny_merging_around_merge_pr_even_in_full_mode() {
+        let full = Permissions {
+            mode: PermissionMode::Full,
+            ..Default::default()
+        };
+        let o = RunOpts {
+            permissions: Some(&full),
+            no_merge: true,
+            ..Default::default()
+        };
+        let a = ClaudeAgent::default().argv("hi", &o);
+        let i = a.iter().position(|x| x == "--disallowedTools").unwrap();
+        assert_eq!(a[i + 1..i + 1 + NO_MERGE.len()], NO_MERGE.map(String::from));
+        assert!(NO_MERGE.contains(&"Bash(*gh pr merge*)"));
+        assert_eq!(a[a.len() - 2..], ["--", "hi"]);
+        let plain = RunOpts {
+            no_merge: false,
+            ..o
+        };
+        assert!(!ClaudeAgent::default()
+            .argv("hi", &plain)
+            .contains(&"--disallowedTools".into()));
     }
 
     #[test]

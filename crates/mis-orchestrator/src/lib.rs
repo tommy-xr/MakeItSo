@@ -615,7 +615,7 @@ impl App {
         };
         let defs = tokio::task::spawn_blocking(move || load_routines(&dir)).await;
         let defs = defs.unwrap_or_default();
-        if self.ledger().forget_live(&defs) {
+        if self.transition(|l| l.forget_live(&defs)) {
             self.save_now().await;
         }
         defs
@@ -1134,12 +1134,15 @@ async fn routines(
 }
 
 /// `run` (replies `{"task": id}`), `pause`, `resume`, `live` or `dry-run` routine
-/// `name`. Acting, like submitting a task: read-only tokens get 403.
+/// `name`. Acting, like submitting a task: read-only tokens get 403. `live`
+/// carries `{"pin": ..}`, the `RoutineView::pin` the user reviewed: 409 if the
+/// file has changed since, so nothing goes live unseen.
 async fn routine_action(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path((name, action)): Path<(String, String)>,
+    body: axum::body::Bytes,
 ) -> Response {
     match app.admit_scope(&headers, peer, "/api/routines").await {
         Some(Scope::Full) => {}
@@ -1177,7 +1180,25 @@ async fn routine_action(
             StatusCode::NO_CONTENT.into_response()
         }
         "live" | "dry-run" => {
-            if let Err(why) = app.ledger().set_live(&r, action == "live") {
+            let seen = serde_json::from_slice::<serde_json::Value>(&body).ok();
+            let seen = seen.as_ref().and_then(|v| v["pin"].as_str());
+            match seen {
+                // Not acting: `set_live` says why.
+                _ if action != "live" || !r.act => {}
+                None => {
+                    let why = "send {\"pin\": ..} from GET /api/routines: the version you reviewed";
+                    return (StatusCode::BAD_REQUEST, why).into_response();
+                }
+                Some(p) if p != r.pin() => {
+                    let why = "its file changed since you read it: review it and go live again";
+                    return (StatusCode::CONFLICT, why).into_response();
+                }
+                Some(_) => {}
+            }
+            if let Err(why) = app.transition(|l| match l.set_live(&r, action == "live") {
+                Ok(effects) => (Ok(()), effects),
+                Err(why) => (Err(why), vec![]),
+            }) {
                 return (StatusCode::BAD_REQUEST, why).into_response();
             }
             // Saved now: a crash mustn't bring back a live it was switched out of.

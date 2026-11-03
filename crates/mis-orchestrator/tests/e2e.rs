@@ -3368,7 +3368,20 @@ async fn acting_routine_runs_dry_until_switched_live() {
     assert_eq!((status, body.contains("act: true")), (400, true), "{body}");
     let dry = "/api/routines/look/dry-run";
     assert_eq!(post_json(&base, dry, "s", "").await.0, 400);
-    assert_eq!(post_json(&base, live, "s", "").await.0, 204);
+    // Only with the pin of the version reviewed.
+    let (status, body) = post_json(&base, live, "s", "").await;
+    assert_eq!((status, body.contains("pin")), (400, true), "{body}");
+    let (_, body) = get_json(&base, "/api/routines", "r").await;
+    let list: Vec<RoutineView> = serde_json::from_str(&body).unwrap();
+    let pin = list
+        .iter()
+        .find(|r| r.name == "fix")
+        .unwrap()
+        .pin
+        .clone()
+        .unwrap();
+    let pin = serde_json::json!({ "pin": pin }).to_string();
+    assert_eq!(post_json(&base, live, "s", &pin).await.0, 204);
     assert_eq!(mode("fix").await, Some(RoutineMode::Live));
 
     // A live run may act, and its task says so.
@@ -3397,6 +3410,69 @@ async fn acting_routine_runs_dry_until_switched_live() {
         204
     );
     assert_eq!(mode("fix").await, Some(RoutineMode::DryRun));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn going_live_approves_the_file_as_read_and_an_edit_ends_it() {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-pin-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = |policy: &str| {
+        format!(
+            "---\nevery: 1h\npaused: true\nact: true\nmerge:\n  repos: [o/r]\n  authors: [me]\n  \
+             max_files: 5\n  max_lines: 50\n  approve: {policy}\n---\nMerge green PRs.\n"
+        )
+    };
+    std::fs::write(dir.join("deps.md"), file("phone")).unwrap();
+    let every = std::time::Duration::from_secs(3600);
+    let base = start_app(with_read_token().with_routines(dir.clone(), every)).await;
+    let view = || {
+        let base = base.clone();
+        async move {
+            let (_, body) = get_json(&base, "/api/routines", "r").await;
+            let list: Vec<RoutineView> = serde_json::from_str(&body).unwrap();
+            list.into_iter().next().unwrap()
+        }
+    };
+    let seen = view().await;
+    let m = seen.merge.clone().unwrap();
+    assert_eq!(
+        (m.repos, m.approve),
+        (vec!["o/r".to_string()], MergeApprove::Phone)
+    );
+    // Edited after the page read it: going live with what the page saw is refused.
+    std::fs::write(dir.join("deps.md"), file("none")).unwrap();
+    let live = "/api/routines/deps/live";
+    let pin = |p: &str| serde_json::json!({ "pin": p }).to_string();
+    let (status, body) = post_json(&base, live, "s", &pin(seen.pin.as_deref().unwrap())).await;
+    assert_eq!(
+        (status, body.contains("changed since you read it")),
+        (409, true),
+        "{body}"
+    );
+    assert_eq!(view().await.mode, Some(RoutineMode::DryRun));
+    let now = view().await;
+    assert_eq!(
+        post_json(&base, live, "s", &pin(now.pin.as_deref().unwrap()))
+            .await
+            .0,
+        204
+    );
+    assert_eq!(view().await.mode, Some(RoutineMode::Live));
+    // Edited while live: back to dry run, marked changed until it goes live again.
+    std::fs::write(dir.join("deps.md"), file("phone")).unwrap();
+    let v = view().await;
+    assert_eq!((v.mode, v.changed), (Some(RoutineMode::DryRun), true));
+    assert_eq!(v.prompt.as_deref(), Some("Merge green PRs."));
+    assert_eq!(post_json(&base, live, "s", "").await.0, 400, "no pin");
+    assert_eq!(
+        post_json(&base, live, "s", &pin(v.pin.as_deref().unwrap()))
+            .await
+            .0,
+        204
+    );
+    let v = view().await;
+    assert_eq!((v.mode, v.changed), (Some(RoutineMode::Live), false));
     std::fs::remove_dir_all(dir).unwrap();
 }
 

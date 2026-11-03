@@ -84,6 +84,7 @@ impl Ledger {
             send_to: None,
             read_only: mode != RoutineMode::Live,
             diff_base: None,
+            merge: r.merge_rule(),
         };
         let (id, effects) = match &r.worker {
             Some(name) => {
@@ -105,10 +106,12 @@ impl Ledger {
         Ok((id, effects))
     }
 
-    /// Switch `r` live (it acts) or back to dry run, its queued runs too; Err if
-    /// its file doesn't say `act: true`. Kept in its state, so it outlasts edits
-    /// that keep `act` (see `forget_live`).
-    pub fn set_live(&mut self, r: &Routine, live: bool) -> Result<(), String> {
+    /// Switch `r` live (it acts) or back to dry run; Err if its file doesn't say
+    /// `act: true`. Live pins `r` as it is now: once its prompt, merge policy or
+    /// placement changes, it runs dry (see `forget_live`). Runs already queued keep
+    /// what they were queued with, which going live didn't approve: queued dry runs
+    /// stay dry, and going dry cancels queued live ones.
+    pub fn set_live(&mut self, r: &Routine, live: bool) -> Result<Vec<Effect>, String> {
         if !r.act {
             return Err(format!(
                 "{} only reports: add `act: true` to {}",
@@ -117,29 +120,48 @@ impl Ledger {
         }
         let now = self.now_ms;
         let s = (self.routines.entry(r.name.clone())).or_insert_with(|| State::new(now));
-        s.live = live;
-        let mode = r.mode(s);
-        let queued = (self.tasks.iter_mut())
-            .filter(|t| t.status == TaskStatus::Queued && t.routine.as_ref() == Some(&r.name));
-        for t in queued {
-            (t.task.prompt, t.task.read_only) = (r.run_prompt(mode), mode != RoutineMode::Live);
-            t.routine_mode = Some(mode);
-        }
-        Ok(())
+        (s.live, s.live_pin, s.changed) = (live, live.then(|| r.pin()), false);
+        Ok(match live {
+            true => vec![],
+            false => self.cancel_queued_live(&r.name),
+        })
     }
 
-    /// Live lasts only while a valid file says `act: true`: dropping `act`, a
-    /// rename or a broken file sends it back to dry run once `act` returns. True
-    /// if that ended one.
-    pub fn forget_live(&mut self, defs: &[Def]) -> bool {
-        let acts = |name: &str| defs.iter().flatten().any(|r| r.name == name && r.act);
-        let mut ended = false;
+    /// Live lasts only while a valid file says `act: true` and pins what went
+    /// live: dropping `act`, a rename or a broken file sends it back to dry run
+    /// once `act` returns, and an edit to what went live (marked `changed`) does
+    /// at once. Either way its queued live runs are cancelled. True if that ended one.
+    pub fn forget_live(&mut self, defs: &[Def]) -> (bool, Vec<Effect>) {
+        let mut ended = vec![];
         for (name, s) in &mut self.routines {
-            if s.live && !acts(name) {
-                (s.live, ended) = (false, true);
+            if !s.live {
+                continue;
             }
+            match defs.iter().flatten().find(|r| &r.name == name && r.act) {
+                Some(r) if s.live_pin.as_deref() == Some(r.pin().as_str()) => continue,
+                Some(_) => s.changed = true,
+                None => {}
+            }
+            (s.live, s.live_pin) = (false, None);
+            ended.push(name.clone());
         }
-        ended
+        let effects = ended
+            .iter()
+            .flat_map(|n| self.cancel_queued_live(n))
+            .collect();
+        (!ended.is_empty(), effects)
+    }
+
+    /// Cancel routine `name`'s queued live runs: what they would run is no longer approved.
+    fn cancel_queued_live(&mut self, name: &str) -> Vec<Effect> {
+        let live = |t: &&super::TaskEntry| {
+            t.status == TaskStatus::Queued
+                && t.routine.as_deref() == Some(name)
+                && t.routine_mode == Some(RoutineMode::Live)
+        };
+        let ids: Vec<TaskId> = self.tasks.iter().filter(live).map(|t| t.task.id).collect();
+        let cancelled = ids.into_iter().filter_map(|id| self.cancel(id).ok());
+        cancelled.flat_map(|(_, effects)| effects).collect()
     }
 
     /// The worker a routine names: by its card name, else the one online worker
@@ -356,19 +378,43 @@ mod tests {
     }
 
     #[test]
-    fn switching_mode_reaches_runs_still_queued_but_not_report_routines() {
+    fn queued_runs_never_go_live_and_going_dry_cancels_queued_live_ones() {
         let mut l = Ledger::default();
         worker(&mut l, "mac");
         // The worker is busy, so the dry run waits.
         l.submit("other".into(), None, Some("claude".into()), None, vec![]);
         let act = defs("---\nevery: 1h\nact: true\n---\ngo");
+        let r = act[0].as_ref().unwrap();
         l.routine_tick(&act, &Utc);
         assert_eq!(l.tasks[1].status, TaskStatus::Queued);
-        l.set_live(act[0].as_ref().unwrap(), true).unwrap();
+        // Going live approves the file as it is now, not what that run was queued with.
+        assert!(l.set_live(r, true).unwrap().is_empty());
         let (p, ro, mode) = last_run(&l);
-        assert!(p.contains("(scheduled run, live)") && !ro && mode == Some(RoutineMode::Live));
+        assert!(p.contains("(scheduled run, dry run)") && ro && mode == Some(RoutineMode::DryRun));
+        // A live run queued, then back to dry run: it's cancelled, the dry one isn't.
+        l.cancel(l.tasks[1].task.id).unwrap();
+        l.start_routine(r).unwrap();
+        assert_eq!(last_run(&l).2, Some(RoutineMode::Live));
+        let effects = l.set_live(r, false).unwrap();
+        assert!(!effects.is_empty());
+        assert_eq!(l.tasks.last().unwrap().status, TaskStatus::Cancelled);
         let report = defs("---\nevery: 1h\n---\ngo");
         assert!(l.set_live(report[0].as_ref().unwrap(), false).is_err());
+    }
+
+    #[test]
+    fn an_edit_cancels_queued_live_runs() {
+        let mut l = Ledger::default();
+        worker(&mut l, "mac");
+        l.submit("other".into(), None, Some("claude".into()), None, vec![]);
+        let act = defs("---\nevery: 1h\nact: true\n---\ngo");
+        l.set_live(act[0].as_ref().unwrap(), true).unwrap();
+        l.routine_tick(&act, &Utc);
+        assert_eq!(last_run(&l).2, Some(RoutineMode::Live));
+        let edited = defs("---\nevery: 1h\nact: true\n---\ngo further");
+        let (ended, effects) = l.forget_live(&edited);
+        assert!(ended && !effects.is_empty());
+        assert_eq!(l.tasks.last().unwrap().status, TaskStatus::Cancelled);
     }
 
     #[test]
@@ -384,8 +430,8 @@ mod tests {
             l.routine_views(&report, &Utc)[0].mode,
             Some(RoutineMode::Report)
         );
-        assert!(l.forget_live(&report));
-        assert!(!l.forget_live(&report));
+        assert!(l.forget_live(&report).0);
+        assert!(!l.forget_live(&report).0);
         // ...so `act` back means dry run again.
         assert_eq!(
             l.routine_views(&act, &Utc)[0].mode,
@@ -407,10 +453,74 @@ mod tests {
         assert!(r.ledger.routine_runs("r").busy);
         let v = &r.ledger.routine_views(&act, &Utc)[0];
         assert_eq!(v.mode, Some(RoutineMode::Live));
-        // The queued run went live with its routine.
+        // The queued run keeps the mode it was queued with.
         assert_eq!(
             r.ledger.tasks[0].summary().routine_mode,
-            Some(RoutineMode::Live)
+            Some(RoutineMode::Report)
+        );
+    }
+
+    const MERGE: &str = "---\nevery: 1h\nact: true\nmerge:\n  repos: [o/r]\n  authors: [me]\n  \
+                         max_files: 5\n  max_lines: 50\n---\nMerge green PRs.";
+
+    #[test]
+    fn an_edit_after_going_live_drops_back_to_dry_run_until_live_again() {
+        let mut l = Ledger::default();
+        let ds = defs(MERGE);
+        let r = ds[0].clone().unwrap();
+        l.set_live(&r, true).unwrap();
+        assert!(!l.forget_live(&ds).0, "unchanged");
+        l.routine_tick(&ds, &Utc);
+        let t = &l.tasks[0].task;
+        assert!(!t.read_only);
+        assert_eq!(t.merge, MergeRule::Tool(Box::new(r.merge.clone().unwrap())));
+        // The policy is loosened: its next run is dry, before and after the file is re-read.
+        let edited = defs(&MERGE.replace("max_lines: 50", "max_lines: 5000"));
+        assert_eq!(
+            l.routine_views(&edited, &Utc)[0].mode,
+            Some(RoutineMode::DryRun)
+        );
+        assert!(l.forget_live(&edited).0);
+        let v = &l.routine_views(&edited, &Utc)[0];
+        assert!(v.changed && v.mode == Some(RoutineMode::DryRun));
+        // Changing it back doesn't revive live: it needs going live again.
+        assert_eq!(
+            l.routine_views(&ds, &Utc)[0].mode,
+            Some(RoutineMode::DryRun)
+        );
+        let e = edited[0].as_ref().unwrap();
+        l.set_live(e, true).unwrap();
+        let v = &l.routine_views(&edited, &Utc)[0];
+        assert!(!v.changed && v.mode == Some(RoutineMode::Live));
+        // Dropping `act` ends live without calling it a change.
+        let report = defs("---\nevery: 1h\n---\nMerge green PRs.");
+        assert!(l.forget_live(&report).0);
+        assert!(!l.routines["r"].changed);
+    }
+
+    #[test]
+    fn routine_runs_merge_only_by_their_policy_and_replies_as_the_user() {
+        let mut l = Ledger::default();
+        let wid = worker(&mut l, "mac");
+        let plain = defs("---\nevery: 1h\nact: true\n---\ngo");
+        l.routine_tick(&plain, &Utc);
+        assert_eq!(l.tasks[0].task.merge, MergeRule::Never);
+        let ds = defs(MERGE);
+        l.start_routine(ds[0].as_ref().unwrap()).unwrap();
+        let t = &l.tasks[1].task;
+        assert!(
+            t.read_only && matches!(t.merge, MergeRule::Tool(_)),
+            "a dry run's merge_pr only says"
+        );
+        // A reply in the run's thread is the user's: no routine limits.
+        let id = l.tasks[0].task.id;
+        (l.tasks[0].status, l.tasks[0].session, l.tasks[0].worker) =
+            (TaskStatus::Done, Some("s".into()), Some(wid));
+        l.reply(id, "now merge it".into(), vec![], false).unwrap();
+        let reply = &l.tasks.last().unwrap().task;
+        assert_eq!(
+            (reply.merge.clone(), reply.read_only),
+            (MergeRule::Any, false)
         );
     }
 }

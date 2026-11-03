@@ -12,6 +12,7 @@ mod git;
 mod inventory;
 mod live;
 mod mcp;
+mod merge;
 mod permissions;
 mod pr;
 mod roots;
@@ -944,7 +945,18 @@ async fn run(
         cwd: PathBuf::from(&cwd),
         roots: ctx.roots.clone(),
     };
-    let server = mcp::serve(id, tx.clone(), ask.then(|| ctx.approvals.clone()), files)
+    let merger = match &task.merge {
+        MergeRule::Tool(policy) => Some(merge::Merger {
+            task: id,
+            policy: (**policy).clone(),
+            dry: task.read_only,
+            approvals: ctx.approvals.clone(),
+            gh: "gh".into(),
+        }),
+        MergeRule::Any | MergeRule::Never => None,
+    };
+    let approvals = ask.then(|| ctx.approvals.clone());
+    let server = mcp::serve(id, tx.clone(), approvals, merger, files)
         .await
         .inspect_err(|e| tracing::warn!(%id, "no mcp server: {e}"))
         .ok();
@@ -1004,6 +1016,8 @@ async fn run(
             images: &image_paths,
             permissions: perms.as_ref(),
             read_only: task.read_only,
+            // A routine run that may act: other ways to merge are denied.
+            no_merge: task.merge != MergeRule::Any && !task.read_only,
         },
         atx,
     );

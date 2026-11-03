@@ -2,8 +2,9 @@
 //! `report_evidence` and `report_result`, and the worker forwards them as
 //! `AgentEvent::Status`, `Evidence` or `Artifact` (a file from its folder, read
 //! here), and `Result`. In ask mode claude also calls `approve` about tool
-//! calls the rules don't allow (`approvals`). Streamable HTTP, JSON replies
-//! only (no SSE): POST `/mcp` with `Authorization: Bearer <token>`.
+//! calls the rules don't allow (`approvals`); a routine run with a merge policy
+//! gets `merge_pr` (`merge`). Streamable HTTP, JSON replies only (no SSE): POST
+//! `/mcp` with `Authorization: Bearer <token>`.
 
 use std::sync::{Arc, Mutex};
 
@@ -15,12 +16,14 @@ use axum::Json;
 use mis_types::evidence::{room, DraftItem, EvidenceDraft};
 use mis_types::{
     first_line, github_link, mcp, AgentEvent, Inventory, Link, LinkKind, TaskId, TaskResult,
+    MERGE_TOOL,
 };
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use crate::approvals::Approvals;
 use crate::evidence::{self, Files, Reader};
+use crate::merge::Merger;
 
 /// Longest status, evidence title or test detail kept; each is one line.
 const MAX_LINE_CHARS: usize = 200;
@@ -106,9 +109,35 @@ fn approve_tool() -> Value {
     })
 }
 
-/// Whether `req` calls `approve`.
-fn is_approve(req: &Value) -> bool {
-    req["method"] == "tools/call" && req["params"]["name"] == mis_agent::APPROVE_TOOL
+fn merge_tool() -> Value {
+    json!({
+        "name": MERGE_TOOL,
+        "description": "Merge a GitHub PR, if this routine's merge rules allow it. The worker \
+            reads the PR and checks every rule itself (repo, author, size, paths, labels, \
+            checks, mergeable), may ask the user, and says why not if it doesn't merge. In a \
+            dry run it only says whether it would.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "owner/name"},
+                "number": {"type": "integer", "description": "the PR number"},
+            },
+            "required": ["repo", "number"],
+        },
+    })
+}
+
+/// Whether `req` calls tool `name`.
+fn is_call(req: &Value, name: &str) -> bool {
+    req["method"] == "tools/call" && req["params"]["name"] == name
+}
+
+/// Tools beyond the reporting ones: `approve` in ask mode, `merge_pr` for a
+/// routine run with a merge policy.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Offer {
+    pub ask: bool,
+    pub merge: bool,
 }
 
 /// Files the task's agent attached so far, against `MAX_EVIDENCE` and `MAX_TASK_BYTES`.
@@ -130,13 +159,13 @@ fn stored_bytes(draft: &EvidenceDraft) -> u64 {
 }
 
 /// One JSON-RPC message in; the reply (None for a notification) and the event
-/// to post, if it was a valid tool call. `ask` lists `approve`; `approved`
-/// answers a call to it. `read` gets attached files' bytes; `used` is what the
-/// task attached before.
+/// to post, if it was a valid tool call. `offer` lists `approve` or `merge_pr`;
+/// `answer` is what the shell got for a call to one. `read` gets attached
+/// files' bytes; `used` is what the task attached before.
 pub fn handle(
     req: &Value,
-    ask: bool,
-    approved: Option<String>,
+    offer: Offer,
+    answer: Option<Result<String, String>>,
     read: Reader,
     used: Used,
 ) -> (Option<Value>, Option<AgentEvent>) {
@@ -187,13 +216,16 @@ pub fn handle(
             },
         }),
     ];
-    if ask {
+    if offer.ask {
         tools.push(approve_tool());
+    }
+    if offer.merge {
+        tools.push(merge_tool());
     }
     let mut event = None;
     let reply = mcp::handle(req, mis_agent::MCP_SERVER, &tools, |name, args| {
-        if name == mis_agent::APPROVE_TOOL {
-            return approved.ok_or_else(|| "nobody to ask".to_string());
+        if name == mis_agent::APPROVE_TOOL || name == MERGE_TOOL {
+            return answer.unwrap_or_else(|| Err("nobody to ask".to_string()));
         }
         let (e, said) = match name {
             "report_evidence" => (evidence(args, read, used)?, "ok".to_string()),
@@ -251,6 +283,10 @@ fn evidence(args: &Value, read: Reader, used: Used) -> Result<AgentEvent, String
             u => github_link(&u).unwrap_or_else(|| row(LinkKind::Url, u, None, None)),
         },
         Some("test") => {
+            // Only `merge_pr` writes merge rows: the agent can't forge or overwrite one.
+            if mis_types::is_merge_label(&label) {
+                return Err("titles like `merge owner/repo#7` are merge_pr's".into());
+            }
             let detail = Some(line("detail")).filter(|d| !d.is_empty());
             row(LinkKind::Test, url()?, args["ok"].as_bool(), detail)
         }
@@ -302,18 +338,21 @@ struct Ctx {
     tx: mpsc::Sender<(TaskId, AgentEvent)>,
     /// Ask mode: where `approve` waits for the user.
     approvals: Option<Arc<Approvals>>,
+    /// A routine run with a merge policy: what `merge_pr` runs.
+    merge: Option<Arc<Merger>>,
     /// Where attached files may come from.
     files: Files,
     used: Arc<Mutex<Used>>,
 }
 
 /// Listen on a random loopback port with a fresh random token; statuses go to
-/// `tx`; with `approvals`, `approve` is offered and asks the user. Attached
-/// files must be within `files`.
+/// `tx`; with `approvals`, `approve` is offered and asks the user; with
+/// `merge`, so is `merge_pr`. Attached files must be within `files`.
 pub async fn serve(
     task: TaskId,
     tx: mpsc::Sender<(TaskId, AgentEvent)>,
     approvals: Option<Arc<Approvals>>,
+    merge: Option<Merger>,
     files: Files,
 ) -> std::io::Result<Server> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -325,6 +364,7 @@ pub async fn serve(
         token: token.clone(),
         tx,
         approvals,
+        merge: merge.map(Arc::new),
         files,
         used: Default::default(),
     };
@@ -350,10 +390,31 @@ async fn post(State(ctx): State<Ctx>, headers: HeaderMap, body: Bytes) -> Respon
     let Ok(req) = serde_json::from_slice::<Value>(&body) else {
         return (StatusCode::BAD_REQUEST, Json(mcp::parse_error())).into_response();
     };
-    // Waits for the user; claude's timeout for this server outlasts APPROVAL_WAIT.
-    let approved = match &ctx.approvals {
-        Some(a) if is_approve(&req) => Some(a.ask(ctx.task, &req["params"]["arguments"]).await),
+    // Both may wait for the user; claude's timeout for this server outlasts that.
+    let args = &req["params"]["arguments"];
+    let answer = match (&ctx.approvals, &ctx.merge) {
+        (Some(a), _) if is_call(&req, mis_agent::APPROVE_TOOL) => {
+            Some(Ok(a.ask(ctx.task, args).await))
+        }
+        // Its own task: a dropped request can't stop a merge halfway or leave its
+        // approval card unanswerable, and the attempt's row is always posted.
+        (_, Some(m)) if is_call(&req, MERGE_TOOL) => {
+            let (m, args, tx, task) = (m.clone(), args.clone(), ctx.tx.clone(), ctx.task);
+            let run = tokio::spawn(async move {
+                let (answer, row) = m.call(&args).await;
+                let _ = tx.send((task, AgentEvent::Evidence(row))).await;
+                answer
+            });
+            Some(
+                run.await
+                    .unwrap_or_else(|e| Err(format!("merge_pr failed: {e}"))),
+            )
+        }
         _ => None,
+    };
+    let offer = Offer {
+        ask: ctx.approvals.is_some(),
+        merge: ctx.merge.is_some(),
     };
     // Off the runtime: attached files are read and encoded here. The lock is
     // held throughout, so concurrent calls can't both pass the task's caps.
@@ -361,7 +422,7 @@ async fn post(State(ctx): State<Ctx>, headers: HeaderMap, body: Bytes) -> Respon
     let handled = tokio::task::spawn_blocking(move || {
         let mut used = c.used.lock().unwrap();
         let read = |p: &str| c.files.read(p);
-        let (reply, event) = handle(&req, c.approvals.is_some(), approved, &read, *used);
+        let (reply, event) = handle(&req, offer, answer, &read, *used);
         if let Some(AgentEvent::Artifact(draft)) = &event {
             used.items += 1;
             used.bytes += stored_bytes(draft);
@@ -431,7 +492,7 @@ mod tests {
 
     fn call_with(method: &str, params: Value, used: Used) -> (Option<Value>, Option<AgentEvent>) {
         let req = json!({"jsonrpc": "2.0", "id": 7, "method": method, "params": params});
-        handle(&req, false, None, &read, used)
+        handle(&req, Offer::default(), None, &read, used)
     }
 
     fn call(method: &str, params: Value) -> (Option<Value>, Option<AgentEvent>) {
@@ -442,7 +503,8 @@ mod tests {
     fn approve_is_offered_only_in_ask_mode_and_returns_the_answer() {
         let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
         let names = |ask| {
-            let (r, _) = handle(&list, ask, None, &read, Used::default());
+            let offer = Offer { ask, merge: false };
+            let (r, _) = handle(&list, offer, None, &read, Used::default());
             let tools = r.unwrap()["result"]["tools"].as_array().unwrap().clone();
             tools
                 .iter()
@@ -453,12 +515,40 @@ mod tests {
         assert!(names(true).contains(&"approve".to_string()));
         let req = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {"name": "approve", "arguments": {"tool_name": "Bash", "input": {}}}});
-        assert!(is_approve(&req));
+        assert!(is_call(&req, "approve"));
         let answer = r#"{"behavior":"deny","message":"no"}"#.to_string();
-        let (r, e) = handle(&req, true, Some(answer.clone()), &read, Used::default());
+        let ask = Offer {
+            ask: true,
+            merge: false,
+        };
+        let (r, e) = handle(&req, ask, Some(Ok(answer.clone())), &read, Used::default());
         assert_eq!(r.unwrap()["result"]["content"][0]["text"], answer);
         assert_eq!(e, None);
-        let (r, _) = handle(&req, false, None, &read, Used::default());
+        let (r, _) = handle(&req, Offer::default(), None, &read, Used::default());
+        assert_eq!(r.unwrap()["error"]["message"], "unknown tool");
+    }
+
+    #[test]
+    fn merge_pr_is_offered_only_with_a_policy_and_its_refusal_is_an_error() {
+        let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+        let merge = Offer {
+            ask: false,
+            merge: true,
+        };
+        let (r, _) = handle(&list, merge, None, &read, Used::default());
+        let tools = r.unwrap()["result"]["tools"].clone();
+        assert_eq!(tools[3]["name"], "merge_pr");
+        assert_eq!(
+            tools[3]["inputSchema"]["required"],
+            json!(["repo", "number"])
+        );
+        let req = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "merge_pr", "arguments": {"repo": "o/r", "number": 7}}});
+        let refused = Some(Err("not merged: o/r#7: it is a draft".to_string()));
+        let (r, e) = handle(&req, merge, refused, &read, Used::default());
+        let r = r.unwrap();
+        assert_eq!((r["result"]["isError"].clone(), e), (json!(true), None));
+        let (r, _) = handle(&req, Offer::default(), None, &read, Used::default());
         assert_eq!(r.unwrap()["error"]["message"], "unknown tool");
     }
 
@@ -621,6 +711,7 @@ mod tests {
             json!({"kind": "link", "title": "t", "url": format!("https://x.io/{}", "a".repeat(MAX_URL_BYTES))}),
             json!({"kind": "test", "title": "t", "url": "ftp://x.io"}),
             json!({"kind": "link", "title": " ", "url": "https://x.io"}),
+            json!({"kind": "test", "title": "merge o/r#7", "ok": true, "detail": "merged"}),
             json!({"kind": "note"}),
             json!({"kind": "image", "title": "t"}),
             json!({"title": "t"}),
@@ -682,7 +773,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             roots: Arc::new(vec![]),
         };
-        let server = serve(task, tx, None, files).await.unwrap();
+        let server = serve(task, tx, None, None, files).await.unwrap();
         let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"report_status","arguments":{"text":"hi"}}}"#;
         let url = server.mcp.url.clone();
         assert!(post_raw(&url, None, call).await.starts_with("HTTP/1.1 401"));
