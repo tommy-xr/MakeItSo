@@ -308,13 +308,14 @@ fn is_commit(s: &str) -> bool {
 async fn git(dir: &str, args: &[&str]) -> Result<(Vec<u8>, bool), String> {
     let mut cmd = tokio::process::Command::new("git");
     cmd.arg("-C").arg(dir);
-    // Paths verbatim, no fsmonitor hook, patches as `a/` `b/` from the top.
+    // Paths verbatim, no fsmonitor hook, patches as `a/` `b/` from the top, renames but no copies.
     for c in [
         "core.quotePath=false",
         "core.fsmonitor=false",
         "diff.noprefix=false",
         "diff.mnemonicPrefix=false",
         "diff.relative=false",
+        "diff.renames=true",
     ] {
         cmd.args(["-c", c]);
     }
@@ -486,7 +487,14 @@ pub async fn diff(base: &DiffBase) -> Option<TaskDiff> {
         return None;
     }
     let status = status(root).await?;
-    let opts = ["-M", "--no-ext-diff", "--no-textconv", "--no-color"];
+    let opts = [
+        "-M",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+    ];
     let mut args = vec!["diff", "--raw", "--numstat", "-z"];
     args.extend(opts);
     args.extend([base.head.as_str(), "--"]);
@@ -524,11 +532,15 @@ pub async fn diff(base: &DiffBase) -> Option<TaskDiff> {
         let root = Path::new(&b.root);
         let now = fingerprints(root, b.dirty.keys().cloned());
         let mut budget = MAX_UNTRACKED_TOTAL;
-        let files = (new.into_iter().enumerate())
-            .map(|(i, p)| {
-                let read = match i < MAX_FILES && budget > 0 {
+        let mut reads = 0;
+        let files = (new.into_iter())
+            .map(|p| {
+                let read = match reads < MAX_FILES && budget > 0 {
                     _ if before(&b, &now, &p) == Before::Only => Err(ONLY.into()),
-                    true => open_in(root, &p).and_then(|f| read_max(f, MAX_UNTRACKED.min(budget))),
+                    true => {
+                        reads += 1;
+                        open_in(root, &p).and_then(|f| read_max(f, MAX_UNTRACKED.min(budget)))
+                    }
                     false => Err("not read".into()),
                 };
                 budget -= read.as_ref().map_or(0, |b| b.len() as u64);
@@ -852,6 +864,8 @@ mod tests {
         let w = |p: &str, b: &[u8]| std::fs::write(dir.join(p), b).unwrap();
         sh_git(&dir, &["init", "-q", "-b", "main"]);
         sh_git(&dir, &["config", "core.autocrlf", "false"]);
+        // Patches are matched by their `a/` `b/` headers, whatever the user's prefixes.
+        sh_git(&dir, &["config", "diff.srcPrefix", "old/"]);
         w("keep.txt", b"a\nb\nc\n");
         w("gone.txt", b"bye\n");
         w("old name.txt", b"same\nsame\nsame\n");

@@ -296,6 +296,10 @@ test('patch rows: hunks numbered, headers dropped, CRs and no-newline notes', ()
     { k: 'h', n: null, text: '@@ -3,3 +3,4 @@ fn x' }, { k: 'c', n: 3, text: 'ctx' }, { k: 'd', n: 4, text: 'old' },
     { k: 'a', n: 4, text: 'new' }, { k: 'a', n: 5, text: '<script>x</script>' }, { k: 'c', n: 6, text: 'end' },
     { k: 'm', n: null, text: 'No newline at end of file' }, { k: 'h', n: null, text: '@@ -0,0 +1 @@' }, { k: 'a', n: 1, text: 'top' }]);
+  // A file swapped for a symlink: two sections, each one's headers dropped.
+  const swap = 'diff --git a/f b/f\ndeleted file mode 100644\n--- a/f\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n'
+    + 'diff --git a/f b/f\nnew file mode 120000\n--- /dev/null\n+++ b/f\n@@ -0,0 +1 @@\n+t\n\\ No newline at end of file\n';
+  assert.deepEqual(df.patchRows(swap).map((r) => r.k + r.text), ['h@@ -1 +0,0 @@', 'dx', 'h@@ -0,0 +1 @@', 'at', 'mNo newline at end of file']);
   // A rename or mode change without hunks shows its header lines.
   assert.deepEqual(df.patchRows('diff --git a/x b/y\nsimilarity index 100%\nrename from x\nrename to y\n').map((r) => r.text),
     ['similarity index 100%', 'rename from x', 'rename to y']);

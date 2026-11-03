@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Files listed; the rest are only counted (`TaskDiff::more`).
+/// Files listed, of the task's and of earlier changes each; the rest of the task's are only counted (`TaskDiff::more`).
 pub const MAX_FILES: usize = 300;
 /// Largest patch kept for one file, and for all of a task's files together.
 pub const MAX_FILE_PATCH: usize = 64 << 10;
@@ -133,10 +133,16 @@ impl TaskDiff {
     /// Within the limits: at most `MAX_FILES` listed, patches past `MAX_FILE_PATCH`
     /// each or `MAX_PATCH` in all dropped with a note, long strings cut.
     pub fn bounded(mut self) -> Self {
-        if self.files.len() > MAX_FILES {
-            let cut = self.files.split_off(MAX_FILES);
-            self.more += cut.iter().filter(|f| f.before != Before::Only).count() as u32;
+        // The task's files and earlier ones each up to the limit: the earlier are
+        // named in a PR request, to be left out.
+        let (mut mine, mut earlier): (Vec<_>, Vec<_>) =
+            (self.files.drain(..)).partition(|f| f.before != Before::Only);
+        if mine.len() > MAX_FILES {
+            self.more += (mine.len() - MAX_FILES) as u32;
+            mine.truncate(MAX_FILES);
         }
+        earlier.truncate(MAX_FILES);
+        self.files = mine.into_iter().chain(earlier).collect();
         let mut total = 0;
         for f in &mut self.files {
             cut(&mut f.path, MAX_PATH_CHARS);
@@ -228,7 +234,8 @@ mod tests {
             ..Default::default()
         }
         .bounded();
-        assert_eq!((d.files.len(), d.more), (MAX_FILES, 3));
+        // Earlier ones are listed apart, up to the limit too.
+        assert_eq!((d.files.len(), d.more), (MAX_FILES + 2, 3));
         assert_eq!(d.files[0].note.as_deref(), Some("patch over 64 KB"));
         // Four 64 KB patches fill the 256 KB; the fifth, and the small ones after, go.
         let kept: Vec<bool> = d.files[..8].iter().map(|f| f.patch.is_some()).collect();
