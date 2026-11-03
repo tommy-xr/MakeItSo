@@ -785,7 +785,10 @@ async fn run_oneshot(
     );
     let feed = async {
         while let Some(ev) = rx.recv().await {
-            on_event(ev);
+            // A one-shot's answer counts once whole.
+            if !matches!(ev, AgentEvent::TextDelta { .. }) {
+                on_event(ev);
+            }
         }
     };
     let (timed_out, _) = tokio::join!(run, feed);
@@ -1653,14 +1656,18 @@ async fn client_conn(mut sock: WebSocket, app: App, scope: Scope) {
                     send_json(&mut sock, &ServerMsg::Sessions { sessions }).await;
                 }
                 Some(ClientMsg::Seen { task }) => app.transition(|l| ((), l.seen(task))),
-                Some(ClientMsg::Show { task }) => {
-                    let reply = match app.ledger().show(task) {
-                        Some((task, events, truncated)) => ServerMsg::TaskDetail {
-                            task,
-                            events: events.to_vec(),
-                            truncated,
-                        },
-                        None => ServerMsg::Error { message: format!("unknown task {task}") },
+                Some(ClientMsg::Show { task: id }) => {
+                    let reply = {
+                        let ledger = app.ledger();
+                        match ledger.show(id) {
+                            Some((task, events, truncated)) => ServerMsg::TaskDetail {
+                                task,
+                                events: events.to_vec(),
+                                truncated,
+                                partial: ledger.partial(id),
+                            },
+                            None => ServerMsg::Error { message: format!("unknown task {id}") },
+                        }
                     };
                     send_json(&mut sock, &reply).await;
                 }

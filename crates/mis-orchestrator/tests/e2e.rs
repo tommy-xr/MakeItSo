@@ -894,6 +894,7 @@ async fn show_returns_transcript() {
         task: info,
         events: got,
         truncated,
+        ..
     } = recv(&mut client).await
     else {
         panic!()

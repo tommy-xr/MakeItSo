@@ -3,6 +3,7 @@
 
 mod app_server;
 mod approvals;
+mod coalesce;
 mod config;
 mod deliver;
 mod evidence;
@@ -933,16 +934,27 @@ async fn run(
     };
     let (atx, mut arx) = mpsc::channel(64);
     let fwd = async {
-        while let Some(ev) = arx.recv().await {
-            // Limit readings go into the stats beat, not the transcript.
-            if let AgentEvent::Limits { mut windows } = ev {
-                let now = unix_ms();
-                windows.iter_mut().for_each(|w| w.observed_at = now);
-                ctx.add_limits(agent.name(), windows);
-                continue;
-            }
-            if tx.send((id, ev)).await.is_err() {
-                break;
+        let mut deltas = coalesce::Coalescer::default();
+        loop {
+            let due = deltas.due();
+            let evs = tokio::select! {
+                ev = arx.recv() => match ev {
+                    Some(ev) => deltas.event(ev, Instant::now()),
+                    None => break,
+                },
+                () = sleep_until(due) => deltas.flush().into_iter().collect(),
+            };
+            for ev in evs {
+                // Limit readings go into the stats beat, not the transcript.
+                if let AgentEvent::Limits { mut windows } = ev {
+                    let now = unix_ms();
+                    windows.iter_mut().for_each(|w| w.observed_at = now);
+                    ctx.add_limits(agent.name(), windows);
+                    continue;
+                }
+                if tx.send((id, ev)).await.is_err() {
+                    return;
+                }
             }
         }
     };
@@ -963,6 +975,14 @@ async fn run(
         atx,
     );
     tokio::join!(run, fwd);
+}
+
+/// Sleeps until `at`; never wakes without one.
+async fn sleep_until(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at.into()).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// `CF_ACCESS_CLIENT_SECRET`; empty counts as unset.

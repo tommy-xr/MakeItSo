@@ -12,7 +12,7 @@ const ev = new Function(`${evBlock}; return { ansi, better, change, fmtChange, t
 
 // Every tag in the output, e.g. ['p', 'a', 'code'].
 const tags = (html) => [...html.matchAll(/<([a-z0-9]+)/g)].map((m) => m[1]);
-const ALLOWED = new Set(['p', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'em', 'code', 'pre', 'ul', 'ol', 'li', 'a', 'blockquote', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td']);
+const ALLOWED = new Set(['span', 'p', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'em', 'code', 'pre', 'ul', 'ol', 'li', 'a', 'blockquote', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td']);
 
 test('HTML in the text stays text', () => {
   for (const src of [
@@ -29,13 +29,19 @@ test('HTML in the text stays text', () => {
     '**<i>x</i>** _<u>y</u>_',
     '| <b>h</b> | x |\n| :-: | --: |\n| <script>x</script> | <img src=x onerror=y> |',
     '| a" style="x | b |\n| :- | - |\n| `</td><script>` | [x](javascript:y) |',
+    // Highlighted code: strings and comments end inside a token, never in markup.
+    '```rust\nlet s = "</span><script>x</script>"; // </span><img src=x onerror=y>\n/* </code></pre><svg onload=x> */\n```',
+    '```py\n"""</span><script>x</script>\n\'\'\'<iframe src=//x>\n```',
+    '```sh\necho \'</span><style>*{}</style>\' # <script>x</script>\n```',
+    '```diff\n+<script>x</script>\n-</span><img src=x onerror=y>\n@@ <b> @@\n```',
+    '```json\n{"</span><script>": "<img src=x onerror=y>", "&lt;": 1}\n```',
   ]) {
     const html = md(src);
     for (const t of tags(html)) assert.ok(ALLOWED.has(t), `${t} in ${html}`);
     assert.ok(!/<(script|img|svg|iframe|style|b|i|u)\b/.test(html), html);
-    // The only attributes: a link's (http/https), a numbered list's start and a code block's language.
+    // The only attributes: a link's (http/https), a numbered list's start, a code block's language, a token's class.
     for (const [tag, , attrs] of html.matchAll(/<([a-z0-9]+)([^>]*)>/g)) {
-      assert.ok(!attrs || /^ (href="https?:\/\/[^"]*" target="_blank" rel="noopener noreferrer"|start="\d+"|data-lang="[\w+#.-]+"|style="text-align:(left|center|right)")$/.test(attrs), tag);
+      assert.ok(!attrs || /^ (href="https?:\/\/[^"]*" target="_blank" rel="noopener noreferrer"|start="\d+"|data-lang="[\w+#.-]+"|style="text-align:(left|center|right)"|class="hl-[a-z]")$/.test(attrs), tag);
     }
   }
 });
@@ -72,8 +78,8 @@ test('inline: bold, italic, code; snake_case untouched', () => {
 test('blocks: headings, paragraphs, fences, quotes, rules', () => {
   assert.equal(md('# One\n### Three ###\ntext\nmore\n\nnext'),
     '<h1>One</h1><h3>Three</h3><p>text<br>more</p><p>next</p>');
-  assert.equal(md('```rust\nlet a = 1 < 2;\n\n  *x*\n```\nafter'),
-    '<pre data-lang="rust"><code>let a = 1 &lt; 2;\n\n  *x*</code></pre><p>after</p>');
+  assert.equal(md('```text\nlet a = 1 < 2;\n\n  *x*\n```\nafter'),
+    '<pre data-lang="text"><code>let a = 1 &lt; 2;\n\n  *x*</code></pre><p>after</p>');
   // Only a word that looks like a language labels a block.
   assert.equal(md('~~~ c++ linenos\nx\n~~~'), '<pre data-lang="c++"><code>x</code></pre>');
   assert.equal(md('```<b>\nx\n```'), '<pre><code>x</code></pre>');
@@ -128,6 +134,67 @@ test('table rows render in linear time', () => {
   md(`| a |\n|${' '.repeat(50000)}-${' '.repeat(50000)}x`);
   md(`${'|'.repeat(50000)}\n${'|-'.repeat(25000)}`);
   assert.ok(Date.now() - t0 < 500, `${Date.now() - t0} ms`);
+});
+
+// A code block's tokens as [class, text], unescaped; plain runs as ['', text]. Spans never nest.
+function tokens(src) {
+  const html = md(src).replace(/^<pre[^>]*><code>|<\/code><\/pre>$/g, '');
+  assert.ok(!/<span[^>]*>[^<]*<span/.test(html), html);
+  const raw = { '&lt;': '<', '&gt;': '>', '&amp;': '&', '&quot;': '"', '&#39;': "'" };
+  const unesc = (s) => s.replace(/&(?:lt|gt|amp|quot|#39);/g, (e) => raw[e]);
+  return [...html.matchAll(/<span class="hl-([a-z])">([^<]*)<\/span>|([^<]+)/g)].map((m) => (m[1] ? [m[1], unesc(m[2])] : ['', unesc(m[3])]));
+}
+const only = (src, cls) => tokens(src).filter(([c]) => c === cls).map(([, t]) => t);
+
+test('highlight: keywords, strings, comments, numbers, types and calls per language', () => {
+  const rust = '```rust\nfn main() {\n    let s: String = "a \\"b\\" < c".into(); // done <ok>\n    println!("{}", 0x1f_u8 + 2.5e3);\n    /* x */ Vec::<i32>::new()\n}\n```';
+  assert.deepEqual(only(rust, 'k'), ['fn', 'let']);
+  assert.deepEqual(only(rust, 's'), ['"a \\"b\\" < c"', '"{}"']);
+  assert.deepEqual(only(rust, 'c'), ['// done <ok>', '/* x */']);
+  assert.deepEqual(only(rust, 'n'), ['0x1f_u8', '2.5e3']);
+  assert.deepEqual(only(rust, 't'), ['String', 'Vec', 'i32']);
+  assert.deepEqual(only(rust, 'f'), ['main', 'into', 'println!', 'new']);
+  // Every token joined is the code itself.
+  assert.equal(tokens(rust).map(([, t]) => t).join(''), rust.split('\n').slice(1, -1).join('\n'));
+  const py = '```python\n@cache\ndef f(x: int) -> None:\n    """doc\n    more"""\n    return x or \'y\'  # why\n```';
+  assert.deepEqual(only(py, 'k'), ['def', 'return', 'or']);
+  assert.deepEqual(only(py, 's'), ['"""doc\n    more"""', "'y'"]);
+  assert.deepEqual(only(py, 'f'), ['@cache', 'f']);
+  assert.deepEqual([only(py, 't'), only(py, 'n'), only(py, 'c')], [['int'], ['None'], ['# why']]);
+  const ts = '```ts\nconst n: number = await get(`/a/${b}`, null); // c\n```';
+  assert.deepEqual([only(ts, 'k'), only(ts, 't'), only(ts, 's'), only(ts, 'n'), only(ts, 'f')],
+    [['const', 'await'], ['number'], ['`/a/${b}`'], ['null'], ['get']]);
+  const sh = '```bash\nif [ -n "$X" ]; then echo ${HOME} a#b; fi # end\n```';
+  assert.deepEqual([only(sh, 'k'), only(sh, 's'), only(sh, 't'), only(sh, 'c')], [['if', 'then', 'fi'], ['"$X"'], ['${HOME}'], ['# end']]);
+  const json = '```json\n{"a": -1.5, "b": [true, null, "s"]}\n```';
+  assert.deepEqual([only(json, 'p'), only(json, 's'), only(json, 'n')], [['"a"', '"b"'], ['"s"'], ['-1.5', 'true', 'null']]);
+  const toml = '```toml\n[package]\nname = "mis" # c\nedition = 2024\nx = [1]\n```';
+  assert.deepEqual([only(toml, 't'), only(toml, 'p'), only(toml, 's'), only(toml, 'c'), only(toml, 'n')],
+    [['[package]'], ['name', 'edition', 'x'], ['"mis"'], ['# c'], ['2024', '1']]);
+  const yaml = '```yml\non: push # c\njobs:\n  - run: cargo test\n    if: true\n```';
+  assert.deepEqual([only(yaml, 'p'), only(yaml, 'c'), only(yaml, 'n')], [['on', 'jobs', 'run', 'if'], ['# c'], ['true']]);
+  const go = '```go\nfunc main() { var e error = nil; fmt.Println("hi", 42) }\n```';
+  assert.deepEqual([only(go, 'k'), only(go, 't'), only(go, 'n'), only(go, 'f')], [['func', 'var'], ['error'], ['nil', '42'], ['main', 'Println']]);
+});
+
+test('highlight: diff lines; unknown languages plain; open tokens stay in their block', () => {
+  assert.deepEqual(tokens('```diff\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n same\n```'),
+    [['m', '--- a/x'], ['', '\n'], ['m', '+++ b/x'], ['', '\n'], ['m', '@@ -1 +1 @@'], ['', '\n'], ['d', '-old'], ['', '\n'], ['a', '+new'], ['', '\n same']]);
+  assert.equal(md('```brainfuck\nfn "x" // y\n```'), '<pre data-lang="brainfuck"><code>fn &quot;x&quot; // y</code></pre>');
+  assert.equal(md('```\nfn x\n```'), '<pre><code>fn x</code></pre>');
+  // An open string ends with its line; an open comment, or a fence still streaming, with the block.
+  assert.deepEqual(only('```js\nlet a = "open\nlet b = 1\n```', 'k'), ['let', 'let']);
+  assert.deepEqual(only('```rust\nx /* open\nfn y\n```', 'c'), ['/* open\nfn y']);
+  assert.deepEqual(only('```python\ndef f(', 'k'), ['def']);
+  // Big blocks stay plain; the rest highlight in linear time.
+  assert.ok(!md(`\`\`\`rust\n${'let x = "a"; // b\n'.repeat(2000)}\`\`\``).includes('<span'));
+  const t = performance.now();
+  md(`\`\`\`rust\n${'"'.repeat(19000)}\n\`\`\``);
+  md(`\`\`\`js\n${'/*'.repeat(9000)}\n\`\`\``);
+  md(`\`\`\`python\n${'\'\'\''.repeat(6000)}\n\`\`\``);
+  md(`\`\`\`rust\n${'r#"'.repeat(6000)}\n\`\`\``);
+  for (const [lang, run] of [['yaml', '/'], ['yaml', 'a.'], ['yml', '-'], ['toml', '.'], ['toml', 'a.']]) md(`\`\`\`${lang}\n${run.repeat(19000 / run.length)}\n\`\`\``);
+  assert.ok(performance.now() - t < 500, `${performance.now() - t} ms`);
 });
 
 test('ansi: colour and bold kept, every other escape and control dropped', () => {
