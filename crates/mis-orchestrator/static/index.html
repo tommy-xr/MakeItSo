@@ -397,6 +397,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   /* Live sessions: name, state pill and age; where; the last line it wrote; then what you sent it. */
   .sr .r1 strong { flex: 0 1 auto; font-size: .9375rem; font-weight: 500; }
   .sr .r1 .chip { flex: none; margin: 0; }
+  .sr .r1 .watch { flex: none; width: .875rem; height: .875rem; margin-left: -.25rem; color: var(--accent); }
   .sr .r1 .age { margin-left: auto; padding-left: .5rem; font-size: .8125rem; color: var(--dim); white-space: nowrap; }
   .sr .r2 { margin-top: .0625rem; }
   .sr a.you { display: flex; align-items: center; gap: .5rem; min-height: 2rem; margin-top: -.5rem; padding: 0 .875rem .375rem 2.125rem; font-size: .8125rem; color: var(--link); }
@@ -422,6 +423,11 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .chead .ttl > span:first-child { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .chead .ttl .chip { flex: none; margin: 0; }
   .chead .r2 { margin-top: .0625rem; font-size: .75rem; }
+  /* A session's bell: on, filled in the accent; the line under the head says what it does. */
+  #bell[aria-pressed=true] { color: var(--accent); }
+  #bell[aria-pressed=true] path:first-child { fill: currentColor; }
+  .chead .hint { font-size: .75rem; color: var(--dim); }
+  .chead .hint.on { color: var(--accent); }
   .convo { padding: 1rem .25rem 0; }
   /* `.toolrun`, not `.run`: the status line takes `.run` while work runs. */
   .fold { display: flex; align-items: center; gap: .5rem; min-height: 2rem; margin: 0 auto 1rem; padding: 0 .875rem; border-radius: 999px; background: var(--raised); color: var(--soft); font: 500 .8125rem var(--sans); }
@@ -717,7 +723,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
 </main>
 
 <main id="session" hidden>
-  <div class="chead"><a href="#workers" class="back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a><div id="session-head"></div><button type="button" id="resume" class="ibtn" aria-label="Copy resume command" title="Copy resume command"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 9l3 3-3 3M12 15h5"/></svg></button></div>
+  <div class="chead"><a href="#workers" class="back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a><div id="session-head"></div><button type="button" id="bell" class="ibtn" aria-pressed="false" aria-label="Notify when it needs you" title="Notify when it needs you" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0c0 6 2.5 8 2.5 8h-17S6 15 6 9"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/></svg></button><button type="button" id="resume" class="ibtn" aria-label="Copy resume command" title="Copy resume command"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 9l3 3-3 3M12 15h5"/></svg></button></div>
   <div id="turns" class="convo"></div>
   <p id="session-state" class="dim"></p>
 </main>
@@ -1822,6 +1828,15 @@ function threadRows(th, now) {
 }
 const LIVE_STATE = { working: 'Working', waiting: 'Waiting for you', stalled: 'Stalled?', shell: 'In shell', idle: 'Idle', active: 'Active' };
 const liveKey = (s) => `${s.worker}/${s.harness}/${s.id}`;
+// Watched: it pushes when it starts needing you (its bell, or a message from here in the last day).
+function watchIcon() {
+  const n = svg(ICON.bell);
+  n.classList.add('watch');
+  n.removeAttribute('aria-hidden');
+  n.setAttribute('role', 'img');
+  n.setAttribute('aria-label', 'notifies you');
+  return n;
+}
 const liveChip = (state) => el('span', { className: `chip st-${state}` }, LIVE_STATE[state] || state);
 // Where a message to a session is: queued → delivering → delivered (or held in its terminal) → answered.
 const sayState = (status, held) => ({ running: 'delivering', delivered: held ? 'waiting for approval in the terminal' : 'delivered',
@@ -1836,7 +1851,7 @@ function liveRow(s, now) {
   });
   const dot = el('span', { className: `sd st-${s.state}` });
   return el('li', { className: `sr${s.online ? '' : ' off'}` }, el('a', { href: `#session/${liveKey(s)}` },
-    el('div', { className: 'r1' }, dot, el('strong', { className: 'one' }, s.name || s.title || short(s.id)), liveChip(s.state), el('span', { className: 'age' }, span(now - s.updated_ms))),
+    el('div', { className: 'r1' }, dot, el('strong', { className: 'one' }, s.name || s.title || short(s.id)), s.watched ? watchIcon() : '', liveChip(s.state), el('span', { className: 'age' }, span(now - s.updated_ms))),
     el('div', { className: 'r2 one' }, ...dots([!s.online && 'offline', s.waiting_for && el('span', { className: 'why' }, s.waiting_for),
       shortHost(s.worker_name), s.harness])),
     s.last ? el('div', { className: 'r3 one' }, snippet(s.last)) : ''), ...you);
@@ -2454,7 +2469,7 @@ function runLabel(run) {
   return [head, names.length ? ` · ${names.slice(0, 3).join(', ')}${names.length > 3 ? '…' : ''}` : ''];
 }
 const svg = (d, w = 2) => { const n = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); n.setAttribute('viewBox', '0 0 24 24'); n.setAttribute('aria-hidden', 'true'); n.innerHTML = `<path d="${d}" fill="none" stroke="currentColor" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round"/>`; return n; };
-const ICON = { term: 'M5 8l4 4-4 4M12 16h7', chev: 'M6 9l6 6 6-6', expand: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5', copy: 'M9 9h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2zM5 15V5a2 2 0 0 1 2-2h8', retry: 'M4 12a8 8 0 1 0 3-6.2M4 4v5h5' };
+const ICON = { term: 'M5 8l4 4-4 4M12 16h7', chev: 'M6 9l6 6 6-6', expand: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5', copy: 'M9 9h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2zM5 15V5a2 2 0 0 1 2-2h8', retry: 'M4 12a8 8 0 1 0 3-6.2M4 4v5h5', bell: 'M6 9a6 6 0 0 1 12 0c0 6 2.5 8 2.5 8h-17S6 15 6 9M10 20.5a2.2 2.2 0 0 0 4 0' };
 const chev = () => { const n = svg(ICON.chev); n.classList.add('chev'); return n; };
 const iconBtn = (icon, label, onclick) => { const b = el('button', { type: 'button', className: 'ibtn', title: label, onclick }, svg(ICON[icon])); b.setAttribute('aria-label', label); return b; };
 
@@ -2877,9 +2892,15 @@ function renderSession(key) {
   const [wid, harness, id] = key.split('/'), got = sess.got, info = sessionInfo(key);
   const active = got && got.active, state = info.state || (active ? 'active' : '');
   const updated = Math.max(info.updated_ms || 0, (got && got.updated_ms) || 0);
+  // The bell, for a live session: only those report the states it pushes on.
+  const row = feed.find((s) => liveKey(s) === key);
+  $('bell').hidden = readOnly || !row;
+  if (row) $('bell').setAttribute('aria-pressed', String(!!row.bell));
+  const hint = row && el('div', { className: `hint one${row.watched ? ' on' : ''}` },
+    row.bell ? 'Notifying when it needs you' : row.watched ? 'Notifying for a day: you messaged it' : 'Notify when it needs you');
   $('session-head').replaceChildren(el('div', { className: 'ttl', title: info.title || '' }, el('span', {}, info.name || info.title || short(id)), state ? liveChip(state) : ''),
     el('div', { className: 'r2 one', title: info.cwd || '' }, ...dots([info.waiting_for && el('span', { className: 'why' }, info.waiting_for),
-      shortHost(info.worker_name || hostOf(wid)), harnessModel(harness, info.model), folder(info.cwd), updated && span(Date.now() + skew - updated)])));
+      shortHost(info.worker_name || hostOf(wid)), harnessModel(harness, info.model), folder(info.cwd), updated && span(Date.now() + skew - updated)])), hint || '');
   renderSay(got);
   if (!got || !got.turns) {
     if (got) $('turns').replaceChildren(); // loaded with an error: no more skeleton
@@ -2988,6 +3009,15 @@ $('resume').onclick = async () => {
   toast((await copyText(`${cwd ? `cd ${shq(cwd)} && ` : ''}${run} ${id}`)) ? `Copied: ${run} ${short(id)}…` : 'Couldn’t copy');
 };
 $('say').addEventListener('submit', (e) => { e.preventDefault(); sayTo(); });
+// Shown at once; the next sessions push confirms it.
+$('bell').onclick = () => {
+  const row = sess && feed.find((s) => liveKey(s) === sess.key);
+  if (!row) return;
+  const on = !row.bell, now = Date.now() + skew;
+  Object.assign(row, { bell: on, watched: on || row.messages.some((m) => now - m.at < 864e5) });
+  send({ type: 'session_bell', worker: row.worker, harness: row.harness, id: row.id, on });
+  render();
+};
 
 // The worker's build, flagged when it isn't the orchestrator's; its self-update progress.
 function versionLine(w) {
@@ -3577,7 +3607,7 @@ const b64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/
 function pushStart(key) {
   if (!key || !pushable()) return;
   push.key = key;
-  // A tapped notification for an open window: show its task here.
+  // A tapped notification for an open window: show its task or session here.
   navigator.serviceWorker.addEventListener('message', (e) => {
     const url = e.data && e.data.open && new URL(e.data.open);
     if (url && url.origin === location.origin) location.hash = url.hash;
