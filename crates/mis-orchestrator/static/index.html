@@ -2791,7 +2791,10 @@ function drawTask(t) {
   if (writing) items.push({ role: 'assistant', text: writing, who: t.harness, streaming: true });
   // A reply on its way shows at once, under the thread.
   if (pending && pending.key === replyDraft(t.id)) items.push({ role: 'user', text: pending.text, key: 'pending', note: { label: 'Sending…', tone: '' } });
-  const working = isFinished(t) || writing ? '' : t.status === 'running' ? t.activity || 'working…' : t.activity || t.status;
+  // An activity that is just the reply above (its first line, cut at 80) says nothing new.
+  const last = items[items.length - 1], said = last && last.role === 'assistant' && last.text.trimStart();
+  const activity = said && t.activity && said.startsWith(t.activity.replace(/…$/, '')) ? '' : t.activity;
+  const working = isFinished(t) || writing ? '' : t.status === 'running' ? activity || 'working…' : activity || t.status;
   const sig = JSON.stringify([items.length, writing ? '' : items[items.length - 1].text, working, !!pending]);
   if (sig === detail.sig) return;
   const bottom = atBottom();
