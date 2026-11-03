@@ -937,23 +937,24 @@ async fn run(
         let mut deltas = coalesce::Coalescer::default();
         loop {
             let due = deltas.due();
-            let ev = tokio::select! {
+            let evs = tokio::select! {
                 ev = arx.recv() => match ev {
                     Some(ev) => deltas.event(ev, Instant::now()),
                     None => break,
                 },
-                () = sleep_until(due) => deltas.flush(),
+                () = sleep_until(due) => deltas.flush().into_iter().collect(),
             };
-            let Some(ev) = ev else { continue };
-            // Limit readings go into the stats beat, not the transcript.
-            if let AgentEvent::Limits { mut windows } = ev {
-                let now = unix_ms();
-                windows.iter_mut().for_each(|w| w.observed_at = now);
-                ctx.add_limits(agent.name(), windows);
-                continue;
-            }
-            if tx.send((id, ev)).await.is_err() {
-                break;
+            for ev in evs {
+                // Limit readings go into the stats beat, not the transcript.
+                if let AgentEvent::Limits { mut windows } = ev {
+                    let now = unix_ms();
+                    windows.iter_mut().for_each(|w| w.observed_at = now);
+                    ctx.add_limits(agent.name(), windows);
+                    continue;
+                }
+                if tx.send((id, ev)).await.is_err() {
+                    return;
+                }
             }
         }
     };

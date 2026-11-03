@@ -459,7 +459,11 @@ async fn send(ws: &mut Ws, m: &ClientMsg) -> Result<()> {
 async fn recv(ws: &mut Ws) -> Result<ServerMsg> {
     loop {
         match ws.next().await {
-            Some(Ok(Message::Text(t))) => return Ok(serde_json::from_str(&t)?),
+            // Skip messages this build doesn't know (e.g. a newer orchestrator's), as the tray does.
+            Some(Ok(Message::Text(t))) => match serde_json::from_str(&t) {
+                Err(e) if e.to_string().starts_with("unknown variant") => continue,
+                msg => return Ok(msg?),
+            },
             Some(Ok(_)) => continue,
             Some(Err(e)) => return Err(e.into()),
             None => bail!("connection closed"),
@@ -925,6 +929,18 @@ async fn run(args: Args) -> Result<Option<TaskSummary>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `recv` skips what a newer orchestrator sends by this error.
+    #[test]
+    fn unknown_server_messages_say_unknown_variant() {
+        for msg in [
+            r#"{"type":"from_the_future"}"#,
+            r#"{"type":"event","task":"00000000-0000-0000-0000-000000000000","worker":null,"event":{"type":"nope"}}"#,
+        ] {
+            let e = serde_json::from_str::<ServerMsg>(msg).unwrap_err();
+            assert!(e.to_string().starts_with("unknown variant"), "{e}");
+        }
+    }
 
     fn task(nested: bool) -> Cmd {
         Cmd::Task {

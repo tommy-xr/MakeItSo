@@ -192,8 +192,9 @@ pub enum AgentEvent {
     Text {
         text: String,
     },
-    /// The next piece of the text the agent is writing, live. Never kept: the
-    /// block's `Text` follows with all of it and is what the transcript holds.
+    /// The next piece of the text the agent is writing, live. Worker to
+    /// orchestrator only (clients get `ServerMsg::TextDelta`), and never kept:
+    /// the block's `Text` follows with all of it and is what the transcript holds.
     TextDelta {
         text: String,
     },
@@ -249,6 +250,14 @@ pub enum AgentEvent {
         read: bool,
         held: bool,
     },
+}
+
+/// The text block a running task is writing: its `ServerMsg::TextDelta`s so far.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Partial {
+    pub text: String,
+    /// `seq` of the last piece in `text`.
+    pub seq: u64,
 }
 
 /// Worker -> orchestrator.
@@ -727,9 +736,18 @@ pub enum ServerMsg {
         task: TaskSummary,
         events: Vec<AgentEvent>,
         truncated: bool,
-        /// The text being written now (its `TextDelta`s so far), while running.
+        /// The text being written now, while running.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        partial: Option<String>,
+        partial: Option<Partial>,
+    },
+    /// A running task's next piece of the text it is writing. Live only: its
+    /// `AgentEvent::Text` follows with the whole block.
+    TextDelta {
+        task: TaskId,
+        text: String,
+        /// 1 for a block's first piece, then one more for each: a client that
+        /// missed one (or joined late) waits for the `Text`.
+        seq: u64,
     },
     Event {
         task: TaskId,

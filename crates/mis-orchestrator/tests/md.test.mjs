@@ -192,7 +192,9 @@ test('highlight: diff lines; unknown languages plain; open tokens stay in their 
   md(`\`\`\`rust\n${'"'.repeat(19000)}\n\`\`\``);
   md(`\`\`\`js\n${'/*'.repeat(9000)}\n\`\`\``);
   md(`\`\`\`python\n${'\'\'\''.repeat(6000)}\n\`\`\``);
-  assert.ok(performance.now() - t < 500);
+  md(`\`\`\`rust\n${'r#"'.repeat(6000)}\n\`\`\``);
+  for (const [lang, run] of [['yaml', '/'], ['yaml', 'a.'], ['yml', '-'], ['toml', '.'], ['toml', 'a.']]) md(`\`\`\`${lang}\n${run.repeat(19000 / run.length)}\n\`\`\``);
+  assert.ok(performance.now() - t < 500, `${performance.now() - t} ms`);
 });
 
 test('ansi: colour and bold kept, every other escape and control dropped', () => {

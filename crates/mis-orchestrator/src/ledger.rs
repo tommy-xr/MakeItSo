@@ -80,9 +80,18 @@ struct Worker {
     last_seen: Duration,
     /// Its latest self-update report this connection; Pending takes it off new tasks.
     update: WorkerUpdate,
-    /// The text its running task is writing, from `TextDelta`s since its last
-    /// recorded event (at most `MAX_PARTIAL` bytes), for clients that open it mid-reply.
-    partial: Option<(TaskId, String)>,
+    /// The text block its running task is writing, for clients that open it mid-reply.
+    stream: Option<Stream>,
+}
+
+/// A text block being written, from its task's `TextDelta`s since its last `Text`.
+#[derive(Default)]
+struct Stream {
+    task: TaskId,
+    /// At most `MAX_PARTIAL` bytes; past that, dropped (`cut`) but still counted.
+    text: String,
+    seq: u64,
+    cut: bool,
 }
 
 /// A reply being written is kept this far for late viewers; live ones get all of it.
@@ -614,14 +623,15 @@ impl Ledger {
         Some((self.summary(t), &t.events, t.truncated))
     }
 
-    /// The text `task` is writing now, while it runs (see `Worker::partial`).
-    pub fn partial(&self, task: TaskId) -> Option<&str> {
+    /// The text `task` is writing now, while it runs and all of it is kept (see `Worker::stream`).
+    pub fn partial(&self, task: TaskId) -> Option<Partial> {
         let t = self.tasks.iter().find(|t| t.task.id == task)?;
-        let w = self.workers.get(&t.worker?)?;
-        match &w.partial {
-            Some((id, p)) if *id == task && t.status == TaskStatus::Running => Some(p),
-            _ => None,
-        }
+        let s = self.workers.get(&t.worker?)?.stream.as_ref()?;
+        let whole = s.task == task && !s.cut && t.status == TaskStatus::Running;
+        whole.then(|| Partial {
+            text: s.text.clone(),
+            seq: s.seq,
+        })
     }
 
     fn is_busy(&self, wid: WorkerId) -> bool {
@@ -1139,7 +1149,7 @@ impl Ledger {
     ) -> (Vec<TaskId>, Vec<Effect>) {
         let generation = self.workers.get(&wid).map_or(0, |w| w.generation) + 1;
         // Its task may still be writing: deltas held while offline follow.
-        let partial = self.workers.remove(&wid).and_then(|w| w.partial);
+        let stream = self.workers.remove(&wid).and_then(|w| w.stream);
         // The first inventory is the baseline. An empty one isn't: it comes from
         // `mis-worker setup`'s test connection or a worker predating inventories.
         let noted = self.noted.entry(wid).or_default();
@@ -1155,7 +1165,7 @@ impl Ledger {
                 stats: None,
                 last_seen: now,
                 update: WorkerUpdate::None,
-                partial,
+                stream,
             },
         );
         let unknown = running
@@ -1304,28 +1314,32 @@ impl Ledger {
             AgentEvent::Artifact(_) => return vec![],
             // Relayed, never recorded: the block's `Text` follows with all of it.
             AgentEvent::TextDelta { text } => {
-                if let Some(w) = self.workers.get_mut(&wid) {
-                    let mut p = (w.partial.take())
-                        .filter(|(t, _)| *t == task)
-                        .map_or_else(String::new, |(_, p)| p);
-                    if p.len() + text.len() <= MAX_PARTIAL {
-                        p.push_str(&text);
-                    }
-                    w.partial = Some((task, p));
+                let Some(w) = self.workers.get_mut(&wid) else {
+                    return vec![];
+                };
+                let mut s = (w.stream.take())
+                    .filter(|s| s.task == task)
+                    .unwrap_or(Stream {
+                        task,
+                        ..Default::default()
+                    });
+                s.seq += 1;
+                s.cut |= s.text.len() + text.len() > MAX_PARTIAL;
+                if s.cut {
+                    s.text = String::new();
+                } else {
+                    s.text.push_str(&text);
                 }
-                let event = AgentEvent::TextDelta { text };
-                let worker = Some(wid);
-                return vec![Effect::Broadcast(ServerMsg::Event {
-                    task,
-                    worker,
-                    event,
-                })];
+                let seq = s.seq;
+                w.stream = Some(s);
+                return vec![Effect::Broadcast(ServerMsg::TextDelta { task, text, seq })];
             }
             _ => {}
         }
         t.record(&event, now);
-        if let Some(w) = self.workers.get_mut(&wid) {
-            w.partial = None;
+        // Its block landed; the next piece starts another.
+        if let (AgentEvent::Text { .. }, Some(w)) = (&event, self.workers.get_mut(&wid)) {
+            w.stream = None;
         }
         if let AgentEvent::Limited { resets_at } = &event {
             // A later hit never shortens an earlier one.
@@ -2705,38 +2719,69 @@ mod tests {
     }
 
     #[test]
-    fn text_deltas_are_relayed_and_kept_only_as_the_reply_being_written() {
+    fn text_deltas_are_relayed_numbered_and_kept_only_as_the_block_being_written() {
         let (mut l, wid, task) = running_setup();
         let delta = |t: &str| AgentEvent::TextDelta { text: t.into() };
+        let partial = |text: &str, seq| {
+            Some(Partial {
+                text: text.into(),
+                seq,
+            })
+        };
         assert!(l.event(wid, 2, task, delta("x")).is_empty(), "stale conn");
         let eff = l.event(wid, 1, task, delta("Hel"));
         assert!(matches!(
             &eff[..],
-            [Effect::Broadcast(ServerMsg::Event { event: AgentEvent::TextDelta { text }, .. })] if text == "Hel"
+            [Effect::Broadcast(ServerMsg::TextDelta { text, seq: 1, .. })] if text == "Hel"
         ));
         l.event(wid, 1, task, delta("lo"));
-        assert_eq!(l.partial(task), Some("Hello"));
+        assert_eq!(l.partial(task), partial("Hello", 2));
         // Still kept after a reconnect: its held deltas follow.
         l.disconnect(wid, 1);
         l.connect(wid, info(), &[task], 2, T0);
-        assert_eq!(l.partial(task), Some("Hello"));
-        // Kept no further than MAX_PARTIAL; relayed all the same.
+        assert_eq!(l.partial(task), partial("Hello", 2));
+        // A usage beat isn't the block's end.
+        l.event(
+            wid,
+            2,
+            task,
+            AgentEvent::Usage {
+                input: 1,
+                output: 1,
+            },
+        );
+        assert_eq!(l.partial(task), partial("Hello", 2));
+        // Past MAX_PARTIAL, no longer served (a late viewer waits for the Text); relayed and counted all the same.
         let big = "x".repeat(MAX_PARTIAL);
-        assert_eq!(l.event(wid, 2, task, delta(&big)).len(), 1);
-        assert_eq!(l.partial(task), Some("Hello"));
-        // The block's Text replaces it; the transcript never holds a delta.
+        let eff = l.event(wid, 2, task, delta(&big));
+        assert!(matches!(
+            &eff[..],
+            [Effect::Broadcast(ServerMsg::TextDelta { seq: 3, .. })]
+        ));
+        assert_eq!(l.partial(task), None);
+        let eff = l.event(wid, 2, task, delta("!"));
+        assert!(matches!(
+            &eff[..],
+            [Effect::Broadcast(ServerMsg::TextDelta { seq: 4, .. })]
+        ));
+        assert_eq!(l.partial(task), None);
+        // The block's Text ends it; the next block counts from 1; the transcript never holds a delta.
         let text = AgentEvent::Text {
             text: "Hello".into(),
         };
         l.event(wid, 2, task, text.clone());
-        assert_eq!(l.partial(task), None);
-        l.event(wid, 2, task, delta("Next"));
+        let eff = l.event(wid, 2, task, delta("Next"));
+        assert!(matches!(
+            &eff[..],
+            [Effect::Broadcast(ServerMsg::TextDelta { seq: 1, .. })]
+        ));
+        assert_eq!(l.partial(task), partial("Next", 1));
         let done = AgentEvent::Finished {
             ok: true,
             summary: None,
         };
         l.event(wid, 2, task, done.clone());
-        assert_eq!(l.partial(task), None);
+        assert_eq!(l.partial(task), None, "finished");
         assert_eq!(l.show(task).unwrap().1, [text, done]);
     }
 

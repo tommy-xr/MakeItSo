@@ -131,7 +131,7 @@ impl Ledger {
                 stats: None,
                 last_seen: now,
                 update: WorkerUpdate::None,
-                partial: None,
+                stream: None,
             };
             l.workers.insert(wid, w);
             effects.push(Effect::StartGrace { wid, generation });

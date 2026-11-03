@@ -785,7 +785,10 @@ async fn run_oneshot(
     );
     let feed = async {
         while let Some(ev) = rx.recv().await {
-            on_event(ev);
+            // A one-shot's answer counts once whole.
+            if !matches!(ev, AgentEvent::TextDelta { .. }) {
+                on_event(ev);
+            }
         }
     };
     let (timed_out, _) = tokio::join!(run, feed);
@@ -1661,7 +1664,7 @@ async fn client_conn(mut sock: WebSocket, app: App, scope: Scope) {
                                 task,
                                 events: events.to_vec(),
                                 truncated,
-                                partial: ledger.partial(id).map(String::from),
+                                partial: ledger.partial(id),
                             },
                             None => ServerMsg::Error { message: format!("unknown task {id}") },
                         }

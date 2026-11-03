@@ -100,13 +100,13 @@ async fn deltas_reach_a_watching_client_batched_and_are_never_kept() {
     let watch = async {
         let (mut deltas, mut text) = (vec![], None);
         loop {
-            let ServerMsg::Event { task, event, .. } = next(&mut client).await else {
-                continue;
-            };
-            match event {
-                AgentEvent::TextDelta { text } => deltas.push(text),
-                AgentEvent::Text { text: t } => text = Some(t),
-                AgentEvent::Finished { .. } => return (task, deltas, text.unwrap()),
+            match next(&mut client).await {
+                ServerMsg::TextDelta { text, seq, .. } => deltas.push((seq, text)),
+                ServerMsg::Event { task, event, .. } => match event {
+                    AgentEvent::Text { text: t } => text = Some(t),
+                    AgentEvent::Finished { .. } => return (task, deltas, text.unwrap()),
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -116,9 +116,12 @@ async fn deltas_reach_a_watching_client_batched_and_are_never_kept() {
         .expect("timeout");
     let all = (1..=24).map(|i| format!("word{i} ")).collect::<String>();
     assert_eq!(text, all);
-    // ~720 ms of pieces in ~100 ms batches; the last batch may be superseded by the Text.
-    assert!((3..=12).contains(&deltas.len()), "{deltas:?}");
-    assert!(all.starts_with(&deltas.concat()), "{deltas:?}");
+    // ~720 ms of pieces in ~100 ms batches, numbered from 1; the last batch may be superseded by the Text.
+    assert!((2..24).contains(&deltas.len()), "{deltas:?}");
+    let seqs: Vec<u64> = deltas.iter().map(|(seq, _)| *seq).collect();
+    assert_eq!(seqs, (1..=deltas.len() as u64).collect::<Vec<_>>());
+    let streamed: String = deltas.into_iter().map(|(_, t)| t).collect();
+    assert!(all.starts_with(&streamed), "{streamed:?}");
 
     send(&mut client, &ClientMsg::Show { task }).await;
     let detail = loop {

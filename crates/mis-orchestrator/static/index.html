@@ -736,8 +736,10 @@ function unsend() {
   if (f) restore(f, p.text);
 }
 const mine = new Set(); // tasks this page submitted; auto-read speaks only these
-// Replies being written: task id -> its text so far (its `text_delta`s, or a Show's `partial`), until its next event.
+// Replies being written: task id -> { text, seq } from its `text_delta`s (or a Show's `partial`) until the block's
+// text lands. `text` is null when a piece was missed (e.g. opened mid-reply): the block then shows once it lands.
 const live = new Map();
+const writingOf = (id) => live.get(id)?.text;
 // Photos for the new task: downscaled here (phone shots are ~4 MB), uploaded on pick, sent as ids.
 // Each is { url: preview object URL, id: upload id once stored }.
 const MAX_SHOTS = 4, MAX_SIDE = 1600;
@@ -779,8 +781,9 @@ const MD_ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#
 const MD_LIST = /^( *)([-*+]|\d{1,9}[.)]) +(.*)$/, MD_FENCE = /^ *(```|~~~)/, MD_HEAD = /^(#{1,6}) +(.*?)[ #]*$/;
 const MD_RULE = /^ *([-*_])( *\1){2,} *$/, MD_QUOTE = /^ *&gt;/;
 const mdStarts = (l) => MD_FENCE.test(l) || MD_HEAD.test(l) || MD_RULE.test(l) || MD_QUOTE.test(l) || MD_LIST.test(l);
+const mdEsc = (s) => s.replace(/[&<>"']/g, (c) => MD_ESC[c]);
 function md(src) {
-  const text = String(src).replace(/\0/g, '').replace(/\t/g, '    ').replace(/[&<>"']/g, (c) => MD_ESC[c]);
+  const text = mdEsc(String(src).replace(/\0/g, '').replace(/\t/g, '    '));
   return mdBlocks(text.split(/\r?\n/));
 }
 const mdLink = (href, label) => `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`;
@@ -907,10 +910,10 @@ const HL_SLASH = /\/\/.*|\/\*[\s\S]*?(?:\*\/|$)/y, HL_HASH = /#.*/y, HL_NUM = /(
 const HL_DQ = /"(?:[^"\\\n]|\\.)*"?/y, HL_SQ = /'(?:[^'\\\n]|\\.)*'?/y;
 const hlSet = (s) => new Set(s.split(' '));
 // Per language: `rules` [class, sticky regex, where] tried in order at each spot (where: 'word' only after a space or
-// at a line start, 'line' only at a line start); else a word, coloured from `kw`, `lit`, `types` (and Capitalized
+// at a line start, 'line' only at a line start); else a `word` (one a failed rule's run, so no run is rescanned), coloured from `kw`, `lit`, `types` (and Capitalized
 // words when `caps`), or as a function when `(` follows it (`fn`).
 const HL_LANG = {
-  rust: { rules: [['c', HL_SLASH], ['s', /b?r(#*)"[\s\S]*?"\1/y], ['s', /b?"(?:[^"\\]|\\[\s\S])*"?/y], ['s', /b?'(?:\\.|[^'\\\n])'/y], ['n', HL_NUM]],
+  rust: { rules: [['c', HL_SLASH], ['s', /b?r(#*)"[\s\S]*?(?:"\1|$)/y], ['s', /b?"(?:[^"\\]|\\[\s\S])*"?/y], ['s', /b?'(?:\\.|[^'\\\n])'/y], ['n', HL_NUM]],
     kw: hlSet('as async await break const continue crate dyn else enum extern fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait type unsafe use where while'),
     lit: hlSet('true false'), types: hlSet('i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize f32 f64 bool char str'), caps: true, fn: true },
   js: { rules: [['c', HL_SLASH], ['s', /`(?:[^`\\]|\\[\s\S])*`?/y], ['s', HL_DQ], ['s', HL_SQ], ['n', HL_NUM]],
@@ -926,14 +929,13 @@ const HL_LANG = {
     word: /\w[\w.-]*/y, kw: hlSet('if then else elif fi for while until do done case esac in function return export local readonly unset shift exit break continue select source') },
   json: { rules: [['p', /"(?:[^"\\\n]|\\.)*"(?=\s*:)/y], ['s', HL_DQ], ['n', /-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/iy]], lit: hlSet('true false null') },
   yaml: { rules: [['c', HL_HASH, 'word'], ['p', /[\w.\/-]+(?=[ \t]*:(?:\s|$))/y], ['s', HL_DQ], ['s', HL_SQ], ['n', /-?\d[\d_]*(?:\.\d+)?\b/y]],
-    lit: hlSet('true false null yes no on off True False Null') },
+    word: /[\w.\/-]+/y, lit: hlSet('true false null yes no on off True False Null') },
   toml: { rules: [['c', HL_HASH], ['t', /\[\[?[^\]\n]*\]\]?/y, 'line'], ['p', /[\w.-]+(?=[ \t]*=)/y], ['s', /"""[\s\S]*?(?:"""|$)|'''[\s\S]*?(?:'''|$)/y],
-    ['s', HL_DQ], ['s', HL_SQ], ['n', /[+-]?\d[\d_:.T+-]*\b/y]], lit: hlSet('true false inf nan') },
+    ['s', HL_DQ], ['s', HL_SQ], ['n', /[+-]?\d[\d_:.T+-]*\b/y]], word: /[\w.-]+/y, lit: hlSet('true false inf nan') },
 };
 const HL_ALIAS = { rs: 'rust', javascript: 'js', jsx: 'js', mjs: 'js', cjs: 'js', ts: 'js', typescript: 'js', tsx: 'js', py: 'python',
   python3: 'python', golang: 'go', bash: 'sh', shell: 'sh', zsh: 'sh', console: 'sh', jsonc: 'json', yml: 'yaml', patch: 'diff' };
-const hlEsc = (s) => s.replace(/[&<>"']/g, (c) => MD_ESC[c]);
-const hlTag = (cls, s) => `<span class="hl-${cls}">${hlEsc(s)}</span>`;
+const hlTag = (cls, s) => `<span class="hl-${cls}">${mdEsc(s)}</span>`;
 // `code` (escaped) as highlighted HTML for `lang` (a code block's info word); unknown languages come back as they are.
 function hl(lang, code) {
   const name = HL_ALIAS[lang.toLowerCase()] || lang.toLowerCase(), L = HL_LANG[name];
@@ -941,7 +943,7 @@ function hl(lang, code) {
   const src = code.replace(/&(?:amp|lt|gt|quot|#39);/g, (e) => MD_UNESC[e]);
   if (!L) {
     return src.split('\n').map((l) => (/^(?:@@|\+\+\+ |--- |diff |index )/.test(l) ? hlTag('m', l) : l[0] === '+' ? hlTag('a', l)
-      : l[0] === '-' ? hlTag('d', l) : hlEsc(l))).join('\n');
+      : l[0] === '-' ? hlTag('d', l) : mdEsc(l))).join('\n');
   }
   const word = L.word || /[A-Za-z_$][\w$]*/y, space = /\s+/y;
   let out = '', i = 0;
@@ -960,7 +962,7 @@ function hl(lang, code) {
       if (cls === 'f' && next === '!') tok += '!';
     }
     tok = tok || src[i];
-    out += cls ? hlTag(cls, tok) : hlEsc(tok);
+    out += cls ? hlTag(cls, tok) : mdEsc(tok);
     i += tok.length;
   }
   return out;
@@ -1687,7 +1689,7 @@ const lastLine = (s) => snippet(s.split('\n').filter((l) => l.trim() && !MD_FENC
 const snippet = (s) => (s || '').split('\n').find((l) => l.trim())?.replace(/\*\*|__|`/g, '').replace(/^(?:#{1,6} +|> ?|\s+)+/, '') || '';
 // What a task is doing (running, held) or said (its summary), for its row's last line.
 function taskLine(t) {
-  const writing = !isFinished(t) && live.get(t.id);
+  const writing = !isFinished(t) && writingOf(t.id);
   if (writing || (!isFinished(t) && t.activity && t.activity !== 'queued')) {
     const line = el('div', { className: 'r3 activity one' }, writing ? lastLine(writing) : t.activity);
     line.dataset.live = t.id; // `paint` writes the reply's latest line here
@@ -2295,8 +2297,9 @@ function codeBlocks(body) {
 function fillStream(body, text) {
   body.innerHTML = md(text);
   codeBlocks(body);
+  // Into the last element while nothing follows it: `**Aliasing:** Rust…` ends in the paragraph's text, not the <strong>.
   let end = body;
-  while (end.lastElementChild && !/^(BR|HR|BUTTON)$/.test(end.lastElementChild.tagName)) end = end.lastElementChild;
+  for (let n = body.lastChild; n && n.nodeType === 1 && !/^(BR|HR|BUTTON)$/.test(n.tagName); n = n.lastChild) end = n;
   const caret = el('span', { className: 'caret' });
   caret.setAttribute('aria-hidden', 'true');
   end.append(caret);
@@ -2316,7 +2319,7 @@ function paint() {
   const view = route().view;
   let redraw = false;
   for (const id of painting) {
-    const text = live.get(id);
+    const text = writingOf(id);
     if (!text) continue;
     const rows = document.querySelectorAll(`[data-live="${id}"]`);
     for (const n of rows) n.textContent = lastLine(text);
@@ -2491,7 +2494,7 @@ function drawTask(t) {
   }
   const items = taskItems(t, detail.events);
   // The reply being written, drawn in place by `paint` as it grows: the signature leaves its text out.
-  const writing = !isFinished(t) && live.get(t.id);
+  const writing = !isFinished(t) && writingOf(t.id);
   if (writing) items.push({ role: 'assistant', text: writing, who: t.harness, streaming: true });
   // A reply on its way shows at once, under the thread.
   if (pending && pending.key === replyDraft(t.id)) items.push({ role: 'user', text: pending.text, key: 'pending', note: { label: 'Sending…', tone: '' } });
@@ -2990,21 +2993,25 @@ function onMessage(msg) {
       break;
     }
     case 'task_detail':
-      if (msg.partial) live.set(msg.task.id, msg.partial); else live.delete(msg.task.id);
+      // The block so far; without one (none, or too long to keep), whatever arrived here stands.
+      if (msg.partial) live.set(msg.task.id, msg.partial);
       if (detail && detail.id === msg.task.id) Object.assign(detail, { task: msg.task, events: msg.events, truncated: msg.truncated, ready: true, refetch: false, sig: null });
       break;
     case 'sessions':
       feed = msg.sessions;
       break;
+    case 'text_delta': {
+      // A piece of the reply being written, in order (`seq` 1 starts a block); drawn in place, no Status or redraw.
+      const was = live.get(msg.task);
+      if (msg.seq > 1 && was && msg.seq <= was.seq) return; // already in a Show's partial
+      const next = msg.seq === 1 ? msg.text : was && msg.seq === was.seq + 1 && was.text !== null ? was.text + msg.text : null;
+      live.set(msg.task, { text: next, seq: msg.seq });
+      if (next !== null) paintSoon(msg.task, !(was && was.text));
+      return;
+    }
     case 'event': {
-      // A piece of the reply being written: drawn in place, no Status or redraw. Usage comes just before its Text.
-      if (msg.event.type === 'text_delta') {
-        const was = live.get(msg.task) || '';
-        live.set(msg.task, was + msg.event.text);
-        paintSoon(msg.task, !was);
-        return;
-      }
-      if (msg.event.type !== 'usage') live.delete(msg.task);
+      // Its block landed (or the task ended): the authoritative card takes over.
+      if (['text', 'finished', 'cancelled'].includes(msg.event.type)) live.delete(msg.task);
       // Rows show each task's latest activity and tokens.
       refreshSoon();
       if (msg.event.type === 'finished' && msg.event.summary && mine.delete(msg.task) && synth && !rec && autoread.on()) say(msg.event.summary);

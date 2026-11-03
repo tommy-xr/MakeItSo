@@ -18,20 +18,27 @@ pub struct Coalescer {
 }
 
 impl Coalescer {
-    /// What to forward for `ev`: a delta joins the held batch, which comes back
-    /// once full or due; any other event comes back as is, dropping the batch:
-    /// a text block's `Text` follows its deltas with all of it.
-    pub fn event(&mut self, ev: AgentEvent, now: Instant) -> Option<AgentEvent> {
-        let AgentEvent::TextDelta { text } = ev else {
-            self.take();
-            return Some(ev);
-        };
-        self.held.push_str(&text);
-        let since = *self.since.get_or_insert(now);
-        if self.held.len() >= FLUSH_BYTES || now >= since + FLUSH_EVERY {
-            return self.flush();
+    /// What to forward for `ev`, in order: a delta joins the held batch, which
+    /// comes back once full or due. A `Text` drops the batch (the block's `Text`
+    /// has all of it); any other event comes after it.
+    pub fn event(&mut self, ev: AgentEvent, now: Instant) -> Vec<AgentEvent> {
+        match ev {
+            AgentEvent::TextDelta { text } => {
+                self.held.push_str(&text);
+                let since = *self.since.get_or_insert(now);
+                let due = self.held.len() >= FLUSH_BYTES || now >= since + FLUSH_EVERY;
+                if due {
+                    self.flush().into_iter().collect()
+                } else {
+                    vec![]
+                }
+            }
+            AgentEvent::Text { .. } => {
+                self.take();
+                vec![ev]
+            }
+            ev => self.flush().into_iter().chain([ev]).collect(),
         }
-        None
     }
 
     /// When the held batch is due, if one is held.
@@ -64,34 +71,36 @@ mod tests {
         let t0 = Instant::now();
         let mut c = Coalescer::default();
         assert_eq!(c.due(), None);
-        assert_eq!(c.event(delta("Hel"), t0), None);
-        assert_eq!(c.event(delta("lo"), t0 + Duration::from_millis(40)), None);
+        assert_eq!(c.event(delta("Hel"), t0), []);
+        assert_eq!(c.event(delta("lo"), t0 + Duration::from_millis(40)), []);
         assert_eq!(c.due(), Some(t0 + FLUSH_EVERY), "timed from the first");
         assert_eq!(c.flush(), Some(delta("Hello")));
         assert_eq!((c.flush(), c.due()), (None, None));
         // Due on arrival: goes at once with what was held.
         c.event(delta("a"), t0);
-        assert_eq!(c.event(delta("b"), t0 + FLUSH_EVERY), Some(delta("ab")));
+        assert_eq!(c.event(delta("b"), t0 + FLUSH_EVERY), [delta("ab")]);
         // Full: goes at once.
         let big = "x".repeat(FLUSH_BYTES);
-        assert_eq!(c.event(delta(&big), t0), Some(delta(&big)));
+        assert_eq!(c.event(delta(&big), t0), [delta(&big)]);
         assert_eq!(c.due(), None);
     }
 
     #[test]
-    fn other_events_pass_and_drop_the_batch_they_supersede() {
+    fn text_drops_the_batch_it_supersedes_and_other_events_follow_it() {
         let t0 = Instant::now();
         let mut c = Coalescer::default();
         c.event(delta("Hi th"), t0);
         let text = AgentEvent::Text {
             text: "Hi there".into(),
         };
-        assert_eq!(c.event(text.clone(), t0), Some(text));
+        assert_eq!(c.event(text.clone(), t0), [text]);
         assert_eq!((c.flush(), c.due()), (None, None));
-        let done = AgentEvent::Finished {
-            ok: true,
-            summary: None,
+        c.event(delta("Hi"), t0);
+        let usage = AgentEvent::Usage {
+            input: 1,
+            output: 2,
         };
-        assert_eq!(c.event(done.clone(), t0), Some(done));
+        assert_eq!(c.event(usage.clone(), t0), [delta("Hi"), usage.clone()]);
+        assert_eq!(c.event(usage.clone(), t0), [usage]);
     }
 }
