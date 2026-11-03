@@ -119,8 +119,6 @@ pub struct DiffStat {
     pub files: u32,
     pub added: u32,
     pub removed: u32,
-    /// Listed files changed only before the task.
-    pub before: u32,
     pub repo: RepoState,
 }
 
@@ -180,13 +178,13 @@ impl TaskDiff {
     }
 
     pub fn stat(&self) -> DiffStat {
-        let (mine, before): (Vec<_>, Vec<_>) =
-            (self.files.iter()).partition(|f| f.before != Before::Only);
+        let mine: Vec<_> = (self.files.iter())
+            .filter(|f| f.before != Before::Only)
+            .collect();
         DiffStat {
             files: mine.len() as u32 + self.more,
             added: mine.iter().map(|f| f.added).sum(),
             removed: mine.iter().map(|f| f.removed).sum(),
-            before: before.len() as u32,
             repo: self.repo.clone(),
         }
     }
@@ -261,6 +259,6 @@ mod tests {
             ..Default::default()
         };
         let s = d.stat();
-        assert_eq!((s.files, s.added, s.removed, s.before), (5, 4, 2, 1));
+        assert_eq!((s.files, s.added, s.removed), (5, 4, 2));
     }
 }

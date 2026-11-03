@@ -316,8 +316,8 @@ test('paths split at the last slash; offers follow the branch, remote and thread
   assert.deepEqual(offer(1, { branch: 'fix-x', ahead: 0, commits: 1, uncommitted: true }, true), { pr: false, push: true }, 'more edits on the PR');
   assert.deepEqual(offer(1, { branch: 'master', default_branch: null, upstream: null, commits: 1 }), { pr: true, push: false });
   assert.deepEqual(offer(1, { branch: null, upstream: null, commits: 1 }), { pr: true, push: false }, 'detached');
-  const pr = df.prPrompt(['notes.md']);
-  for (const want of ['gh pr create', 'Conventional Commits', 'report_evidence', 'new branch', 'before/after', '`notes.md`']) assert.ok(pr.includes(want), want);
+  const pr = df.prPrompt(['notes.md', 'a`b\nc']);
+  for (const want of ['gh pr create', 'Conventional Commits', 'report_evidence', 'new branch', 'before/after', '"notes.md", "a`b\\nc"']) assert.ok(pr.includes(want), want);
   assert.ok(!df.prPrompt([]).includes('leave them out'));
   assert.ok(df.pushPrompt([]).includes('push the current branch'));
 });

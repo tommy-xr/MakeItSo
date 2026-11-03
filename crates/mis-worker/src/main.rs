@@ -868,7 +868,9 @@ async fn send_diff(
     let Some(base) = base.lock().unwrap().take() else {
         return;
     };
-    match git::diff(&base).await {
+    // Bounded: the run's end waits on it.
+    let diff = tokio::time::timeout(Duration::from_secs(30), git::diff(&base)).await;
+    match diff.ok().flatten() {
         Some(d) => {
             let _ = tx.send((id, AgentEvent::Diff(d))).await;
         }
@@ -957,7 +959,8 @@ async fn run(
     };
     // A message to the user's own session changes their repo, not the task's.
     if task.send_to.is_none() {
-        *base.lock().unwrap() = git::base(&cwd, task.diff_base.clone().map(|b| *b)).await;
+        *base.lock().unwrap() =
+            git::base(&cwd, &ctx.roots, task.diff_base.clone().map(|b| *b)).await;
     }
     let (atx, mut arx) = mpsc::channel(64);
     let fwd = async {

@@ -170,10 +170,7 @@ async fn a_threads_changes_reach_the_api_with_earlier_ones_told_apart() {
     assert_eq!(first.status, TaskStatus::Done);
     let stat = first.diff.clone().expect("a diff");
     // keep +1 -1, gone -1, added file +1, pic.bin; mine.txt was the user's.
-    assert_eq!(
-        (stat.files, stat.added, stat.removed, stat.before),
-        (4, 2, 2, 1)
-    );
+    assert_eq!((stat.files, stat.added, stat.removed), (4, 2, 2));
     assert_eq!(stat.repo.branch.as_deref(), Some("main"));
     assert!(stat.repo.github);
 

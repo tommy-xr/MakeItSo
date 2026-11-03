@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use mis_types::diff::*;
@@ -35,14 +35,6 @@ struct Status {
     changed: Vec<String>,
     untracked: Vec<String>,
 }
-
-const STATUS: &[&str] = &[
-    "status",
-    "--porcelain=v2",
-    "--branch",
-    "-z",
-    "--untracked-files=all",
-];
 
 /// NUL-separated records, each as text.
 fn records(out: &[u8]) -> impl Iterator<Item = String> + '_ {
@@ -232,35 +224,34 @@ fn assemble(
     now: &BTreeMap<String, String>,
     repo: RepoState,
 ) -> TaskDiff {
-    // Uncut, a patch per change, or they can't be matched up.
-    let aligned = cut || patches.len() == changes.len();
-    let mut patches = patches.into_iter();
+    // Matched by header, not order: git ran twice and the tree may have changed
+    // between. A file swapped for a symlink comes as two patches under one header.
+    let mut by_header: BTreeMap<String, String> = BTreeMap::new();
+    for p in patches {
+        let head = p.lines().next().unwrap_or("").to_string();
+        by_header.entry(head).or_default().push_str(&p);
+    }
     let mut files: Vec<FileDiff> = (changes.into_iter())
         .map(|c| {
-            // Each patch must name its file: git ran twice, and the tree may have changed between.
-            let header = format!(
-                "diff --git a/{} b/{}\n",
-                c.from.as_deref().unwrap_or(&c.path),
-                c.path
-            );
-            let named = |p: &String| {
-                p.starts_with(&header) || p.lines().next().is_some_and(|l| l.contains('"'))
+            // A file renamed after its earlier changes still carries them.
+            let moved = c.from.as_ref().is_some_and(|f| base.dirty.contains_key(f));
+            let before = match before(base, now, &c.path) {
+                Before::Clean if moved => Before::Also,
+                b => b,
             };
-            let patch = patches.next().filter(|p| aligned && named(p));
+            // Paths git quotes (`"`, `\`, control characters) never match: no patch.
+            let from = c.from.as_deref().unwrap_or(&c.path);
+            let patch = by_header.remove(&format!("diff --git a/{from} b/{}", c.path));
             let note = match (&patch, c.binary) {
+                _ if before == Before::Only => Some(ONLY),
                 (_, true) => Some("binary"),
                 (Some(_), false) => None,
                 (None, false) if cut => Some("patch too large to read"),
                 (None, false) => Some("patch unavailable"),
             };
-            // A file renamed after its earlier changes still carries them.
-            let moved = c.from.as_ref().is_some_and(|f| base.dirty.contains_key(f));
             FileDiff {
-                before: match before(base, now, &c.path) {
-                    Before::Clean if moved => Before::Also,
-                    b => b,
-                },
-                patch: patch.filter(|_| !c.binary),
+                before,
+                patch: patch.filter(|_| !c.binary && before != Before::Only),
                 note: note.map(String::from),
                 path: c.path,
                 from: c.from,
@@ -274,6 +265,9 @@ fn assemble(
         .collect();
     files.extend(untracked.into_iter().map(|mut f| {
         f.before = before(base, now, &f.path);
+        if f.before == Before::Only {
+            (f.patch, f.note) = (None, Some(ONLY.into()));
+        }
         f
     }));
     // The task's own first, so the file limit cuts earlier changes first.
@@ -287,6 +281,9 @@ fn assemble(
     }
     .bounded()
 }
+
+/// The note on a file only changed before the task: its contents are the user's, never read.
+const ONLY: &str = "changed before this task";
 
 /// Whether a `git remote -v` listing has a remote on github.com.
 fn github(remotes: &str) -> bool {
@@ -358,6 +355,16 @@ async fn git(dir: &str, args: &[&str]) -> Result<(Vec<u8>, bool), String> {
     out.map_err(|_| format!("git {} timed out", args[0]))?
 }
 
+/// `git status` of `root`, untracked files listed one by one unless the repo
+/// hides them (`status.showUntrackedFiles=no`, as dotfiles repos set).
+async fn status(root: &str) -> Option<Status> {
+    let shown = git(root, &["config", "--get", "status.showUntrackedFiles"]).await;
+    let hidden = shown.is_ok_and(|o| String::from_utf8_lossy(&o.0).trim() == "no");
+    let untracked = if hidden { "-uno" } else { "-uall" };
+    let args = ["status", "--porcelain=v2", "--branch", "-z", untracked];
+    Some(parse_status(whole(&git(root, &args).await.ok()?)))
+}
+
 /// Output cut mid-record loses its last record.
 fn whole((out, cut): &(Vec<u8>, bool)) -> &[u8] {
     match cut {
@@ -409,6 +416,12 @@ fn read_max(file: std::fs::File, max: u64) -> Result<Vec<u8>, String> {
 /// `MAX_HASHED`, or `gone`.
 fn fingerprints(root: &Path, paths: impl IntoIterator<Item = String>) -> BTreeMap<String, String> {
     let one = |rel: &str| -> String {
+        if !Path::new(rel)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+        {
+            return "gone".into();
+        }
         let Ok(file) = open_in(root, rel) else {
             // A symlink by its target; anything else unreadable alike each time.
             return match std::fs::read_link(root.join(rel)) {
@@ -439,17 +452,22 @@ fn fingerprints(root: &Path, paths: impl IntoIterator<Item = String>) -> BTreeMa
 
 /// Where a task starting in `cwd` starts in its repo: `inherited` (its thread's
 /// base) when it is this repo's and its commit is still there. None outside a
-/// repo or before its first commit.
-pub async fn base(cwd: &str, inherited: Option<DiffBase>) -> Option<DiffBase> {
+/// repo, in one reaching above the worker's `roots` (canonical), or before its
+/// first commit.
+pub async fn base(cwd: &str, roots: &[PathBuf], inherited: Option<DiffBase>) -> Option<DiffBase> {
     let top = git(cwd, &["rev-parse", "--show-toplevel"]).await.ok()?;
     let root = String::from_utf8_lossy(&top.0).trim_end().to_string();
+    let real = Path::new(&root).canonicalize().ok()?;
+    if !roots.iter().any(|r| real.starts_with(r)) {
+        return None;
+    }
     if let Some(b) = inherited.filter(|b| b.root == root && is_commit(&b.head)) {
         let commit = format!("{}^{{commit}}", b.head);
         if git(&root, &["cat-file", "-e", &commit]).await.is_ok() {
             return Some(b);
         }
     }
-    let status = parse_status(whole(&git(&root, STATUS).await.ok()?));
+    let status = status(&root).await?;
     let head = status.head.filter(|h| is_commit(h))?;
     let paths = (status.changed.into_iter().chain(status.untracked)).take(MAX_DIRTY);
     let paths: Vec<String> = paths.collect();
@@ -467,7 +485,7 @@ pub async fn diff(base: &DiffBase) -> Option<TaskDiff> {
     if !is_commit(&base.head) {
         return None;
     }
-    let status = parse_status(whole(&git(root, STATUS).await.ok()?));
+    let status = status(root).await?;
     let opts = ["-M", "--no-ext-diff", "--no-textconv", "--no-color"];
     let mut args = vec!["diff", "--raw", "--numstat", "-z"];
     args.extend(opts);
@@ -501,14 +519,15 @@ pub async fn diff(base: &DiffBase) -> Option<TaskDiff> {
         })
         .filter(|n| !n.is_empty());
     let remotes = git(root, &["remote", "-v"]).await.ok();
-    let (dir, dirty) = (root.to_string(), base.dirty.clone());
-    let new = status.untracked;
+    let (b, new) = (base.clone(), status.untracked);
     let (untracked, now) = tokio::task::spawn_blocking(move || {
-        let root = Path::new(&dir);
+        let root = Path::new(&b.root);
+        let now = fingerprints(root, b.dirty.keys().cloned());
         let mut budget = MAX_UNTRACKED_TOTAL;
         let files = (new.into_iter().enumerate())
             .map(|(i, p)| {
                 let read = match i < MAX_FILES && budget > 0 {
+                    _ if before(&b, &now, &p) == Before::Only => Err(ONLY.into()),
                     true => open_in(root, &p).and_then(|f| read_max(f, MAX_UNTRACKED.min(budget))),
                     false => Err("not read".into()),
                 };
@@ -516,7 +535,7 @@ pub async fn diff(base: &DiffBase) -> Option<TaskDiff> {
                 untracked(p, read)
             })
             .collect::<Vec<_>>();
-        (files, fingerprints(root, dirty.into_keys()))
+        (files, now)
     })
     .await
     .ok()?;
@@ -746,63 +765,61 @@ mod tests {
                 ("b", Before::Also, true, None),
                 ("c", Before::Clean, false, Some("binary")),
                 ("new", Before::Also, true, None),
-                ("a", Before::Only, true, None),
-                ("z", Before::Only, true, None),
+                ("a", Before::Only, false, Some(ONLY)),
+                ("z", Before::Only, false, Some(ONLY)),
             ]
         );
-        assert_eq!((d.stat().files, d.stat().before), (3, 2));
-        // A patch naming another file (the tree changed between git's runs) is
-        // dropped; one quoted by git can't be checked and is kept.
-        let one = |c: Change, patch: &str, cut| {
+        assert_eq!(d.stat().files, 3);
+        // A patch is matched by its header: one for another file (the tree
+        // changed between git's runs) or quoted by git matches nothing; one cut
+        // off the end leaves its file without.
+        let notes = |changes: Vec<Change>, patches: &[&str], cut| {
+            let patches = patches.iter().map(|p| p.to_string()).collect();
             let d = assemble(
                 &base,
-                vec![c],
-                vec![patch.into()],
+                changes,
+                patches,
                 cut,
                 vec![],
                 &now,
                 RepoState::default(),
             );
-            d.files[0].note.clone()
+            let notes = d.files.iter().map(|f| (f.path.clone(), f.note.clone()));
+            notes.collect::<Vec<_>>()
         };
+        let unavailable = Some("patch unavailable".to_string());
         assert_eq!(
-            one(change("a", false), &p("b"), false).as_deref(),
-            Some("patch unavailable")
+            notes(vec![change("c", false)], &[&p("d")], false),
+            [("c".into(), unavailable.clone())]
+        );
+        let quoted = "diff --git \"a/t\\\"q\" \"b/t\\\"q\"\n";
+        assert_eq!(
+            notes(vec![change("t\"q", false)], &[quoted], false),
+            [("t\"q".into(), unavailable)]
         );
         assert_eq!(
-            one(
-                change("t\"q", false),
-                "diff --git \"a/t\\\"q\" \"b/t\\\"q\"\n",
-                false
+            notes(
+                vec![change("c", false), change("d", false)],
+                &[&p("c")],
+                true
             ),
-            None
+            [
+                ("c".into(), None),
+                ("d".into(), Some("patch too large to read".into()))
+            ]
         );
-        // Patches that don't match up are dropped; ones cut short keep those read.
-        let none = assemble(
+        // A file swapped for a symlink: two patches under one header, both kept.
+        let swap = format!("{}deleted file mode 100644\n", p("c"));
+        let d = assemble(
             &base,
-            vec![change("a", false)],
-            vec![],
+            vec![change("c", false)],
+            vec![swap.clone(), p("c")],
             false,
             vec![],
             &now,
             RepoState::default(),
         );
-        assert_eq!(none.files[0].note.as_deref(), Some("patch unavailable"));
-        let cut = assemble(
-            &base,
-            vec![change("a", false), change("b", false)],
-            vec![p("a")],
-            true,
-            vec![],
-            &now,
-            RepoState::default(),
-        );
-        assert_eq!(cut.files[0].path, "b");
-        assert_eq!(
-            cut.files[0].note.as_deref(),
-            Some("patch too large to read")
-        );
-        assert!(cut.files[1].patch.is_some());
+        assert_eq!(d.files[0].patch, Some(format!("{swap}{}", p("c"))));
     }
 
     /// `git` in `dir`, for setting up repos; panics on failure.
@@ -846,12 +863,17 @@ mod tests {
             &dir,
             &["remote", "add", "origin", "git@github.com:demo/r.git"],
         );
-        // The user's own edit, before the task.
+        // The user's own edit and file, before the task.
         w("dirty.txt", b"x\nmine\n");
+        w("secret.env", b"TOKEN=1\n");
         let cwd = dir.to_string_lossy().into_owned();
-        let base = base(&cwd, None).await.expect("a base");
+        let roots = [dir.canonicalize().unwrap()];
+        let base = base(&cwd, &roots, None).await.expect("a base");
         assert!(is_commit(&base.head));
-        assert_eq!(base.dirty.keys().collect::<Vec<_>>(), ["dirty.txt"]);
+        assert_eq!(
+            base.dirty.keys().collect::<Vec<_>>(),
+            ["dirty.txt", "secret.env"]
+        );
 
         w("keep.txt", b"a\nB\nc\nd\n");
         w("crlf.txt", b"one\r\nTWO\r\n");
@@ -884,8 +906,14 @@ mod tests {
                 ("nouveau é.txt", Renamed, 0, 0, false, Before::Clean),
                 ("pic.bin", Added, 0, 0, true, Before::Clean),
                 ("dirty.txt", Modified, 1, 0, false, Before::Only),
+                ("secret.env", Added, 0, 0, true, Before::Only),
             ]
         );
+        // Earlier changes are the user's: never read, nor sent.
+        for p in ["dirty.txt", "secret.env"] {
+            let f = d.files.iter().find(|f| f.path == p).unwrap();
+            assert_eq!((f.patch.as_deref(), f.note.as_deref()), (None, Some(ONLY)));
+        }
         let file = |p: &str| d.files.iter().find(|f| f.path == p).unwrap();
         assert_eq!(file("nouveau é.txt").from.as_deref(), Some("old name.txt"));
         assert!(file("crlf.txt")
@@ -911,11 +939,11 @@ mod tests {
             (Some("main"), 1, true, 0, true)
         );
         let s = d.stat();
-        assert_eq!((s.files, s.added, s.removed, s.before), (6, 4, 3, 1));
+        assert_eq!((s.files, s.added, s.removed), (6, 4, 3));
 
         // A reply in the thread starts from the same base; a bogus one is replaced.
         assert_eq!(
-            super::base(&cwd, Some(base.clone())).await,
+            super::base(&cwd, &roots, Some(base.clone())).await,
             Some(base.clone())
         );
         let bogus = DiffBase {
@@ -923,14 +951,26 @@ mod tests {
             ..base.clone()
         };
         assert_ne!(
-            super::base(&cwd, Some(bogus)).await.unwrap().head,
+            super::base(&cwd, &roots, Some(bogus)).await.unwrap().head,
             "--output=x"
+        );
+        // A repo reaching above the worker's roots isn't diffed.
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let inner = [sub.canonicalize().unwrap()];
+        assert_eq!(
+            super::base(&sub.to_string_lossy(), &inner, None).await,
+            None
         );
         let _ = std::fs::remove_dir_all(&dir);
         // Outside a repo there is no base.
         let plain = std::env::temp_dir().join(format!("mis-nogit-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&plain).unwrap();
-        assert_eq!(super::base(&plain.to_string_lossy(), None).await, None);
+        let roots = [plain.canonicalize().unwrap()];
+        assert_eq!(
+            super::base(&plain.to_string_lossy(), &roots, None).await,
+            None
+        );
         let _ = std::fs::remove_dir_all(&plain);
     }
 }

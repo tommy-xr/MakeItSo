@@ -1168,7 +1168,7 @@ function diffOffer(stat, hasPr) {
 // permissions. `before`: paths changed before the thread started, to leave out.
 function leaveOut(before) {
   if (!before.length) return '';
-  const list = before.slice(0, 10).map((p) => `\`${p}\``).join(', ') + (before.length > 10 ? `, and ${before.length - 10} more` : '');
+  const list = before.slice(0, 10).map((p) => JSON.stringify(p)).join(', ') + (before.length > 10 ? `, and ${before.length - 10} more` : '');
   return ` These files had changes before this thread started; leave them out unless they belong to it: ${list}.`;
 }
 const prPrompt = (before) => ['Open a pull request for the changes in this thread.',
@@ -2061,7 +2061,9 @@ function renderDiff(t) {
   // Offered once the files are here: the reply names the earlier changes to leave out.
   const offer = e.v && isFinished(t) && !readOnly && t.session && t.worker ? diffOffer(stat, !!pr) : { pr: false, push: false };
   if (!offer[diffUi.ask]) diffUi.ask = null;
-  const key = JSON.stringify([t.id, e.sig, !!e.v, e.error, [...diffUi.open], diffUi.all, diffUi.before, diffUi.ask, pr && [pr.url, pr.pr], offer, !!pending, readOnly]);
+  // Asking needs the socket and no submit in flight, as the reply form does.
+  const busy = !!pending || !(ws && ws.readyState === WebSocket.OPEN);
+  const key = JSON.stringify([t.id, e.sig, !!e.v, e.error, [...diffUi.open], diffUi.all, diffUi.before, diffUi.ask, pr && [pr.url, pr.pr], offer, busy, readOnly]);
   if (key === diffKey) return;
   diffKey = key;
   box.hidden = false;
@@ -2082,7 +2084,7 @@ function renderDiff(t) {
     diffUi.all && e.v.more ? el('p', { className: 'dnote' }, `${plural(e.v.more, 'more file')} not listed`) : '',
     earlier.length ? toggle('dbt', `Changed before this task · ${plural(earlier.length, 'file')}`, diffUi.before, () => { diffUi.before = !diffUi.before; }) : '',
     diffUi.before ? el('ul', { className: 'dfl' }, ...earlier.map(fileRow)) : ''];
-  const ask = (what) => el('button', { type: 'button', className: what === 'pr' ? 'yes' : '', disabled: !!pending, onclick: () => { diffUi.ask = what; render(); } }, what === 'pr' ? 'Open PR' : 'Push');
+  const ask = (what) => el('button', { type: 'button', className: what === 'pr' ? 'yes' : '', disabled: busy, onclick: () => { diffUi.ask = what; render(); } }, what === 'pr' ? 'Open PR' : 'Push');
   const acts = [pr ? prChip(pr) : '', offer.push && !diffUi.ask ? ask('push') : '', offer.pr && !diffUi.ask ? ask('pr') : ''].filter(Boolean);
   const leave = earlier.map((f) => f.path);
   const confirm = diffUi.ask && el('div', { className: 'dask', role: 'group', ariaLabel: 'Confirm' },
@@ -2090,7 +2092,7 @@ function renderDiff(t) {
       : el('span', {}, 'Ask the agent to commit and push ', el('code', {}, r.branch), '?')),
     el('div', { className: 'row' },
       el('button', { type: 'button', onclick: () => { diffUi.ask = null; render(); } }, 'Not now'),
-      el('button', { type: 'button', className: 'yes', disabled: !!pending, onclick: () => askAgent(t, diffUi.ask === 'pr' ? prPrompt(leave) : pushPrompt(leave)) },
+      el('button', { type: 'button', className: 'yes', disabled: busy, onclick: () => askAgent(t, diffUi.ask === 'pr' ? prPrompt(leave) : pushPrompt(leave)) },
         diffUi.ask === 'pr' ? 'Open PR' : 'Push')));
   box.replaceChildren(head, sub, ...body, acts.length ? el('div', { className: 'dact' }, ...acts) : '', confirm || '');
 }
@@ -2101,7 +2103,7 @@ function prChip(l) {
 }
 // Sends `prompt` as a reply in t's thread, as the reply form would; its Submitted opens the reply.
 function askAgent(t, prompt) {
-  if (pending) return;
+  if (pending || !(ws && ws.readyState === WebSocket.OPEN)) return;
   pending = { key: `ask:${t.id}`, text: prompt };
   $('reply-error').hidden = true;
   diffUi.ask = null;
