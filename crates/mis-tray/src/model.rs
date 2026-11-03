@@ -550,6 +550,7 @@ mod tests {
             evidence: vec![],
             result: None,
             diff: None,
+            plan: vec![],
             attention: Default::default(),
             blocked_until: None,
             approvals: vec![],

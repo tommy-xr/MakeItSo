@@ -1,0 +1,14 @@
+{"type":"thread.started","thread_id":"00000000-0000-0000-0000-000000000000"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"I’ll track the three steps and mark each complete as I go."}}
+{"type":"item.started","item":{"id":"item_3","type":"todo_list","items":[{"text":"Run `echo one`","completed":false},{"text":"Run `echo two`","completed":false},{"text":"Say done","completed":false}]}}
+{"type":"item.started","item":{"id":"item_4","type":"command_execution","command":"/bin/zsh -lc 'echo one'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_4","type":"command_execution","command":"/bin/zsh -lc 'echo one'","aggregated_output":"one\n","exit_code":0,"status":"completed"}}
+{"type":"item.updated","item":{"id":"item_3","type":"todo_list","items":[{"text":"Run `echo one`","completed":true},{"text":"Run `echo two`","completed":false},{"text":"Say done","completed":false}]}}
+{"type":"item.started","item":{"id":"item_5","type":"command_execution","command":"/bin/zsh -lc 'echo two'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_5","type":"command_execution","command":"/bin/zsh -lc 'echo two'","aggregated_output":"two\n","exit_code":0,"status":"completed"}}
+{"type":"item.updated","item":{"id":"item_3","type":"todo_list","items":[{"text":"Run `echo one`","completed":true},{"text":"Run `echo two`","completed":true},{"text":"Say done","completed":false}]}}
+{"type":"item.updated","item":{"id":"item_3","type":"todo_list","items":[{"text":"Run `echo one`","completed":true},{"text":"Run `echo two`","completed":true},{"text":"Say done","completed":true}]}}
+{"type":"item.completed","item":{"id":"item_6","type":"agent_message","text":"done"}}
+{"type":"item.completed","item":{"id":"item_3","type":"todo_list","items":[{"text":"Run `echo one`","completed":true},{"text":"Run `echo two`","completed":true},{"text":"Say done","completed":true}]}}
+{"type":"turn.completed","usage":{"input_tokens":145716,"cached_input_tokens":123648,"cache_write_input_tokens":0,"output_tokens":380,"reasoning_output_tokens":0}}

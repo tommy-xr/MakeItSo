@@ -205,6 +205,9 @@ struct TaskEntry {
     diff: Option<DiffStat>,
     #[serde(default)]
     diff_base: Option<DiffBase>,
+    /// The agent's latest checklist (`AgentEvent::Plan`).
+    #[serde(default)]
+    plan: Vec<PlanItem>,
     /// The agent reported a usage limit.
     limited: bool,
     /// A client opened it after it finished.
@@ -303,6 +306,7 @@ impl TaskEntry {
             result: None,
             diff: None,
             diff_base: None,
+            plan: vec![],
             limited: false,
             seen: false,
             images: vec![],
@@ -398,6 +402,7 @@ impl TaskEntry {
             evidence: self.evidence.clone(),
             result: self.result.clone(),
             diff: self.diff.clone(),
+            plan: self.plan.clone(),
             attention: self.attention(),
             // Needs the fleet; see `Ledger::status`.
             blocked_until: None,
@@ -1345,6 +1350,14 @@ impl Ledger {
                     return vec![Effect::Broadcast(self.status())];
                 }
                 return vec![];
+            }
+            AgentEvent::Plan { items } => {
+                let items = bound_plan(items);
+                if t.plan == items {
+                    return vec![];
+                }
+                t.plan = items;
+                return vec![Effect::Broadcast(self.status())];
             }
             AgentEvent::Artifact(_) | AgentEvent::Diff(_) => return vec![],
             // Relayed, never recorded: the block's `Text` follows with all of it.
@@ -2722,6 +2735,47 @@ mod tests {
             (Some("Listed files. All fine."), TaskStatus::Done)
         );
         assert!(l.summarized(Uuid::new_v4(), "x").is_empty());
+    }
+
+    #[test]
+    fn latest_plan_is_kept_bounded_and_off_the_transcript() {
+        let (mut l, wid, task) = running_setup();
+        let item = |text: &str, status| PlanItem {
+            text: text.into(),
+            status,
+            active_form: None,
+        };
+        let plan = |items| AgentEvent::Plan { items };
+        let first = vec![
+            item("a", PlanStatus::InProgress),
+            item("b", PlanStatus::Pending),
+        ];
+        assert!(
+            l.event(wid, 2, task, plan(first.clone())).is_empty(),
+            "stale conn"
+        );
+        let eff = l.event(wid, 1, task, plan(first.clone()));
+        assert!(matches!(
+            &eff[..],
+            [Effect::Broadcast(ServerMsg::Status { .. })]
+        ));
+        assert!(l.event(wid, 1, task, plan(first)).is_empty(), "unchanged");
+        let mut next: Vec<_> = (0..60)
+            .map(|i| item(&i.to_string(), PlanStatus::Completed))
+            .collect();
+        next[0].text = "x".repeat(300);
+        l.event(wid, 1, task, plan(next));
+        let (s, events, _) = l.show(task).unwrap();
+        assert_eq!(s.plan.len(), MAX_PLAN_ITEMS);
+        assert_eq!(s.plan[0].text.chars().count(), MAX_PLAN_ITEM_CHARS);
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::Plan { .. })));
+        // Kept once it ends, for the finished task's progress line.
+        let done = AgentEvent::Finished {
+            ok: true,
+            summary: None,
+        };
+        l.event(wid, 1, task, done);
+        assert_eq!(l.show(task).unwrap().0.plan.len(), MAX_PLAN_ITEMS);
     }
 
     #[test]

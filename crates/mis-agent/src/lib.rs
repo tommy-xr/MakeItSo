@@ -196,7 +196,8 @@ pub fn available() -> Vec<Box<dyn Agent>> {
         v.push(Box::new(claude::ClaudeAgent::default()));
     }
     if which("codex") {
-        v.push(Box::new(codex::CodexAgent));
+        let plan_tool = codex::probe_plan_tool();
+        v.push(Box::new(codex::CodexAgent { plan_tool }));
     }
     v
 }

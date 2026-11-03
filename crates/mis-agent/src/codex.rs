@@ -4,7 +4,10 @@ use anyhow::Context;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use mis_types::{AgentEvent, LimitWindow, PermissionMode, Permissions, TaskId, TASK_ENV};
+use mis_types::{
+    bound_plan, AgentEvent, LimitWindow, PermissionMode, Permissions, PlanItem, PlanStatus, TaskId,
+    TASK_ENV,
+};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -13,7 +16,60 @@ use tokio::sync::mpsc;
 use crate::{Agent, BoxFut, RunOpts, MCP_SERVER, MCP_TOKEN_ENV};
 
 #[derive(Default)]
-pub struct CodexAgent;
+pub struct CodexAgent {
+    /// Runs get `PLAN_TOOL`: this codex took it in `probe_plan_tool`.
+    pub plan_tool: bool,
+}
+
+/// Turns on codex's plan tool (`update_plan`), off by default for current models.
+/// The value's shape is 0.163's; a codex reading the key as something else
+/// refuses the whole config, so it's probed first.
+pub const PLAN_TOOL: &str = "tools.update_plan={enabled=true}";
+
+/// A command that loads the config as `exec` does, `PLAN_TOOL` included, without
+/// starting a turn: it fails on a value of the wrong shape (`tools.update_plan=123`)
+/// and ignores an unknown key. The `-c` goes after the subcommand: before it,
+/// codex reads `features list` as a prompt.
+pub const PLAN_PROBE: [&str; 4] = ["features", "list", "-c", PLAN_TOOL];
+
+/// Whether runs get `PLAN_TOOL`, from the probe's exit: `Some(success)`, or None
+/// if it didn't start or finish in time.
+pub fn plan_tool_verdict(exit: Option<bool>) -> bool {
+    exit == Some(true)
+}
+
+/// Runs `PLAN_PROBE` (2 s at most) and says whether `PLAN_TOOL` is safe here;
+/// logs once when it isn't.
+pub fn probe_plan_tool() -> bool {
+    let exit = (|| {
+        let mut child = std::process::Command::new("codex")
+            .args(PLAN_PROBE)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return Some(status.success()),
+                Ok(None) if std::time::Instant::now() < until => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+            }
+        }
+    })();
+    let on = plan_tool_verdict(exit);
+    if !on {
+        tracing::warn!("codex rejected tools.update_plan; plans off for codex");
+    }
+    on
+}
 
 /// Slugs from codex's `models_cache.json` with visibility "list", by priority,
 /// after the default `model` set at the top level of `config.toml` (if any).
@@ -216,6 +272,10 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                 text: format!("error: {}", item["message"].as_str().unwrap_or("")),
             }]
         }
+        // Its plan tool (`update_plan`), each update the whole list.
+        (Some("item.started" | "item.updated" | "item.completed"), Some("todo_list")) => {
+            todo_plan(&item["items"]).map_or(vec![], |items| vec![AgentEvent::Plan { items }])
+        }
         (Some("item.started"), Some("command_execution")) => vec![AgentEvent::ToolUse {
             name: "shell".into(),
             input: serde_json::json!({ "command": item["command"] }),
@@ -246,6 +306,28 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
     }
 }
 
+/// A `todo_list` item's `[{text, completed}]` as a plan. Codex marks no row in
+/// progress, so the first open one is taken to be.
+fn todo_plan(items: &Value) -> Option<Vec<PlanItem>> {
+    let mut current = false;
+    let rows = items.as_array()?.iter().map(|i| {
+        let status = match i["completed"].as_bool()? {
+            true => PlanStatus::Completed,
+            false if !current => {
+                current = true;
+                PlanStatus::InProgress
+            }
+            false => PlanStatus::Pending,
+        };
+        Some(PlanItem {
+            text: i["text"].as_str()?.into(),
+            status,
+            active_form: None,
+        })
+    });
+    Some(bound_plan(rows.collect::<Option<_>>()?))
+}
+
 impl CodexAgent {
     /// `codex` argv for one run: `exec [opts] -- <prompt>`, or
     /// `exec resume|fork [opts] -- <session> <prompt>` to continue a session or a
@@ -263,6 +345,9 @@ impl CodexAgent {
             );
         }
         a.extend(["--json", "--skip-git-repo-check"].map(String::from));
+        if self.plan_tool {
+            a.extend(["-c", PLAN_TOOL].map(String::from));
+        }
         if let Some(p) = o.permissions {
             a.extend(permission_args(p));
         }
@@ -569,6 +654,46 @@ mod tests {
         assert!(parse_line(r#"{"type":"turn.started"}"#).is_empty());
     }
 
+    /// `exec --json` 0.163 with `tools.update_plan` on (gpt-6-luna, told to plan
+    /// 3 steps and tick them off): one `todo_list` item, started then updated.
+    #[test]
+    fn todo_list_items_become_plans() {
+        use PlanStatus::*;
+        let fixture = include_str!("../tests/fixtures/codex-todo.jsonl");
+        let got: Vec<Vec<PlanStatus>> = (fixture.lines().flat_map(parse_line))
+            .filter_map(|e| match e {
+                AgentEvent::Plan { items } => Some(items.iter().map(|i| i.status).collect()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                [InProgress, Pending, Pending],
+                [Completed, InProgress, Pending],
+                [Completed, Completed, InProgress],
+                [Completed, Completed, Completed],
+                [Completed, Completed, Completed],
+            ]
+        );
+        let first = fixture.lines().flat_map(parse_line).find_map(|e| match e {
+            AgentEvent::Plan { items } => Some(items),
+            _ => None,
+        });
+        assert_eq!(first.unwrap()[0].text, "Run `echo one`");
+        let bad = r#"{"type":"item.updated","item":{"type":"todo_list","items":[{"text":"a"}]}}"#;
+        assert!(parse_line(bad).is_empty());
+    }
+
+    #[test]
+    fn plan_tool_only_on_a_clean_probe() {
+        assert!(plan_tool_verdict(Some(true)));
+        assert!(!plan_tool_verdict(Some(false)), "rejected");
+        assert!(!plan_tool_verdict(None), "didn't run or timed out");
+        // The override after the subcommand, so codex parses it as config.
+        assert_eq!(PLAN_PROBE, ["features", "list", "-c", PLAN_TOOL]);
+    }
+
     #[test]
     fn argv_new_and_resumed() {
         let full = Permissions {
@@ -580,12 +705,16 @@ mod tests {
             permissions: Some(&full),
             ..Default::default()
         };
+        // The plan tool only where the probe passed.
+        let probed = CodexAgent { plan_tool: true };
         assert_eq!(
-            CodexAgent.argv("hi", &o),
+            probed.argv("hi", &o),
             [
                 "exec",
                 "--json",
                 "--skip-git-repo-check",
+                "-c",
+                "tools.update_plan={enabled=true}",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--model=gpt-5",
                 "--",
@@ -597,7 +726,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            CodexAgent.argv("-more", &o),
+            CodexAgent::default().argv("-more", &o),
             [
                 "exec",
                 "resume",
@@ -614,7 +743,7 @@ mod tests {
             fork: Some(true),
             ..Default::default()
         };
-        let a = CodexAgent.argv("hi", &o);
+        let a = CodexAgent::default().argv("hi", &o);
         assert_eq!(a[..2], ["exec", "fork"]);
         assert_eq!(a[a.len() - 3..], ["--", "t-1", "hi"]);
     }
@@ -626,7 +755,7 @@ mod tests {
             images: &images,
             ..Default::default()
         };
-        let a = CodexAgent.argv("hi", &o);
+        let a = CodexAgent::default().argv("hi", &o);
         assert_eq!(
             &a[a.len() - 6..],
             ["-i", "/t/a.jpg", "-i", "/t/b.png", "--", "hi"]
@@ -635,7 +764,7 @@ mod tests {
             resume: Some("t-1"),
             ..o
         };
-        let a = CodexAgent.argv("hi", &o);
+        let a = CodexAgent::default().argv("hi", &o);
         assert_eq!(
             &a[a.len() - 7..],
             ["-i", "/t/a.jpg", "-i", "/t/b.png", "--", "t-1", "hi"]
@@ -655,7 +784,7 @@ mod tests {
             permissions: Some(&p),
             ..Default::default()
         };
-        let a = CodexAgent.argv("hi", &o);
+        let a = CodexAgent::default().argv("hi", &o);
         assert!(!a.iter().any(|x| x.contains("dangerously")));
         assert_eq!(
             a[4..],

@@ -23,7 +23,9 @@ mod links;
 pub use links::{github_link, github_links, Checks, Link, LinkKind, PrState, PrStatus};
 pub mod mcp;
 mod permissions;
+mod plan;
 pub use permissions::{Approval, Decision, PermissionMode, Permissions, MAX_APPROVAL_DETAIL};
+pub use plan::{bound_plan, PlanItem, PlanStatus, MAX_PLAN_ITEMS, MAX_PLAN_ITEM_CHARS};
 mod sessions;
 pub use sessions::{
     Answer, Delivered, LiveSession, LiveState, Query, Role, SendMode, SendTo, Session,
@@ -228,6 +230,11 @@ pub enum AgentEvent {
     /// What the task changed in its git repo, sent by the worker before the run
     /// ends; stored like `Artifact`, off the transcript.
     Diff(TaskDiff),
+    /// The agent's checklist now, replacing the last; kept like `Result`, off the
+    /// transcript, as `TaskSummary::plan`.
+    Plan {
+        items: Vec<PlanItem>,
+    },
     /// The agent hit a usage limit; `resets_at` is Unix seconds when it lifts, if known.
     Limited {
         #[serde(default)]
@@ -569,6 +576,9 @@ pub struct TaskSummary {
     /// What it changed in its git repo; the files are at `/api/tasks/<id>/diff`.
     #[serde(default)]
     pub diff: Option<DiffStat>,
+    /// The agent's latest checklist; empty if it wrote none.
+    #[serde(default)]
+    pub plan: Vec<PlanItem>,
     #[serde(default)]
     pub attention: Attention,
     /// Queued only because every online worker that could run it is out of
@@ -1154,6 +1164,7 @@ mod tests {
             evidence: vec![],
             result: None,
             diff: None,
+            plan: vec![],
             attention: Attention::None,
             blocked_until: None,
             approvals: vec![],
