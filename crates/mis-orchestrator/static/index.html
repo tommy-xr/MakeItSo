@@ -2993,8 +2993,8 @@ function onMessage(msg) {
       break;
     }
     case 'task_detail':
-      // The block so far; without one (none, or too long to keep), whatever arrived here stands.
-      if (msg.partial) live.set(msg.task.id, msg.partial);
+      // The block so far; none (or one too long to keep): what arrives next shows once its block lands.
+      if (msg.partial) live.set(msg.task.id, msg.partial); else live.delete(msg.task.id);
       if (detail && detail.id === msg.task.id) Object.assign(detail, { task: msg.task, events: msg.events, truncated: msg.truncated, ready: true, refetch: false, sig: null });
       break;
     case 'sessions':
@@ -3007,6 +3007,7 @@ function onMessage(msg) {
       const next = msg.seq === 1 ? msg.text : was && msg.seq === was.seq + 1 && was.text !== null ? was.text + msg.text : null;
       live.set(msg.task, { text: next, seq: msg.seq });
       if (next !== null) paintSoon(msg.task, !(was && was.text));
+      else if (was && was.text) render(); // a piece went missing: its card goes until the block lands
       return;
     }
     case 'event': {
@@ -3036,6 +3037,7 @@ function onMessage(msg) {
       }
       break;
     case 'error':
+      if (/^dropped/.test(msg.message)) live.clear(); // a block's end may be among them
       // A refused save or suggestion: the flash says why; the editor stops waiting.
       if (note && (note.saving !== null || note.asked !== null)) {
         Object.assign(note, { saving: null, asked: null });
