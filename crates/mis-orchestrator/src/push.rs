@@ -1,5 +1,6 @@
-//! Web Push to the user's browsers when a task needs them: subscriptions and
-//! the VAPID key persisted in a state dir, and the sender for `Effect::Notify`.
+//! Web Push to the user's browsers when a task or live session needs them:
+//! subscriptions and the VAPID key persisted in a state dir, and the sender for
+//! `Effect::Notify` and `Effect::NotifySession`.
 //! Payloads are end-to-end encrypted (RFC 8291) but still transit the browser
 //! vendor's push service.
 
@@ -11,7 +12,7 @@ use std::time::Duration;
 use anyhow::Context;
 use axum::http::{header, HeaderValue, Uri};
 use base64ct::{Base64UrlUnpadded, Encoding};
-use mis_types::TaskId;
+use mis_types::{TaskId, WorkerId};
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
 use serde::{Deserialize, Serialize};
@@ -76,15 +77,32 @@ pub fn gone(status: u16) -> bool {
     matches!(status, 404 | 410)
 }
 
-/// What the service worker shows: `tag` makes a repeat replace, `url` opens the task.
-pub fn payload(task: TaskId, title: &str, body: &str) -> String {
-    serde_json::json!({
-        "title": title,
-        "body": body,
-        "tag": task,
-        "url": format!("/#task/{task}"),
-    })
-    .to_string()
+/// What a notification opens: its page's `tag` (a repeat for it replaces the earlier
+/// one) and URL.
+pub enum Opens<'a> {
+    Task(TaskId),
+    Session {
+        worker: WorkerId,
+        harness: &'a str,
+        id: &'a str,
+    },
+}
+
+/// What the service worker shows.
+pub fn payload(opens: &Opens, title: &str, body: &str) -> String {
+    let tag = match opens {
+        Opens::Task(task) => task.to_string(),
+        Opens::Session {
+            worker,
+            harness,
+            id,
+        } => format!("session/{worker}/{harness}/{id}"),
+    };
+    let url = match opens {
+        Opens::Task(_) => format!("/#task/{tag}"),
+        Opens::Session { .. } => format!("/#{tag}"),
+    };
+    serde_json::json!({ "title": title, "body": body, "tag": tag, "url": url }).to_string()
 }
 
 /// Write `bytes` to `path` readable only by this user, atomically and durably
@@ -232,8 +250,8 @@ impl Push {
     }
 
     /// Push to every subscription; drop those the service says are gone.
-    pub async fn send(&self, task: TaskId, title: &str, body: &str, urgent: bool) {
-        let payload = payload(task, title, body);
+    pub async fn send(&self, opens: Opens<'_>, title: &str, body: &str, urgent: bool) {
+        let payload = payload(&opens, title, body);
         let subs = self.subs.lock().unwrap().clone();
         for sub in subs {
             let host = host(&sub.endpoint);
@@ -362,14 +380,28 @@ mod tests {
     }
 
     #[test]
-    fn payload_opens_the_task() {
+    fn payload_opens_the_task_or_session() {
         let task = uuid::Uuid::nil();
-        let v: serde_json::Value = serde_json::from_str(&payload(task, "t", "b")).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&payload(&Opens::Task(task), "t", "b")).unwrap();
         assert_eq!(v["url"], format!("/#task/{task}"));
         assert_eq!(v["tag"], task.to_string());
         assert_eq!(
             (v["title"].as_str(), v["body"].as_str()),
             (Some("t"), Some("b"))
+        );
+        let (worker, id) = (uuid::Uuid::nil(), "22222222-2222-4222-8222-222222222222");
+        let harness = "claude";
+        let at = Opens::Session {
+            worker,
+            harness,
+            id,
+        };
+        let v: serde_json::Value = serde_json::from_str(&payload(&at, "t", "b")).unwrap();
+        let tag = format!("session/{worker}/claude/{id}");
+        assert_eq!(
+            (&v["tag"], &v["url"]),
+            (&tag.clone().into(), &format!("/#{tag}").into())
         );
     }
 

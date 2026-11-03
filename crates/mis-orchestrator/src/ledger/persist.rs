@@ -4,7 +4,7 @@
 //! the files.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Duration;
 
 use mis_types::*;
@@ -36,6 +36,9 @@ struct Saved<'a> {
     /// `Ledger::live`.
     #[serde(default)]
     live: Cow<'a, BTreeMap<WorkerId, super::sessions::Live>>,
+    /// `Ledger::bells`.
+    #[serde(default)]
+    bells: Cow<'a, BTreeSet<super::alerts::SessionKey>>,
 }
 
 /// One save: the ledger file and each transcript that may have changed.
@@ -80,6 +83,7 @@ impl Ledger {
             tasks: Cow::Borrowed(&self.tasks),
             routines: Cow::Borrowed(&self.routines),
             live: Cow::Borrowed(&self.live),
+            bells: Cow::Borrowed(&self.bells),
         };
         let transcripts = (self.tasks.iter())
             .filter(|t| !written.contains(&t.task.id))
@@ -132,6 +136,7 @@ impl Ledger {
                 last_seen: now,
                 update: WorkerUpdate::None,
                 stream: None,
+                reported: false,
             };
             l.workers.insert(wid, w);
             effects.push(Effect::StartGrace { wid, generation });
@@ -140,6 +145,7 @@ impl Ledger {
         l.tasks = saved.tasks.into_owned();
         l.routines = saved.routines.into_owned();
         l.live = saved.live.into_owned();
+        l.bells = saved.bells.into_owned();
         let written = (l.tasks.iter())
             .filter(|t| t.status.finished())
             .map(|t| t.task.id)

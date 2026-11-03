@@ -21,7 +21,7 @@ pub fn allowed(scope: Scope, msg: &ClientMsg) -> bool {
         // a push subscription makes the orchestrator POST task prompts to its endpoint;
         // a purpose rewrites a worker's config and steers routing; a suggestion runs a model;
         // an approval lets an agent act (and "always" rewrites a worker's config);
-        // sessions hold what the user's own terminals say.
+        // sessions hold what the user's own terminals say, and a bell pushes what they say.
         ClientMsg::Submit { .. }
         | ClientMsg::Seen { .. }
         | ClientMsg::RefreshEvidence { .. }
@@ -30,7 +30,8 @@ pub fn allowed(scope: Scope, msg: &ClientMsg) -> bool {
         | ClientMsg::SetPurpose { .. }
         | ClientMsg::SuggestPurpose { .. }
         | ClientMsg::Approve { .. }
-        | ClientMsg::WatchSessions => scope == Scope::Full,
+        | ClientMsg::WatchSessions
+        | ClientMsg::SessionBell { .. } => scope == Scope::Full,
     }
 }
 
@@ -84,6 +85,12 @@ mod tests {
                 decision: mis_types::Decision::Allow,
             },
             ClientMsg::WatchSessions,
+            ClientMsg::SessionBell {
+                worker: task,
+                harness: "claude".into(),
+                id: "s".into(),
+                on: true,
+            },
         ];
         for m in acts {
             assert!(!allowed(Scope::Read, &m), "{m:?}");

@@ -28,7 +28,7 @@ mod sessions;
 pub use sessions::{
     Answer, Delivered, LiveSession, LiveState, Query, Role, SendMode, SendTo, Session,
     SessionMessage, SessionRow, Turn, LIVE_WINDOW_MS, MAX_DELIVERED, MAX_LIVE, MAX_TURNS,
-    PEER_NAME, STALL_MS,
+    PEER_NAME, STALL_MS, WATCH_MS,
 };
 
 pub type WorkerId = Uuid;
@@ -465,6 +465,14 @@ pub enum ClientMsg {
     },
     /// Send `ServerMsg::Sessions` now and on every change (subscribes too). Full access only.
     WatchSessions,
+    /// Turn live session `id`'s bell on or off: on, it pushes when it starts needing the
+    /// user (`SessionRow::bell`). Full access only.
+    SessionBell {
+        worker: WorkerId,
+        harness: String,
+        id: String,
+        on: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1042,6 +1050,8 @@ mod tests {
                     held: false,
                     at: 1,
                 }],
+                bell: true,
+                watched: true,
             }],
         };
         let s = serde_json::to_string(&row).unwrap();
@@ -1053,6 +1063,11 @@ mod tests {
         assert_eq!(serde_json::from_str::<ServerMsg>(&s).unwrap(), row);
         let watch = serde_json::to_string(&ClientMsg::WatchSessions).unwrap();
         assert_eq!(watch, r#"{"type":"watch_sessions"}"#);
+        let bell = r#"{"type":"session_bell","worker":"00000000-0000-0000-0000-000000000000","harness":"claude","id":"s","on":true}"#;
+        assert!(matches!(
+            serde_json::from_str(bell).unwrap(),
+            ClientMsg::SessionBell { on: true, .. }
+        ));
         // Summaries from orchestrators predating timing/tokens/activity still parse.
         let old: TaskSummary = serde_json::from_str(
             r#"{"id":"00000000-0000-0000-0000-000000000000","prompt":"p","status":"done",

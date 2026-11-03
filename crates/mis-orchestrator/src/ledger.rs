@@ -10,9 +10,12 @@ use uuid::Uuid;
 
 use crate::{note, plan, routine, summary};
 
+mod alerts;
 pub mod persist;
 mod routines;
 mod sessions;
+
+pub use alerts::SessionKey;
 
 /// Opaque handle for one worker connection; the shell maps it to a socket.
 pub type ConnId = u64;
@@ -66,6 +69,16 @@ pub enum Effect {
         body: String,
         urgent: bool,
     },
+    /// Push a notification to the user's devices: live session `id` on `worker` started
+    /// needing them.
+    NotifySession {
+        worker: WorkerId,
+        harness: String,
+        id: String,
+        title: String,
+        body: String,
+        urgent: bool,
+    },
 }
 
 struct Worker {
@@ -82,6 +95,9 @@ struct Worker {
     update: WorkerUpdate,
     /// The text block its running task is writing, for clients that open it mid-reply.
     stream: Option<Stream>,
+    /// It sent live sessions this connection: the next report's changes are real, not
+    /// what happened while it was away.
+    reported: bool,
 }
 
 /// A text block being written, from its task's `TextDelta`s since its last `Text`.
@@ -517,6 +533,10 @@ pub struct Ledger {
     live: BTreeMap<WorkerId, sessions::Live>,
     /// `sessions()` as last pushed to watchers.
     pushed: Option<Vec<SessionRow>>,
+    /// Live sessions whose bell the user turned on.
+    bells: std::collections::BTreeSet<alerts::SessionKey>,
+    /// When each live session last pushed (Unix millis); not saved.
+    alerted: HashMap<alerts::SessionKey, u64>,
 }
 
 impl Ledger {
@@ -1180,6 +1200,7 @@ impl Ledger {
                 last_seen: now,
                 update: WorkerUpdate::None,
                 stream,
+                reported: false,
             },
         );
         let unknown = running
