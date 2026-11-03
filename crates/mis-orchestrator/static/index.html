@@ -24,6 +24,8 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
     --accent: #5EE6F2; --on-accent: #062026; --link: #7FE9F4; --run: #5EE6F2; --ok: #5FD49A; --warn: #F2B05E; --bad: #F2726B;
     /* Pill tints (background) and their text, per tone. */
     --t-run: #0F2A2E; --f-run: #7FE9F4; --t-warn: #33270F; --t-bad: #2A1719; --f-bad: #F28B82; --t-ok: #172A22; --t-n: #222A35; --edge-warn: #6B5221;
+    /* Terminal colours with no token above: ANSI blue and magenta. */
+    --a-blue: #7AA2F7; --a-mag: #C792EA;
     --ring: rgba(94, 230, 242, .18); --shadow: 0 6px 24px rgba(0, 0, 0, .35); --scrim: rgba(0, 0, 0, .5);
     --mono: ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace;
     /* No web fonts, so the page works offline. */
@@ -35,14 +37,14 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
       --sep: #C3D6E0; --hover: #E1EDF3; --seg-on: #FFFFFF; --track: #B8CCD7;
       --fg: #0B2233; --fg2: #22404F; --soft: #3A5566; --dim: #4A6577; --faint: #546F7F;
       --accent: #00687A; --on-accent: #FFFFFF; --link: #00687A; --run: #00687A; --ok: #1F6B45; --warn: #9A4800; --bad: #B3261E;
-      --t-run: #D3ECF0; --f-run: #00586A; --t-warn: #FFE9D1; --t-bad: #FBE0DE; --f-bad: #A3221B; --t-ok: #D7EEE2; --t-n: #DCE8EE; --edge-warn: #D9A066;
+      --t-run: #D3ECF0; --f-run: #00586A; --t-warn: #FFE9D1; --t-bad: #FBE0DE; --f-bad: #A3221B; --t-ok: #D7EEE2; --t-n: #DCE8EE; --edge-warn: #D9A066; --a-blue: #2F5BD3; --a-mag: #8A3FB8;
       --ring: rgba(0, 104, 122, .16); --shadow: 0 4px 18px rgba(11, 34, 51, .1), 0 1px 3px rgba(11, 34, 51, .06); --scrim: rgba(11, 34, 51, .32); }
   }
   :root:where([data-theme=light]) { color-scheme: light; --bg: #EAF3F7; --card: #FFFFFF; --raised: #DCE8EE; --composer: #FFFFFF; --bubble: #D9E8F0; --code: #F5F9FB;
     --sep: #C3D6E0; --hover: #E1EDF3; --seg-on: #FFFFFF; --track: #B8CCD7;
     --fg: #0B2233; --fg2: #22404F; --soft: #3A5566; --dim: #4A6577; --faint: #546F7F;
     --accent: #00687A; --on-accent: #FFFFFF; --link: #00687A; --run: #00687A; --ok: #1F6B45; --warn: #9A4800; --bad: #B3261E;
-    --t-run: #D3ECF0; --f-run: #00586A; --t-warn: #FFE9D1; --t-bad: #FBE0DE; --f-bad: #A3221B; --t-ok: #D7EEE2; --t-n: #DCE8EE; --edge-warn: #D9A066;
+    --t-run: #D3ECF0; --f-run: #00586A; --t-warn: #FFE9D1; --t-bad: #FBE0DE; --f-bad: #A3221B; --t-ok: #D7EEE2; --t-n: #DCE8EE; --edge-warn: #D9A066; --a-blue: #2F5BD3; --a-mag: #8A3FB8;
     --ring: rgba(0, 104, 122, .16); --shadow: 0 4px 18px rgba(11, 34, 51, .1), 0 1px 3px rgba(11, 34, 51, .06); --scrim: rgba(11, 34, 51, .32); }
   html { min-height: 100%; background: var(--bg); -webkit-tap-highlight-color: transparent; }
   body { --pad: .75rem; box-sizing: border-box; margin: 0 auto; max-width: 46rem; min-height: 100svh; padding: 0 var(--pad) calc(var(--dock, 0px) + var(--kb, 0px) + 1.5rem); color: var(--fg); font: 1rem/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
@@ -458,14 +460,110 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .md .code { border-radius: .75rem; background: var(--code); overflow: hidden; }
   .md .code pre { margin: 0; padding-top: 0; border-radius: 0; }
   .code-h { display: flex; align-items: center; justify-content: space-between; padding: .25rem .25rem .25rem .75rem; font-size: .75rem; color: var(--dim); }
-  .code-h button { min-height: 0; height: 1.75rem; padding: 0 .625rem; border-radius: .5rem; background: none; color: var(--soft); font: 500 .75rem var(--sans); }
-  @media (hover: hover) { .code-h button:hover { background: var(--hover); } }
+  :is(.code-h, .evo-h) button { min-height: 0; height: 1.75rem; padding: 0 .625rem; border-radius: .5rem; background: none; color: var(--soft); font: 500 .75rem var(--sans); }
+  @media (hover: hover) { :is(.code-h, .evo-h) button:hover { background: var(--hover); } }
   .md blockquote { padding-left: .875rem; border-left: 3px solid var(--sep); color: var(--soft); }
   .md hr { border: 0; border-top: 1px solid var(--sep); }
   /* Jump to latest: shown when the conversation grew while scrolled up. */
   #latest { position: fixed; z-index: 2; left: 50%; bottom: calc(var(--dock, 0px) + var(--kb, 0px) + .5rem); transform: translateX(-50%); min-height: 2rem; padding: 0 .875rem; border-radius: 999px; background: var(--card); color: var(--fg); box-shadow: var(--shadow); font-size: .8125rem; animation: rise .15s ease-out; }
   /* A passing note at the top, e.g. a copied resume command. */
   #toast { position: fixed; z-index: 3; top: calc(4rem + env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%); max-width: calc(100vw - 2rem); box-sizing: border-box; padding: .5rem .75rem; border-radius: .625rem; background: var(--seg-on); color: var(--fg); box-shadow: var(--shadow); font: .75rem/1.4 var(--mono); overflow-wrap: anywhere; animation: rise .15s ease-out; }
+  /* Tables: in markdown and in evidence. Numbers in even columns; wide ones scroll inside their box. */
+  .md table, .evt table { border-collapse: collapse; font-size: .8125rem; font-variant-numeric: tabular-nums; }
+  .md table { display: block; max-width: 100%; overflow-x: auto; margin: 0 0 .75rem; }
+  :is(.md, .evt) :is(th, td) { padding: .4375rem .625rem; border-top: 1px solid var(--sep); text-align: left; white-space: nowrap; }
+  :is(.md, .evt) th { border-top: 0; color: var(--dim); font-weight: 600; font-size: .75rem; }
+  /* Result: the agent's headline and points in a card, then its evidence. */
+  #result { margin: 1rem 0 .5rem; }
+  .rcard { padding: .875rem 1rem .5rem; border-radius: 1rem; background: var(--card); }
+  .rcard h2 { margin: 0; font: 600 1.0625rem/1.35 var(--sans); overflow-wrap: anywhere; }
+  .rcard ul { margin: .5rem 0 0; padding-left: 1.125rem; list-style: disc; color: var(--fg2); font-size: .9375rem; line-height: 1.45; }
+  .rcard li { margin: .25rem 0; overflow-wrap: anywhere; }
+  .rfoot { display: flex; justify-content: flex-end; margin: .25rem -.5rem 0 0; }
+  .rfoot button { display: inline-flex; align-items: center; gap: .375rem; min-height: 2.25rem; padding: 0 .625rem; border-radius: .625rem; background: none; color: var(--soft); font: 500 .8125rem var(--sans); }
+  .rfoot svg { width: 1rem; height: 1rem; }
+  @media (hover: hover) { .rfoot button:hover { background: var(--hover); } }
+  /* Evidence strip: pictures two across (a lone one, a video or a compare full width); tables and output full width. */
+  .evs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; margin: .625rem 0 0; }
+  .evs > .wide { grid-column: 1 / -1; }
+  .tile { position: relative; display: block; width: 100%; min-height: 0; margin: 0; padding: 0; aspect-ratio: 4 / 3; border-radius: .75rem; overflow: hidden; background: var(--raised); color: #fff; }
+  .tile.wide { aspect-ratio: 16 / 9; }
+  .tile :is(img, video) { display: block; width: 100%; height: 100%; object-fit: cover; }
+  .tile video { object-fit: contain; background: #000; }
+  /* Its title on a dark fade, so it reads over any picture in either theme. */
+  /* A lone picture is shown whole: a tall screenshot letterboxed, not cut to a band. */
+  .tile.wide img { object-fit: contain; }
+  .tile .cap { position: absolute; left: 0; right: 0; bottom: 0; padding: 1.25rem .625rem .375rem; background: linear-gradient(transparent, rgba(0, 0, 0, .6)); font: 500 .75rem/1.3 var(--sans); text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+  .tile:has(video) .cap { top: 0; bottom: auto; padding: .375rem 2.75rem 1.25rem .625rem; background: linear-gradient(rgba(0, 0, 0, .6), transparent); }
+  .tile .exp { position: absolute; top: .25rem; right: .25rem; width: 2.25rem; height: 2.25rem; border-radius: .625rem; background: rgba(0, 0, 0, .45); color: #fff; }
+  .tile .exp svg { width: 1.125rem; height: 1.125rem; }
+  /* A file that couldn't be fetched (gone, or no access): a dim word instead. */
+  .gone::after { content: "Unavailable"; position: absolute; inset: 0; background: var(--raised); display: grid; place-items: center; color: var(--dim); font: .8125rem var(--sans); }
+  /* Compare: the before picture over the after, cut at the handle; or the two side by side. */
+  .cmp { display: grid; gap: .375rem; }
+  .cmp-h { display: flex; align-items: center; gap: .5rem; min-width: 0; }
+  .cmp-h .t { flex: 1; min-width: 0; font-size: .8125rem; color: var(--soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cmp-h .ibtn { width: 2.25rem; height: 2.25rem; }
+  .seg2 { flex: none; display: flex; gap: .125rem; padding: .1875rem; border-radius: .625rem; background: var(--raised); }
+  .seg2 button { min-height: 0; height: 1.75rem; padding: 0 .5rem; border-radius: .4375rem; background: none; color: var(--dim); font: 500 .75rem var(--sans); }
+  .seg2 button[aria-pressed=true] { background: var(--seg-on); color: var(--fg); box-shadow: 0 1px 2px rgba(0, 0, 0, .15); }
+  .slider { --pos: 50%; position: relative; aspect-ratio: 4 / 3; border-radius: .75rem; overflow: hidden; background: var(--raised); touch-action: pan-y; cursor: ew-resize; -webkit-user-select: none; user-select: none; }
+  .slider img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+  .slider .before { clip-path: inset(0 calc(100% - var(--pos)) 0 0); }
+  .slider .line { position: absolute; top: 0; bottom: 0; left: var(--pos); width: 2px; margin-left: -1px; background: #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, .25); pointer-events: none; }
+  .slider .knob { position: absolute; top: 50%; left: var(--pos); display: grid; place-items: center; width: 2.25rem; height: 2.25rem; margin: -1.125rem 0 0 -1.125rem; border-radius: 50%; background: #fff; color: #0B2233; box-shadow: 0 2px 8px rgba(0, 0, 0, .35); pointer-events: none; }
+  .slider .knob svg { width: 1.125rem; height: 1.125rem; }
+  .slider:focus-visible { outline-offset: 2px; }
+  .slider:focus-visible .knob { box-shadow: 0 0 0 3px var(--accent); }
+  .lab { position: absolute; top: .5rem; padding: .125rem .5rem; border-radius: 999px; background: rgba(0, 0, 0, .55); color: #fff; font: 600 .6875rem/1.5 var(--sans); pointer-events: none; }
+  .lab.l { left: .5rem; } .lab.r { right: .5rem; }
+  .pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .375rem; }
+  .pair .tile .cap { font-weight: 600; }
+  /* Table: its title, then the table scrolling inside a rounded box; header taps sort. */
+  .evt { border-radius: .75rem; background: var(--card); overflow: hidden; }
+  .evt-h, .evo summary { display: flex; align-items: center; gap: .5rem; min-height: 2.5rem; padding: 0 .75rem; font: 500 .8125rem var(--sans); color: var(--fg2); }
+  .evt-h .one, .evo summary .one { flex: 1; min-width: 0; }
+  .evt-h .dim, .evo summary .dim { flex: none; font-weight: 400; font-size: .75rem; }
+  .evt .scroll { overflow-x: auto; }
+  .evt table { min-width: 100%; }
+  .evt th { padding: 0; }
+  .evt th button { display: flex; align-items: center; gap: .25rem; width: 100%; min-height: 2.25rem; padding: 0 .625rem; border-radius: 0; background: none; color: inherit; font: inherit; text-align: inherit; }
+  .evt th.n button { justify-content: flex-end; }
+  .evt th[aria-sort=ascending] button::after { content: "↑"; } .evt th[aria-sort=descending] button::after { content: "↓"; }
+  .evt th[aria-sort]:not([aria-sort=none]) { color: var(--fg); }
+  .evt .n { text-align: right; }
+  .evt td.d { font-weight: 600; color: var(--dim); }
+  .d.good { color: var(--ok) !important; } .d.warn { color: var(--warn) !important; } .d.bad { color: var(--bad) !important; }
+  .evt .note { padding: .875rem .75rem; font-size: .8125rem; color: var(--dim); }
+  /* Output: a collapsible block of coloured terminal text with Copy. */
+  .evo { margin: 0; border-radius: .75rem; background: var(--card); overflow: hidden; }
+  .evo summary { min-height: 2.75rem; }
+  .evo summary::after { flex: none; }
+  .evo-h { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: 0 .25rem 0 .75rem; font-size: .75rem; color: var(--dim); }
+  .evo pre { max-height: 24rem; overflow: auto; margin: 0; padding: .375rem .75rem .75rem; background: var(--code); white-space: pre; word-break: normal; font: .75rem/1.55 var(--mono); color: var(--fg2); }
+  .a0 { color: var(--dim); } .a1 { color: var(--bad); } .a2 { color: var(--ok); } .a3 { color: var(--warn); }
+  .a4 { color: var(--a-blue); } .a5 { color: var(--a-mag); } .a6 { color: var(--accent); } .a7 { color: var(--fg); } .ab { font-weight: 700; }
+  /* Home rows: up to two thumbnails and a chip (the biggest change in its table, or how many pictures). */
+  .evrow { display: flex; align-items: center; gap: .375rem; margin-top: .5rem; padding-left: 1.25rem; min-width: 0; }
+  .evrow img { flex: none; width: 3.5rem; height: 2.5rem; border-radius: .5rem; object-fit: cover; background: var(--raised); }
+  .evc { min-width: 0; height: 2.5rem; display: inline-flex; align-items: center; padding: 0 .625rem; border-radius: .5rem; background: var(--t-n); color: var(--soft); font: 600 .75rem/1 var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .evc span { overflow: hidden; text-overflow: ellipsis; }
+  .evc.good { background: var(--t-ok); color: var(--ok); } .evc.warn { background: var(--t-warn); color: var(--warn); } .evc.bad { background: var(--t-bad); color: var(--f-bad); }
+  /* Viewer: full screen over a black ground in either theme, inside the safe area. */
+  #viewer { inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: #000; color: #fff; overflow: hidden; }
+  #viewer::backdrop { background: #000; }
+  #viewer[open] { display: flex; flex-direction: column; animation: fade .15s ease-out; }
+  .vtop { display: flex; align-items: center; gap: .5rem; padding: calc(.375rem + env(safe-area-inset-top, 0px)) calc(.375rem + env(safe-area-inset-right, 0px)) .375rem calc(1rem + env(safe-area-inset-left, 0px)); font: 500 .875rem var(--sans); }
+  .vtop .one { flex: 1; min-width: 0; }
+  .vtop .n { flex: none; color: #AEB8C4; font-size: .8125rem; font-variant-numeric: tabular-nums; }
+  #viewer .ibtn { color: #fff; }
+  @media (hover: hover) { #viewer .ibtn:hover { background: rgba(255, 255, 255, .12); } }
+  #vstage { position: relative; flex: 1; min-height: 0; display: grid; place-items: center; margin: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px); overflow: hidden; touch-action: none; }
+  #vstage :is(img, video) { max-width: 100%; max-height: 100%; object-fit: contain; transform-origin: center; -webkit-user-drag: none; user-select: none; }
+  #vstage img { cursor: zoom-in; } #vstage.zoomed img { cursor: grab; }
+  .vnav { position: absolute; top: 50%; margin-top: -1.375rem; width: 2.75rem !important; height: 2.75rem !important; border-radius: 50% !important; background: rgba(0, 0, 0, .45) !important; }
+  .vnav.l { left: calc(.5rem + env(safe-area-inset-left, 0px)); } .vnav.r { right: calc(.5rem + env(safe-area-inset-right, 0px)); }
+  .vnav:disabled { visibility: hidden; }
   [hidden] { display: none !important; }
   /* Reduced motion: nothing slides, fades or pulses; busy spinners still turn, and the recording dots stay readable. */
   @media (prefers-reduced-motion: reduce) {
@@ -507,6 +605,13 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   </div>
 </dialog>
 
+<dialog id="viewer" aria-label="Evidence viewer">
+  <div class="vtop"><span id="vt" class="one"></span><span id="vn" class="n"></span><button type="button" id="vclose" class="ibtn" aria-label="Close viewer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+  <div id="vstage"></div>
+  <button type="button" id="vprev" class="ibtn vnav l" aria-label="Previous"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></button>
+  <button type="button" id="vnext" class="ibtn vnav r" aria-label="Next"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></button>
+</dialog>
+
 <form id="auth" hidden>
   <p>This orchestrator needs its token (MIS_TOKEN).</p>
   <input id="token" type="password" autocomplete="current-password" placeholder="token">
@@ -519,6 +624,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
 
 <main id="detail" hidden>
   <div class="chead"><a href="#" class="back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a><div id="task-head"></div></div>
+  <section id="result" aria-label="Result" hidden></section>
   <div id="task-convo" class="convo"></div>
   <section id="approvals" hidden></section>
   <div class="row" hidden><button type="button" id="speak">Speak</button></div>
@@ -707,9 +813,11 @@ function mdBlocks(lines, depth = 0) {
       out.push(`<blockquote>${mdBlocks(q, depth + 1)}</blockquote>`);
     } else if (MD_LIST.test(l)) {
       i = mdList(lines, i, out, depth);
+    } else if (mdTableAt(lines, i)) {
+      i = mdTable(lines, i, out);
     } else {
       const p = [l.trim()];
-      for (i++; i < lines.length && lines[i].trim() && !mdStarts(lines[i]); i++) p.push(lines[i].trim());
+      for (i++; i < lines.length && lines[i].trim() && !mdStarts(lines[i]) && !mdTableAt(lines, i); i++) p.push(lines[i].trim());
       out.push(`<p>${p.map(mdInline).join('<br>')}</p>`);
     }
   }
@@ -744,7 +852,151 @@ function mdList(lines, i, out, depth) {
   out.push(`<${tag}${start}>${items.map((it) => `<li>${mdInline(it.text)}${it.kids.length ? kids(it.kids) : ''}</li>`).join('')}</${tag}>`);
   return i;
 }
+// GitHub pipe tables: a header row, then a delimiter row (`| --- | :-: |`) with as many cells; rows run to a blank
+// line or another block. Cells split on `|`, except `\|`.
+function mdCells(l) {
+  const t = l.trim(), cells = [];
+  let cur = '';
+  for (let k = 0; k < t.length; k++) {
+    if (t[k] === '\\' && t[k + 1] === '|') { cur += '|'; k++; } else if (t[k] === '|') { cells.push(cur.trim()); cur = ''; } else cur += t[k];
+  }
+  cells.push(cur.trim());
+  if (t.startsWith('|')) cells.shift();
+  if (/(?:^|[^\\])\|$/.test(t) && cells.length > 1) cells.pop();
+  return cells;
+}
+const mdTableAt = (lines, i) => {
+  if (i + 1 >= lines.length || !lines[i].includes('|') || !lines[i + 1].includes('|')) return false;
+  const delim = mdCells(lines[i + 1]);
+  return delim.every((c) => /^:?-+:?$/.test(c)) && mdCells(lines[i]).length === delim.length;
+};
+function mdTable(lines, i, out) {
+  const head = mdCells(lines[i]);
+  const align = mdCells(lines[i + 1]).map((c) => (/^:-+:$/.test(c) ? 'center' : /-:$/.test(c) ? 'right' : /^:-/.test(c) ? 'left' : ''));
+  const cell = (tag, c, k) => `<${tag}${align[k] ? ` style="text-align:${align[k]}"` : ''}>${mdInline(c || '')}</${tag}>`;
+  const rows = [];
+  for (i += 2; i < lines.length && lines[i].trim() && !mdStarts(lines[i]); i++) {
+    const c = mdCells(lines[i]);
+    rows.push(`<tr>${head.map((_, k) => cell('td', c[k], k)).join('')}</tr>`);
+  }
+  out.push(`<table><thead><tr>${head.map((c, k) => cell('th', c, k)).join('')}</tr></thead>${rows.length ? `<tbody>${rows.join('')}</tbody>` : ''}</table>`);
+  return i;
+}
 // md:end
+
+// ev:begin. Evidence, pure: terminal colours, table deltas, Markdown for a PR. tests/md.test.mjs runs this block.
+// Command output as [{ text, fg, bold }]: SGR colour (fg 0-7, bright folded in) and bold kept; every other escape
+// sequence and control character but newline and tab dropped, as the worker's transcript stripper does: CSI
+// (`ESC [` or 8-bit `\x9b`, up to a final byte), strings (OSC, DCS, SOS, PM, APC: up to BEL, `\x9c` or `ESC \`), other
+// escapes (`ESC ( B`, `ESC =`); one cut off at the end is dropped. Callers set it as text, never as HTML.
+const ANSI = /(?:\x1b\[|\x9b)([^@-~]*)([@-~]|$)|\x1b[\]PX^_][^\x07\x9c\x1b]*(?:[\x07\x9c]|\x1b[\s\S]?|$)|\x1b[ -/][^0-~]*[0-~]?|\x1b[\s\S]?|[\x00-\x08\x0b-\x1a\x1c-\x1f\x7f]/g;
+function ansi(src) {
+  const s = String(src), out = [];
+  let fg = null, bold = false, last = 0;
+  const push = (text) => {
+    const p = out[out.length - 1];
+    if (!text) return;
+    if (p && p.fg === fg && p.bold === bold) p.text += text; else out.push({ text, fg, bold });
+  };
+  s.replace(ANSI, (m, params, final, at) => {
+    push(s.slice(last, at));
+    last = at + m.length;
+    if (final !== 'm' || !/^[0-9;:]*$/.test(params)) return '';
+    // `;` separates codes; `:` joins a code's own arguments (`38:2::r:g:b`).
+    const c = params.split(';');
+    for (let i = 0; i < c.length; i++) {
+      const sub = c[i].split(':').map(Number), n = sub[0];
+      if (n === 0) { fg = null; bold = false; } else if (n === 1) bold = true; else if (n === 22) bold = false;
+      else if (n >= 30 && n <= 37) fg = n - 30; else if (n >= 90 && n <= 97) fg = n - 90; else if (n === 39) fg = null;
+      // 256-colour and RGB: the first 16 of 256 map, the rest (and RGB) are plain; their arguments are skipped.
+      else if (n === 38 || n === 48) {
+        const [mode, k] = sub.length > 1 ? sub.slice(1) : [Number(c[i + 1]), Number(c[i + 2])];
+        if (n === 38) fg = mode === 5 && k < 16 ? k % 8 : null;
+        if (sub.length === 1) i += mode === 5 ? 2 : mode === 2 ? 4 : 0;
+      }
+    }
+    return '';
+  });
+  push(s.slice(last));
+  return out;
+}
+// Which way is better for a measure, from its words: 'up' for throughput and rates of success (ops/s, fps, /s,
+// score, coverage, hit or pass rate), 'down' for time and size (ms, s, MB, bytes, %, time, latency), '' when unknown.
+// Up wins, so `coverage 81%` is up while `cpu 35%` is down. Texts go most specific first (row, columns, title).
+const EV_UP = /\/ ?s(?:ec)?\b|\bfps\b|\bscore\b|\bthroughput\b|\b[oqr]ps\b|\bcoverage\b|\baccuracy\b|\b(?:hit|pass|success)(?:es)? ?rate\b|\buptime\b/i;
+const EV_DOWN = /µs|%|\b(?:ns|us|ms|s|secs?|seconds?|min|[kmgt]i?b|bytes?|time|latency|duration|memory|size)\b/i;
+function better(...texts) {
+  for (const t of texts) { if (EV_UP.test(t)) return 'up'; if (EV_DOWN.test(t)) return 'down'; }
+  return '';
+}
+// Percent change from a to b; null when either is unknown or a is 0.
+const change = (a, b) => (a === null || b === null || a === 0 ? null : ((b - a) / Math.abs(a)) * 100);
+// `−21%`, `+1.5%`, `0%`: whole from 10%, else one decimal.
+function fmtChange(p) {
+  const r = Math.abs(p) >= 10 ? Math.round(p) : Math.round(p * 10) / 10;
+  return `${r > 0 ? '+' : r < 0 ? '−' : ''}${Math.abs(r)}%`;
+}
+// 'good' when it moved the better way, 'bad' 10% or more the worse way, 'warn' less; '' unchanged or unknown.
+function tone(p, dir) {
+  if (p === null || !dir || Math.round(p * 10) === 0) return '';
+  return (dir === 'down' ? p < 0 : p > 0) ? 'good' : Math.abs(p) >= 10 ? 'bad' : 'warn';
+}
+// A cell's number (the server reads it), or null; the unit after it, e.g. `ms` in `12.5 ms`.
+const cellNum = (c) => (c && typeof c.num === 'number' ? c.num : null);
+const unitOf = (c) => (c ? c.text.trim().replace(/^[\d+\-.,eE]+/, '').trim().toLowerCase() : '');
+// A table's rows with their change ({ cells, label, delta, tone }), whether it has a Δ column (before and after
+// columns given), and its row with the biggest change. Numbers in different units (`900 ms`, `1.2 s`) get none.
+function deltas(table, title = '') {
+  const { header, rows } = table, b = table.before ?? null, a = table.after ?? null;
+  const has = b !== null && a !== null && b !== a && b < header.length && a < header.length;
+  const out = rows.map((cells) => {
+    const label = (cells.find((c, i) => i !== b && i !== a && c.text) || { text: '' }).text;
+    if (!has) return { cells, label, delta: null, tone: '' };
+    const delta = unitOf(cells[b]) === unitOf(cells[a]) ? change(cellNum(cells[b]), cellNum(cells[a])) : null;
+    const dir = better([label, cells[b]?.text, cells[a]?.text].join(' '), `${header[b]} ${header[a]}`, title);
+    return { cells, label, delta, tone: tone(delta, dir) };
+  });
+  const top = out.filter((r) => r.delta !== null).reduce((x, r) => (!x || Math.abs(r.delta) > Math.abs(x.delta) ? r : x), null);
+  return { has, rows: out, top };
+}
+const mdCell = (s) => String(s).replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
+// A table as a GitHub pipe table, numbers right-aligned, with its Δ column.
+function tableMd(table, title) {
+  const d = deltas(table, title), head = [...table.header, ...(d.has ? ['Δ'] : [])];
+  const right = head.map((_, i) => i >= table.header.length || table.rows.some((r) => cellNum(r[i]) !== null));
+  const line = (cells) => `| ${cells.map(mdCell).join(' | ')} |`;
+  return [line(head), `|${right.map((r) => (r ? ' ---: ' : ' --- ')).join('|')}|`,
+    ...d.rows.map((r) => line([...table.header.map((_, i) => (r.cells[i] ? r.cells[i].text : '')),
+      ...(d.has ? [r.delta === null ? '—' : fmtChange(r.delta)] : [])]))].join('\n');
+}
+const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif', 'video/mp4': 'mp4' };
+const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'evidence';
+// A PR-ready block: headline, points, then each item in order. `got` maps a file id to what was fetched (a table, an
+// output's text); one not fetched is left out. Pictures get placeholder links, to replace once uploaded.
+function resultMd(result, evidence, got) {
+  const out = [], esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+  let pics = false;
+  if (result) out.push(`**${result.headline}**`, ...(result.points.length ? [result.points.map((p) => `- ${p}`).join('\n')] : []));
+  for (const e of evidence) {
+    if (e.kind === 'image') {
+      pics = true;
+      out.push(`![${e.title.replace(/[[\]]/g, '')}](${slug(e.title)}.${EXT[e.file.mime] || 'png'})`);
+    } else if (e.kind === 'compare') {
+      pics = true;
+      const s = slug(e.title);
+      out.push(`**${e.title}**\n\n| Before | After |\n| --- | --- |\n| ![before](${s}-before.${EXT[e.before.mime] || 'png'}) | ![after](${s}-after.${EXT[e.after.mime] || 'png'}) |`);
+    } else if (e.kind === 'table' && got.has(e.file.id)) {
+      out.push(`**${e.title}**\n\n${tableMd(got.get(e.file.id), e.title)}`);
+    } else if (e.kind === 'output' && got.has(e.file.id)) {
+      const text = ansi(got.get(e.file.id)).map((x) => x.text).join('').replace(/\n+$/, '');
+      const fence = '`'.repeat(Math.max(3, ...(text.match(/`+/g) || []).map((x) => x.length + 1)));
+      out.push(`<details><summary>${esc(e.title)}${e.truncated ? ` (last ${e.lines} lines)` : ''}</summary>\n\n${fence}\n${text}\n${fence}\n\n</details>`);
+    }
+  }
+  if (pics) out.push('<!-- Images need uploading: replace the placeholder links above with hosted ones. -->');
+  return `${out.join('\n\n')}\n`;
+}
+// ev:end
 
 // One transcript line, matching `mis show` / `mis task --follow`; null for none.
 function eventLine(e) {
@@ -1351,14 +1603,15 @@ const snippet = (s) => (s || '').split('\n').find((l) => l.trim())?.replace(/\*\
 // What a task is doing (running, held) or said (its summary), for its row's last line.
 function taskLine(t) {
   if (!isFinished(t) && t.activity && t.activity !== 'queued') return el('div', { className: 'r3 activity one' }, t.activity);
-  return t.summary ? el('div', { className: 'r3 one' }, snippet(t.summary)) : '';
+  const said = t.result ? t.result.headline : snippet(t.summary);
+  return said ? el('div', { className: 'r3 one' }, said) : '';
 }
 function taskRow(t, now, reply) {
   return el('li', { className: [reply && 'reply', t.status === 'cancelled' && 'cancelled'].filter(Boolean).join(' ') },
     el('a', { href: `#task/${t.id}` },
       el('div', { className: 'r1' }, statusDot(t), el('span', { className: 'one' }, reply ? '↳ ' : '', sentTo(t), ...routineHead(t))),
       el('div', { className: 'r2 one' }, ...dots([t.worker && shortHost(hostOf(t.worker)), t.model, t.status === 'running' ? clock(t) : span(now - changedAt(t))])),
-      taskLine(t)));
+      taskLine(t), evHint(t)));
 }
 // A thread: its first task, then its replies folded into one line (the most urgent, else the latest); a tap shows them.
 function threadRows(th, now) {
@@ -1366,7 +1619,7 @@ function threadRows(th, now) {
   if (!th.replies.length) return [first];
   const open = repliesOpen.has(th.root.id), n = th.replies.length;
   const lead = th.replies.reduce((a, t) => (rank(t) <= rank(a) ? t : a));
-  const said = snippet(lead.summary) || (isFinished(lead) ? lead.status : lead.activity || lead.status);
+  const said = (lead.result && lead.result.headline) || snippet(lead.summary) || (isFinished(lead) ? lead.status : lead.activity || lead.status);
   const more = el('button', { type: 'button', className: 'more' }, statusDot(lead), el('span', { className: 'one' }, `↳ ${n} repl${n === 1 ? 'y' : 'ies'} · ${said}`));
   more.setAttribute('aria-expanded', String(open));
   more.onclick = () => {
@@ -1402,6 +1655,7 @@ const secHead = (label, ...end) => el('div', { className: 'sec' }, el('h3', {}, 
 function renderList() {
   if (frozen()) return;
   const now = Date.now() + skew, listed = new Set(feed.flatMap((s) => s.messages.map((m) => m.task)));
+  hintBudget = HINT_FILES;
   const threads = held('home', homeThreads(tasks, listed), (th) => th.root.id);
   const sessions = held('live', [...feed], liveKey);
   const label = (sec) => (sec === 'need' ? 'Needs you' : sec === 'flight' ? 'In flight' : dayLabel(sec.slice(4), now));
@@ -1504,6 +1758,333 @@ $('refresh-ev').onclick = () => {
   render();
 };
 
+// Evidence files, fetched with the token (an <img> can't send it) and kept by file id, most recently used last, up
+// to EV_KEEP files and EV_BYTES: an object URL for media, the parsed table, an output's text. Only settled files
+// are evicted, so no URL is made after its entry is gone. A failure is kept EV_RETRY_MS (a 404 for good), so
+// redraws don't ask again at once.
+const evFiles = new Map(), EV_KEEP = 120, EV_BYTES = 64 << 20, EV_RETRY_MS = 30e3;
+const MEDIA = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'video/mp4']);
+function evFile(f) {
+  let e = evFiles.get(f.id);
+  if (e) { evFiles.delete(f.id); evFiles.set(f.id, e); return e.p; }
+  e = { v: undefined, bytes: f.bytes || 0, settled: false };
+  e.p = fetch(`/api/evidence/${f.id}`, { headers: authHeaders() }).then(async (r) => {
+    if (!r.ok) throw Object.assign(new Error(`error ${r.status}`), { gone: r.status === 404 });
+    // Media gets the type its kind names, never one from the response.
+    if (MEDIA.has(f.mime)) e.v = URL.createObjectURL(new Blob([await r.arrayBuffer()], { type: f.mime }));
+    else e.v = f.mime === 'application/json' ? await r.json() : await r.text();
+    return e.v;
+  });
+  e.p.then(() => { e.settled = true; }, (err) => {
+    e.settled = true;
+    if (!err.gone) setTimeout(() => { if (evFiles.get(f.id) === e) evFiles.delete(f.id); }, EV_RETRY_MS);
+  });
+  evFiles.set(f.id, e);
+  let bytes = 0;
+  for (const x of evFiles.values()) bytes += x.bytes;
+  for (const [id, old] of evFiles) {
+    if (evFiles.size <= EV_KEEP && bytes <= EV_BYTES) break;
+    if (!old.settled) continue;
+    evFiles.delete(id);
+    bytes -= old.bytes;
+    if (typeof old.v === 'string' && old.v.startsWith('blob:')) URL.revokeObjectURL(old.v);
+  }
+  return e.p;
+}
+// Fills an <img> or <video> once its file is here; a file that can't be had marks its box.
+function evMedia(node, f, box = node.parentNode) {
+  if (!MEDIA.has(f.mime)) { box.classList.add('gone'); return; }
+  evFile(f).then((url) => { node.src = url; }, () => box.classList.add('gone'));
+}
+const isVideo = (f) => f.mime === 'video/mp4';
+// What the viewer pages through: pictures and videos, a compare as its before and after.
+const viewItems = (ev) => ev.flatMap((e) => (e.kind === 'image' ? [{ file: e.file, title: e.title, id: e.id }]
+  : e.kind === 'compare' ? [{ file: e.before, title: `Before · ${e.title}`, id: e.id }, { file: e.after, title: `After · ${e.title}`, id: `${e.id}/after` }] : []));
+
+// The task's result card (headline, points) and evidence strip, rebuilt only when they change, so a slider, a
+// sort or an open output survives the redraws status messages bring.
+let resultKey = '';
+function renderResult(t) {
+  const ev = (t && t.evidence) || [], r = t && t.result, box = $('result');
+  const key = JSON.stringify([t && t.id, r, ev.map((e) => e.id)]);
+  if (key === resultKey) return;
+  resultKey = key;
+  box.hidden = !r && !ev.length;
+  if (box.hidden) { box.replaceChildren(); return; }
+  const copy = el('button', { type: 'button' }, svg(ICON.copy), 'Copy as Markdown');
+  copy.onclick = () => copyResult(r, ev);
+  const foot = el('div', { className: 'rfoot' }, copy);
+  box.replaceChildren(r ? el('div', { className: 'rcard' }, el('h2', {}, r.headline),
+    r.points.length ? el('ul', {}, ...r.points.map((p) => el('li', {}, p))) : '', foot) : foot, ev.length ? evStrip(ev) : '');
+}
+// Copies the result as Markdown for a PR. Tables and outputs are fetched already (the strip shows them); any not
+// yet here are awaited, which some browsers' clipboards refuse after the tap, hence the fallback toast.
+async function copyResult(r, ev) {
+  const files = ev.flatMap((e) => (e.kind === 'table' || e.kind === 'output' ? [e.file] : []));
+  const got = new Map();
+  await Promise.all(files.map((f) => evFile(f).then((v) => got.set(f.id, v), () => {})));
+  const pics = viewItems(ev).length ? ' · images need uploading' : '';
+  toast((await copyText(resultMd(r, ev, got))) ? `Copied as Markdown${pics}` : 'Couldn’t copy');
+}
+// Items in order; a run of pictures pairs up two across, the odd one out full width.
+function evStrip(ev) {
+  const items = viewItems(ev), nodes = [];
+  let run = [];
+  const flush = () => { if (run.length % 2) run[run.length - 1].classList.add('wide'); nodes.push(...run); run = []; };
+  for (const e of ev) {
+    if (e.kind === 'image' && !isVideo(e.file)) { run.push(evTile(e, items)); continue; }
+    flush();
+    nodes.push(e.kind === 'image' ? evTile(e, items) : e.kind === 'compare' ? evCompare(e, items) : e.kind === 'table' ? evTable(e) : evOutput(e));
+    nodes[nodes.length - 1].classList.add('wide');
+  }
+  flush();
+  return el('div', { className: 'evs' }, ...nodes);
+}
+const itemAt = (items, id) => Math.max(0, items.findIndex((x) => x.id === id));
+// A picture opens the viewer on a tap; a video plays in place (muted, no autoplay) and has its own expand button.
+function evTile(e, items) {
+  const cap = el('span', { className: 'cap' }, e.title);
+  if (!isVideo(e.file)) {
+    const img = el('img', { alt: '' }), b = el('button', { type: 'button', className: 'tile', onclick: () => openViewer(items, itemAt(items, e.id)) }, img, cap);
+    b.setAttribute('aria-label', `Open ${e.title}`);
+    evMedia(img, e.file, b);
+    return b;
+  }
+  const v = el('video', { muted: true, defaultMuted: true, playsInline: true, controls: true, preload: 'metadata' });
+  v.setAttribute('aria-label', e.title);
+  const box = el('div', { className: 'tile' }, v, cap, iconBtn('expand', 'Full screen', () => { v.pause(); openViewer(items, itemAt(items, e.id)); }));
+  box.lastChild.classList.add('exp');
+  evMedia(v, e.file, box);
+  return box;
+}
+// Before over after, cut at a handle: drag it, tap to jump, or arrow keys; or the two side by side.
+function evCompare(e, items) {
+  const before = el('img', { className: 'before', alt: `${e.title}, before` }), after = el('img', { alt: `${e.title}, after` });
+  const knob = el('span', { className: 'knob' }, svg('M9 7l-5 5 5 5M15 7l5 5-5 5'));
+  const slider = el('div', { className: 'slider', tabIndex: 0 }, after, before, el('span', { className: 'line' }), knob,
+    el('span', { className: 'lab l' }, 'Before'), el('span', { className: 'lab r' }, 'After'));
+  Object.entries({ role: 'slider', 'aria-label': `${e.title}: before shown left of the handle`, 'aria-valuemin': 0, 'aria-valuemax': 100 })
+    .forEach(([k, v]) => slider.setAttribute(k, v));
+  const set = (v) => {
+    const p = Math.round(Math.max(0, Math.min(100, v)));
+    slider.style.setProperty('--pos', `${p}%`);
+    slider.setAttribute('aria-valuenow', p);
+    slider.setAttribute('aria-valuetext', `${p}% before`);
+  };
+  set(50);
+  const pct = (x) => { const r = slider.getBoundingClientRect(); return ((x - r.left) / r.width) * 100; };
+  // A touch drags only once it moves sideways, so a vertical scroll starting on it still scrolls; a tap jumps.
+  let drag = null;
+  slider.onpointerdown = (ev) => {
+    if (ev.button !== 0) return;
+    drag = { id: ev.pointerId, x0: ev.clientX, v0: Number(slider.getAttribute('aria-valuenow')), moving: ev.pointerType !== 'touch' };
+    slider.setPointerCapture(ev.pointerId);
+    if (drag.moving) set(pct(ev.clientX));
+  };
+  slider.onpointermove = (ev) => {
+    if (!drag || ev.pointerId !== drag.id) return;
+    if (!drag.moving && Math.abs(ev.clientX - drag.x0) < 6) return;
+    drag.moving = true;
+    set(pct(ev.clientX));
+  };
+  slider.onpointerup = (ev) => { if (drag && ev.pointerId === drag.id && !drag.moving) set(pct(ev.clientX)); drag = null; };
+  slider.onpointercancel = () => { if (drag) set(drag.v0); drag = null; };
+  slider.onkeydown = (ev) => {
+    const v = Number(slider.getAttribute('aria-valuenow'));
+    const to = { ArrowLeft: v - 5, ArrowDown: v - 5, ArrowRight: v + 5, ArrowUp: v + 5, PageDown: v - 20, PageUp: v + 20, Home: 0, End: 100 }[ev.key];
+    if (to === undefined) return;
+    ev.preventDefault();
+    set(to);
+  };
+  // Both pictures share the after picture's shape.
+  after.onload = () => { slider.style.aspectRatio = `${after.naturalWidth} / ${after.naturalHeight}`; };
+  evMedia(before, e.before, slider);
+  evMedia(after, e.after, slider);
+  const side = (f, label, id) => {
+    const img = el('img', { alt: `${e.title}, ${label.toLowerCase()}` }), b = el('button', { type: 'button', className: 'tile', onclick: () => openViewer(items, itemAt(items, id)) }, img, el('span', { className: 'cap' }, label));
+    evMedia(img, f, b);
+    return b;
+  };
+  const pair = el('div', { className: 'pair', hidden: true }, side(e.before, 'Before', e.id), side(e.after, 'After', `${e.id}/after`));
+  const mode = (sideBySide) => {
+    slider.hidden = sideBySide;
+    pair.hidden = !sideBySide;
+    seg.children[0].setAttribute('aria-pressed', String(!sideBySide));
+    seg.children[1].setAttribute('aria-pressed', String(sideBySide));
+  };
+  const seg = el('div', { className: 'seg2' }, el('button', { type: 'button', onclick: () => mode(false) }, 'Slider'),
+    el('button', { type: 'button', onclick: () => mode(true) }, 'Side by side'));
+  seg.setAttribute('role', 'group');
+  seg.setAttribute('aria-label', 'Compare as');
+  mode(false);
+  return el('div', { className: 'cmp' }, el('div', { className: 'cmp-h' }, el('span', { className: 't' }, e.title), seg,
+    iconBtn('expand', 'Full screen', () => openViewer(items, itemAt(items, e.id)))), slider, pair);
+}
+// A table with tabular numbers, a coloured Δ column when it has before and after columns, sorted by a header tap
+// (ascending, descending, back to as sent).
+function evTable(e) {
+  const scroll = el('div', { className: 'scroll' }, el('p', { className: 'note' }, 'Loading…'));
+  evFile(e.file).then((t) => drawTable(scroll, t, e.title)).catch(() => scroll.replaceChildren(el('p', { className: 'note' }, 'Table unavailable')));
+  return el('section', { className: 'evt' }, el('div', { className: 'evt-h' }, el('span', { className: 'one' }, e.title),
+    el('span', { className: 'dim' }, plural(e.rows, 'row'))), scroll);
+}
+function drawTable(box, table, title) {
+  const d = deltas(table, title);
+  const cols = [...table.header.map((h, i) => ({ h, key: (r) => cellNum(r.cells[i]) ?? (r.cells[i] ? r.cells[i].text : ''), num: d.rows.some((r) => cellNum(r.cells[i]) !== null) })),
+    ...(d.has ? [{ h: 'Δ', key: (r) => r.delta, num: true }] : [])];
+  let sort = { col: -1, dir: 0 };
+  const cmp = (key) => (x, y) => {
+    const a = key(x), b = key(y);
+    if (a === null || b === null) return a === b ? 0 : a === null ? 1 : -1; // unknowns last either way
+    return (typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b), undefined, { numeric: true })) * sort.dir;
+  };
+  const draw = () => {
+    const rows = sort.dir ? [...d.rows].sort(cmp(cols[sort.col].key)) : d.rows;
+    const head = cols.map((c, i) => {
+      const th = el('th', { className: c.num ? 'n' : '' }, el('button', { type: 'button', onclick: () => {
+        sort = sort.col !== i ? { col: i, dir: 1 } : { col: i, dir: sort.dir === 1 ? -1 : sort.dir === -1 ? 0 : 1 };
+        draw();
+      } }, c.h));
+      th.setAttribute('aria-sort', sort.col === i && sort.dir ? (sort.dir === 1 ? 'ascending' : 'descending') : 'none');
+      return th;
+    });
+    const body = rows.map((r) => el('tr', {}, ...table.header.map((_, i) => el('td', { className: cols[i].num ? 'n' : '' }, r.cells[i] ? r.cells[i].text : '')),
+      ...(d.has ? [el('td', { className: `n d${r.tone ? ` ${r.tone}` : ''}` }, r.delta === null ? '—' : fmtChange(r.delta))] : [])));
+    box.replaceChildren(el('table', {}, el('thead', {}, el('tr', {}, ...head)), el('tbody', {}, ...body)));
+  };
+  draw();
+}
+// Command output, collapsible (open when short), its colours kept; Copy takes the plain text.
+function evOutput(e) {
+  let plain = '';
+  const pre = el('pre', {}), copy = copyBtn(() => plain);
+  copy.disabled = true;
+  evFile(e.file).then((text) => {
+    const segs = ansi(text);
+    plain = segs.map((s) => s.text).join('');
+    pre.replaceChildren(...segs.map((s) => (s.fg === null && !s.bold ? s.text
+      : el('span', { className: [s.fg !== null && `a${s.fg}`, s.bold && 'ab'].filter(Boolean).join(' ') }, s.text))));
+    copy.disabled = false;
+  }, () => { pre.textContent = 'Output unavailable'; });
+  return el('details', { className: 'evo', open: e.lines <= 12 }, el('summary', {}, el('span', { className: 'one' }, e.title),
+    el('span', { className: 'dim' }, plural(e.lines, 'line'))),
+  el('div', { className: 'evo-h' }, el('span', {}, e.truncated ? `Last ${plural(e.lines, 'line')}; earlier output cut` : ''), copy), pre);
+}
+
+// Full-screen viewer: swipe, arrow keys or the side buttons page; pinch, double-tap or double-click zoom a picture,
+// a drag pans it; Esc or ✕ closes. Videos keep their own controls, so gestures skip them.
+const view = { items: [], i: 0, z: 1, x: 0, y: 0 };
+function openViewer(items, i) {
+  if (!items.length) return;
+  view.items = items;
+  viewAt(i);
+  if (!$('viewer').open) $('viewer').showModal();
+}
+function viewAt(i) {
+  view.i = Math.max(0, Math.min(view.items.length - 1, i));
+  const it = view.items[view.i], stage = $('vstage');
+  const media = isVideo(it.file) ? el('video', { muted: true, defaultMuted: true, playsInline: true, controls: true, preload: 'metadata' }) : el('img', { alt: it.title, draggable: false });
+  stage.replaceChildren(media);
+  stage.classList.remove('gone');
+  if (MEDIA.has(it.file.mime)) evFile(it.file).then((url) => { media.src = url; }, () => { if (stage.firstChild === media) stage.classList.add('gone'); });
+  else stage.classList.add('gone');
+  zoom(1, 0, 0);
+  $('vt').textContent = it.title;
+  $('vn').textContent = view.items.length > 1 ? `${view.i + 1} / ${view.items.length}` : '';
+  $('vprev').disabled = view.i === 0;
+  $('vnext').disabled = view.i === view.items.length - 1;
+}
+// Zoomed pictures pan at most to their edges; videos don't zoom (their controls would grow too).
+function zoom(z, x, y, dx = 0) {
+  const m = $('vstage').firstChild, w = m ? m.offsetWidth : 0, h = m ? m.offsetHeight : 0; // layout size, before the transform
+  if (m && m.tagName === 'VIDEO') z = 1;
+  view.z = z;
+  view.x = Math.max(-(w * (z - 1)) / 2, Math.min((w * (z - 1)) / 2, x));
+  view.y = Math.max(-(h * (z - 1)) / 2, Math.min((h * (z - 1)) / 2, y));
+  if (m) m.style.transform = z === 1 && !dx ? '' : `translate(${view.x + dx}px, ${view.y}px) scale(${z})`;
+  $('vstage').classList.toggle('zoomed', z > 1);
+}
+$('vclose').onclick = () => $('viewer').close();
+// Pages by `d`; nothing past either end.
+const page = (d) => { const j = view.i + d; if (j >= 0 && j < view.items.length) viewAt(j); };
+$('vprev').onclick = () => page(-1);
+$('vnext').onclick = () => page(1);
+$('viewer').onclose = () => $('vstage').replaceChildren();
+$('viewer').onkeydown = (e) => {
+  if (e.target.tagName === 'VIDEO') return;
+  if (e.key === 'ArrowLeft') { e.preventDefault(); page(-1); } else if (e.key === 'ArrowRight') { e.preventDefault(); page(1); }
+};
+{
+  const stage = $('vstage'), pts = new Map();
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  // The gesture: { pinch, d0, z0, x0, y0, m0 } or { sx, sy, x0, y0, dx, dy, t0, far }. `tap`: the last tap, for a double.
+  let g = null, tap = null;
+  const begin = () => {
+    const p = [...pts.values()];
+    g = !p.length ? null : p.length > 1 ? { pinch: true, d0: dist(p[0], p[1]) || 1, z0: view.z, x0: view.x, y0: view.y, m0: { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 } }
+      : { sx: p[0].x, sy: p[0].y, x0: view.x, y0: view.y, dx: 0, dy: 0, t0: performance.now(), far: false };
+  };
+  // Anywhere on the stage but on a video, whose controls take the touch.
+  stage.onpointerdown = (e) => {
+    if (e.target.tagName === 'VIDEO') return;
+    stage.setPointerCapture(e.pointerId);
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    begin();
+  };
+  stage.onpointermove = (e) => {
+    if (!pts.has(e.pointerId) || !g) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const p = [...pts.values()];
+    if (!g.pinch && Math.hypot(p[0].x - g.sx, p[0].y - g.sy) > 10) g.far = true;
+    if (g.pinch && p.length > 1) {
+      const m = { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 };
+      zoom(Math.max(1, Math.min(6, (g.z0 * dist(p[0], p[1])) / g.d0)), g.x0 + m.x - g.m0.x, g.y0 + m.y - g.m0.y);
+    } else if (!g.pinch && view.z > 1) zoom(view.z, g.x0 + p[0].x - g.sx, g.y0 + p[0].y - g.sy);
+    else if (!g.pinch) { g.dx = p[0].x - g.sx; g.dy = p[0].y - g.sy; zoom(1, 0, 0, Math.abs(g.dx) > Math.abs(g.dy) ? g.dx : 0); }
+  };
+  const end = (e) => {
+    if (!pts.delete(e.pointerId)) return;
+    // A swipe pages when it lifts mostly sideways; a cancelled one only springs back.
+    const up = e.type === 'pointerup', now = performance.now();
+    const swipe = up && g && !g.pinch && view.z === 1 && Math.abs(g.dx) > Math.abs(g.dy) ? g.dx : 0;
+    // A double tap (or double click) toggles zoom; pointers, not dblclick, which touch browsers don't all send.
+    if (up && g && !g.pinch && !g.far && now - g.t0 < 300) {
+      if (tap && now - tap.t < 350 && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) < 30) { tap = null; zoom(view.z > 1 ? 1 : 2.5, 0, 0); } else tap = { t: now, x: e.clientX, y: e.clientY };
+    } else {
+      if (Math.abs(swipe) > 60) page(swipe < 0 ? 1 : -1);
+      if (view.z < 1.05) zoom(1, 0, 0);
+    }
+    begin();
+  };
+  stage.onpointerup = stage.onpointercancel = end;
+}
+
+// Home row hint: up to two pictures, then a chip with the first table's biggest change, else how many pictures.
+// Videos and pictures over THUMB_MAX aren't fetched for a row; they count in the chip. A redraw fetches at most
+// HINT_FILES files of at most THUMB_MAX (well under EV_KEEP and EV_BYTES), so a long Home never evicts its own
+// thumbnails and fetches them again.
+const THUMB_MAX = 1 << 20, HINT_FILES = 40;
+let hintBudget = HINT_FILES;
+function evHint(t) {
+  const ev = t.evidence || [];
+  if (!ev.length) return '';
+  const pics = ev.flatMap((e) => (e.kind === 'image' ? [e.file] : e.kind === 'compare' ? [e.before, e.after] : []));
+  const thumbs = pics.filter((f) => !isVideo(f) && f.bytes <= THUMB_MAX).slice(0, Math.min(2, hintBudget)).map((f) => {
+    hintBudget--;
+    const img = el('img', { alt: '' });
+    evFile(f).then((url) => { img.src = url; }, () => img.remove());
+    return img;
+  });
+  const table = hintBudget > 0 && ev.find((e) => e.kind === 'table');
+  if (table) hintBudget--;
+  const chip = el('span', { className: 'evc', hidden: pics.length <= thumbs.length }, plural(pics.length, pics.every(isVideo) ? 'video' : 'image'));
+  if (table) evFile(table.file).then((v) => {
+    const top = deltas(v, table.title).top;
+    if (top) { chip.className = `evc ${top.tone}`; chip.replaceChildren(el('span', {}, `${fmtChange(top.delta)} ${top.label}`)); chip.hidden = false; }
+  }).catch(() => {});
+  return el('div', { className: 'evrow' }, ...thumbs, chip);
+}
+
 // Approvals answered here (id -> when), hidden while the answer travels; one still listed after
 // ANSWER_MS was refused or lost (the worker offline, say), so it shows again to be answered.
 const answered = new Map(), ANSWER_MS = 5000;
@@ -1578,7 +2159,7 @@ function runLabel(run) {
   return [head, names.length ? ` · ${names.slice(0, 3).join(', ')}${names.length > 3 ? '…' : ''}` : ''];
 }
 const svg = (d, w = 2) => { const n = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); n.setAttribute('viewBox', '0 0 24 24'); n.setAttribute('aria-hidden', 'true'); n.innerHTML = `<path d="${d}" fill="none" stroke="currentColor" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round"/>`; return n; };
-const ICON = { term: 'M5 8l4 4-4 4M12 16h7', chev: 'M6 9l6 6 6-6', copy: 'M9 9h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2zM5 15V5a2 2 0 0 1 2-2h8', retry: 'M4 12a8 8 0 1 0 3-6.2M4 4v5h5' };
+const ICON = { term: 'M5 8l4 4-4 4M12 16h7', chev: 'M6 9l6 6 6-6', expand: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5', copy: 'M9 9h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2zM5 15V5a2 2 0 0 1 2-2h8', retry: 'M4 12a8 8 0 1 0 3-6.2M4 4v5h5' };
 const chev = () => { const n = svg(ICON.chev); n.classList.add('chev'); return n; };
 const iconBtn = (icon, label, onclick) => { const b = el('button', { type: 'button', className: 'ibtn', title: label, onclick }, svg(ICON[icon])); b.setAttribute('aria-label', label); return b; };
 
@@ -1603,13 +2184,18 @@ function toast(text) {
   toastTimer = setTimeout(() => { $('toast').hidden = true; }, 1800);
 }
 // Code blocks get a header: their language, and Copy (`Copied` for a moment).
+// A Copy button for `text()`: `Copied` for a moment.
+function copyBtn(text) {
+  const copy = el('button', { type: 'button' }, 'Copy');
+  copy.onclick = async () => {
+    copy.textContent = (await copyText(text())) ? 'Copied' : 'Couldn’t copy';
+    setTimeout(() => { copy.textContent = 'Copy'; }, 1400);
+  };
+  return copy;
+}
 function codeBlocks(body) {
   for (const pre of body.querySelectorAll('pre')) {
-    const copy = el('button', { type: 'button' }, 'Copy');
-    copy.onclick = async () => {
-      copy.textContent = (await copyText(pre.textContent)) ? 'Copied' : 'Couldn’t copy';
-      setTimeout(() => { copy.textContent = 'Copy'; }, 1400);
-    };
+    const copy = copyBtn(() => pre.textContent);
     const box = el('div', { className: 'code' }, el('div', { className: 'code-h' }, el('span', {}, pre.dataset.lang || 'code'), copy));
     pre.before(box);
     box.append(pre);
@@ -1667,18 +2253,19 @@ function drawConvo(box, items, open, more, working, retry) {
   open.just = null;
   box.replaceChildren(...nodes);
 }
-// Conversation views open on the latest exchange (`toEnd`: at the newest content, e.g. a running task's approvals), then
-// stay at the bottom as it grows unless the reader scrolled up: then `#latest` offers the newest. `sig` names what's drawn.
+// Conversation views open on the latest exchange (`toEnd`: at the newest content, e.g. a running task's approvals;
+// `toTop`: at the top, e.g. a finished task's result card), then stay at the bottom as it grows unless the reader
+// scrolled up: then `#latest` offers the newest. `sig` names what's drawn.
 let follow = { key: null, sig: null };
 const atBottom = () => innerHeight + scrollY >= document.documentElement.scrollHeight - 80;
-function placeConvo(key, sig, wasAtBottom, box, toEnd) {
+function placeConvo(key, sig, wasAtBottom, box, toEnd, toTop) {
   const end = document.documentElement.scrollHeight;
   if (follow.key !== key) {
     follow = { key, sig };
     $('latest').hidden = true;
     // The earlier-turns line and your last message under the sticky head; a short exchange just ends at the bottom.
     const head = box.parentNode.querySelector('.chead'), top = box.querySelector('.fold') || [...box.querySelectorAll(':scope > .msg.user')].pop();
-    scrollTo(0, top && !toEnd ? top.getBoundingClientRect().top + scrollY - head.offsetHeight - 8 : end);
+    scrollTo(0, toTop ? 0 : top && !toEnd ? top.getBoundingClientRect().top + scrollY - head.offsetHeight - 8 : end);
     return;
   }
   if (follow.sig === sig) return;
@@ -1743,6 +2330,7 @@ function renderDetail(id) {
   $('task-head').replaceChildren(...(t ? [el('div', { className: 'ttl', title: rootOf(t).prompt }, el('span', {}, sentTo(t), ...routineHead(rootOf(t))), chip(t.status)),
     el('div', { className: 'r2 one' }, ...dots([t.worker && shortHost(hostOf(t.worker)), harnessModel(t.harness, t.model),
       t.status === 'running' ? clock(t) : changedAt(t) && span(now - changedAt(t))]))] : []));
+  renderResult(t);
   drawTask(t);
   renderAttached((t && t.images) || []);
   // Thread links: up to the parent, down to each reply.
@@ -1778,7 +2366,7 @@ function drawTask(t) {
   const bottom = atBottom();
   detail.sig = sig;
   drawConvo($('task-convo'), items, detail.open, false, working, $('reply-text'));
-  placeConvo(`task/${t.id}`, sig, bottom, $('task-convo'), !isFinished(t));
+  placeConvo(`task/${t.id}`, sig, bottom, $('task-convo'), !isFinished(t), isFinished(t) && !$('result').hidden);
 }
 
 // Cancel: a tap asks, a second confirms. `cancelAsk` belongs to the task open when it was asked.
@@ -2536,7 +3124,7 @@ for (const f of [$('prompt'), $('reply-text')]) f.addEventListener('input', () =
 $('prompt').value = drafts.get('draft:new');
 // Leaving a view stops dictation into it and any readback.
 // A press's click has landed once the view changes: nothing left to hold for.
-window.onhashchange = () => { takeNew(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); render(); };
+window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); render(); };
 setInterval(tick, 1000);
 
 // `#new`, a link into the page for a new task, is Tasks with the composer focused; the hash becomes `#` so back links don't refocus.
