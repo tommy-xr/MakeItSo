@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 mod access;
 pub use access::access_headers;
+pub mod diff;
+pub use diff::{DiffBase, DiffStat, TaskDiff};
 pub mod evidence;
 pub use evidence::{Evidence, EvidenceDraft, TaskResult};
 mod image;
@@ -144,6 +146,10 @@ pub struct Task {
     /// enforce it rely on the prompt.
     #[serde(default)]
     pub read_only: bool,
+    /// Where its thread started in its git repo: a reply's changes are told
+    /// against it. None: the worker records where this task starts.
+    #[serde(default)]
+    pub diff_base: Option<Box<DiffBase>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -219,6 +225,9 @@ pub enum AgentEvent {
     /// The agent's closing summary (`report_result`); kept off the transcript
     /// like `Artifact`, and shown as `TaskSummary::result`.
     Result(TaskResult),
+    /// What the task changed in its git repo, sent by the worker before the run
+    /// ends; stored like `Artifact`, off the transcript.
+    Diff(TaskDiff),
     /// The agent hit a usage limit; `resets_at` is Unix seconds when it lifts, if known.
     Limited {
         #[serde(default)]
@@ -549,6 +558,9 @@ pub struct TaskSummary {
     /// The agent's own summary; when set, `summary` is its one-line form.
     #[serde(default)]
     pub result: Option<TaskResult>,
+    /// What it changed in its git repo; the files are at `/api/tasks/<id>/diff`.
+    #[serde(default)]
+    pub diff: Option<DiffStat>,
     #[serde(default)]
     pub attention: Attention,
     /// Queued only because every online worker that could run it is out of
@@ -1126,6 +1138,7 @@ mod tests {
             links: vec![],
             evidence: vec![],
             result: None,
+            diff: None,
             attention: Attention::None,
             blocked_until: None,
             approvals: vec![],

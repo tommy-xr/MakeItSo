@@ -8,6 +8,7 @@ mod config;
 mod deliver;
 mod evidence;
 mod feed;
+mod git;
 mod inventory;
 mod live;
 mod mcp;
@@ -833,8 +834,10 @@ async fn run_task(
 ) {
     let id = task.id;
     let had_images = !images.is_empty();
+    // Where it started in its repo, until its diff is sent.
+    let base = Mutex::new(None);
     let cancelled = tokio::select! {
-        () = run(ctx, task, images, &tx) => false,
+        () = run(ctx, task, images, &tx, &base) => false,
         // Err: the sender is gone, so no cancel can come; let the run finish.
         Ok(()) = cancelled => true,
     };
@@ -844,6 +847,7 @@ async fn run_task(
     }
     if cancelled {
         tracing::info!(%id, "cancelled");
+        send_diff(id, &base, &tx).await;
         let _ = tx.send((id, AgentEvent::Cancelled)).await;
     }
 }
@@ -854,11 +858,32 @@ fn image_dir(id: TaskId) -> PathBuf {
     std::env::temp_dir().join(format!("mis-task-{id}"))
 }
 
+/// What the task changed in its repo since `base`, sent before the run ends
+/// (once: `base` is taken).
+async fn send_diff(
+    id: TaskId,
+    base: &Mutex<Option<DiffBase>>,
+    tx: &mpsc::Sender<(TaskId, AgentEvent)>,
+) {
+    let Some(base) = base.lock().unwrap().take() else {
+        return;
+    };
+    // Bounded: the run's end waits on it.
+    let diff = tokio::time::timeout(Duration::from_secs(30), git::diff(&base)).await;
+    match diff.ok().flatten() {
+        Some(d) => {
+            let _ = tx.send((id, AgentEvent::Diff(d))).await;
+        }
+        None => tracing::warn!(%id, "no diff of {}", base.root),
+    }
+}
+
 async fn run(
     ctx: &Ctx,
     task: Task,
     images: Vec<ImageFile>,
     tx: &mpsc::Sender<(TaskId, AgentEvent)>,
+    base: &Mutex<Option<DiffBase>>,
 ) {
     let id = task.id;
     let fail = |summary: String| {
@@ -932,6 +957,11 @@ async fn run(
             &mcp::machine_hint(&ctx.inventory, agent.name()),
         ),
     };
+    // A message to the user's own session changes their repo, not the task's.
+    if task.send_to.is_none() {
+        *base.lock().unwrap() =
+            git::base(&cwd, &ctx.roots, task.diff_base.clone().map(|b| *b)).await;
+    }
     let (atx, mut arx) = mpsc::channel(64);
     let fwd = async {
         let mut deltas = coalesce::Coalescer::default();
@@ -951,6 +981,9 @@ async fn run(
                     windows.iter_mut().for_each(|w| w.observed_at = now);
                     ctx.add_limits(agent.name(), windows);
                     continue;
+                }
+                if matches!(ev, AgentEvent::Finished { .. }) {
+                    send_diff(id, base, tx).await;
                 }
                 if tx.send((id, ev)).await.is_err() {
                     return;

@@ -496,6 +496,27 @@ impl App {
         self.transition(|l| ((), l.add_evidence(wid, conn, task, stored)));
     }
 
+    /// Bound and keep what `task` changed in its repo, then show its counts on
+    /// the task. The caller awaits it, so the run's `Finished` lands after.
+    async fn diffed(&self, wid: WorkerId, conn: ConnId, task: TaskId, diff: TaskDiff) {
+        if self.ledger().attached(wid, conn, task).is_none() {
+            return;
+        }
+        let diff = diff.bounded();
+        if let Some(store) = self.evidence.clone() {
+            // Served without the base: where the repo is and what was dirty stay here.
+            let view = TaskDiff {
+                base: Default::default(),
+                ..diff.clone()
+            };
+            let stored = tokio::task::spawn_blocking(move || store.store_diff(task, &view)).await;
+            if !matches!(stored, Ok(Ok(()))) {
+                tracing::warn!(%task, "storing its diff failed: {stored:?}");
+            }
+        }
+        self.transition(|l| ((), l.add_diff(wid, conn, task, &diff)));
+    }
+
     /// Restore the saved ledger, if it has a dir. Unusable: serve without
     /// saving. Err: another orchestrator has it.
     fn open_store(&self) -> anyhow::Result<()> {
@@ -891,6 +912,7 @@ pub fn router(app: App) -> Router {
         .route("/api/evidence/{id}", get(evidence_file))
         .route("/api/update", get(update_status).post(set_update))
         .route("/api/tasks/{id}/cancel", post(cancel))
+        .route("/api/tasks/{id}/diff", get(task_diff))
         .route("/api/routines", get(routines))
         .route("/api/routines/{name}/{action}", post(routine_action))
         .route("/api/sessions", get(live_sessions))
@@ -1269,6 +1291,31 @@ async fn evidence_file(
     }
 }
 
+/// What a task changed in its repo (`TaskDiff`, base left out), as JSON; 404
+/// until its worker sends one. Auth as for evidence.
+async fn task_diff(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(task): Path<TaskId>,
+) -> Response {
+    if !app.admit(&headers, peer, "/api/tasks/diff").await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match app.evidence.as_ref().and_then(|s| s.read_diff(task)) {
+        Some(json) => (
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                (header::CONTENT_SECURITY_POLICY, "default-src 'none'"),
+            ],
+            json,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct ListParams {
     /// Also list `claude -p` / `codex exec` runs.
@@ -1524,6 +1571,9 @@ async fn worker_conn(mut sock: WebSocket, app: App) {
                 incoming = recv_json::<WorkerMsg>(&mut sock) => match incoming {
                     Some(WorkerMsg::Event { task, event: AgentEvent::Artifact(draft) }) => {
                         app.attach(wid, conn, task, draft).await;
+                    }
+                    Some(WorkerMsg::Event { task, event: AgentEvent::Diff(diff) }) => {
+                        app.diffed(wid, conn, task, diff).await;
                     }
                     Some(WorkerMsg::Event { task, event }) => {
                         app.transition(|l| ((), l.event(wid, conn, task, event)));

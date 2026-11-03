@@ -497,6 +497,54 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .rfoot button { display: inline-flex; align-items: center; gap: .375rem; min-height: 2.25rem; padding: 0 .625rem; border-radius: .625rem; background: none; color: var(--soft); font: 500 .8125rem var(--sans); }
   .rfoot svg { width: 1rem; height: 1rem; }
   @media (hover: hover) { .rfoot button:hover { background: var(--hover); } }
+  /* Files changed: a card under the result; each file row folds open to its patch, which scrolls sideways. */
+  #diff { margin: 1rem 0 .5rem; padding-top: .75rem; border-radius: 1rem; background: var(--card); overflow: hidden; }
+  .dh { display: flex; align-items: baseline; gap: .5rem; padding: 0 1rem; }
+  .dh h3 { margin: 0; padding: 0; color: var(--fg); font: 600 1rem/1.35 var(--sans); }
+  .dh .dn { margin-left: auto; font-size: .8125rem; color: var(--soft); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .add { color: var(--ok); } .del { color: var(--bad); }
+  .dsub { padding: .125rem 1rem .625rem; font-size: .8125rem; color: var(--dim); overflow-wrap: anywhere; }
+  :is(.dsub, .dask) code { font: .75rem var(--mono); color: var(--fg2); }
+  .dfl { margin: 0; padding: 0; list-style: none; }
+  .dfl > li { border-top: 1px solid var(--sep); }
+  .dfr { display: flex; align-items: center; gap: .5rem; width: 100%; min-height: 2.75rem; padding: 0 .75rem 0 1rem; border-radius: 0; background: none; color: var(--fg); font: 400 .875rem var(--sans); text-align: left; }
+  .dfr:active { transform: none; background: var(--hover); }
+  @media (hover: hover) { .dfr:hover, :is(.dmore, .dbt):hover { background: var(--hover); } }
+  .dst { flex: none; width: 1rem; font: 700 .6875rem/1 var(--mono); }
+  .s-A { color: var(--ok); } .s-M { color: var(--warn); } .s-D { color: var(--bad); } .s-R { color: var(--a-blue); }
+  /* The folder gives way first, so a narrow row keeps the file's name. */
+  .dp { flex: 1; min-width: 0; display: flex; font: .8125rem/1.3 var(--mono); white-space: nowrap; }
+  .dd { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--dim); }
+  .db { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  .dc { flex: none; font-size: .75rem; font-variant-numeric: tabular-nums; color: var(--dim); }
+  .dtag { flex: none; padding: 0 .375rem; border-radius: 999px; background: var(--t-warn); color: var(--warn); font: 600 .625rem/1.6 var(--sans); }
+  .dfr .chev { flex: none; width: 1rem; height: 1rem; color: var(--dim); transition: transform .15s; }
+  .dfr[aria-expanded=true] .chev { transform: rotate(180deg); }
+  .dpatch { margin: 0 .5rem .5rem; border-radius: .625rem; background: var(--code); overflow-x: auto; font: .6875rem/1.6 var(--mono); }
+  .dlines { display: inline-block; min-width: 100%; padding: .375rem 0; }
+  .dl { display: flex; white-space: pre; }
+  .dl .ln { flex: none; min-width: 3ch; padding: 0 .5ch 0 .75ch; text-align: right; color: var(--faint); -webkit-user-select: none; user-select: none; }
+  .dl .sg { flex: none; width: 2ch; text-align: center; -webkit-user-select: none; user-select: none; }
+  .dl .tx { padding-right: .75rem; color: var(--fg2); }
+  .dl.a { background: var(--hl-at); } .dl.a .sg { color: var(--hl-a); } .dl.d { background: var(--hl-dt); } .dl.d .sg { color: var(--hl-d); }
+  .dl.h .tx { color: var(--hl-m); } .dl.m .tx { color: var(--dim); font-style: italic; }
+  .dmeta { padding: .5rem .75rem 0; color: var(--dim); font: .75rem var(--sans); white-space: normal; }
+  .dnote { margin: 0; padding: .625rem 1rem; border-top: 1px solid var(--sep); font-size: .8125rem; color: var(--dim); }
+  :is(.dmore, .dbt) { display: flex; align-items: center; gap: .375rem; width: 100%; min-height: 2.75rem; padding: 0 1rem; border-top: 1px solid var(--sep); border-radius: 0; background: none; color: var(--link); font: 500 .8125rem var(--sans); text-align: left; }
+  .dbt { color: var(--soft); }
+  .dbt .chev { width: 1rem; height: 1rem; transition: transform .15s; } .dbt[aria-expanded=true] .chev { transform: rotate(180deg); }
+  .dact { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: .5rem; padding: .625rem .75rem; border-top: 1px solid var(--sep); }
+  .dact button { min-height: 2.25rem; padding: 0 1rem; border-radius: .75rem; font: 600 .8125rem var(--sans); }
+  .dpr { display: inline-flex; align-items: center; gap: .5rem; min-height: 2.25rem; margin-right: auto; padding: 0 .75rem; border-radius: .75rem; background: var(--raised); color: var(--fg); font: 600 .8125rem var(--sans); text-decoration: none; }
+  .dpr .v { font-weight: 500; } .dpr .ok { color: var(--ok); } .dpr .run { color: var(--run); } .dpr .bad { color: var(--bad); } .dpr .merged { color: var(--link); } .dpr .dim { color: var(--dim); }
+  .dask { margin: 0 .75rem .75rem; padding: .75rem .875rem; border-radius: .75rem; background: var(--raised); font-size: .875rem; animation: rise .15s ease-out; }
+  .dask p { margin: 0 0 .625rem; }
+  .dask .row { display: flex; justify-content: flex-end; gap: .5rem; margin: 0; }
+  .dask button { min-height: 2.25rem; padding: 0 1rem; border-radius: .75rem; font: 600 .8125rem var(--sans); }
+  :is(.dact, .dask) .yes { background: var(--accent); color: var(--on-accent); }
+  .dask button:not(.yes) { background: none; color: var(--soft); }
+  /* Home: a finished task's lines changed, after its meta line. */
+  .dchip { margin-left: .5rem; font: 600 .6875rem/1 var(--sans); font-variant-numeric: tabular-nums; white-space: nowrap; }
   /* Evidence strip: pictures two across (a lone one, a video or a compare full width); tables and output full width. */
   .evs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; margin: .625rem 0 0; }
   .evs > .wide { grid-column: 1 / -1; }
@@ -639,6 +687,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
 <main id="detail" hidden>
   <div class="chead"><a href="#" class="back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a><div id="task-head"></div></div>
   <section id="result" aria-label="Result" hidden></section>
+  <section id="diff" aria-label="Files changed" hidden></section>
   <div id="task-convo" class="convo"></div>
   <section id="approvals" hidden></section>
   <div class="row" hidden><button type="button" id="speak">Speak</button></div>
@@ -1082,6 +1131,55 @@ function resultMd(result, evidence, got) {
   return `${out.join('\n\n')}\n`;
 }
 // ev:end
+
+// diff:begin. Task diffs, pure: a patch as rows, a path split for a narrow row, what a finished task offers and the
+// replies that ask its agent for it. tests/md.test.mjs runs this block.
+// One file's patch as rows { k, n, text }: k 'a' added, 'd' deleted, 'c' context, 'h' hunk header, 'm' a note (no
+// newline at end; mode and rename lines of a patch without hunks); n the line number, the old file's for a deletion.
+// git's header lines go (a file swapped for a symlink has two sections); a CR before a line end is dropped.
+const PATCH_META = /^(?:old mode|new mode|new file mode|deleted file mode|similarity index|rename from|rename to|copy from|copy to) /;
+function patchRows(patch) {
+  const lines = String(patch).replace(/\n$/, '').split('\n').map((l) => l.replace(/\r$/, ''));
+  const rows = [], meta = [];
+  let o = 0, n = 0, head = true;
+  for (const l of lines) {
+    const h = l.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (l.startsWith('diff --git ')) head = true;
+    else if (h) { head = false; o = +h[1]; n = +h[2]; rows.push({ k: 'h', n: null, text: l }); }
+    else if (head) { if (PATCH_META.test(l)) meta.push({ k: 'm', n: null, text: l }); }
+    else if (l[0] === '+') rows.push({ k: 'a', n: n++, text: l.slice(1) });
+    else if (l[0] === '-') rows.push({ k: 'd', n: o++, text: l.slice(1) });
+    else if (l[0] === '\\') rows.push({ k: 'm', n: null, text: l.slice(2) });
+    else { rows.push({ k: 'c', n: n++, text: l.slice(1) }); o++; }
+  }
+  return rows.length ? rows : meta;
+}
+// `a/b/c.rs` -> ['a/b/', 'c.rs']: a narrow row cuts the folder, keeping the name.
+const pathParts = (p) => [p.slice(0, p.lastIndexOf('/') + 1), p.slice(p.lastIndexOf('/') + 1)];
+// A finished task's offers: Open PR with a GitHub remote and something to propose, unless its thread has a PR;
+// Push on a branch of its own (not the default) with work its upstream lacks: commits, uncommitted changes, or no upstream yet.
+function diffOffer(stat, hasPr) {
+  const r = stat.repo, def = r.default_branch;
+  const own = !!r.branch && (def ? r.branch !== def : !['main', 'master'].includes(r.branch));
+  return { pr: !!r.github && !hasPr && (stat.files > 0 || r.commits > 0 || r.ahead > 0),
+    push: own && (r.ahead > 0 || !!r.uncommitted || (!r.upstream && r.commits > 0)) };
+}
+// The replies sent for them: the agent does the work, so it follows the repo's conventions and its worker's
+// permissions. `before`: paths changed before the thread started, to leave out.
+function leaveOut(before) {
+  if (!before.length) return '';
+  const list = before.slice(0, 10).map((p) => JSON.stringify(p)).join(', ') + (before.length > 10 ? `, and ${before.length - 10} more` : '');
+  return ` These files had changes before this thread started; leave them out unless they belong to it: ${list}.`;
+}
+const prPrompt = (before) => ['Open a pull request for the changes in this thread.',
+  '1. If you are on the default branch (or a detached HEAD), create a new branch with a short descriptive name.',
+  `2. Commit the changes with a Conventional Commits message (\`feat: …\`, \`fix: …\`), following this repo's conventions (AGENTS.md, CONTRIBUTING) if it has them.${leaveOut(before)}`,
+  '3. Push the branch.',
+  '4. Open the PR with `gh pr create`; its body shows before/after evidence of the change (test output, logs or screenshots).',
+  '5. Report the PR link with `report_evidence` (kind `link`).'].join('\n');
+const pushPrompt = (before) => [`Commit this thread's uncommitted changes, if any, with a Conventional Commits message, then push the current branch.${leaveOut(before)}`,
+  'If the branch has an open pull request, report its link with `report_evidence` (kind `link`).'].join(' ');
+// diff:end
 
 // One transcript line, matching `mis show` / `mis task --follow`; null for none.
 function eventLine(e) {
@@ -1702,7 +1800,7 @@ function taskRow(t, now, reply) {
   return el('li', { className: [reply && 'reply', t.status === 'cancelled' && 'cancelled'].filter(Boolean).join(' ') },
     el('a', { href: `#task/${t.id}` },
       el('div', { className: 'r1' }, statusDot(t), el('span', { className: 'one' }, reply ? '↳ ' : '', sentTo(t), ...routineHead(t))),
-      el('div', { className: 'r2 one' }, ...dots([t.worker && shortHost(hostOf(t.worker)), t.model, t.status === 'running' ? clock(t) : span(now - changedAt(t))])),
+      el('div', { className: 'r2 one' }, ...dots([t.worker && shortHost(hostOf(t.worker)), t.model, t.status === 'running' ? clock(t) : span(now - changedAt(t))]), diffChip(t)),
       taskLine(t), evHint(t)));
 }
 // A thread: its first task, then its replies folded into one line (the most urgent, else the latest); a tap shows them.
@@ -1909,6 +2007,111 @@ function renderResult(t) {
   box.replaceChildren(r ? el('div', { className: 'rcard' }, el('h2', {}, r.headline),
     r.points.length ? el('ul', {}, ...r.points.map((p) => el('li', {}, p))) : '', foot) : foot, ev.length ? evStrip(ev) : '');
 }
+// Files changed: a task's diff (fetched once per diff from `/api/tasks/<id>/diff`), its file rows folding open to their
+// patch; under them the Push / Open PR offers, each asking in place before its reply goes to the agent.
+const diffs = new Map(), DIFF_KEEP = 8, DIFF_FIRST = 5; // task id -> { sig, v: TaskDiff | null, error }
+let diffKey = '', diffUi = { id: null };
+function diffOf(t) {
+  const sig = JSON.stringify(t.diff);
+  let e = diffs.get(t.id);
+  if (e && e.sig === sig) return e;
+  e = { sig, v: null, error: '' };
+  diffs.delete(t.id);
+  diffs.set(t.id, e);
+  for (const id of diffs.keys()) if (diffs.size > DIFF_KEEP) diffs.delete(id);
+  fetch(`/api/tasks/${t.id}/diff`, { headers: authHeaders() }).then(async (r) => {
+    if (!r.ok) throw new Error(r.status === 404 ? 'Files unavailable' : `error ${r.status}`);
+    e.v = await r.json();
+  }).catch((err) => { e.error = err.message || 'couldn’t load the files'; }).finally(() => { if (diffs.get(t.id) === e) render(); });
+  return e;
+}
+// The newest PR link reported anywhere in t's thread.
+function threadPr(t) {
+  const all = [rootOf(t)];
+  for (let i = 0; i < all.length && all.length < 200; i++) all.push(...tasks.filter((r) => r.parent === all[i].id));
+  return all.sort((a, b) => (a.started_at || 0) - (b.started_at || 0)).flatMap((x) => x.links || [])
+    .filter((l) => l.kind === 'pr' && safeUrl(l)).pop();
+}
+const lineCounts = (f) => (f.binary ? [el('span', {}, 'binary')] : [el('span', { className: 'add' }, `+${f.added}`), ' ', el('span', { className: 'del' }, `−${f.removed}`)]);
+function patchView(f) {
+  const notes = [f.from && `Renamed from ${f.from}`, f.untracked && 'Not tracked by git yet', f.before === 'also' && 'It had uncommitted changes before this task; they show here too',
+    f.before === 'only' && 'Changed before this task, not by it', !f.patch && (f.note ? cap(f.note) : 'No patch')].filter(Boolean);
+  const rows = f.patch ? patchRows(f.patch) : [];
+  return el('div', { className: 'dpatch' }, ...notes.map((n) => el('div', { className: 'dmeta' }, n)),
+    rows.length ? el('div', { className: 'dlines' }, ...rows.map((r) => el('div', { className: `dl ${r.k}` },
+      el('span', { className: 'ln' }, r.n === null ? '' : String(r.n)), el('span', { className: 'sg' }, r.k === 'a' ? '+' : r.k === 'd' ? '-' : ''),
+      el('span', { className: 'tx' }, r.text)))) : '');
+}
+function fileRow(f) {
+  const open = diffUi.open.has(f.path), [dir, base] = pathParts(f.path);
+  const row = el('button', { type: 'button', className: 'dfr', title: f.from ? `${f.from} → ${f.path}` : f.path },
+    el('span', { className: `dst s-${f.status}` }, f.status),
+    el('span', { className: 'dp' }, el('span', { className: 'dd' }, dir), el('span', { className: 'db' }, base)),
+    f.before === 'also' ? el('span', { className: 'dtag' }, 'edited before') : '',
+    el('span', { className: 'dc' }, ...lineCounts(f)), chev());
+  row.setAttribute('aria-expanded', String(open));
+  row.onclick = () => { if (open) diffUi.open.delete(f.path); else diffUi.open.add(f.path); render(); };
+  return el('li', {}, row, open ? patchView(f) : '');
+}
+function renderDiff(t) {
+  const box = $('diff'), stat = t && t.diff;
+  if (!stat || !(stat.files > 0 || stat.repo.commits > 0)) { box.hidden = true; box.replaceChildren(); diffKey = ''; return; }
+  if (diffUi.id !== t.id) diffUi = { id: t.id, open: new Set(), all: false, before: false, ask: null };
+  const e = diffOf(t), pr = threadPr(t), r = stat.repo;
+  // Offered once the files are here: the reply names the earlier changes to leave out.
+  const offer = e.v && isFinished(t) && !readOnly && t.session && t.worker ? diffOffer(stat, !!pr) : { pr: false, push: false };
+  if (!offer[diffUi.ask]) diffUi.ask = null;
+  // Asking needs the socket and no submit in flight, as the reply form does.
+  const busy = !!pending || !(ws && ws.readyState === WebSocket.OPEN);
+  const key = JSON.stringify([t.id, e.sig, !!e.v, e.error, [...diffUi.open], diffUi.all, diffUi.before, diffUi.ask, pr && [pr.url, pr.pr], offer, busy, readOnly]);
+  if (key === diffKey) return;
+  diffKey = key;
+  box.hidden = false;
+  const head = el('div', { className: 'dh' }, el('h3', {}, 'Files changed'),
+    el('span', { className: 'dn' }, `${plural(stat.files, 'file')} · `, ...lineCounts(stat)));
+  const sub = el('div', { className: 'dsub' }, ...dots([r.branch ? el('span', {}, 'on ', el('code', {}, r.branch)) : 'detached HEAD',
+    r.commits && plural(r.commits, 'commit'), r.upstream ? r.ahead && el('span', {}, `${r.ahead} ahead of `, el('code', {}, r.upstream)) : r.commits && 'not pushed']));
+  const files = e.v ? e.v.files : [], mine = files.filter((f) => f.before !== 'only'), earlier = files.filter((f) => f.before === 'only');
+  const shown = diffUi.all ? mine : mine.slice(0, DIFF_FIRST);
+  const toggle = (cls, label, on, flip) => {
+    const b = el('button', { type: 'button', className: cls, onclick: () => { flip(); render(); } }, label, cls === 'dbt' ? chev() : '');
+    if (cls === 'dbt') b.setAttribute('aria-expanded', String(on));
+    return b;
+  };
+  const body = !e.v ? [e.error ? el('p', { className: 'dnote' }, e.error) : skel(3)] : [
+    el('ul', { className: 'dfl' }, ...shown.map(fileRow)),
+    mine.length > shown.length ? toggle('dmore', `Show all ${plural(mine.length, 'file')}`, false, () => { diffUi.all = true; }) : '',
+    diffUi.all && e.v.more ? el('p', { className: 'dnote' }, `${plural(e.v.more, 'more file')} not listed`) : '',
+    earlier.length ? toggle('dbt', `Changed before this task · ${plural(earlier.length, 'file')}`, diffUi.before, () => { diffUi.before = !diffUi.before; }) : '',
+    diffUi.before ? el('ul', { className: 'dfl' }, ...earlier.map(fileRow)) : ''];
+  const ask = (what) => el('button', { type: 'button', className: what === 'pr' ? 'yes' : '', disabled: busy, onclick: () => { diffUi.ask = what; render(); } }, what === 'pr' ? 'Open PR' : 'Push');
+  const acts = [pr ? prChip(pr) : '', offer.push && !diffUi.ask ? ask('push') : '', offer.pr && !diffUi.ask ? ask('pr') : ''].filter(Boolean);
+  const leave = earlier.map((f) => f.path);
+  const confirm = diffUi.ask && el('div', { className: 'dask', role: 'group', ariaLabel: 'Confirm' },
+    el('p', {}, diffUi.ask === 'pr' ? 'Ask the agent to commit, push and open a pull request? It replies in this thread with the link.'
+      : el('span', {}, 'Ask the agent to commit and push ', el('code', {}, r.branch), '?')),
+    el('div', { className: 'row' },
+      el('button', { type: 'button', onclick: () => { diffUi.ask = null; render(); } }, 'Not now'),
+      el('button', { type: 'button', className: 'yes', disabled: busy, onclick: () => askAgent(t, diffUi.ask === 'pr' ? prPrompt(leave) : pushPrompt(leave)) },
+        diffUi.ask === 'pr' ? 'Open PR' : 'Push')));
+  box.replaceChildren(head, sub, ...body, acts.length ? el('div', { className: 'dact' }, ...acts) : '', confirm || '');
+}
+// A PR the thread reported: its number and state, opening it.
+function prChip(l) {
+  const [v, vc] = l.pr ? prVerdict(l.pr) : ['', ''];
+  return el('a', { className: 'dpr', href: safeUrl(l).href, target: '_blank', rel: 'noopener' }, `PR ${parts(l)[0]}`, v ? el('span', { className: vc }, v) : '');
+}
+// Sends `prompt` as a reply in t's thread, as the reply form would; its Submitted opens the reply.
+function askAgent(t, prompt) {
+  if (pending || !(ws && ws.readyState === WebSocket.OPEN)) return;
+  pending = { key: `ask:${t.id}`, text: prompt };
+  $('reply-error').hidden = true;
+  diffUi.ask = null;
+  send({ type: 'submit', prompt, cwd: null, harness: null, model: null, reply_to: t.id });
+  render();
+}
+// Home: lines a finished task changed.
+const diffChip = (t) => (isFinished(t) && t.diff && (t.diff.added || t.diff.removed) ? el('span', { className: 'dchip' }, ...lineCounts(t.diff)) : '');
 // Copies the result as Markdown for a PR. Tables and outputs are fetched already (the strip shows them); any not
 // yet here are awaited, which some browsers' clipboards refuse after the tap, hence the fallback toast.
 async function copyResult(r, ev) {
@@ -2466,6 +2669,7 @@ function renderDetail(id) {
     el('div', { className: 'r2 one' }, ...dots([t.worker && shortHost(hostOf(t.worker)), harnessModel(t.harness, t.model),
       t.status === 'running' ? clock(t) : changedAt(t) && span(now - changedAt(t))]))] : []));
   renderResult(t);
+  renderDiff(t);
   drawTask(t);
   renderAttached((t && t.images) || []);
   // Thread links: up to the parent, down to each reply.

@@ -183,6 +183,12 @@ struct TaskEntry {
     /// The agent's own summary (`AgentEvent::Result`).
     #[serde(default)]
     result: Option<TaskResult>,
+    /// What it changed in its git repo (`Ledger::add_diff`), and where it started
+    /// there, which replies in its thread start from.
+    #[serde(default)]
+    diff: Option<DiffStat>,
+    #[serde(default)]
+    diff_base: Option<DiffBase>,
     /// The agent reported a usage limit.
     limited: bool,
     /// A client opened it after it finished.
@@ -279,6 +285,8 @@ impl TaskEntry {
             links: vec![],
             evidence: vec![],
             result: None,
+            diff: None,
+            diff_base: None,
             limited: false,
             seen: false,
             images: vec![],
@@ -373,6 +381,7 @@ impl TaskEntry {
             links: self.links.clone(),
             evidence: self.evidence.clone(),
             result: self.result.clone(),
+            diff: self.diff.clone(),
             attention: self.attention(),
             // Needs the fleet; see `Ledger::status`.
             blocked_until: None,
@@ -666,6 +675,7 @@ impl Ledger {
                 resume: None,
                 send_to: None,
                 read_only: false,
+                diff_base: None,
             },
             self.now_ms,
         );
@@ -732,6 +742,9 @@ impl Ledger {
                     resume: Some(session.clone()),
                     // The user replies: their worker's permissions, not the run's.
                     read_only: false,
+                    // The thread's changes add up from where it started.
+                    diff_base: (p.diff_base.clone().map(Box::new))
+                        .or_else(|| p.task.diff_base.clone()),
                     ..p.task.clone()
                 };
                 self.enqueue_pinned(wid, task, images)
@@ -776,6 +789,7 @@ impl Ledger {
             resume: Some(to.session.to_string()),
             send_to: Some(to),
             read_only: false,
+            diff_base: None,
         };
         self.enqueue_pinned(wid, task, images)
     }
@@ -1311,7 +1325,7 @@ impl Ledger {
                 }
                 return vec![];
             }
-            AgentEvent::Artifact(_) => return vec![],
+            AgentEvent::Artifact(_) | AgentEvent::Diff(_) => return vec![],
             // Relayed, never recorded: the block's `Text` follows with all of it.
             AgentEvent::TextDelta { text } => {
                 let Some(w) = self.workers.get_mut(&wid) else {
@@ -1487,6 +1501,24 @@ impl Ledger {
             Ok(e) => t.evidence.push(e),
             Err((title, why)) => t.add_link(note(&format!("{title}: not kept ({why})"))),
         }
+        vec![Effect::Broadcast(self.status())]
+    }
+
+    /// What running `task` changed in its repo, its files stored by the shell.
+    /// Only from the task's worker, on its live connection.
+    pub fn add_diff(
+        &mut self,
+        wid: WorkerId,
+        conn: ConnId,
+        task: TaskId,
+        diff: &TaskDiff,
+    ) -> Vec<Effect> {
+        let running = self.owned_task(wid, conn, task);
+        let Some(t) = running.filter(|t| t.status == TaskStatus::Running) else {
+            return vec![];
+        };
+        t.diff = Some(diff.stat());
+        t.diff_base = Some(diff.base.clone());
         vec![Effect::Broadcast(self.status())]
     }
 
@@ -2831,6 +2863,61 @@ mod tests {
         l.event(wid, 1, task, done);
         assert_eq!(l.attached(wid, 1, task), None, "finished");
         assert!(l.add_evidence(wid, 1, task, Ok(shot)).is_empty());
+    }
+
+    #[test]
+    fn a_diff_counts_only_from_the_running_tasks_worker_and_replies_start_from_its_base() {
+        use mis_types::diff::*;
+        let (mut l, wid, task) = running_setup();
+        let base = DiffBase {
+            root: "/r".into(),
+            head: "abc".into(),
+            dirty: Default::default(),
+        };
+        let file = FileDiff {
+            path: "a.rs".into(),
+            from: None,
+            status: FileStatus::Modified,
+            added: 3,
+            removed: 1,
+            binary: false,
+            untracked: false,
+            before: Before::Clean,
+            patch: None,
+            note: None,
+        };
+        let diff = TaskDiff {
+            base: base.clone(),
+            files: vec![file],
+            ..Default::default()
+        };
+        // Fed straight in it is ignored: the shell stores its files first.
+        assert!(l
+            .event(wid, 1, task, AgentEvent::Diff(diff.clone()))
+            .is_empty());
+        assert!(l.add_diff(wid, 2, task, &diff).is_empty(), "stale conn");
+        assert!(
+            l.add_diff(Uuid::new_v4(), 1, task, &diff).is_empty(),
+            "other worker"
+        );
+        assert!(!l.add_diff(wid, 1, task, &diff).is_empty());
+        let stat = l.show(task).unwrap().0.diff.unwrap();
+        assert_eq!((stat.files, stat.added, stat.removed), (1, 3, 1));
+        for e in [
+            AgentEvent::Started {
+                session: Some("s1".into()),
+                model: None,
+            },
+            AgentEvent::Finished {
+                ok: true,
+                summary: None,
+            },
+        ] {
+            l.event(wid, 1, task, e);
+        }
+        assert!(l.add_diff(wid, 1, task, &diff).is_empty(), "finished");
+        let (_, eff) = l.reply(task, "more".into(), vec![], true).unwrap();
+        assert_eq!(sent(&eff)[0].diff_base, Some(Box::new(base)));
     }
 
     #[test]

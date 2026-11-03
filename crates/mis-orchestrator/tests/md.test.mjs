@@ -1,5 +1,5 @@
 // The page's pure renderers (index.html): markdown between `md:begin` and `md:end`, evidence helpers between `ev:begin`
-// and `ev:end`. Run: node --test crates/mis-orchestrator/tests
+// and `ev:end`, diff helpers between `diff:begin` and `diff:end`. Run: node --test crates/mis-orchestrator/tests
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -9,6 +9,8 @@ const block = page.slice(page.indexOf('// md:begin'), page.indexOf('// md:end'))
 const md = new Function(`${block}; return md;`)();
 const evBlock = page.slice(page.indexOf('// ev:begin'), page.indexOf('// ev:end'));
 const ev = new Function(`${evBlock}; return { ansi, better, change, fmtChange, tone, deltas, tableMd, resultMd };`)();
+const diffBlock = page.slice(page.indexOf('// diff:begin'), page.indexOf('// diff:end'));
+const df = new Function(`${diffBlock}; return { patchRows, pathParts, diffOffer, prPrompt, pushPrompt };`)();
 
 // Every tag in the output, e.g. ['p', 'a', 'code'].
 const tags = (html) => [...html.matchAll(/<([a-z0-9]+)/g)].map((m) => m[1]);
@@ -285,4 +287,41 @@ test('markdown for a PR: table with Δ, escaped cells, output fenced, image plac
     '<details><summary>cargo &lt;test&gt; (last 2 lines)</summary>\n\n````\n```ok```\n````\n\n</details>',
     '<!-- Images need uploading: replace the placeholder links above with hosted ones. -->'].join('\n\n') + '\n');
   assert.equal(ev.resultMd(null, [], new Map()), '\n');
+});
+
+test('patch rows: hunks numbered, headers dropped, CRs and no-newline notes', () => {
+  const patch = 'diff --git a/a b/a\nindex 1..2 100644\n--- a/a\n+++ b/a\n@@ -3,3 +3,4 @@ fn x\n ctx\r\n-old\n+new\r\n+<script>x</script>\n'
+    + ' end\n\\ No newline at end of file\n@@ -0,0 +1 @@\n+top\n';
+  assert.deepEqual(df.patchRows(patch), [
+    { k: 'h', n: null, text: '@@ -3,3 +3,4 @@ fn x' }, { k: 'c', n: 3, text: 'ctx' }, { k: 'd', n: 4, text: 'old' },
+    { k: 'a', n: 4, text: 'new' }, { k: 'a', n: 5, text: '<script>x</script>' }, { k: 'c', n: 6, text: 'end' },
+    { k: 'm', n: null, text: 'No newline at end of file' }, { k: 'h', n: null, text: '@@ -0,0 +1 @@' }, { k: 'a', n: 1, text: 'top' }]);
+  // A file swapped for a symlink: two sections, each one's headers dropped.
+  const swap = 'diff --git a/f b/f\ndeleted file mode 100644\n--- a/f\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n'
+    + 'diff --git a/f b/f\nnew file mode 120000\n--- /dev/null\n+++ b/f\n@@ -0,0 +1 @@\n+t\n\\ No newline at end of file\n';
+  assert.deepEqual(df.patchRows(swap).map((r) => r.k + r.text), ['h@@ -1 +0,0 @@', 'dx', 'h@@ -0,0 +1 @@', 'at', 'mNo newline at end of file']);
+  // A rename or mode change without hunks shows its header lines.
+  assert.deepEqual(df.patchRows('diff --git a/x b/y\nsimilarity index 100%\nrename from x\nrename to y\n').map((r) => r.text),
+    ['similarity index 100%', 'rename from x', 'rename to y']);
+});
+
+test('paths split at the last slash; offers follow the branch, remote and thread', () => {
+  assert.deepEqual(df.pathParts('crates/a b/é.rs'), ['crates/a b/', 'é.rs']);
+  assert.deepEqual(df.pathParts('top.md'), ['', 'top.md']);
+  const repo = (r) => ({ branch: 'main', upstream: 'origin/main', ahead: 0, default_branch: 'main', commits: 0, github: true, ...r });
+  const offer = (files, r, pr = false) => df.diffOffer({ files, repo: repo(r) }, pr);
+  assert.deepEqual(offer(2, {}), { pr: true, push: false });
+  assert.deepEqual(offer(2, {}, true), { pr: false, push: false }, 'the thread has a PR');
+  assert.deepEqual(offer(2, { github: false }), { pr: false, push: false });
+  assert.deepEqual(offer(0, {}), { pr: false, push: false }, 'nothing to propose');
+  assert.deepEqual(offer(0, { branch: 'fix-x', upstream: 'origin/fix-x', ahead: 2 }), { pr: true, push: true });
+  assert.deepEqual(offer(1, { branch: 'fix-x', upstream: null, commits: 1 }), { pr: true, push: true }, 'never pushed');
+  assert.deepEqual(offer(1, { branch: 'fix-x', ahead: 0, commits: 1 }, true), { pr: false, push: false }, 'pushed already');
+  assert.deepEqual(offer(1, { branch: 'fix-x', ahead: 0, commits: 1, uncommitted: true }, true), { pr: false, push: true }, 'more edits on the PR');
+  assert.deepEqual(offer(1, { branch: 'master', default_branch: null, upstream: null, commits: 1 }), { pr: true, push: false });
+  assert.deepEqual(offer(1, { branch: null, upstream: null, commits: 1 }), { pr: true, push: false }, 'detached');
+  const pr = df.prPrompt(['notes.md', 'a`b\nc']);
+  for (const want of ['gh pr create', 'Conventional Commits', 'report_evidence', 'new branch', 'before/after', '"notes.md", "a`b\\nc"']) assert.ok(pr.includes(want), want);
+  assert.ok(!df.prPrompt([]).includes('leave them out'));
+  assert.ok(df.pushPrompt([]).includes('push the current branch'));
 });

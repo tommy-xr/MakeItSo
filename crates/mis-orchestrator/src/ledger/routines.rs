@@ -83,6 +83,7 @@ impl Ledger {
             resume: None,
             send_to: None,
             read_only: mode != RoutineMode::Live,
+            diff_base: None,
         };
         let (id, effects) = match &r.worker {
             Some(name) => {

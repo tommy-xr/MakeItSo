@@ -549,6 +549,7 @@ mod tests {
             links: vec![],
             evidence: vec![],
             result: None,
+            diff: None,
             attention: Default::default(),
             blocked_until: None,
             approvals: vec![],
