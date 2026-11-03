@@ -345,7 +345,28 @@ impl App {
                     urgent,
                 } => {
                     if let Some(push) = self.push.clone() {
-                        tokio::spawn(async move { push.send(task, &title, &body, urgent).await });
+                        let opens = push::Opens::Task(task);
+                        tokio::spawn(async move { push.send(opens, &title, &body, urgent).await });
+                    }
+                }
+                Effect::NotifySession {
+                    worker,
+                    harness,
+                    id,
+                    title,
+                    body,
+                    urgent,
+                } => {
+                    if let Some(push) = self.push.clone() {
+                        tokio::spawn(async move {
+                            let (harness, id) = (&harness, &id);
+                            let opens = push::Opens::Session {
+                                worker,
+                                harness,
+                                id,
+                            };
+                            push.send(opens, &title, &body, urgent).await
+                        });
                     }
                 }
             }
@@ -1762,6 +1783,16 @@ async fn client_conn(mut sock: WebSocket, app: App, scope: Scope) {
                             Err(why) => (Some(why.to_string()), vec![]),
                         }),
                     };
+                    if let Some(message) = refused {
+                        send_json(&mut sock, &ServerMsg::Error { message }).await;
+                    }
+                }
+                Some(ClientMsg::SessionBell { worker, harness, id, on }) => {
+                    let key = ledger::SessionKey { worker, harness, id };
+                    let refused = app.transition(|l| match l.session_bell(key, on) {
+                        Ok(effects) => (None, effects),
+                        Err(why) => (Some(why), vec![]),
+                    });
                     if let Some(message) = refused {
                         send_json(&mut sock, &ServerMsg::Error { message }).await;
                     }

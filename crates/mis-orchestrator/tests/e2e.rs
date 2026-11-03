@@ -2181,6 +2181,80 @@ async fn gone_push_subscription_is_dropped() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[tokio::test]
+async fn a_belled_session_turning_waiting_pushes_once_and_an_unwatched_one_never() {
+    let mut stub = push_stub().await;
+    let (base, dir, mut client, mut worker) = push_setup(&stub).await;
+    let wid = only_worker(&mut client).await.id;
+    let (watched, other) = (
+        uuid::Uuid::new_v4().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+    let at = |id: &str, state, why: Option<&str>| LiveSession {
+        harness: "claude".into(),
+        id: id.into(),
+        name: Some("ci-fix".into()),
+        state,
+        waiting_for: why.map(String::from),
+        ..Default::default()
+    };
+    let report = |sessions| WorkerMsg::LiveSessions { sessions };
+    let working = vec![
+        at(&watched, LiveState::Working, None),
+        at(&other, LiveState::Working, None),
+    ];
+    send(&mut worker, &report(working)).await;
+    // Listed, so its bell may go on.
+    loop {
+        let (_, body) = get_json(&base, "/api/sessions", "-").await;
+        if serde_json::from_str::<Vec<SessionRow>>(&body)
+            .unwrap()
+            .len()
+            == 2
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let bell = ClientMsg::SessionBell {
+        worker: wid,
+        harness: "claude".into(),
+        id: watched.clone(),
+        on: true,
+    };
+    send(&mut client, &bell).await;
+    // Handled in order: a Status answer means the bell went on.
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { .. } = recv(&mut client).await else {
+        panic!("bell refused?")
+    };
+    let waiting = vec![
+        at(&watched, LiveState::Waiting, Some("permission prompt")),
+        at(&other, LiveState::Waiting, Some("permission prompt")),
+    ];
+    send(&mut worker, &report(waiting.clone())).await;
+    let (headers, body) = next_push(&mut stub).await;
+    assert_eq!(headers["urgency"], "high");
+    let (ua, auth) = browser_keys();
+    let auth = web_push_native::Auth::clone_from_slice(&auth);
+    let plain = web_push_native::decrypt(body, &ua, &auth).unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&plain).unwrap();
+    let tag = format!("session/{wid}/claude/{watched}");
+    assert_eq!(
+        payload,
+        serde_json::json!({
+            "title": "ci-fix is waiting for you",
+            "body": "permission prompt",
+            "tag": tag,
+            "url": format!("/#{tag}"),
+        })
+    );
+    // Still waiting: nothing more, and never for the other.
+    send(&mut worker, &report(waiting)).await;
+    no_more_pushes(&mut stub).await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// Minimal HTTP/1.1 request; returns the status, raw head and body bytes.
 async fn http(base: &str, head: &str, body: &[u8]) -> (u16, String, Vec<u8>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

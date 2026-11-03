@@ -196,7 +196,17 @@ pub struct SessionRow {
     /// Oldest first.
     #[serde(default)]
     pub messages: Vec<SessionMessage>,
+    /// The user turned its bell on (`ClientMsg::SessionBell`).
+    #[serde(default)]
+    pub bell: bool,
+    /// Pushes go out when it starts needing the user: its bell is on, or it was
+    /// messaged from MIS in the last `WATCH_MS`.
+    #[serde(default)]
+    pub watched: bool,
 }
+
+/// A session messaged from MIS is watched this long after.
+pub const WATCH_MS: u64 = 24 * 3600 * 1000;
 
 /// A task that messaged a session (`Task::send_to`), shown inside its session's row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

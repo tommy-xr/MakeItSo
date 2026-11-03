@@ -72,13 +72,18 @@ impl Ledger {
         conn: ConnId,
         sessions: Vec<LiveSession>,
     ) -> Vec<Effect> {
-        let Some(w) = self.workers.get(&wid).filter(|w| w.conn == Some(conn)) else {
+        let Some(w) = self.workers.get_mut(&wid).filter(|w| w.conn == Some(conn)) else {
             return vec![];
         };
+        let first = !std::mem::replace(&mut w.reported, true);
         let host = w.info.hostname.clone();
         let sessions = sessions.into_iter().take(MAX_LIVE).collect();
-        self.live.insert(wid, Live { host, sessions });
+        let was = self.live.insert(wid, Live { host, sessions });
         let (mut effects, changed) = self.follow(wid, true);
+        // After `follow`, so a message this report answers counts as answered.
+        if !first {
+            effects.extend(self.alerts(wid, was.as_ref()));
+        }
         effects.extend(self.schedule());
         if changed {
             effects.push(Effect::Broadcast(self.status()));
@@ -219,12 +224,16 @@ impl Ledger {
                     .collect();
                 messages.sort_by_key(|m| m.at);
                 messages.drain(..messages.len().saturating_sub(MAX_MESSAGES));
+                let bell = self.bell(*wid, s);
+                let messaged = |m: &SessionMessage| self.now_ms.saturating_sub(m.at) < WATCH_MS;
                 rows.push(SessionRow {
                     worker: *wid,
                     worker_name: live.host.clone(),
                     online,
                     session: s.clone(),
+                    watched: bell || messages.iter().any(messaged),
                     messages,
+                    bell,
                 });
             }
         }
