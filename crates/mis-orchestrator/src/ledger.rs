@@ -535,8 +535,8 @@ pub struct Ledger {
     pushed: Option<Vec<SessionRow>>,
     /// Live sessions whose bell the user turned on.
     bells: std::collections::BTreeSet<alerts::SessionKey>,
-    /// When each live session last pushed (Unix millis); not saved.
-    alerted: HashMap<alerts::SessionKey, u64>,
+    /// When each live session last pushed (Unix millis) and whether urgently; not saved.
+    alerted: HashMap<alerts::SessionKey, (u64, bool)>,
 }
 
 impl Ledger {

@@ -2879,7 +2879,8 @@ const IDLE_REFRESH_MS = 30000;
 const messaging = (key) => tasks.some((t) => t.send_to && key.endsWith(`/${t.harness}/${t.send_to.session}`)
   && (['queued', 'running'].includes(t.status) || awaited(t)));
 // What's known of a session: its live row, else its listing on the Workers view.
-const sessionInfo = (key) => feed.find((s) => liveKey(s) === key)
+const liveOf = (key) => feed.find((s) => liveKey(s) === key);
+const sessionInfo = (key) => liveOf(key)
   || ((sessLists.get(key.split('/')[0]) || {}).list || []).find((x) => x.id === key.split('/')[2]) || {};
 function renderSession(key) {
   if (!everOpen) return; // fetch once connected, with the token in place
@@ -2893,8 +2894,9 @@ function renderSession(key) {
   const active = got && got.active, state = info.state || (active ? 'active' : '');
   const updated = Math.max(info.updated_ms || 0, (got && got.updated_ms) || 0);
   // The bell, for a live session: only those report the states it pushes on.
-  const row = feed.find((s) => liveKey(s) === key);
+  const row = liveOf(key);
   $('bell').hidden = readOnly || !row;
+  $('bell').disabled = !(ws && ws.readyState === WebSocket.OPEN); // a bell sent offline would be lost
   if (row) $('bell').setAttribute('aria-pressed', String(!!row.bell));
   const hint = row && el('div', { className: `hint one${row.watched ? ' on' : ''}` },
     row.bell ? 'Notifying when it needs you' : row.watched ? 'Notifying for a day: you messaged it' : 'Notify when it needs you');
@@ -3010,11 +3012,12 @@ $('resume').onclick = async () => {
 };
 $('say').addEventListener('submit', (e) => { e.preventDefault(); sayTo(); });
 // Shown at once; the next sessions push confirms it.
+const WATCH_MS = 864e5; // as the orchestrator's: a session messaged from here is watched this long
 $('bell').onclick = () => {
-  const row = sess && feed.find((s) => liveKey(s) === sess.key);
+  const row = sess && liveOf(sess.key);
   if (!row) return;
   const on = !row.bell, now = Date.now() + skew;
-  Object.assign(row, { bell: on, watched: on || row.messages.some((m) => now - m.at < 864e5) });
+  Object.assign(row, { bell: on, watched: on || row.messages.some((m) => now - m.at < WATCH_MS) });
   send({ type: 'session_bell', worker: row.worker, harness: row.harness, id: row.id, on });
   render();
 };

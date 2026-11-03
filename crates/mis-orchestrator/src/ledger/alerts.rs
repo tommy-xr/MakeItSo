@@ -1,8 +1,9 @@
 //! Pushes for live sessions the user watches (`SessionRow::watched`) when one starts
 //! needing them: into waiting (a prompt, or its turn ended) or stalled. Once per
-//! transition and at most once per `COOLDOWN_MS` a session; never for a worker's first
-//! report after it (re)connects (that's what happened while it was away), nor for a
-//! session that just answered a message from MIS (that message's task pushed already).
+//! transition and at most once per `COOLDOWN_MS` a session (a prompt may follow a lesser
+//! push); never for a worker's first report after it (re)connects (that's what happened
+//! while it was away), nor for a turn that just answered a message from MIS (that
+//! message's task pushed already).
 
 use mis_types::*;
 use serde::{Deserialize, Serialize};
@@ -17,9 +18,10 @@ pub struct SessionKey {
     pub id: String,
 }
 
-/// A session pushes at most once this often, however it flaps.
+/// A session pushes at most once this often, however it flaps; but a prompt (urgent)
+/// still follows a push that wasn't.
 const COOLDOWN_MS: u64 = 10 * 60 * 1000;
-/// Waiting this soon after a message from MIS to it finished: its "done" push said so.
+/// Its turn ended this soon after it answered a message from MIS: the "done" push said so.
 const ANSWERED_MS: u64 = 60 * 1000;
 const NAME_CHARS: usize = 60;
 /// The one line of a session a push carries: it transits a browser vendor's service.
@@ -31,8 +33,9 @@ struct Seen<'a> {
     /// Its state in the worker's previous report; None if it wasn't in it.
     was: Option<LiveState>,
     watched: bool,
-    /// Unix millis of its last push, and of the latest finish of a message MIS sent it.
-    alerted: Option<u64>,
+    /// Its last push: Unix millis, and whether urgent.
+    alerted: Option<(u64, bool)>,
+    /// Unix millis it last answered a message from MIS.
     answered: Option<u64>,
 }
 
@@ -40,18 +43,23 @@ struct Seen<'a> {
 fn alert(seen: &Seen, now: u64) -> Option<(String, String, bool)> {
     let s = seen.s;
     let recent = |at: Option<u64>, ms| at.is_some_and(|at| now.saturating_sub(at) < ms);
-    if !seen.watched || seen.was == Some(s.state) || recent(seen.alerted, COOLDOWN_MS) {
+    let urgent = s.state == LiveState::Waiting && s.waiting_for.is_some();
+    let cooling = (seen.alerted)
+        .is_some_and(|(at, was_urgent)| recent(Some(at), COOLDOWN_MS) && (was_urgent || !urgent));
+    // Not in the last report (it fell out of the worker's list and came back): no
+    // change seen.
+    if !seen.watched || seen.was.is_none_or(|was| was == s.state) || cooling {
         return None;
     }
     let name = (s.name.as_deref().or(s.title.as_deref())).unwrap_or(&s.id);
     let name = first_line(name, NAME_CHARS);
     let last = first_line(s.last.as_deref().unwrap_or(""), BODY_CHARS);
     match s.state {
-        LiveState::Waiting if recent(seen.answered, ANSWERED_MS) => None,
+        LiveState::Waiting if !urgent && recent(seen.answered, ANSWERED_MS) => None,
         LiveState::Waiting => Some((
             format!("{name} is waiting for you"),
             (s.waiting_for.as_deref()).map_or(last, |w| first_line(w, BODY_CHARS)),
-            s.waiting_for.is_some(),
+            urgent,
         )),
         LiveState::Stalled => {
             let quiet = now.saturating_sub(s.updated_ms) / 60_000;
@@ -95,7 +103,7 @@ impl Ledger {
     pub(super) fn alerts(&mut self, wid: WorkerId, was: Option<&Live>) -> Vec<Effect> {
         let now = self.now_ms;
         self.alerted
-            .retain(|_, at| now.saturating_sub(*at) < COOLDOWN_MS);
+            .retain(|_, (at, _)| now.saturating_sub(*at) < COOLDOWN_MS);
         let state = |s: &LiveSession| {
             let mut sessions = was?.sessions.iter();
             Some(
@@ -111,19 +119,21 @@ impl Ledger {
                 harness: r.session.harness.clone(),
                 id: r.session.id.clone(),
             };
-            let finished =
-                |m: &SessionMessage| (self.tasks.iter().find(|t| t.task.id == m.task))?.finished_at;
+            let answered = |m: &SessionMessage| {
+                let t = (self.tasks.iter()).find(|t| m.answered && t.task.id == m.task);
+                t?.finished_at
+            };
             let seen = Seen {
                 s: &r.session,
                 was: state(&r.session),
                 watched: r.watched,
                 alerted: self.alerted.get(&key).copied(),
-                answered: r.messages.iter().filter_map(finished).max(),
+                answered: r.messages.iter().filter_map(answered).max(),
             };
             let Some((title, body, urgent)) = alert(&seen, now) else {
                 continue;
             };
-            self.alerted.insert(key.clone(), now);
+            self.alerted.insert(key.clone(), (now, urgent));
             effects.push(Effect::NotifySession {
                 worker: wid,
                 harness: key.harness,
@@ -197,8 +207,8 @@ mod tests {
         let (title, body, _) = alert(&seen(&s, Some(LiveState::Working)), NOW).unwrap();
         assert_eq!(title, "ci-fix may be stalled · quiet 12m");
         assert_eq!(body, "Checking the workflow files.");
-        // New to the feed counts as a change.
-        assert!(alert(&seen(&waiting(None), None), NOW).is_some());
+        // Not in the last report (fell out of the worker's list): no change seen.
+        assert_eq!(alert(&seen(&waiting(None), None), NOW), None);
     }
 
     #[test]
@@ -220,14 +230,17 @@ mod tests {
     }
 
     #[test]
-    fn a_flapping_session_pushes_once_per_cooldown() {
-        let s = waiting(None);
-        let at = |alerted| Seen {
+    fn a_flapping_session_pushes_once_per_cooldown_but_a_prompt_gets_through() {
+        let (ended, prompt) = (waiting(None), waiting(Some("permission prompt")));
+        let at = |s, alerted| Seen {
             alerted: Some(alerted),
-            ..seen(&s, Some(LiveState::Working))
+            ..seen(s, Some(LiveState::Working))
         };
-        assert_eq!(alert(&at(NOW - 9 * MIN), NOW), None);
-        assert!(alert(&at(NOW - 10 * MIN), NOW).is_some());
+        assert_eq!(alert(&at(&ended, (NOW - 9 * MIN, false)), NOW), None);
+        assert!(alert(&at(&ended, (NOW - 10 * MIN, false)), NOW).is_some());
+        // After a lesser push, a prompt still goes out; after a prompt, it waits.
+        assert!(alert(&at(&prompt, (NOW - MIN, false)), NOW).is_some());
+        assert_eq!(alert(&at(&prompt, (NOW - MIN, true)), NOW), None);
     }
 
     #[test]
@@ -239,6 +252,13 @@ mod tests {
         };
         assert_eq!(alert(&at(NOW - 59_000), NOW), None);
         assert!(alert(&at(NOW - 60_000), NOW).is_some());
+        // A prompt after the answer is news.
+        let prompt = waiting(Some("permission prompt"));
+        let s = Seen {
+            answered: Some(NOW),
+            ..seen(&prompt, Some(LiveState::Working))
+        };
+        assert!(alert(&s, NOW).is_some());
         // A stall isn't an answer.
         let stalled = LiveSession {
             state: LiveState::Stalled,
@@ -377,6 +397,36 @@ mod tests {
             pushes(&l.live_sessions(w, 1, vec![live(LiveState::Waiting)])).len(),
             1
         );
+    }
+
+    #[test]
+    fn a_declined_message_is_no_answer() {
+        let (mut l, w) = ledger();
+        let s = Uuid::new_v4();
+        let at = |state| LiveSession {
+            id: s.to_string(),
+            open: true,
+            ..live(state)
+        };
+        let to = SendTo {
+            session: s,
+            title: None,
+            mode: SendMode::Deliver,
+        };
+        let (task, _) =
+            (l.send_to_session(w, "claude".into(), "rename it".into(), to, vec![])).unwrap();
+        let ev = AgentEvent::Delivered {
+            msg_id: "m1".into(),
+            read: false,
+            held: true,
+        };
+        l.event(w, 1, task, ev);
+        // Held, then at rest without it: declined in its terminal.
+        l.live_sessions(w, 1, vec![at(LiveState::Idle)]);
+        assert_eq!(l.show(task).unwrap().0.status, TaskStatus::Failed);
+        l.live_sessions(w, 1, vec![at(LiveState::Working)]);
+        let eff = l.live_sessions(w, 1, vec![at(LiveState::Waiting)]);
+        assert_eq!(pushes(&eff), ["ci-fix is waiting for you"]);
     }
 
     #[test]
