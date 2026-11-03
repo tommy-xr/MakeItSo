@@ -3,6 +3,7 @@
 
 mod app_server;
 mod approvals;
+mod coalesce;
 mod config;
 mod deliver;
 mod evidence;
@@ -933,7 +934,17 @@ async fn run(
     };
     let (atx, mut arx) = mpsc::channel(64);
     let fwd = async {
-        while let Some(ev) = arx.recv().await {
+        let mut deltas = coalesce::Coalescer::default();
+        loop {
+            let due = deltas.due();
+            let ev = tokio::select! {
+                ev = arx.recv() => match ev {
+                    Some(ev) => deltas.event(ev, Instant::now()),
+                    None => break,
+                },
+                () = sleep_until(due) => deltas.flush(),
+            };
+            let Some(ev) = ev else { continue };
             // Limit readings go into the stats beat, not the transcript.
             if let AgentEvent::Limits { mut windows } = ev {
                 let now = unix_ms();
@@ -963,6 +974,14 @@ async fn run(
         atx,
     );
     tokio::join!(run, fwd);
+}
+
+/// Sleeps until `at`; never wakes without one.
+async fn sleep_until(at: Option<Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at.into()).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// `CF_ACCESS_CLIENT_SECRET`; empty counts as unset.

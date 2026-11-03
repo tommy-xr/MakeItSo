@@ -1,4 +1,4 @@
-//! Claude Code backend: `claude -p <prompt> --output-format stream-json --verbose`.
+//! Claude Code backend: `claude -p <prompt> --output-format stream-json --verbose --include-partial-messages`.
 
 use anyhow::Context;
 use mis_types::{AgentEvent, LimitWindow, PermissionMode, Permissions, TaskId, TASK_ENV};
@@ -238,6 +238,21 @@ fn events(v: &Value, hidden: &mut HashSet<String>) -> Vec<AgentEvent> {
                 _ => None,
             })
             .collect(),
+        // `--include-partial-messages`: a text block's pieces as they arrive, the main
+        // agent's only (a subagent's carry its Task call's id).
+        Some("stream_event") if v["parent_tool_use_id"].is_null() => {
+            let d = &v["event"]["delta"];
+            match (
+                v["event"]["type"].as_str(),
+                d["type"].as_str(),
+                d["text"].as_str(),
+            ) {
+                (Some("content_block_delta"), Some("text_delta"), Some(t)) if !t.is_empty() => {
+                    vec![AgentEvent::TextDelta { text: t.into() }]
+                }
+                _ => vec![],
+            }
+        }
         Some("user") => blocks(v)
             .filter(|b| b["type"] == "tool_result")
             .filter(|b| {
@@ -312,9 +327,15 @@ pub fn tool_result_text(c: &Value) -> String {
 impl ClaudeAgent {
     /// `claude` argv for one run; the MCP token goes in the env (see `mcp_args`).
     pub fn argv(&self, prompt: &str, o: &RunOpts) -> Vec<String> {
-        let mut a: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose"]
-            .map(String::from)
-            .to_vec();
+        let mut a: Vec<String> = [
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+        ]
+        .map(String::from)
+        .to_vec();
         let mut allowed = vec![];
         if let Some(m) = o.mcp {
             let auth = format!("Bearer ${{{MCP_TOKEN_ENV}}}");
@@ -443,6 +464,55 @@ impl Agent for ClaudeAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real `--include-partial-messages` run (haiku: a sentence, a Bash call, a
+    /// sentence; ids zeroed): each text block streams as deltas, then its `assistant`
+    /// line repeats it whole. Tool input, thinking and signature deltas aren't text.
+    #[test]
+    fn partial_messages_stream_each_text_block_before_it_lands() {
+        let mut p = Parser::default();
+        let fixture = include_str!("../tests/fixtures/claude-partial.jsonl");
+        let got: Vec<String> = fixture
+            .lines()
+            .flat_map(|l| p.line(l))
+            .map(|e| match e {
+                AgentEvent::TextDelta { text } => format!("+{text}"),
+                AgentEvent::Text { text } => format!("={text}"),
+                AgentEvent::ToolUse { name, .. } => format!("tool {name}"),
+                AgentEvent::ToolResult { content } => format!("result {content}"),
+                AgentEvent::Started { .. } => "started".into(),
+                AgentEvent::Usage { .. } => "usage".into(),
+                AgentEvent::Finished { ok, .. } => format!("finished {ok}"),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "started",
+                "+I",
+                "+ will",
+                "+ run `",
+                "+echo probe-ok`",
+                "+ now.",
+                "usage",
+                "=I will run `echo probe-ok` now.",
+                "tool Bash",
+                "result probe-ok",
+                "usage",
+                "+The command",
+                "+ print",
+                "+ed `probe-ok`",
+                "+.",
+                "=The command printed `probe-ok`.",
+                "usage",
+                "finished true",
+            ]
+        );
+        // A subagent's text streams under its Task call: not the reply.
+        let sub = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}},"parent_tool_use_id":"toolu_1"}"#;
+        assert!(parse_line(sub).is_empty());
+    }
 
     #[test]
     fn parses_probe_output() {
@@ -683,6 +753,7 @@ mod tests {
                 "--output-format",
                 "stream-json",
                 "--verbose",
+                "--include-partial-messages",
                 "--dangerously-skip-permissions",
                 "--max-turns",
                 "1",
@@ -703,7 +774,10 @@ mod tests {
             let a = ClaudeAgent::default().argv("hi", &o);
             a[a.len() - 4..].to_vec()
         };
-        assert_eq!(resume(false), ["--verbose", "--resume=s-1", "--", "hi"]);
+        assert_eq!(
+            resume(false),
+            ["--include-partial-messages", "--resume=s-1", "--", "hi"]
+        );
         assert_eq!(resume(true), ["--resume=s-1", "--fork-session", "--", "hi"]);
         let plain = ClaudeAgent::default().argv("hi", &RunOpts::default());
         assert!(!plain.iter().any(|a| a.starts_with("--resume")));
@@ -732,7 +806,7 @@ mod tests {
         assert!(!a.iter().any(|x| x == "--strict-mcp-config"));
         assert!(!a.iter().any(|x| x.contains("dangerously")));
         assert_eq!(
-            a[6..],
+            a[7..],
             [
                 "--permission-mode",
                 "acceptEdits",
@@ -757,7 +831,7 @@ mod tests {
             ..Default::default()
         };
         let a = ClaudeAgent::default().argv("hi", &o);
-        assert_eq!(a[6..], ["--allowedTools", "mcp__mis", "--", "hi"]);
+        assert_eq!(a[7..], ["--allowedTools", "mcp__mis", "--", "hi"]);
     }
 
     #[test]
@@ -816,8 +890,8 @@ mod tests {
         let a = argv(&full);
         assert!(!a.iter().any(|x| x.contains("dangerously")));
         let isolated = ["dontAsk", "--setting-sources=", "--strict-mcp-config"];
-        assert_eq!(a[7..10], isolated);
-        assert_eq!(a[11], READ_ONLY_NOTE);
+        assert_eq!(a[8..11], isolated);
+        assert_eq!(a[12], READ_ONLY_NOTE);
         let all = allowed(&a);
         assert_eq!(all.len(), 1 + GH_READS.len());
         assert!(all.contains(&"Bash(gh pr list *)".into()) && all[0] == "mcp__mis");
@@ -830,8 +904,8 @@ mod tests {
             commands: vec!["gh pr".into(), "python3".into()],
         };
         let a = argv(&ask);
-        assert_eq!(a[7..10], isolated);
-        assert_eq!(a[12..16], ["--settings", SANDBOX, "--add-dir", "/u/game"]);
+        assert_eq!(a[8..11], isolated);
+        assert_eq!(a[13..17], ["--settings", SANDBOX, "--add-dir", "/u/game"]);
         assert!(!a.iter().any(|x| x == "--permission-prompt-tool"));
         let got = allowed(&a);
         assert!(got

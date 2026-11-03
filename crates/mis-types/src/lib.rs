@@ -192,6 +192,11 @@ pub enum AgentEvent {
     Text {
         text: String,
     },
+    /// The next piece of the text the agent is writing, live. Never kept: the
+    /// block's `Text` follows with all of it and is what the transcript holds.
+    TextDelta {
+        text: String,
+    },
     ToolUse {
         name: String,
         input: serde_json::Value,
@@ -722,6 +727,9 @@ pub enum ServerMsg {
         task: TaskSummary,
         events: Vec<AgentEvent>,
         truncated: bool,
+        /// The text being written now (its `TextDelta`s so far), while running.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        partial: Option<String>,
     },
     Event {
         task: TaskId,

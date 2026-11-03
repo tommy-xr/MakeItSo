@@ -485,6 +485,8 @@ fn print_event(task: TaskId, event: &AgentEvent) {
         }
         AgentEvent::Started { .. } => println!("[{short}] started"),
         AgentEvent::Text { text } => println!("[{short}] {text}"),
+        // Live pieces of the next `Text`, which prints it whole.
+        AgentEvent::TextDelta { .. } => {}
         AgentEvent::ToolUse { name, input } => println!("[{short}] > {name} {input}"),
         AgentEvent::ToolResult { content } => {
             let first = content.lines().next().unwrap_or("");
@@ -786,6 +788,7 @@ async fn run(args: Args) -> Result<Option<TaskSummary>> {
                     task,
                     events,
                     truncated,
+                    ..
                 } => (task, events, truncated),
                 ServerMsg::Error { message } => bail!(message),
                 other => bail!("unexpected reply: {other:?}"),
