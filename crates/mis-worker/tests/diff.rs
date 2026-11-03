@@ -200,8 +200,8 @@ async fn a_threads_changes_reach_the_api_with_earlier_ones_told_apart() {
             ("added file.txt", FileStatus::Added, Before::Clean, true),
             ("gone.txt", FileStatus::Deleted, Before::Clean, false),
             ("keep.txt", FileStatus::Modified, Before::Clean, false),
-            ("mine.txt", FileStatus::Modified, Before::Only, false),
             ("pic.bin", FileStatus::Added, Before::Clean, true),
+            ("mine.txt", FileStatus::Modified, Before::Only, false),
         ]
     );
     let keep = d.files[2].patch.as_deref().unwrap();

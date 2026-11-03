@@ -46,6 +46,9 @@ pub struct RepoState {
     pub commits: u32,
     /// Some remote is on github.com.
     pub github: bool,
+    /// The task's own changes are in the tree, not all committed.
+    #[serde(default)]
+    pub uncommitted: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -103,7 +106,7 @@ pub struct TaskDiff {
     pub repo: RepoState,
     /// By path.
     pub files: Vec<FileDiff>,
-    /// Changed files past `MAX_FILES`, not listed.
+    /// The task's changed files past `MAX_FILES`, not listed.
     #[serde(default)]
     pub more: u32,
 }
@@ -133,8 +136,8 @@ impl TaskDiff {
     /// each or `MAX_PATCH` in all dropped with a note, long strings cut.
     pub fn bounded(mut self) -> Self {
         if self.files.len() > MAX_FILES {
-            self.more += (self.files.len() - MAX_FILES) as u32;
-            self.files.truncate(MAX_FILES);
+            let cut = self.files.split_off(MAX_FILES);
+            self.more += cut.iter().filter(|f| f.before != Before::Only).count() as u32;
         }
         let mut total = 0;
         for f in &mut self.files {
@@ -218,12 +221,16 @@ mod tests {
             f.patch = Some("x".repeat(MAX_FILE_PATCH));
         }
         files[2].path = "é".repeat(2000);
+        // Of the five past the limit, the earlier changes aren't the task's.
+        for f in &mut files[MAX_FILES..MAX_FILES + 2] {
+            f.before = Before::Only;
+        }
         let d = TaskDiff {
             files,
             ..Default::default()
         }
         .bounded();
-        assert_eq!((d.files.len(), d.more), (MAX_FILES, 5));
+        assert_eq!((d.files.len(), d.more), (MAX_FILES, 3));
         assert_eq!(d.files[0].note.as_deref(), Some("patch over 64 KB"));
         // Four 64 KB patches fill the 256 KB; the fifth, and the small ones after, go.
         let kept: Vec<bool> = d.files[..8].iter().map(|f| f.patch.is_some()).collect();

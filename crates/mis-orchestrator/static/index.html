@@ -1157,12 +1157,12 @@ function patchRows(patch) {
 // `a/b/c.rs` -> ['a/b/', 'c.rs']: a narrow row cuts the folder, keeping the name.
 const pathParts = (p) => [p.slice(0, p.lastIndexOf('/') + 1), p.slice(p.lastIndexOf('/') + 1)];
 // A finished task's offers: Open PR with a GitHub remote and something to propose, unless its thread has a PR;
-// Push on a branch of its own (not the default) with commits its upstream lacks, or no upstream yet.
+// Push on a branch of its own (not the default) with work its upstream lacks: commits, uncommitted changes, or no upstream yet.
 function diffOffer(stat, hasPr) {
   const r = stat.repo, def = r.default_branch;
   const own = !!r.branch && (def ? r.branch !== def : !['main', 'master'].includes(r.branch));
   return { pr: !!r.github && !hasPr && (stat.files > 0 || r.commits > 0 || r.ahead > 0),
-    push: own && (r.ahead > 0 || (!r.upstream && r.commits > 0)) };
+    push: own && (r.ahead > 0 || !!r.uncommitted || (!r.upstream && r.commits > 0)) };
 }
 // The replies sent for them: the agent does the work, so it follows the repo's conventions and its worker's
 // permissions. `before`: paths changed before the thread started, to leave out.
@@ -2058,7 +2058,8 @@ function renderDiff(t) {
   if (!stat || !(stat.files > 0 || stat.repo.commits > 0)) { box.hidden = true; box.replaceChildren(); diffKey = ''; return; }
   if (diffUi.id !== t.id) diffUi = { id: t.id, open: new Set(), all: false, before: false, ask: null };
   const e = diffOf(t), pr = threadPr(t), r = stat.repo;
-  const offer = isFinished(t) && !readOnly && t.session && t.worker ? diffOffer(stat, !!pr) : { pr: false, push: false };
+  // Offered once the files are here: the reply names the earlier changes to leave out.
+  const offer = e.v && isFinished(t) && !readOnly && t.session && t.worker ? diffOffer(stat, !!pr) : { pr: false, push: false };
   if (!offer[diffUi.ask]) diffUi.ask = null;
   const key = JSON.stringify([t.id, e.sig, !!e.v, e.error, [...diffUi.open], diffUi.all, diffUi.before, diffUi.ask, pr && [pr.url, pr.pr], offer, !!pending, readOnly]);
   if (key === diffKey) return;

@@ -237,15 +237,29 @@ fn assemble(
     let mut patches = patches.into_iter();
     let mut files: Vec<FileDiff> = (changes.into_iter())
         .map(|c| {
-            let patch = patches.next().filter(|_| aligned);
+            // Each patch must name its file: git ran twice, and the tree may have changed between.
+            let header = format!(
+                "diff --git a/{} b/{}\n",
+                c.from.as_deref().unwrap_or(&c.path),
+                c.path
+            );
+            let named = |p: &String| {
+                p.starts_with(&header) || p.lines().next().is_some_and(|l| l.contains('"'))
+            };
+            let patch = patches.next().filter(|p| aligned && named(p));
             let note = match (&patch, c.binary) {
                 (_, true) => Some("binary"),
                 (Some(_), false) => None,
                 (None, false) if cut => Some("patch too large to read"),
                 (None, false) => Some("patch unavailable"),
             };
+            // A file renamed after its earlier changes still carries them.
+            let moved = c.from.as_ref().is_some_and(|f| base.dirty.contains_key(f));
             FileDiff {
-                before: before(base, now, &c.path),
+                before: match before(base, now, &c.path) {
+                    Before::Clean if moved => Before::Also,
+                    b => b,
+                },
                 patch: patch.filter(|_| !c.binary),
                 note: note.map(String::from),
                 path: c.path,
@@ -262,7 +276,9 @@ fn assemble(
         f.before = before(base, now, &f.path);
         f
     }));
-    files.sort_by(|a, b| a.path.cmp(&b.path));
+    // The task's own first, so the file limit cuts earlier changes first.
+    let only = |f: &FileDiff| f.before == Before::Only;
+    files.sort_by(|a, b| only(a).cmp(&only(b)).then_with(|| a.path.cmp(&b.path)));
     TaskDiff {
         base: base.clone(),
         repo,
@@ -485,14 +501,6 @@ pub async fn diff(base: &DiffBase) -> Option<TaskDiff> {
         })
         .filter(|n| !n.is_empty());
     let remotes = git(root, &["remote", "-v"]).await.ok();
-    let repo = RepoState {
-        branch: status.branch,
-        upstream: status.upstream,
-        ahead: status.ahead,
-        default_branch,
-        commits,
-        github: remotes.is_some_and(|o| github(&String::from_utf8_lossy(&o.0))),
-    };
     let (dir, dirty) = (root.to_string(), base.dirty.clone());
     let new = status.untracked;
     let (untracked, now) = tokio::task::spawn_blocking(move || {
@@ -512,6 +520,21 @@ pub async fn diff(base: &DiffBase) -> Option<TaskDiff> {
     })
     .await
     .ok()?;
+    let changed = status
+        .changed
+        .iter()
+        .chain(untracked.iter().map(|f| &f.path));
+    let repo = RepoState {
+        branch: status.branch,
+        upstream: status.upstream,
+        ahead: status.ahead,
+        default_branch,
+        commits,
+        github: remotes.is_some_and(|o| github(&String::from_utf8_lossy(&o.0))),
+        uncommitted: changed
+            .into_iter()
+            .any(|p| before(base, &now, p) != Before::Only),
+    };
     Some(assemble(base, changes, patches, cut, untracked, &now, repo))
 }
 
@@ -672,22 +695,36 @@ mod tests {
     }
 
     #[test]
-    fn assembled_files_are_sorted_and_tell_earlier_changes_apart() {
+    fn assembled_files_put_the_tasks_first_and_tell_earlier_changes_apart() {
         let base = DiffBase {
             root: "/r".into(),
             head: "abcd".into(),
-            dirty: [("a", "1"), ("b", "2"), ("z", "3")]
+            dirty: [("a", "1"), ("b", "2"), ("z", "3"), ("old", "4")]
                 .map(|(p, f)| (p.to_string(), f.to_string()))
                 .into(),
         };
-        // `a` untouched since, `b` changed further, `z` untracked and untouched.
+        // `a` untouched since, `b` changed further, `z` untracked and untouched,
+        // `old` renamed to `new` after its earlier change.
         let now: BTreeMap<_, _> = [("a", "1"), ("b", "9"), ("z", "3")]
             .map(|(p, f)| (p.to_string(), f.to_string()))
             .into();
+        let p = |path: &str| format!("diff --git a/{path} b/{path}\n@@ x");
+        let mut renamed = change("new", false);
+        renamed.from = Some("old".into());
         let d = assemble(
             &base,
-            vec![change("b", false), change("a", false), change("c", true)],
-            vec!["pb".into(), "pa".into(), "pc".into()],
+            vec![
+                change("b", false),
+                change("a", false),
+                change("c", true),
+                renamed,
+            ],
+            vec![
+                p("b"),
+                p("a"),
+                p("c"),
+                "diff --git a/old b/new\nrename from old\n".into(),
+            ],
             false,
             vec![untracked("z".into(), Ok(b"z\n".to_vec()))],
             &now,
@@ -698,7 +735,7 @@ mod tests {
                 (
                     f.path.as_str(),
                     f.before,
-                    f.patch.as_deref(),
+                    f.patch.is_some(),
                     f.note.as_deref(),
                 )
             })
@@ -706,13 +743,40 @@ mod tests {
         assert_eq!(
             got,
             [
-                ("a", Before::Only, Some("pa"), None),
-                ("b", Before::Also, Some("pb"), None),
-                ("c", Before::Clean, None, Some("binary")),
-                ("z", Before::Only, Some("@@ -0,0 +1,1 @@\n+z\n"), None),
+                ("b", Before::Also, true, None),
+                ("c", Before::Clean, false, Some("binary")),
+                ("new", Before::Also, true, None),
+                ("a", Before::Only, true, None),
+                ("z", Before::Only, true, None),
             ]
         );
-        assert_eq!((d.stat().files, d.stat().before), (2, 2));
+        assert_eq!((d.stat().files, d.stat().before), (3, 2));
+        // A patch naming another file (the tree changed between git's runs) is
+        // dropped; one quoted by git can't be checked and is kept.
+        let one = |c: Change, patch: &str, cut| {
+            let d = assemble(
+                &base,
+                vec![c],
+                vec![patch.into()],
+                cut,
+                vec![],
+                &now,
+                RepoState::default(),
+            );
+            d.files[0].note.clone()
+        };
+        assert_eq!(
+            one(change("a", false), &p("b"), false).as_deref(),
+            Some("patch unavailable")
+        );
+        assert_eq!(
+            one(
+                change("t\"q", false),
+                "diff --git \"a/t\\\"q\" \"b/t\\\"q\"\n",
+                false
+            ),
+            None
+        );
         // Patches that don't match up are dropped; ones cut short keep those read.
         let none = assemble(
             &base,
@@ -727,17 +791,18 @@ mod tests {
         let cut = assemble(
             &base,
             vec![change("a", false), change("b", false)],
-            vec!["pa".into()],
+            vec![p("a")],
             true,
             vec![],
             &now,
             RepoState::default(),
         );
-        assert_eq!(cut.files[0].patch.as_deref(), Some("pa"));
+        assert_eq!(cut.files[0].path, "b");
         assert_eq!(
-            cut.files[1].note.as_deref(),
+            cut.files[0].note.as_deref(),
             Some("patch too large to read")
         );
+        assert!(cut.files[1].patch.is_some());
     }
 
     /// `git` in `dir`, for setting up repos; panics on failure.
@@ -813,12 +878,12 @@ mod tests {
             got,
             [
                 ("crlf.txt", Modified, 1, 1, false, Before::Clean),
-                ("dirty.txt", Modified, 1, 0, false, Before::Only),
                 ("gone.txt", Deleted, 0, 1, false, Before::Clean),
                 ("keep.txt", Modified, 2, 1, false, Before::Clean),
                 ("new file.rs", Added, 1, 0, true, Before::Clean),
                 ("nouveau é.txt", Renamed, 0, 0, false, Before::Clean),
                 ("pic.bin", Added, 0, 0, true, Before::Clean),
+                ("dirty.txt", Modified, 1, 0, false, Before::Only),
             ]
         );
         let file = |p: &str| d.files.iter().find(|f| f.path == p).unwrap();
@@ -836,8 +901,14 @@ mod tests {
         assert!(file("pic.bin").binary);
         let r = &d.repo;
         assert_eq!(
-            (r.branch.as_deref(), r.commits, r.github, r.ahead),
-            (Some("main"), 1, true, 0)
+            (
+                r.branch.as_deref(),
+                r.commits,
+                r.github,
+                r.ahead,
+                r.uncommitted
+            ),
+            (Some("main"), 1, true, 0, true)
         );
         let s = d.stat();
         assert_eq!((s.files, s.added, s.removed, s.before), (6, 4, 3, 1));

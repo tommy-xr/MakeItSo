@@ -313,6 +313,7 @@ test('paths split at the last slash; offers follow the branch, remote and thread
   assert.deepEqual(offer(0, { branch: 'fix-x', upstream: 'origin/fix-x', ahead: 2 }), { pr: true, push: true });
   assert.deepEqual(offer(1, { branch: 'fix-x', upstream: null, commits: 1 }), { pr: true, push: true }, 'never pushed');
   assert.deepEqual(offer(1, { branch: 'fix-x', ahead: 0, commits: 1 }, true), { pr: false, push: false }, 'pushed already');
+  assert.deepEqual(offer(1, { branch: 'fix-x', ahead: 0, commits: 1, uncommitted: true }, true), { pr: false, push: true }, 'more edits on the PR');
   assert.deepEqual(offer(1, { branch: 'master', default_branch: null, upstream: null, commits: 1 }), { pr: true, push: false });
   assert.deepEqual(offer(1, { branch: null, upstream: null, commits: 1 }), { pr: true, push: false }, 'detached');
   const pr = df.prPrompt(['notes.md']);
