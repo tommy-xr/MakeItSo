@@ -292,7 +292,8 @@ impl CodexAgent {
             );
         }
         a.extend(["--json", "--skip-git-repo-check"].map(String::from));
-        // Its plan tool is off by default for current models.
+        // Its plan tool is off by default for current models. Shape as of 0.163: a codex that
+        // reads this key as something else refuses the config, failing every run.
         a.extend(["-c", "tools.update_plan={enabled=true}"].map(String::from));
         if let Some(p) = o.permissions {
             a.extend(permission_args(p));

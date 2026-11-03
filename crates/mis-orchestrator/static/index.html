@@ -503,15 +503,12 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .rfoot button { display: inline-flex; align-items: center; gap: .375rem; min-height: 2.25rem; padding: 0 .625rem; border-radius: .625rem; background: none; color: var(--soft); font: 500 .8125rem var(--sans); }
   .rfoot svg { width: 1rem; height: 1rem; }
   @media (hover: hover) { .rfoot button:hover { background: var(--hover); } }
-  /* Plan: the agent's checklist in a card under the result; a thin bar of its progress under the head. */
+  /* Plan: the agent's checklist in a card (under the conversation while running, else under the result); a thin bar
+     of its progress under the head. */
   #plan { margin: 1rem 0 .5rem; border-radius: 1rem; background: var(--card); overflow: hidden; }
-  .ph { display: flex; align-items: center; gap: .5rem; width: 100%; min-height: 2.75rem; padding: 0 .75rem 0 1rem; border-radius: 0; background: none; color: var(--fg); text-align: left; }
-  .ph:active { transform: none; background: var(--hover); }
-  .ph h3 { margin: 0; padding: 0; color: var(--fg); font: 600 1rem/1.35 var(--sans); }
-  .ph .pn { margin-left: auto; font: .8125rem var(--sans); color: var(--soft); white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .ph .chev { flex: none; width: 1rem; height: 1rem; color: var(--dim); transition: transform .15s; }
-  .ph[aria-expanded=true] .chev { transform: rotate(180deg); }
-  .pbar { display: block; height: .1875rem; margin: 0 1rem .75rem; border-radius: 999px; background: linear-gradient(var(--accent), var(--accent)) 0 0 / var(--v, 0%) 100% no-repeat, var(--sep); transition: background-size .3s ease-out; }
+  /* Its head is a diff-card row (see .dfr) holding the card's title. */
+  .ph .pn { margin-left: auto; font-size: .8125rem; color: var(--soft); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .bar.pbar { --b: var(--accent); height: .1875rem; margin: 0 1rem .75rem; transition: background-size .3s ease-out; }
   .pl { margin: -.25rem 0 0; padding: 0 0 .5rem; list-style: none; }
   .pi { display: flex; align-items: flex-start; gap: .625rem; padding: .3125rem 1rem; font-size: .9375rem; line-height: 1.4; color: var(--fg2); }
   .pt { min-width: 0; overflow-wrap: anywhere; }
@@ -519,27 +516,27 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .pk { flex: none; display: grid; place-items: center; box-sizing: border-box; width: 1rem; height: 1rem; margin-top: .125rem; border: 1.5px solid var(--faint); border-radius: 50%; }
   .pk svg { width: .625rem; height: .625rem; }
   .pi.in_progress .pk { border-color: var(--run); background: conic-gradient(var(--run) 0 50%, transparent 0); }
-  .pi.live .pk { border: 2px solid var(--t-run); border-top-color: var(--run); background: none; animation: spin .9s linear infinite; }
+  .pi.live .pk { border: 2px solid var(--track); border-top-color: var(--run); background: none; animation: spin .9s linear infinite; }
   .pi.live .pt { color: var(--fg); font-weight: 500; }
   .pi.completed .pk { border-color: var(--ok); background: var(--ok); color: var(--card); }
   .pi.completed .pt { color: var(--dim); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--dim) 55%, transparent); }
   /* Home: a running task's plan in one line, a short bar before it. */
   .r3.pline { margin: .125rem 0 0; color: var(--link); }
   .pline b { font-weight: 600; font-variant-numeric: tabular-nums; }
-  .pmini { display: inline-block; width: 1.5rem; height: .25rem; margin-right: .375rem; vertical-align: .125rem; border-radius: 999px; background: linear-gradient(var(--accent), var(--accent)) 0 0 / var(--v, 0%) 100% no-repeat, var(--sep); }
+  .bar.pmini { --b: var(--accent); display: inline-block; width: 1.5rem; margin: 0 .375rem 0 0; vertical-align: .125rem; }
   /* Files changed: a card under the result; each file row folds open to its patch, which scrolls sideways. */
   #diff { margin: 1rem 0 .5rem; padding-top: .75rem; border-radius: 1rem; background: var(--card); overflow: hidden; }
   .dh { display: flex; align-items: baseline; gap: .5rem; padding: 0 1rem; }
-  .dh h3 { margin: 0; padding: 0; color: var(--fg); font: 600 1rem/1.35 var(--sans); }
+  :is(.dh, .ph) h3 { margin: 0; padding: 0; color: var(--fg); font: 600 1rem/1.35 var(--sans); }
   .dh .dn { margin-left: auto; font-size: .8125rem; color: var(--soft); white-space: nowrap; font-variant-numeric: tabular-nums; }
   .add { color: var(--ok); } .del { color: var(--bad); }
   .dsub { padding: .125rem 1rem .625rem; font-size: .8125rem; color: var(--dim); overflow-wrap: anywhere; }
   :is(.dsub, .dask) code { font: .75rem var(--mono); color: var(--fg2); }
   .dfl { margin: 0; padding: 0; list-style: none; }
   .dfl > li { border-top: 1px solid var(--sep); }
-  .dfr { display: flex; align-items: center; gap: .5rem; width: 100%; min-height: 2.75rem; padding: 0 .75rem 0 1rem; border-radius: 0; background: none; color: var(--fg); font: 400 .875rem var(--sans); text-align: left; }
-  .dfr:active { transform: none; background: var(--hover); }
-  @media (hover: hover) { .dfr:hover, :is(.dmore, .dbt):hover { background: var(--hover); } }
+  :is(.dfr, .ph) { display: flex; align-items: center; gap: .5rem; width: 100%; min-height: 2.75rem; padding: 0 .75rem 0 1rem; border-radius: 0; background: none; color: var(--fg); font: 400 .875rem var(--sans); text-align: left; }
+  :is(.dfr, .ph):active { transform: none; background: var(--hover); }
+  @media (hover: hover) { :is(.dfr, .ph):hover, :is(.dmore, .dbt):hover { background: var(--hover); } }
   .dst { flex: none; width: 1rem; font: 700 .6875rem/1 var(--mono); }
   .s-A { color: var(--ok); } .s-M { color: var(--warn); } .s-D { color: var(--bad); } .s-R { color: var(--a-blue); }
   /* The folder gives way first, so a narrow row keeps the file's name. */
@@ -548,8 +545,8 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .db { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
   .dc { flex: none; font-size: .75rem; font-variant-numeric: tabular-nums; color: var(--dim); }
   .dtag { flex: none; padding: 0 .375rem; border-radius: 999px; background: var(--t-warn); color: var(--warn); font: 600 .625rem/1.6 var(--sans); }
-  .dfr .chev { flex: none; width: 1rem; height: 1rem; color: var(--dim); transition: transform .15s; }
-  .dfr[aria-expanded=true] .chev { transform: rotate(180deg); }
+  :is(.dfr, .ph) .chev { flex: none; width: 1rem; height: 1rem; color: var(--dim); transition: transform .15s; }
+  :is(.dfr, .ph)[aria-expanded=true] .chev { transform: rotate(180deg); }
   .dpatch { margin: 0 .5rem .5rem; border-radius: .625rem; background: var(--code); overflow-x: auto; font: .6875rem/1.6 var(--mono); }
   .dlines { display: inline-block; min-width: 100%; padding: .375rem 0; }
   .dl { display: flex; white-space: pre; }
@@ -1819,7 +1816,7 @@ const lastLine = (s) => snippet(s.split('\n').filter((l) => l.trim() && !MD_FENC
 const snippet = (s) => (s || '').split('\n').find((l) => l.trim())?.replace(/\*\*|__|`/g, '').replace(/^(?:#{1,6} +|> ?|\s+)+/, '') || '';
 // What a task is doing (running, held) or said (its summary), for its row's last line.
 function taskLine(t) {
-  if (t.status === 'running' && t.plan && t.plan.length) return planLine(t);
+  if (t.status === 'running' && t.plan && planNow(t.plan) && t.activity !== 'cancelling…') return planLine(t);
   const writing = !isFinished(t) && writingOf(t.id);
   if (writing || (!isFinished(t) && t.activity && t.activity !== 'queued')) {
     const line = el('div', { className: 'r3 activity one' }, writing ? lastLine(writing) : t.activity);
@@ -2049,24 +2046,27 @@ function renderResult(t) {
   box.replaceChildren(r ? el('div', { className: 'rcard' }, el('h2', {}, r.headline),
     r.points.length ? el('ul', {}, ...r.points.map((p) => el('li', {}, p))) : '', foot) : foot, ev.length ? evStrip(ev) : '');
 }
-// Plan: the agent's latest checklist, open while it runs, folded to its progress once finished (a tap flips either).
+// Plan: the agent's latest checklist. While it runs: open, under the conversation, where a running task is read; once
+// finished: under the result, folded to its progress. A tap flips open/folded. True when it redrew.
 const planDone = (p) => p.filter((i) => i.status === 'completed').length;
 const planNow = (p) => p.find((i) => i.status === 'in_progress') || p.find((i) => i.status === 'pending');
 const PLAN_MARK = { pending: 'to do', in_progress: 'in progress', completed: 'done' };
 let planKey = '', planUi = { id: null, open: null };
 function progressBar(cls, done, n) {
-  const b = el('i', { className: cls });
+  const b = el('i', { className: `bar ${cls}` });
   b.style.setProperty('--v', `${(done / n) * 100}%`);
   return b;
 }
 function renderPlan(t) {
   const box = $('plan'), p = (t && t.plan) || [];
-  if (!p.length) { box.hidden = true; box.replaceChildren(); planKey = ''; return; }
+  if (!p.length) { box.hidden = true; box.replaceChildren(); planKey = ''; return false; }
   if (planUi.id !== t.id) planUi = { id: t.id, open: null };
   const running = t.status === 'running', open = planUi.open ?? running;
   const key = JSON.stringify([t.id, p, running, open]);
-  if (key === planKey) return;
+  if (key === planKey) return false;
   planKey = key;
+  const at = running ? $('approvals') : $('diff');
+  if (box.nextElementSibling !== at) at.before(box);
   box.hidden = false;
   const done = planDone(p);
   const head = el('button', { type: 'button', className: 'ph', onclick: () => { planUi.open = !open; render(); } },
@@ -2081,13 +2081,17 @@ function renderPlan(t) {
       el('span', { className: 'pk', role: 'img', ariaLabel: PLAN_MARK[i.status] }, i.status === 'completed' ? svg(ICON.check, 3) : ''),
       el('span', { className: 'pt' }, live ? i.active_form || i.text : i.text));
   };
+  // A redraw replaces the head: keep the keyboard on it.
+  const focused = document.activeElement && document.activeElement.classList.contains('ph');
   box.replaceChildren(head, bar, open ? el('ol', { className: 'pl' }, ...p.map(row)) : '');
+  if (focused) head.focus();
+  return true;
 }
 // A running task's plan on Home: `3/7 · Running the tests`.
 function planLine(t) {
   const p = t.plan, cur = planNow(p), done = planDone(p);
   return el('div', { className: 'r3 pline one' }, progressBar('pmini', done, p.length), el('b', {}, `${done}/${p.length}`), ' · ',
-    !cur ? 'All done' : (cur.status === 'in_progress' && cur.active_form) || cur.text);
+    (cur.status === 'in_progress' && cur.active_form) || cur.text);
 }
 // Files changed: a task's diff (fetched once per diff from `/api/tasks/<id>/diff`), its file rows folding open to their
 // patch; under them the Push / Open PR offers, each asking in place before its reply goes to the agent.
@@ -2751,7 +2755,9 @@ function renderDetail(id) {
     el('div', { className: 'r2 one' }, ...dots([t.worker && shortHost(hostOf(t.worker)), harnessModel(t.harness, t.model),
       t.status === 'running' ? clock(t) : changedAt(t) && span(now - changedAt(t))]))] : []));
   renderResult(t);
-  renderPlan(t);
+  // The card grows under the conversation: one followed from the bottom stays there.
+  const bottom = atBottom();
+  if (renderPlan(t) && bottom && t.status === 'running') scrollTo(0, document.documentElement.scrollHeight);
   renderDiff(t);
   drawTask(t);
   renderAttached((t && t.images) || []);
