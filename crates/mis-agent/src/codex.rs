@@ -211,13 +211,15 @@ pub fn codex_home() -> Result<PathBuf, String> {
 }
 
 /// `-c` overrides offering `url` as MCP server `MCP_SERVER`, its bearer token read
-/// from `MCP_TOKEN_ENV`, its tools approved (else `exec` refuses to call them).
+/// from `MCP_TOKEN_ENV`, its tools approved (else `exec` refuses to call them),
+/// and calls waiting as long as `merge_pr` may wait for the user.
 pub fn mcp_args(url: &str) -> Vec<String> {
     let key = format!("mcp_servers.{MCP_SERVER}");
     [
         format!("{key}.url=\"{url}\""),
         format!("{key}.bearer_token_env_var=\"{MCP_TOKEN_ENV}\""),
         format!("{key}.default_tools_approval_mode=\"approve\""),
+        format!("{key}.tool_timeout_sec={}", crate::MCP_CALL_WAIT.as_secs()),
     ]
     .into_iter()
     .flat_map(|kv| ["-c".to_string(), kv])
@@ -815,6 +817,8 @@ mod tests {
                 r#"mcp_servers.mis.bearer_token_env_var="MIS_MCP_TOKEN""#,
                 "-c",
                 r#"mcp_servers.mis.default_tools_approval_mode="approve""#,
+                "-c",
+                "mcp_servers.mis.tool_timeout_sec=2100",
             ]
         );
     }

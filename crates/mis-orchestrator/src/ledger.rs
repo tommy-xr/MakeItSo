@@ -485,10 +485,14 @@ impl TaskEntry {
 
 /// Evidence rows that replace each other: tests and notes by title (a re-run
 /// updates its verdict), links by URL (a reported PR and a mentioned one match).
-fn key(l: &Link) -> (Option<LinkKind>, &str) {
+/// `merge_pr` rows by outcome too, so "merged" outlasts a later "it is merged".
+fn key(l: &Link) -> (Option<LinkKind>, &str, &str) {
     match l.kind {
-        LinkKind::Test | LinkKind::Note => (Some(l.kind), &l.label),
-        _ => (None, &l.url),
+        LinkKind::Test if is_merge_label(&l.label) => {
+            (Some(l.kind), &l.label, l.detail.as_deref().unwrap_or(""))
+        }
+        LinkKind::Test | LinkKind::Note => (Some(l.kind), &l.label, ""),
+        _ => (None, &l.url, ""),
     }
 }
 
@@ -701,6 +705,7 @@ impl Ledger {
                 send_to: None,
                 read_only: false,
                 diff_base: None,
+                merge: MergeRule::Any,
             },
             self.now_ms,
         );
@@ -767,6 +772,7 @@ impl Ledger {
                     resume: Some(session.clone()),
                     // The user replies: their worker's permissions, not the run's.
                     read_only: false,
+                    merge: MergeRule::Any,
                     // The thread's changes add up from where it started.
                     diff_base: (p.diff_base.clone().map(Box::new))
                         .or_else(|| p.task.diff_base.clone()),
@@ -815,6 +821,7 @@ impl Ledger {
             send_to: Some(to),
             read_only: false,
             diff_base: None,
+            merge: MergeRule::Any,
         };
         self.enqueue_pinned(wid, task, images)
     }
@@ -3202,6 +3209,7 @@ mod tests {
             summary: summary.into(),
             detail: summary.into(),
             always: Some("commands starting python3".into()),
+            merge: None,
         }
     }
 

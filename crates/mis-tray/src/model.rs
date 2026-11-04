@@ -633,6 +633,10 @@ mod tests {
             last_status: None,
             error: None,
             mode: Some(RoutineMode::Report),
+            merge: None,
+            changed: false,
+            pin: None,
+            prompt: None,
         }
     }
 
@@ -730,6 +734,7 @@ mod tests {
             summary: "Bash: python3 make.py".into(),
             detail: String::new(),
             always: None,
+            merge: None,
         }];
         let mut runs = task(4, Running, "status: counting tests");
         runs.worker = Some(mini.id);

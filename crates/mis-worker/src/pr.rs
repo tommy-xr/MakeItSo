@@ -140,22 +140,42 @@ fn next_poll(elapsed: Duration) -> Option<Duration> {
 }
 
 #[derive(Debug, PartialEq)]
-enum GhError {
+pub enum GhError {
     /// `gh` is missing or signed out: no point retrying.
     Unavailable(String),
-    /// This read failed (network, unknown PR); the next poll retries.
+    /// This call failed (network, unknown PR); a retry may work.
     Failed(String),
+}
+
+impl GhError {
+    pub fn why(self) -> String {
+        match self {
+            Self::Unavailable(why) | Self::Failed(why) => why,
+        }
+    }
 }
 
 /// Run `program pr view <url> --json …`; its stdout.
 async fn gh_view(program: &OsStr, url: &str) -> Result<String, GhError> {
+    gh(program, &args(url), GH_TIMEOUT).await
+}
+
+/// Run `program <args>` (argv, no shell) outside any checkout, so it touches no
+/// local branch; its stdout, or why not.
+pub async fn gh(
+    program: &OsStr,
+    args: &[impl AsRef<OsStr>],
+    timeout: Duration,
+) -> Result<String, GhError> {
     let child = tokio::process::Command::new(program)
-        .args(args(url))
+        .args(args)
+        .current_dir(std::env::temp_dir())
         .env("GH_PROMPT_DISABLED", "1")
+        .env("GH_NO_UPDATE_NOTIFIER", "1")
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .output();
-    let out = match tokio::time::timeout(GH_TIMEOUT, child).await {
+    let out = match tokio::time::timeout(timeout, child).await {
         Err(_) => return Err(GhError::Failed("gh timed out".into())),
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(GhError::Unavailable("gh not found".into()))

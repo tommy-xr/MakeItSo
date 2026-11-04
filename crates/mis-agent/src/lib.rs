@@ -23,6 +23,9 @@ pub const MCP_SERVER: &str = "mis";
 pub const APPROVE_TOOL: &str = "approve";
 /// How long the worker waits for the user to answer before denying.
 pub const APPROVAL_WAIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// How long a harness lets one call to the worker's MCP server take: `APPROVAL_WAIT`
+/// plus `merge_pr`'s `gh` calls around it.
+pub const MCP_CALL_WAIT: std::time::Duration = std::time::Duration::from_secs(35 * 60);
 
 /// Loopback MCP server the agent may call for the duration of one run.
 #[derive(Debug, Clone)]
@@ -55,6 +58,9 @@ pub struct RunOpts<'a> {
     /// Narrow `permissions` to reads (see `claude::read_only_args`). Codex ignores
     /// it: its read-only sandbox also cuts the network `gh` needs.
     pub read_only: bool,
+    /// Deny the usual ways around `merge_pr` (see `claude::NO_MERGE`): a live
+    /// routine run. Codex ignores it, as it has no deny rules; its prompt says so.
+    pub no_merge: bool,
 }
 
 pub trait Agent: Send + Sync {

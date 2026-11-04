@@ -77,13 +77,38 @@ impl Approvals {
             summary: rules::summary(tool, input, home),
             detail: rules::detail(tool, input),
             always: rule.as_ref().map(|r| rules::describe(r, home)),
+            merge: None,
         };
+        match self.wait(task, approval, rule).await {
+            Ok(Decision::Allow | Decision::Always) => allow(input),
+            Ok(Decision::Deny) => deny("the user denied this"),
+            Err(why) => deny(why),
+        }
+    }
+
+    /// Ask the user to confirm a `merge_pr` merge (`approval.merge`); Ok only if
+    /// they allow it in `wait`. Nothing is saved: each merge is asked anew.
+    pub async fn confirm(&self, task: TaskId, approval: Approval) -> Result<(), &'static str> {
+        match self.wait(task, approval, None).await? {
+            Decision::Allow | Decision::Always => Ok(()),
+            Decision::Deny => Err("the user denied it"),
+        }
+    }
+
+    /// Send `approval` to the user and wait for the answer; Err: why none came.
+    async fn wait(
+        &self,
+        task: TaskId,
+        approval: Approval,
+        rule: Option<rules::Rule>,
+    ) -> Result<Decision, &'static str> {
         let id = approval.id;
         let (reply, answer) = oneshot::channel();
         let request = WorkerMsg::ApprovalRequest {
             task,
             approval: approval.clone(),
         };
+        tracing::info!(%task, %id, "asking the user: {}", approval.tool);
         self.pending.lock().unwrap().insert(
             id,
             Pending {
@@ -93,16 +118,14 @@ impl Approvals {
                 reply,
             },
         );
-        tracing::info!(%task, %id, "asking the user: {tool}");
         let _ = self.out.send(request).await;
         match tokio::time::timeout(self.wait, answer).await {
-            Ok(Ok(Decision::Allow | Decision::Always)) => allow(input),
-            Ok(Ok(Decision::Deny)) => deny("the user denied this"),
-            Ok(Err(_)) => deny("the request was dropped"),
+            Ok(Ok(decision)) => Ok(decision),
+            Ok(Err(_)) => Err("the request was dropped"),
             Err(_) => {
                 self.pending.lock().unwrap().remove(&id);
                 let _ = self.out.send(WorkerMsg::ApprovalClosed { task, id }).await;
-                deny("no answer from the user")
+                Err("no answer from the user")
             }
         }
     }

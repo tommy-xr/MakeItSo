@@ -37,6 +37,9 @@ pub struct Approval {
     /// What "always" would save, e.g. "writes in ~/assets"; None when it can't.
     #[serde(default)]
     pub always: Option<String>,
+    /// A `merge_pr` merge waiting on the user: the PR it checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge: Option<crate::MergeFacts>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

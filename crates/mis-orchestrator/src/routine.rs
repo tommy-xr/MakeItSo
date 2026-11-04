@@ -6,7 +6,10 @@
 use std::collections::BTreeMap;
 
 use chrono::TimeZone;
-use mis_types::{RoutineMode, RoutineView, TaskId, TaskStatus};
+use mis_types::{
+    MergeApprove, MergeMethod, MergePolicy, MergeRule, RoutineMode, RoutineView, TaskId,
+    TaskStatus, MERGE_TOOL,
+};
 use serde::{Deserialize, Serialize};
 
 mod cron;
@@ -40,6 +43,8 @@ pub struct Routine {
     pub paused: bool,
     /// May act (`act: true`): runs dry until [`State::live`].
     pub act: bool,
+    /// What `merge_pr` may merge; None: runs never merge.
+    pub merge: Option<MergePolicy>,
     pub prompt: String,
 }
 
@@ -63,8 +68,13 @@ pub struct State {
     pub last_task: Option<TaskId>,
     /// Paused or resumed from the API; beats the file's `paused`.
     pub paused: Option<bool>,
-    /// Switched live from the API; counts only while the file says `act: true`.
+    /// Switched live from the API; counts only while the file says `act: true`
+    /// and its [`Routine::pin`] is `live_pin`.
     pub live: bool,
+    /// The routine's pin when it went live.
+    pub live_pin: Option<String>,
+    /// It dropped back to dry run because its file changed while live.
+    pub changed: bool,
     /// Why the last attempt couldn't start a task; cleared once one does.
     pub error: Option<String>,
 }
@@ -102,37 +112,84 @@ impl Routine {
         }
     }
 
-    /// Report unless the file says `act: true`; then dry run until switched live.
+    /// Report unless the file says `act: true`; then dry run until switched live,
+    /// and again once what went live changes (see [`Routine::pin`]).
     pub fn mode(&self, s: &State) -> RoutineMode {
-        match (self.act, s.live) {
+        let pinned = s.live_pin.as_deref() == Some(self.pin().as_str());
+        match (self.act, s.live && pinned) {
             (false, _) => RoutineMode::Report,
             (true, false) => RoutineMode::DryRun,
             (true, true) => RoutineMode::Live,
         }
     }
 
+    /// Hex SHA-256 of what going live approves: the prompt, merge policy, and
+    /// where and how it runs (harness, model, worker, cwd).
+    pub fn pin(&self) -> String {
+        use sha2::Digest;
+        let what = serde_json::json!({
+            "prompt": self.prompt,
+            "merge": self.merge,
+            "harness": self.harness,
+            "model": self.model,
+            "worker": self.worker,
+            "cwd": self.cwd,
+        });
+        let hash = sha2::Sha256::digest(what.to_string().as_bytes());
+        hash.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// How its runs may merge: through `merge_pr` if the file has a policy (a dry
+    /// run's only says what it would merge), else never.
+    pub fn merge_rule(&self) -> MergeRule {
+        self.merge
+            .clone()
+            .map_or(MergeRule::Never, |p| MergeRule::Tool(Box::new(p)))
+    }
+
     /// The prompt a run in `mode` gets: one paragraph saying what it may do, then
-    /// the file's. Runs start unattended, so even live ones never merge.
+    /// the file's. Runs start unattended, so they merge only through `merge_pr`.
     pub fn run_prompt(&self, mode: RoutineMode) -> String {
+        let tool = self.merge.is_some();
         let rules = match mode {
-            RoutineMode::Report => {
-                "(scheduled run, report only)\n\
+            RoutineMode::Report => "(scheduled run, report only)\n\
                  Investigate and report what you find. Do not push, merge, open, close or \
                  comment on PRs or issues, deploy, or change any other remote state."
-            }
+                .to_string(),
             RoutineMode::DryRun => {
-                "(scheduled run, dry run)\n\
-                 This routine may act, but this run is a dry run, so the user can judge it \
-                 before letting it act. Investigate, then list exactly the actions you would \
-                 take: each command, push, comment or label, with its full text. Perform none \
-                 of them: change no files, commits, PRs, issues or other state."
+                let merge = match tool {
+                    true => format!(
+                        " For each PR you would merge, call `{MERGE_TOOL}` (repo, number): \
+                         in a dry run it only says whether this routine's merge rules would \
+                         let it merge, and why not."
+                    ),
+                    false => String::new(),
+                };
+                format!(
+                    "(scheduled run, dry run)\n\
+                     This routine may act, but this run is a dry run, so the user can judge it \
+                     before letting it act. Investigate, then list exactly the actions you would \
+                     take: each command, push, comment or label, with its full text. Perform none \
+                     of them: change no files, commits, PRs, issues or other state.{merge}"
+                )
             }
             RoutineMode::Live => {
-                "(scheduled run, live)\n\
-                 You may act as the instructions below say, and only that far. Never merge \
-                 PRs, push tags, create releases, or read, change or print secrets or \
-                 credentials. Report every action you take (command, push, comment, label), \
-                 and call `report_evidence` for each PR, commit or comment you made."
+                let merge = match tool {
+                    true => format!(
+                        "Merge PRs only by calling `{MERGE_TOOL}` (repo, number), never with \
+                         gh, git or the API: it checks this routine's merge rules, may ask the \
+                         user, and merges only if they pass. Report what it answered for each \
+                         PR. Never push tags"
+                    ),
+                    false => "Never merge PRs, push tags".to_string(),
+                };
+                format!(
+                    "(scheduled run, live)\n\
+                     You may act as the instructions below say, and only that far. {merge}, \
+                     create releases, or read, change or print secrets or credentials. Report \
+                     every action you take (command, push, comment, label), and call \
+                     `report_evidence` for each PR, commit or comment you made."
+                )
             }
         };
         format!("Routine \"{}\" {rules}\n\n{}", self.name, self.prompt)
@@ -195,6 +252,10 @@ pub fn view<Tz: TimeZone>(
             cwd: r.cwd.clone(),
             paused: r.paused(&s),
             mode: Some(r.mode(&s)),
+            merge: r.merge.clone(),
+            changed: s.changed,
+            pin: Some(r.pin()),
+            prompt: Some(r.prompt.clone()),
             next_at: r.next_at(&s, runs.ended, tz),
             last_at,
             last_task,
@@ -211,6 +272,10 @@ pub fn view<Tz: TimeZone>(
             cwd: None,
             paused: false,
             mode: None,
+            merge: None,
+            changed: false,
+            pin: None,
+            prompt: None,
             next_at: None,
             last_at,
             last_task,
@@ -249,7 +314,8 @@ pub fn parse_all(files: Vec<(String, Result<String, String>)>) -> Vec<Def> {
 /// Keys: `name` (default: the file name less `.md`), `every` (`30m`, `6h`, `1d`) or
 /// `cron` (5 fields), and optional `harness`, `model`, `worker`, `cwd` (a folder on
 /// the worker, as for tasks: absolute or under its root; no `~`), `paused`, `act`
-/// (may act once switched live; see [`Routine::mode`]).
+/// (may act once switched live; see [`Routine::mode`]), and `merge:` with its keys
+/// on indented lines below (see [`parse_merge`]). ` #` starts a comment.
 pub fn parse(file: &str, text: &str) -> Result<Routine, String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut lines = text.split_inclusive('\n');
@@ -257,29 +323,59 @@ pub fn parse(file: &str, text: &str) -> Result<Routine, String> {
         return Err("must start with a `---` frontmatter line".into());
     }
     let mut keys: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut merge: Option<BTreeMap<&str, &str>> = None;
+    // The top-level key the indented lines below it belong to.
+    let mut block = None;
     let mut body = None;
     let mut at = text.find('\n').map_or(text.len(), |i| i + 1);
-    for line in lines {
-        at += line.len();
-        let line = line.trim();
+    for raw in lines {
+        at += raw.len();
+        let line = raw.trim();
         if line == "---" {
             body = Some(&text[at..]);
             break;
         }
-        if line.is_empty() || line.starts_with('#') {
+        let line = strip_comment(line);
+        if line.is_empty() {
             continue;
+        }
+        let indented = raw.starts_with([' ', '\t']);
+        if line.starts_with("- ") || line == "-" {
+            return Err(format!("`{line}`: write lists as `[a, b]`"));
         }
         let (k, v) =
             (line.split_once(':')).ok_or_else(|| format!("`{line}`: want `key: value`"))?;
-        let (k, v) = (k.trim(), unquote(v.trim()));
-        const KEYS: [&str; 9] = [
-            "name", "every", "cron", "harness", "model", "worker", "cwd", "paused", "act",
+        let (k, v) = (k.trim(), v.trim());
+        if indented {
+            let Some(keys) = merge.as_mut().filter(|_| block == Some("merge")) else {
+                return Err(format!("`{line}`: indented, but not under `merge:`"));
+            };
+            if !MERGE_KEYS.contains(&k) {
+                return Err(format!(
+                    "merge: unknown key `{k}` (known: {})",
+                    MERGE_KEYS.join(", ")
+                ));
+            }
+            if keys.insert(k, v).is_some() {
+                return Err(format!("merge: `{k}` is set twice"));
+            }
+            continue;
+        }
+        const KEYS: [&str; 10] = [
+            "name", "every", "cron", "harness", "model", "worker", "cwd", "paused", "act", "merge",
         ];
         if !KEYS.contains(&k) {
             return Err(format!("unknown key `{k}` (known: {})", KEYS.join(", ")));
         }
-        if keys.insert(k, v).is_some() {
+        if keys.insert(k, unquote(v)).is_some() {
             return Err(format!("`{k}` is set twice"));
+        }
+        block = Some(k);
+        if k == "merge" {
+            if !v.is_empty() {
+                return Err("merge: put its keys on indented lines below it".into());
+            }
+            merge = Some(BTreeMap::new());
         }
     }
     let body = body.ok_or("the frontmatter needs a closing `---` line")?;
@@ -306,6 +402,10 @@ pub fn parse(file: &str, text: &str) -> Result<Routine, String> {
         Some(v) => Err(format!("{k} `{v}`: want true or false")),
     };
     let (paused, act) = (flag("paused")?, flag("act")?);
+    let merge = merge.map(|m| parse_merge(&m)).transpose()?;
+    if merge.is_some() && !act {
+        return Err("merge needs `act: true`: report-only runs never merge".into());
+    }
     let prompt = body.trim().to_string();
     if prompt.is_empty() {
         return Err("no prompt after the frontmatter".into());
@@ -320,8 +420,139 @@ pub fn parse(file: &str, text: &str) -> Result<Routine, String> {
         cwd: get("cwd"),
         paused,
         act,
+        merge,
         prompt,
     })
+}
+
+const MERGE_KEYS: [&str; 8] = [
+    "repos",
+    "max_files",
+    "max_lines",
+    "authors",
+    "forbid_paths",
+    "require_labels",
+    "method",
+    "approve",
+];
+
+/// Most files `gh pr view --json files` lists; a PR with more can't be checked.
+pub const MAX_MERGE_FILES: u32 = 100;
+
+/// The `merge:` block's keys: `repos` (`owner/name`) and `authors` (logins as
+/// `gh` gives them, e.g. `app/dependabot`), at least one each; `max_files` (at
+/// most `MAX_MERGE_FILES`) and `max_lines`; optional `forbid_paths` (globs),
+/// `require_labels`, `method` (squash, merge or rebase; default squash) and
+/// `approve` (phone or none; default phone). Lists are `[a, b]`.
+fn parse_merge(keys: &BTreeMap<&str, &str>) -> Result<MergePolicy, String> {
+    let list = |k: &str| keys.get(k).map_or(Ok(vec![]), |v| parse_list(k, v));
+    let num = |k: &str, max: u32| {
+        let v = keys.get(k).map(|v| unquote(v));
+        let n = v.ok_or_else(|| format!("merge: needs `{k}`"))?;
+        match n.parse::<u32>() {
+            Ok(n) if (1..=max).contains(&n) => Ok(n),
+            _ => Err(format!(
+                "merge: {k} `{n}`: want a whole number from 1 to {max}"
+            )),
+        }
+    };
+    let word = |k: &str, default: &'static str| keys.get(k).map_or(default, |v| unquote(v));
+    let repos = list("repos")?;
+    if repos.is_empty() {
+        return Err("merge: needs `repos: [owner/name]`".into());
+    }
+    let repo_ok = |r: &str| {
+        let part = |p: &str| {
+            !p.is_empty()
+                && !p.starts_with(['.', '-'])
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        };
+        r.split_once('/').is_some_and(|(o, n)| part(o) && part(n))
+    };
+    if let Some(bad) = repos.iter().find(|r| !repo_ok(r)) {
+        return Err(format!("merge: repo `{bad}`: want owner/name"));
+    }
+    let authors = list("authors")?;
+    if authors.is_empty() {
+        return Err("merge: needs `authors: [login]`, whose PRs it may merge".into());
+    }
+    let login_ok = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '[' | ']');
+    if let Some(bad) = authors.iter().find(|a| !a.chars().all(login_ok)) {
+        return Err(format!("merge: author `{bad}`: want a GitHub login"));
+    }
+    let method = match word("method", "squash") {
+        "squash" => MergeMethod::Squash,
+        "merge" => MergeMethod::Merge,
+        "rebase" => MergeMethod::Rebase,
+        v => return Err(format!("merge: method `{v}`: want squash, merge or rebase")),
+    };
+    let approve = match word("approve", "phone") {
+        "phone" => MergeApprove::Phone,
+        "none" => MergeApprove::None,
+        v => return Err(format!("merge: approve `{v}`: want phone or none")),
+    };
+    let forbid_paths = list("forbid_paths")?;
+    // Classes and braces would match nothing here, leaving those paths open.
+    if let Some(bad) = forbid_paths
+        .iter()
+        .find(|g| g.contains(['[', ']', '{', '}']))
+    {
+        return Err(format!(
+            "merge: forbid_paths `{bad}`: use only `*` and `**`"
+        ));
+    }
+    Ok(MergePolicy {
+        repos,
+        max_files: num("max_files", MAX_MERGE_FILES)?,
+        max_lines: num("max_lines", u32::MAX)?,
+        authors,
+        forbid_paths,
+        require_labels: list("require_labels")?,
+        method,
+        approve,
+    })
+}
+
+/// `[a, "b c"]` -> `a`, `b c`; a bare value is a list of one.
+fn parse_list(k: &str, v: &str) -> Result<Vec<String>, String> {
+    let inner = match v.strip_prefix('[') {
+        Some(rest) => (rest.strip_suffix(']'))
+            .ok_or_else(|| format!("merge: {k}: a list needs its closing `]`"))?,
+        None => v,
+    };
+    if inner.trim().is_empty() {
+        return Ok(vec![]);
+    }
+    (inner.split(','))
+        .map(|item| match (item.trim(), unquote(item.trim())) {
+            (_, "") => Err(format!("merge: {k}: empty item")),
+            // `"a,b"` was split at its comma: half-quoted, it would match nothing.
+            (raw, same) if raw == same && raw.starts_with(['"', '\'']) => {
+                Err(format!("merge: {k}: `{raw}`: no commas inside quotes"))
+            }
+            (_, item) => Ok(item.to_string()),
+        })
+        .collect()
+}
+
+/// `value  # note` -> `value`; a `#` inside quotes, or not after a space, stays.
+fn strip_comment(line: &str) -> &str {
+    if line.starts_with('#') {
+        return "";
+    }
+    let mut quote = None;
+    let mut prev = ' ';
+    for (i, c) in line.char_indices() {
+        match (quote, c) {
+            (None, '"' | '\'') => quote = Some(c),
+            (Some(q), c) if c == q => quote = None,
+            (None, '#') if prev.is_whitespace() => return line[..i].trim_end(),
+            _ => {}
+        }
+        prev = c;
+    }
+    line
 }
 
 /// `"x"` or `'x'` -> `x`.
@@ -598,10 +829,10 @@ mod tests {
 
     #[test]
     fn mode_needs_act_in_the_file_and_live_in_the_state() {
-        let mut live = State::new(0);
-        live.live = true;
-        let report = parse("x.md", FILE).unwrap();
         let act = routine("every: 1h\nact: true");
+        let mut live = State::new(0);
+        (live.live, live.live_pin) = (true, Some(act.pin()));
+        let report = parse("x.md", FILE).unwrap();
         assert!(!report.act && act.act);
         assert_eq!(report.mode(&State::new(0)), RoutineMode::Report);
         assert_eq!(report.mode(&live), RoutineMode::Report, "act removed");
@@ -631,6 +862,168 @@ mod tests {
             // One paragraph of rules: the phone shows what follows it as the routine's prompt.
             let text = p(m);
             assert_eq!(text.split_once("\n\n").unwrap().1, "Groom the open PRs.");
+        }
+    }
+
+    const MERGE: &str =
+        "---\nevery: 1d\nact: true\nmerge:\n  repos: [tommy-xr/MakeItSo, \"o/r\"]\n  \
+                         max_files: 10\n  max_lines: 300\n  \
+                         authors: [app/dependabot, tommy-xr]      # PR author logins allowed\n  \
+                         forbid_paths: [.github/workflows/**, release/**]\n  \
+                         require_labels: [automerge]   # optional\n  method: rebase\n  \
+                         approve: none\nharness: claude\n---\nMerge green dependabot PRs.";
+
+    #[test]
+    fn parses_a_merge_policy() {
+        let r = parse("deps.md", MERGE).unwrap();
+        let m = r.merge.clone().unwrap();
+        assert_eq!(m.repos, ["tommy-xr/MakeItSo", "o/r"]);
+        assert_eq!((m.max_files, m.max_lines), (10, 300));
+        assert_eq!(m.authors, ["app/dependabot", "tommy-xr"]);
+        assert_eq!(m.forbid_paths, [".github/workflows/**", "release/**"]);
+        assert_eq!(m.require_labels, ["automerge"]);
+        assert_eq!(
+            (m.method, m.approve),
+            (MergeMethod::Rebase, MergeApprove::None)
+        );
+        assert_eq!(r.harness.as_deref(), Some("claude"), "keys after the block");
+        assert_eq!(r.merge_rule(), MergeRule::Tool(Box::new(m)));
+        // Defaults: squash, approved on the phone; no paths or labels required.
+        let min = "---\nevery: 1d\nact: true\nmerge:\n\trepos: o/r\n\tauthors: [me]\n\t\
+                   max_files: 1\n\tmax_lines: 1\n---\ngo";
+        let m = parse("r.md", min).unwrap().merge.unwrap();
+        assert_eq!(
+            (m.method, m.approve),
+            (MergeMethod::Squash, MergeApprove::Phone)
+        );
+        assert!(m.forbid_paths.is_empty() && m.require_labels.is_empty());
+        assert_eq!(
+            routine("every: 1h\nact: true").merge_rule(),
+            MergeRule::Never
+        );
+    }
+
+    #[test]
+    fn bad_merge_policies_say_why() {
+        let base = |extra: &str| {
+            format!(
+                "---\nevery: 1d\nact: true\nmerge:\n  repos: [o/r]\n  authors: [me]\n  \
+                 max_files: 5\n  max_lines: 50\n{extra}---\ngo"
+            )
+        };
+        for (text, why) in [
+            (base("  mehtod: squash\n"), "merge: unknown key `mehtod`"),
+            (base("  repos: [x/y]\n"), "merge: `repos` is set twice"),
+            (base("  method: octopus\n"), "method `octopus`"),
+            (base("  approve: email\n"), "approve `email`"),
+            (
+                base("  forbid_paths: [.github/{a,b}]\n"),
+                "use only `*` and `**`",
+            ),
+            (base("  forbid_paths: [a,,b]\n"), "empty item"),
+            (
+                base("  forbid_paths: [\"a,b\"]\n"),
+                "no commas inside quotes",
+            ),
+            (base("  require_labels: [a\n"), "closing `]`"),
+            (base("  - x\n"), "write lists as `[a, b]`"),
+            (base("every2: 1h\n  x: y\n"), "unknown key `every2`"),
+            (
+                "---\nevery: 1d\nact: true\nmerge: {repos: [o/r]}\n---\ngo".into(),
+                "indented lines below",
+            ),
+            (
+                "---\nevery: 1d\n  repos: [o/r]\n---\ngo".into(),
+                "not under `merge:`",
+            ),
+            (
+                base("").replace("act: true\n", ""),
+                "merge needs `act: true`",
+            ),
+            (base("").replace("  repos: [o/r]\n", ""), "needs `repos"),
+            (
+                base("").replace("[o/r]", "[o]"),
+                "repo `o`: want owner/name",
+            ),
+            (base("").replace("[o/r]", "[--admin/r]"), "repo `--admin/r`"),
+            (base("").replace("  authors: [me]\n", ""), "needs `authors"),
+            (base("").replace("[me]", "[\"me; rm\"]"), "author `me; rm`"),
+            (
+                base("").replace("  max_files: 5\n", ""),
+                "needs `max_files`",
+            ),
+            (
+                base("").replace("max_files: 5", "max_files: 0"),
+                "max_files `0`",
+            ),
+            (
+                base("").replace("max_files: 5", "max_files: 101"),
+                "from 1 to 100",
+            ),
+            (
+                base("").replace("max_lines: 50", "max_lines: lots"),
+                "max_lines `lots`",
+            ),
+        ] {
+            let err = parse("r.md", &text).unwrap_err();
+            assert!(err.contains(why), "{text:?}: {err}");
+        }
+        // A `#` without a space before it is part of the value.
+        let r = parse("r.md", "---\nevery: 1h\nmodel: a#b # note\n---\ngo").unwrap();
+        assert_eq!(r.model.as_deref(), Some("a#b"));
+    }
+
+    #[test]
+    fn going_live_pins_the_prompt_policy_and_placement() {
+        let r = parse("deps.md", MERGE).unwrap();
+        let mut s = State::new(0);
+        (s.live, s.live_pin) = (true, Some(r.pin()));
+        assert_eq!(r.mode(&s), RoutineMode::Live);
+        // The schedule and pause aren't pinned...
+        let same = parse(
+            "deps.md",
+            &MERGE.replace("every: 1d", "every: 2h\npaused: true"),
+        )
+        .unwrap();
+        assert_eq!(same.mode(&s), RoutineMode::Live);
+        // ...but each of these is.
+        for (from, to) in [
+            ("Merge green", "Merge any"),
+            ("max_lines: 300", "max_lines: 3000"),
+            ("approve: none", "approve: phone"),
+            ("harness: claude", "harness: codex"),
+            ("harness: claude", "harness: claude\nworker: other"),
+            ("harness: claude", "harness: claude\ncwd: /elsewhere"),
+            ("harness: claude", "harness: claude\nmodel: opus"),
+        ] {
+            let edited = parse("deps.md", &MERGE.replace(from, to)).unwrap();
+            assert_eq!(edited.mode(&s), RoutineMode::DryRun, "{from} -> {to}");
+        }
+        // A live state from before pins existed has none: dry run.
+        s.live_pin = None;
+        assert_eq!(r.mode(&s), RoutineMode::DryRun);
+        let v = view(&Ok(r.clone()), None, Runs::default(), None, 0, &Utc);
+        assert_eq!(v.pin.as_deref(), Some(r.pin().as_str()));
+        assert_eq!(v.merge, r.merge);
+        assert_eq!(r.pin().len(), 64);
+    }
+
+    #[test]
+    fn merge_runs_are_told_to_use_merge_pr() {
+        let r = parse("deps.md", MERGE).unwrap();
+        let live = r.run_prompt(RoutineMode::Live);
+        assert!(
+            live.contains("Merge PRs only by calling `merge_pr`"),
+            "{live}"
+        );
+        assert!(live.contains("Never push tags, create releases"));
+        let dry = r.run_prompt(RoutineMode::DryRun);
+        assert!(dry.contains("call `merge_pr`") && dry.contains("only says whether"));
+        for text in [live, dry] {
+            assert_eq!(
+                text.split_once("\n\n").unwrap().1,
+                "Merge green dependabot PRs."
+            );
         }
     }
 }
