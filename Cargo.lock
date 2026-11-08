@@ -1953,11 +1953,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "flate2",
  "futures-util",
  "mis-agent",
  "mis-types",
  "reqwest",
  "serde_json",
+ "tar",
  "tokio",
  "tokio-tungstenite 0.26.2",
 ]

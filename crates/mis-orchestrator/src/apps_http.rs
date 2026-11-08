@@ -105,7 +105,11 @@ fn serve(apps: &Apps, slug: &str, path: &str) -> Response {
     let web = live.manifest.clients.web.as_str();
     let found = apps::clean_path(path.trim_end_matches('/'))
         .and_then(read)
-        .or_else(|| apps::wants_entry_fallback(path).then(|| read(web)).flatten());
+        .or_else(|| {
+            apps::wants_entry_fallback(path)
+                .then(|| read(web))
+                .flatten()
+        });
     match found {
         Some((rel, bytes)) => {
             ([(header::CONTENT_TYPE, apps::content_type(&rel))], bytes).into_response()

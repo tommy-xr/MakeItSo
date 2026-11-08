@@ -173,7 +173,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   #menu nav a { display: flex; align-items: center; min-height: 2.75rem; padding: 0 .75rem; border-radius: .75rem; text-decoration: none; font-size: .9375rem; color: var(--fg2); }
   @media (hover: hover) { #menu nav a:hover { background: var(--hover); } }
   #menu nav a[aria-current=page] { color: var(--fg); background: var(--bubble); font-weight: 500; }
-  /* Routines and Workers: the name opens the view, the chevron unfolds one link per routine or worker. */
+  /* Routines, Apps and Workers: the name opens the view, the chevron unfolds one link per routine, app or worker. */
   .ngrp { display: flex; align-items: center; gap: .125rem; }
   .ngrp > a { flex: 1; min-width: 0; }
   .ngrp .chev { width: 1rem; height: 1rem; transition: transform .15s; }
@@ -233,9 +233,9 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   #fleet { padding: .5rem .375rem .75rem; font-size: .8125rem; }
   ul { list-style: none; margin: 0; padding: 0; }
   /* Grouped lists: rounded cards with hairlines inset past the status dot. */
-  .rows, #routine-list, #machines, #wbody > ul { background: var(--card); border-radius: 1rem; overflow: hidden; }
-  .rows > li, #routine-list > li, #machines > li, #wbody > ul > li { position: relative; }
-  .rows > li + li::before, #routine-list > li + li::before, #machines > li + li::before, #wbody > ul > li + li::before { content: ""; position: absolute; top: 0; left: 2.25rem; right: 0; height: 1px; background: var(--sep); }
+  .rows, #routine-list, #app-list, #machines, #wbody > ul { background: var(--card); border-radius: 1rem; overflow: hidden; }
+  .rows > li, #routine-list > li, #app-list > li, #machines > li, #wbody > ul > li { position: relative; }
+  .rows > li + li::before, #routine-list > li + li::before, #app-list > li + li::before, #machines > li + li::before, #wbody > ul > li + li::before { content: ""; position: absolute; top: 0; left: 2.25rem; right: 0; height: 1px; background: var(--sep); }
   li.dim { padding: .875rem; }
   li > a { display: block; padding: .75rem .875rem; color: inherit; text-decoration: none; transition: background-color .15s; }
   @media (hover: hover) { li > a:hover, .more:hover { background: var(--hover); } }
@@ -325,10 +325,10 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   #log { padding: .625rem .75rem; border-radius: .75rem; background: var(--code); color: var(--soft); font: .75rem/1.5 var(--mono); }
   #ids { font-family: var(--mono); font-size: .75rem; }
   /* Workers: the whole row opens the worker; the busy task's id is its own link on top. */
-  li.worker, li.routine { padding: .875rem .875rem .875rem 2.25rem; font-size: .875rem; }
-  .worker .head, .routine .head { font-size: 1rem; }
+  li.worker, li.routine, li.app { padding: .875rem .875rem .875rem 2.25rem; font-size: .875rem; }
+  .worker .head, .routine .head, .app .head { font-size: 1rem; }
   /* Their status dot, in the inset the hairlines leave. */
-  li.worker::after, li.routine::after { content: ""; position: absolute; left: .875rem; top: 1.4375rem; width: .5rem; height: .5rem; border-radius: 50%; background: var(--s, var(--faint)); }
+  li.worker::after, li.routine::after, li.app::after { content: ""; position: absolute; left: .875rem; top: 1.4375rem; width: .5rem; height: .5rem; border-radius: 50%; background: var(--s, var(--faint)); }
   .worker .open { color: var(--fg); font-weight: 600; text-decoration: none; }
   .worker .open::after { content: ""; position: absolute; inset: 0; }
   .worker .task { position: relative; display: inline-block; padding: .625rem .25rem; margin: -.625rem 0; font: .8125rem var(--mono); }
@@ -348,6 +348,15 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   /* Merge policy and the "changed since live" notice under a routine's placement. */
   .routine .merge { margin-top: .25rem; overflow-wrap: anywhere; }
   .routine .changed { margin-top: .5rem; padding: .5rem .625rem; border-radius: .625rem; background: var(--t-warn); }
+  /* Apps: title and its link out, what's live, then a newer release to make live. */
+  .app .head { display: flex; align-items: baseline; gap: .75rem; }
+  .app strong { flex: 1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+  .app .head a { font-size: .875rem; color: var(--accent); text-decoration: none; }
+  .app .sub { margin-top: .25rem; }
+  .app .row { margin: .75rem 0 0; }
+  .app .row button { min-height: 2.25rem; padding: 0 .875rem; border-radius: .625rem; font-size: .8125rem; }
+  .app .golive { background: var(--bg); }
+  .app .err { margin-top: .25rem; overflow-wrap: anywhere; }
   /* A merge approval: the PR's facts as a small grid. */
   .appr dl { display: grid; grid-template-columns: auto 1fr; gap: .125rem .75rem; margin: .25rem 0 .5rem; font-size: .8125rem; }
   .appr dt { color: var(--dim); }
@@ -709,6 +718,8 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
       <a href="#" data-view="list">Home</a>
       <div class="ngrp"><a href="#routines" data-view="routines">Routines</a><button type="button" id="routine-add" class="ibtn" aria-label="New routine" title="New routine"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-routines" aria-label="Show routines"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
       <ul id="nav-routines" class="nsub" hidden></ul>
+      <div class="ngrp"><a href="#apps" data-view="apps">Apps</a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-apps" aria-label="Show apps"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
+      <ul id="nav-apps" class="nsub" hidden></ul>
       <div class="ngrp"><a href="#workers" data-view="workers">Workers</a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-workers" aria-label="Show workers"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
       <ul id="nav-workers" class="nsub" hidden></ul>
     </nav>
@@ -772,6 +783,10 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
     <div class="row"><button>Create</button><button type="button" id="rn-cancel">Cancel</button></div>
   </form>
   <ul id="routine-list"></ul>
+</main>
+
+<main id="apps" hidden>
+  <ul id="app-list"></ul>
 </main>
 
 <main id="workers" hidden>
@@ -1545,6 +1560,7 @@ function tick() {
   renderStrip();
   if (++ticks % 30 === 0 && everOpen && route().view === 'workers') renderWorkers();
   if (ticks % 10 === 0 && everOpen && route().view === 'routines' && !document.hidden) loadRoutines();
+  if (ticks % 10 === 0 && everOpen && route().view === 'apps' && !document.hidden) loadApps();
   for (const s of document.querySelectorAll('[data-asof]')) s.textContent = asOf(Number(s.dataset.asof));
 }
 // Known parts joined with ` · ` (or `sep`).
@@ -1648,20 +1664,20 @@ $('upd').onclick = (e) => {
   renderUpdate();
 };
 
-// `#` tasks, `#task/<id>`, `#routines`, `#workers`, `#worker/<id>`, `#session/<worker>/<harness>/<id>`.
+// `#` tasks, `#task/<id>`, `#routines`, `#apps`, `#workers`, `#worker/<id>`, `#session/<worker>/<harness>/<id>`.
 // `#new` (see takeNew) is Tasks with the composer focused.
 function route() {
   const m = location.hash.match(/^#(task|worker)\/([0-9a-f-]{36})$/);
   if (m) return { view: m[1] === 'task' ? 'detail' : 'machine', id: m[2] };
   const s = location.hash.match(/^#session\/([0-9a-f-]{36}\/(?:claude|codex)\/[0-9a-f-]{36})$/);
   if (s) return { view: 'session', id: s[1] };
-  return { view: { '#workers': 'workers', '#routines': 'routines' }[location.hash] || 'list' };
+  return { view: { '#workers': 'workers', '#routines': 'routines', '#apps': 'apps' }[location.hash] || 'list' };
 }
 
 function render() {
   const r = route();
   const live = ws && ws.readyState === WebSocket.OPEN;
-  const views = { list: renderList, detail: renderDetail, routines: renderRoutines, workers: renderWorkers, machine: renderMachine, session: renderSession };
+  const views = { list: renderList, detail: renderDetail, routines: renderRoutines, apps: renderApps, workers: renderWorkers, machine: renderMachine, session: renderSession };
   $('auth').hidden = live || !authNeeded || !!store.get();
   // Placeholder rows until the first socket opens, unless that is stuck (a token, no server).
   $('skel').hidden = everOpen || !$('auth').hidden || offline || connMsg !== 'connecting…';
@@ -1684,7 +1700,7 @@ function render() {
   if (r.view !== 'detail' && r.view !== 'session') { follow.key = null; $('latest').hidden = true; if (detail) detail.sig = null; }
   if (r.view !== 'session') closeSession();
   const onWorkers = r.view === 'workers' || r.view === 'machine' || r.view === 'session';
-  const area = onWorkers ? 'workers' : r.view === 'routines' ? 'routines' : 'list';
+  const area = onWorkers ? 'workers' : ['routines', 'apps'].includes(r.view) ? r.view : 'list';
   for (const a of $('menu').querySelectorAll('nav a')) {
     if (a.dataset.view === area) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
@@ -3270,7 +3286,7 @@ function renderRoutines() {
   if (pick) pick.scrollIntoView({ block: 'center' });
 }
 
-// The menu's unfolded lists: one link per routine (to its row on Routines) and per worker, with its status dot.
+// The menu's unfolded lists: one link per routine (to its row on Routines), app (live: out to it) and worker, with its status dot.
 let routineFocus = null; // routine to scroll to when Routines next renders
 function renderNav() {
   $('routine-add').hidden = readOnly;
@@ -3279,6 +3295,9 @@ function renderNav() {
   const rs = routines && routines.list;
   fillNav($('nav-routines'), !routines ? [['Loading…']] : routines.error ? [[routines.error]] : !rs.length ? [['No routines']]
     : rs.map((r) => ['#routines', routineState(r), r.name]));
+  const as = hosted && hosted.list;
+  fillNav($('nav-apps'), !hosted ? [['Loading…']] : hosted.error ? [[hosted.error]] : !as.length ? [['No apps']]
+    : as.map((a) => (a.active && a.url ? [a.url, 'done', a.title] : ['#apps', '', a.title])));
   fillNav($('nav-workers'), !workers.length ? [['No workers']] : workers.map((w) => [`#worker/${w.id}`, workerState(w), w.info.hostname]));
 }
 function fillNav(ul, rows) {
@@ -3286,12 +3305,69 @@ function fillNav(ul, rows) {
   if (ul.dataset.key === key) return;
   ul.dataset.key = key;
   ul.replaceChildren(...rows.map(([href, cls, name]) => (cls === undefined ? el('li', { className: 'dim' }, href)
-    : el('li', {}, el('a', { href, onclick: href === '#routines' ? (e) => pickRoutine(e, name) : null }, el('span', { className: `sd ${cls}` }), el('span', { className: 'one' }, name))))));
+    : el('li', {}, el('a', { href, ...(href[0] === '#' ? {} : { target: '_blank', rel: 'noopener' }), onclick: href === '#routines' ? (e) => pickRoutine(e, name) : null }, el('span', { className: `sd ${cls}` }), el('span', { className: 'one' }, name))))));
 }
 // Already on Routines, the link's own jump to the top would undo the scroll to the row.
 function pickRoutine(e, name) {
   routineFocus = name;
   if (route().view === 'routines') { e.preventDefault(); renderRoutines(); }
+}
+
+// Apps the orchestrator hosts, fetched on open, every 10 s while shown, and after an activation.
+let hosted = null; // { list } | { error } | null while reading
+let hostedAsked = null;
+let appAsk = null, appBusy = null; // slug whose activate confirm is open; slug activating
+const appErr = new Map(); // slug -> why its activation failed
+async function loadApps() {
+  const ask = {};
+  hostedAsked = ask;
+  let got;
+  try {
+    const r = await fetch('/api/apps', { headers: authHeaders() });
+    got = r.ok ? { list: await r.json() } : { error: (await r.text()) || `error ${r.status}` };
+  } catch { got = { error: 'couldn’t reach the orchestrator' }; }
+  if (hostedAsked !== ask) return;
+  hosted = got;
+  if (route().view === 'apps') renderApps();
+  renderNav();
+}
+async function activateApp(slug, n) {
+  appAsk = null; appBusy = slug;
+  renderApps();
+  try {
+    const r = await fetch(`/api/apps/${encodeURIComponent(slug)}/activate`, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ release: n }) });
+    if (r.ok) appErr.delete(slug); else appErr.set(slug, (await r.text()) || `error ${r.status}`);
+  } catch { appErr.set(slug, 'couldn’t reach the orchestrator'); }
+  appBusy = null;
+  await loadApps();
+}
+function appRow(a, now) {
+  const newest = a.releases[a.releases.length - 1];
+  const ready = newest && newest.n > (a.active || 0) ? newest : null;
+  const busy = appBusy === a.slug, asking = appAsk === a.slug && ready, err = appErr.get(a.slug);
+  const ask = (slug) => { appAsk = slug; renderApps(); };
+  const actions = readOnly || !ready ? '' : el('div', { className: 'row' },
+    el('button', { type: 'button', disabled: busy || asking, onclick: () => ask(a.slug) }, `Make v${ready.n} live`));
+  const confirm = !actions || !asking ? '' : el('div', { className: 'golive' },
+    el('p', {}, `Make v${ready.n} of ${a.title} live? It shows on the next reload.${a.active ? ` Making v${a.active} live again reverts it.` : ''}`),
+    el('div', { className: 'row' },
+      el('button', { disabled: busy, onclick: () => activateApp(a.slug, ready.n) }, `Yes, make v${ready.n} live`),
+      el('button', { type: 'button', onclick: () => ask(null) }, a.active ? `Keep v${a.active}` : 'Not yet')));
+  return el('li', { className: `app ${a.active ? 'done' : ''}` },
+    el('div', { className: 'head' }, el('strong', {}, a.title),
+      a.active && a.url ? el('a', { href: a.url, target: '_blank', rel: 'noopener' }, 'Open ↗') : ''),
+    el('div', { className: 'sub dim' }, ...dots([a.slug, a.active ? `v${a.active} live` : 'not live', plural(a.releases.length, 'release')])),
+    ready ? el('div', { className: 'sub dim' }, `v${ready.n} ready · published ${ago(now - ready.at)}`) : '',
+    err ? el('div', { className: 'err bad' }, err) : '',
+    actions, confirm);
+}
+function renderApps() {
+  if (!everOpen) return; // fetch once connected, with the token in place
+  if (!hosted) { if (!$('app-list').querySelector('.skel')) $('app-list').replaceChildren(el('li', {}, skel())); if (!hostedAsked) loadApps(); return; }
+  if (hosted.error) { $('app-list').replaceChildren(el('li', { className: 'bad' }, hosted.error)); return; }
+  const now = Date.now() + skew;
+  $('app-list').replaceChildren(...hosted.list.map((a) => appRow(a, now)));
+  if (!hosted.list.length) $('app-list').append(el('li', { className: 'dim' }, 'No apps yet: publish one with mis apps publish <name> <folder>'));
 }
 
 function renderWorkers() {
@@ -3696,7 +3772,7 @@ for (const f of [$('prompt'), $('reply-text')]) f.addEventListener('input', () =
 $('prompt').value = drafts.get('draft:new');
 // Leaving a view stops dictation into it and any readback.
 // A press's click has landed once the view changes: nothing left to hold for.
-window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); render(); };
+window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (route().view === 'apps' && hosted) loadApps(); render(); };
 setInterval(tick, 1000);
 
 // `#new`, a link into the page for a new task, is Tasks with the composer focused; the hash becomes `#` so back links don't refocus.
@@ -3744,6 +3820,7 @@ $('menu-btn').onclick = () => {
   $('menu').showModal();
   $('menu-btn').setAttribute('aria-expanded', 'true');
   if (!$('nav-routines').hidden) loadRoutines();
+  if (!$('nav-apps').hidden) loadApps();
   renderNav();
 };
 // + opens the new-routine form atop Routines; the orchestrator writes `<name>.md`, paused.
@@ -3776,13 +3853,14 @@ $('routine-new').onsubmit = async (e) => {
   routineFocus = body.name;
   await loadRoutines();
 };
-// A chevron unfolds its list; opening Routines' fetches them fresh.
+// A chevron unfolds its list; opening Routines' or Apps' fetches them fresh.
 for (const b of $('menu').querySelectorAll('.ngrp button[aria-controls]')) b.onclick = () => {
   const open = b.getAttribute('aria-expanded') !== 'true';
   b.setAttribute('aria-expanded', String(open));
   b.setAttribute('aria-label', `${open ? 'Hide' : 'Show'} ${b.parentElement.querySelector('a').textContent.toLowerCase()}`);
   $(b.getAttribute('aria-controls')).hidden = !open;
   if (open && b.getAttribute('aria-controls') === 'nav-routines') loadRoutines();
+  if (open && b.getAttribute('aria-controls') === 'nav-apps') loadApps();
 };
 $('menu').addEventListener('close', () => $('menu-btn').setAttribute('aria-expanded', 'false'));
 $('menu-close').onclick = () => $('menu').close();

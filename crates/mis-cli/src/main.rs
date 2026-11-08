@@ -94,6 +94,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<RoutineCmd>,
     },
+    /// Apps the orchestrator hosts: static bundles, each publish a numbered release.
+    Apps {
+        #[command(subcommand)]
+        cmd: AppsCmd,
+    },
     /// Run an orchestrator and a worker on this machine for quick testing.
     Dev {
         /// Let agents run tools without permission prompts.
@@ -110,6 +115,147 @@ enum RoutineCmd {
     Live { name: String },
     /// Back to listing what it would do, acting on nothing.
     DryRun { name: String },
+}
+
+#[derive(Subcommand)]
+enum AppsCmd {
+    /// Apps, their releases and which one is live.
+    List,
+    /// Upload folder `dir` (with `app.json` at its top) as `slug`'s next release.
+    /// Hidden files (`.DS_Store`, `.git`) are left out; symlinks are refused.
+    Publish {
+        slug: String,
+        dir: std::path::PathBuf,
+        /// Make it live at once.
+        #[arg(long)]
+        activate: bool,
+    },
+    /// Make release `n` live; an earlier n reverts.
+    Activate { slug: String, n: u32 },
+}
+
+async fn apps(args: &Args, cmd: &AppsCmd) -> Result<()> {
+    let base = http_url(&args.url);
+    let client = reqwest::Client::new();
+    match cmd {
+        AppsCmd::List => {
+            let body = call(args, client.get(format!("{base}/api/apps"))).await?;
+            let list: Vec<AppView> = serde_json::from_str(&body)?;
+            let now = unix_ms();
+            for a in &list {
+                println!("{}", app_lines(a, now));
+            }
+            if list.is_empty() {
+                println!("no apps");
+            }
+        }
+        AppsCmd::Publish {
+            slug,
+            dir,
+            activate,
+        } => {
+            let tar_gz = pack(dir)?;
+            let url = format!("{base}/api/apps/{slug}/releases?activate={activate}");
+            let body = call(args, client.post(url).body(tar_gz)).await?;
+            let v: serde_json::Value = serde_json::from_str(&body)?;
+            let n = v["release"].as_u64().context("no release in the reply")?;
+            match activate {
+                true => println!("{slug}: release {n} published, live"),
+                false => println!(
+                    "{slug}: release {n} published; `mis apps activate {slug} {n}` makes it live"
+                ),
+            }
+        }
+        AppsCmd::Activate { slug, n } => {
+            let req = client
+                .post(format!("{base}/api/apps/{slug}/activate"))
+                .header("content-type", "application/json")
+                .body(serde_json::json!({ "release": n }).to_string());
+            call(args, req).await?;
+            println!("{slug}: release {n} live");
+        }
+    }
+    Ok(())
+}
+
+/// `dir`'s files, hidden ones left out, as a `.tar.gz` in path order.
+fn pack(dir: &std::path::Path) -> Result<Vec<u8>> {
+    fn walk(
+        dir: &std::path::Path,
+        rel: &str,
+        out: &mut Vec<(String, std::path::PathBuf)>,
+    ) -> Result<()> {
+        for e in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+            let e = e?;
+            let name = e
+                .file_name()
+                .into_string()
+                .map_err(|n| anyhow::anyhow!("{n:?}: not UTF-8"))?;
+            if name.starts_with('.') {
+                continue;
+            }
+            let path = format!("{rel}{name}");
+            let kind = e.file_type()?;
+            if kind.is_symlink() {
+                bail!("{path} is a symlink: bundles hold only files");
+            } else if kind.is_dir() {
+                walk(&e.path(), &format!("{path}/"), out)?;
+            } else if kind.is_file() {
+                out.push((path, e.path()));
+            } else {
+                bail!("{path} is not a regular file");
+            }
+        }
+        Ok(())
+    }
+    let mut files = vec![];
+    walk(dir, "", &mut files)?;
+    files.sort();
+    let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut tar = tar::Builder::new(gz);
+    for (path, src) in files {
+        let bytes = std::fs::read(&src).with_context(|| format!("reading {}", src.display()))?;
+        let mut h = tar::Header::new_gnu();
+        h.set_size(bytes.len() as u64);
+        h.set_mode(0o644);
+        tar.append_data(&mut h, &path, bytes.as_slice())?;
+    }
+    Ok(tar.into_inner()?.finish()?)
+}
+
+/// `demo · Demo · v2 live · v3 ready · <url>`, then a line per release, newest first.
+fn app_lines(a: &AppView, now: u64) -> String {
+    let mut head = vec![a.slug.clone(), a.title.clone()];
+    head.push(a.active.map_or("not live".into(), |n| format!("v{n} live")));
+    if let Some(r) = a.releases.last().filter(|r| Some(r.n) > a.active) {
+        head.push(format!("v{} ready", r.n));
+    }
+    head.extend(a.url.clone());
+    let mut out = head.join(" · ");
+    for r in a.releases.iter().rev() {
+        let live = if Some(r.n) == a.active {
+            " · live"
+        } else {
+            ""
+        };
+        let ago = fmt_elapsed(now.saturating_sub(r.at));
+        let sha = &r.sha256[..r.sha256.len().min(12)];
+        out.push_str(&format!(
+            "\n    v{} · {ago} ago · {} · {sha}{live}",
+            r.n,
+            size_text(r.size)
+        ));
+    }
+    out
+}
+
+/// `512 B`, `1.5 KiB`, `2.0 MiB`.
+fn size_text(b: u64) -> String {
+    match b {
+        0..1024 => format!("{b} B"),
+        1024..1048576 => format!("{:.1} KiB", b as f64 / 1024.0),
+        _ => format!("{:.1} MiB", b as f64 / 1048576.0),
+    }
 }
 
 /// `mis routines` (GET /api/routines), or `run`, `live` or `dry-run <name>`.
@@ -751,6 +897,10 @@ async fn run(args: Args) -> Result<Option<TaskSummary>> {
         routines(&args, cmd.as_ref()).await?;
         return Ok(None);
     }
+    if let Cmd::Apps { cmd } = &args.cmd {
+        apps(&args, cmd).await?;
+        return Ok(None);
+    }
     check_nested(&args.cmd, std::env::var(TASK_ENV).ok().as_deref())?;
     let mut ws = connect(&args).await?;
     match &args.cmd {
@@ -950,7 +1100,9 @@ async fn run(args: Args) -> Result<Option<TaskSummary>> {
                 }
             }
         }
-        Cmd::Dev { .. } | Cmd::Ask { .. } | Cmd::Routines { .. } => unreachable!(),
+        Cmd::Dev { .. } | Cmd::Ask { .. } | Cmd::Routines { .. } | Cmd::Apps { .. } => {
+            unreachable!()
+        }
     }
     Ok(None)
 }
@@ -1191,6 +1343,58 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(stats_text(Some(&s)), "disk 38% cpu 64% mem 82%");
+    }
+
+    #[test]
+    fn app_lines_show_live_ready_and_releases() {
+        let r = |n, at, size| AppRelease {
+            n,
+            at,
+            sha256: "ab".repeat(32),
+            size,
+        };
+        let a = AppView {
+            slug: "demo".into(),
+            title: "Demo".into(),
+            url: Some("http://127.0.0.1:7475/a/demo/".into()),
+            active: Some(1),
+            releases: vec![r(1, 0, 512), r(2, 60_000, 1536)],
+        };
+        assert_eq!(
+            app_lines(&a, 120_000),
+            "demo · Demo · v1 live · v2 ready · http://127.0.0.1:7475/a/demo/\n    \
+             v2 · 1m00s ago · 1.5 KiB · abababababab\n    \
+             v1 · 2m00s ago · 512 B · abababababab · live"
+        );
+        let staged = AppView {
+            active: None,
+            url: None,
+            ..a
+        };
+        assert!(app_lines(&staged, 0).starts_with("demo · Demo · not live · v2 ready\n"));
+    }
+
+    #[test]
+    fn pack_leaves_out_hidden_files_and_refuses_symlinks() {
+        let dir = std::env::temp_dir().join(format!("mis-pack-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("js")).unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join("index.html"), "x").unwrap();
+        std::fs::write(dir.join("js/app.js"), "y").unwrap();
+        std::fs::write(dir.join(".DS_Store"), "z").unwrap();
+        std::fs::write(dir.join(".git/HEAD"), "z").unwrap();
+        let tar_gz = pack(&dir).unwrap();
+        let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(tar_gz.as_slice()));
+        let paths: Vec<String> = (ar.entries().unwrap())
+            .map(|e| e.unwrap().path().unwrap().display().to_string())
+            .collect();
+        assert_eq!(paths, ["index.html", "js/app.js"]);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc/passwd", dir.join("pw")).unwrap();
+            assert!(pack(&dir).unwrap_err().to_string().contains("symlink"));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

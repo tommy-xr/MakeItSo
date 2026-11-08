@@ -3816,7 +3816,10 @@ fn gzip(tar: &[u8]) -> Vec<u8> {
 /// A demo app whose page says `page`.
 fn demo(page: &str) -> Vec<u8> {
     bundle(&[
-        ("app.json", br#"{"title":"Demo","clients":{"web":"index.html"}}"#),
+        (
+            "app.json",
+            br#"{"title":"Demo","clients":{"web":"index.html"}}"#,
+        ),
         ("index.html", page.as_bytes()),
         ("js/app.js", b"console.log(1)"),
     ])
@@ -3848,8 +3851,14 @@ async fn apps_publish_activate_and_serve() {
     let (status, head, body) = app_get(&apps, "/a/demo/", "").await;
     assert_eq!((status, body.as_str()), (200, "v1"));
     let head = head.to_ascii_lowercase();
-    assert!(head.contains("content-type: text/html; charset=utf-8"), "{head}");
-    let csp = format!("content-security-policy: {}", mis_orchestrator::apps_http::CSP);
+    assert!(
+        head.contains("content-type: text/html; charset=utf-8"),
+        "{head}"
+    );
+    let csp = format!(
+        "content-security-policy: {}",
+        mis_orchestrator::apps_http::CSP
+    );
     assert!(head.contains(&csp), "{head}");
     assert!(head.contains("x-content-type-options: nosniff"), "{head}");
     assert!(head.contains("cache-control: no-cache"), "{head}");
@@ -3861,14 +3870,23 @@ async fn apps_publish_activate_and_serve() {
     assert_eq!(app_get(&apps, "/a/demo/missing.png", "").await.0, 404);
     assert_eq!(app_get(&apps, "/a/demo/.release.json", "").await.0, 404);
     // `..` never leaves the release: an extensionless miss is just the entry.
-    assert_eq!(app_get(&apps, "/a/demo/%2e%2e/%2e%2e/active", "").await.2, "v1");
+    assert_eq!(
+        app_get(&apps, "/a/demo/%2e%2e/%2e%2e/active", "").await.2,
+        "v1"
+    );
     let up = "/a/demo/%2e%2e/1/.release.json";
     assert_eq!(app_get(&apps, up, "").await.0, 404);
     let (status, head, _) = app_get(&apps, "/a/demo", "").await;
     assert_eq!(status, 308);
     assert!(head.contains("location: /a/demo/"), "{head}");
     // Published live at once, then reverted.
-    let (status, body) = publish(&mis, "/api/apps/demo/releases?activate=true", "s", &demo("v2")).await;
+    let (status, body) = publish(
+        &mis,
+        "/api/apps/demo/releases?activate=true",
+        "s",
+        &demo("v2"),
+    )
+    .await;
     assert_eq!((status, body.as_str()), (201, r#"{"release":2}"#));
     assert_eq!(app_get(&apps, "/a/demo/", "").await.2, "v2");
     post_json(&mis, "/api/apps/demo/activate", "s", &activate(1)).await;
@@ -3879,8 +3897,14 @@ async fn apps_publish_activate_and_serve() {
     assert_eq!(status, 200);
     let list: Vec<AppView> = serde_json::from_str(&body).unwrap();
     let a = &list[0];
-    assert_eq!((a.slug.as_str(), a.title.as_str(), a.active), ("demo", "Demo", Some(1)));
-    assert_eq!(a.url.as_deref(), Some(format!("http://{}/a/demo/", &apps[5..]).as_str()));
+    assert_eq!(
+        (a.slug.as_str(), a.title.as_str(), a.active),
+        ("demo", "Demo", Some(1))
+    );
+    assert_eq!(
+        a.url.as_deref(),
+        Some(format!("http://{}/a/demo/", &apps[5..]).as_str())
+    );
     let ns: Vec<u32> = a.releases.iter().map(|r| r.n).collect();
     assert_eq!(ns, [1, 2]);
     assert_ne!(a.releases[0].sha256, a.releases[1].sha256);
@@ -3979,7 +4003,12 @@ async fn apps_port_has_no_orchestrator_routes() {
 #[tokio::test]
 async fn read_token_lists_apps_but_cannot_publish_or_activate() {
     let (mis, _, dir) = start_with_apps(with_read_token()).await;
-    assert_eq!(publish(&mis, "/api/apps/demo/releases", "s", &demo("v1")).await.0, 201);
+    assert_eq!(
+        publish(&mis, "/api/apps/demo/releases", "s", &demo("v1"))
+            .await
+            .0,
+        201
+    );
     let (status, body) = get_json(&mis, "/api/apps", "r").await;
     assert_eq!(status, 200);
     assert!(body.contains(r#""slug":"demo""#), "{body}");
@@ -4034,9 +4063,19 @@ async fn capture_app_jwt_opens_only_the_capture_route() {
 #[tokio::test]
 async fn apps_port_refuses_cloudflare_traffic() {
     let (mis, apps, dir) = start_with_apps(App::new(None)).await;
-    publish(&mis, "/api/apps/demo/releases?activate=true", "", &demo("v1")).await;
+    publish(
+        &mis,
+        "/api/apps/demo/releases?activate=true",
+        "",
+        &demo("v1"),
+    )
+    .await;
     assert_eq!(app_get(&apps, "/a/demo/", "").await.0, 200);
-    for h in ["Cf-Access-Jwt-Assertion: x", "CF-Ray: 1", "CF-Connecting-IP: 203.0.113.9"] {
+    for h in [
+        "Cf-Access-Jwt-Assertion: x",
+        "CF-Ray: 1",
+        "CF-Connecting-IP: 203.0.113.9",
+    ] {
         for path in ["/a/demo/", "/a/", "/nope"] {
             let (status, head, _) = app_get(&apps, path, &format!("\r\n{h}")).await;
             assert_eq!(status, 403, "{h} {path}");

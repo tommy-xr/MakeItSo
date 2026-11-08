@@ -252,3 +252,38 @@ policy for a capture-only service token, and pass its AUD as `--cf-access-captur
 `MIS_CF_ACCESS_CAPTURE_AUD`. Its JWT is accepted only there, still needs a capture (or full) token,
 and grants no more than capturing, so keep the main app's policies naming their own service tokens. A capture token is
 never upgraded by an Access login.
+
+## Apps
+
+The orchestrator can host small static web apps (a bundle of HTML, JS, CSS, images) for you and
+your household, served on a second listener with no orchestrator routes on it:
+
+```sh
+MIS_APPS_BIND=127.0.0.1:7475 mis-orchestrator   # or --apps-bind; unset: apps aren't served
+mis apps publish pool ./dist --activate          # dist/app.json + the files
+mis apps list                                    # releases, which one is live
+mis apps activate pool 1                         # revert: activate any earlier release
+```
+
+A bundle has `app.json` at its top: `{"title": "Pool scores", "icon": "icon.png", "clients":
+{"web": "index.html"}}` (`icon` optional; `web` is the page browsers open). The server checks
+every upload and refuses links, devices, absolute or `..` paths, hidden files, more than 2000 files
+or 20 MiB, and an `app.json` naming files it doesn't hold. It never runs app code. `mis apps
+publish` leaves hidden files (`.DS_Store`, `.git`) out.
+
+Each publish is a new numbered release, all kept, in `<state-dir>/apps/<name>/releases/<n>/`;
+`<state-dir>/apps/<name>/active` holds the live n. Names are `a-z`, `0-9` and `-`, up to 32.
+`POST /api/apps/<name>/releases` (raw `.tar.gz` body, `?activate=true` to go live) and
+`POST /api/apps/<name>/activate` (`{"release": n}`) need the full token; `GET /api/apps` lists
+them for read-only tokens too. Menu -> Apps shows each app, links out to the live one and asks
+before making a newer release live.
+
+The apps listener serves the live release at `/a/<name>/` (paths without an extension fall back to
+the entry page, for client-side routes) and a list of live apps at `/a/`. Every response sends
+`Cache-Control: no-cache` and a CSP that allows only the app's own scripts, styles, fonts and
+connections (bundle dependencies; no CDNs). Set `--apps-public-url` / `MIS_APPS_PUBLIC_URL` (e.g.
+`https://home.example.com`) so app links point there.
+
+**Don't route a tunnel to the apps port yet.** It checks no identity: until it does, it refuses
+every request that came through Cloudflare, and anyone who can reach it directly (bind beyond
+loopback) sees every live app.
