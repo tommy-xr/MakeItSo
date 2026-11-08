@@ -1433,8 +1433,12 @@ async fn capture(
         Ok(c) => c,
         Err(refused) => return refused.into_response(),
     };
+    // What arrived, for the operator's log: `note` is the first 80 chars of the typed text.
+    let note: String = c.text.as_deref().unwrap_or("").chars().take(80).collect();
+    let (url, shared, images) = (c.url.clone(), c.shared.is_some(), c.images.len());
     match tokio::task::spawn_blocking(move || inbox.store(&c)).await {
         Ok(Ok(saved)) => {
+            tracing::info!(file = %saved.file, new = saved.new, ?url, shared, images, %note, "captured");
             let status = match saved.new {
                 true => StatusCode::CREATED,
                 false => StatusCode::OK,
@@ -1455,12 +1459,14 @@ async fn capture_form(
 ) -> Result<capture::Capture, (StatusCode, String)> {
     let refuse = |e: axum::extract::multipart::MultipartError| (e.status(), e.body_text());
     let bad = |why: String| (StatusCode::BAD_REQUEST, why);
-    let (mut url, mut text, mut via, mut images) = (None, None, None, Vec::new());
+    let (mut url, mut text, mut shared, mut via) = (None, None, None, None);
+    let mut images = Vec::new();
     while let Some(field) = form.next_field().await.map_err(refuse)? {
         let name = field.name().unwrap_or_default().to_string();
         let slot = match name.as_str() {
             "url" => &mut url,
             "text" => &mut text,
+            "shared" => &mut shared,
             "via" => &mut via,
             "image" => {
                 images.push(field.bytes().await.map_err(refuse)?.into());
@@ -1468,7 +1474,7 @@ async fn capture_form(
             }
             _ => {
                 return Err(bad(format!(
-                    "unknown field {name:?}: send url, text, image, via"
+                    "unknown field {name:?}: send url, text, shared, image, via"
                 )))
             }
         };
@@ -1477,7 +1483,7 @@ async fn capture_form(
         }
         *slot = Some(field.text().await.map_err(refuse)?);
     }
-    capture::Capture::new(url, text, images, via).map_err(refused_capture)
+    capture::Capture::new(url, text, shared, images, via).map_err(refused_capture)
 }
 
 /// A url-encoded capture: the same fields, no files. Duplicates and unknown fields
@@ -1487,6 +1493,7 @@ async fn capture_form(
 struct TextCapture {
     url: Option<String>,
     text: Option<String>,
+    shared: Option<String>,
     via: Option<String>,
     /// Tolerated empty, in case a client sends an empty file field as `image=`.
     image: Option<String>,
@@ -1497,7 +1504,7 @@ fn text_capture(f: TextCapture) -> Result<capture::Capture, (StatusCode, String)
         let why = "images need multipart/form-data".to_string();
         return Err((StatusCode::BAD_REQUEST, why));
     }
-    capture::Capture::new(f.url, f.text, Vec::new(), f.via).map_err(refused_capture)
+    capture::Capture::new(f.url, f.text, f.shared, Vec::new(), f.via).map_err(refused_capture)
 }
 
 fn refused_capture(r: capture::Refused) -> (StatusCode, String) {
