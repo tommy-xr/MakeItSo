@@ -110,7 +110,11 @@ fn renamed(asset: &str, from: &str, to: &str) -> String {
 fn paths(r: &Receipt, stem_: &str) -> Vec<String> {
     let from = stem(&r.file);
     std::iter::once(format!("{INBOX}/{stem_}.md"))
-        .chain(r.assets.iter().map(|a| format!("{INBOX}/{}", renamed(a, from, stem_))))
+        .chain(
+            r.assets
+                .iter()
+                .map(|a| format!("{INBOX}/{}", renamed(a, from, stem_))),
+        )
         .collect()
 }
 
@@ -139,7 +143,11 @@ fn batch(mut out: &[u8]) -> Vec<Option<&[u8]>> {
         let head = String::from_utf8_lossy(&out[..nl]);
         out = &out[nl + 1..];
         // `<oid> blob <size>`, else `<name> missing`.
-        match head.rsplit(' ').next().and_then(|s| s.parse::<usize>().ok()) {
+        match head
+            .rsplit(' ')
+            .next()
+            .and_then(|s| s.parse::<usize>().ok())
+        {
             Some(n) if out.len() > n => {
                 objects.push(Some(&out[..n]));
                 out = &out[n + 1..];
@@ -468,7 +476,10 @@ impl Notes {
                 Some((p, k.id))
             })
             .collect();
-        Ok(paths.iter().map(|p| (p.clone(), ids.get(p).copied())).collect())
+        Ok(paths
+            .iter()
+            .map(|p| (p.clone(), ids.get(p).copied()))
+            .collect())
     }
 
     /// Write and commit the records `actions` says to write, if any.
@@ -479,7 +490,10 @@ impl Notes {
                 continue;
             };
             std::fs::create_dir_all(self.clone.join(INBOX))?;
-            let r = receipts.iter().find(|r| r.id == *id).expect("planned from these");
+            let r = receipts
+                .iter()
+                .find(|r| r.id == *id)
+                .expect("planned from these");
             let md = std::fs::read_to_string(self.receipts.join(&r.file))?;
             let (md, images) = record(&md, r, path);
             for (from, to) in images {
@@ -500,7 +514,14 @@ impl Notes {
         let mut add = vec!["add", "--"];
         add.extend(added.iter().map(String::as_str));
         self.git(&add)?.check("add", Failure::Other)?;
-        let commit = ["commit", "--quiet", "-m", &subject, "-m", "MIS-Writer: capture"];
+        let commit = [
+            "commit",
+            "--quiet",
+            "-m",
+            &subject,
+            "-m",
+            "MIS-Writer: capture",
+        ];
         self.git(&commit)?.check("commit", Failure::Other)?;
         Ok(())
     }
@@ -524,7 +545,12 @@ fn run_git(dir: &Path, args: &[&str], input: Option<&[u8]>) -> std::io::Result<O
     let mut cmd = Command::new("git");
     cmd.current_dir(dir)
         // A stalled transfer (under 1 KB/s for a minute) fails instead of hanging.
-        .args(["-c", "commit.gpgsign=false", "-c", "http.lowSpeedLimit=1000"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "http.lowSpeedLimit=1000",
+        ])
         .args(["-c", "http.lowSpeedTime=60"])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -603,10 +629,16 @@ mod tests {
     #[test]
     fn published_ids_are_skipped_whatever_the_repo_holds() {
         let rs = [receipt(1, "a.md", &[]), receipt(2, "b.md", &[])];
-        let map = Map::from([(id(1), published("inbox/a.md")), (id(2), published("inbox/b.md"))]);
+        let map = Map::from([
+            (id(1), published("inbox/a.md")),
+            (id(2), published("inbox/b.md")),
+        ]);
         // 1 deleted by the human, 2 renamed: neither comes back.
         let got = plan(&rs, &map, &repo(&[("inbox/b-renamed.md", Some(2))]));
-        assert_eq!(got, [Action::Skip { id: id(1) }, Action::Skip { id: id(2) }]);
+        assert_eq!(
+            got,
+            [Action::Skip { id: id(1) }, Action::Skip { id: id(2) }]
+        );
     }
 
     #[test]
@@ -674,7 +706,9 @@ mod tests {
         let raced = "To /r.git\n!\tHEAD:refs/heads/main\t[remote rejected] (incorrect old value provided)\nDone\n";
         assert!(refused(fetch_first) && refused(raced));
         assert!(!refused(""), "unreachable: nothing on stdout");
-        assert!(!refused("To /r.git\n \tHEAD:refs/heads/main\t[up to date]\nDone\n"));
+        assert!(!refused(
+            "To /r.git\n \tHEAD:refs/heads/main\t[up to date]\nDone\n"
+        ));
     }
 
     #[test]

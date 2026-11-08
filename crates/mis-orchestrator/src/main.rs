@@ -93,8 +93,8 @@ struct Args {
     /// Holds task history (`ledger.json`, `transcripts/`; tasks are kept 30 days
     /// after they end), the push notification key and subscriptions, and uploaded
     /// images (`images/`, deleted after a week), evidence files agents attach
-    /// (`evidence/`, deleted after 30 days), captures (`captures/inbox/`, kept) and published
-    /// apps (`apps/`, every release kept). Default: ~/.local/state/mis
+    /// (`evidence/`, deleted after 30 days), captures (`captures/inbox/`, kept), the notes
+    /// repo clone (`notes/`) and published apps (`apps/`, every release kept). Default: ~/.local/state/mis
     /// (%LOCALAPPDATA%\mis on Windows).
     #[arg(long, env = "MIS_STATE_DIR")]
     state_dir: Option<std::path::PathBuf>,

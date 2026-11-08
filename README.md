@@ -262,6 +262,29 @@ policy for a capture-only service token, and pass its AUD as `--cf-access-captur
 and grants no more than capturing, so keep the main app's policies naming their own service tokens. A capture token is
 never upgraded by an Access login.
 
+### Publishing to the notes repo
+
+With `MIS_NOTES_REMOTE` (or `--notes-remote`) set to a git remote, e.g.
+`https://github.com/you/mis-notes.git`, the orchestrator keeps a clone at `<state-dir>/notes` and
+publishes each capture there as a record in `inbox/` on `main`: 30 s after a capture, and every
+10 minutes. It authenticates with the user's own git credentials; for a GitHub https remote,
+`gh auth login` then `gh auth setup-git` on the orchestrator's machine. Unset: nothing is published.
+
+Each run fetches, rebases its own unpushed commits onto `origin/main`, writes the new records in one
+commit (`capture: N items`, author `Make It So <mis@localhost>`, trailer `MIS-Writer: capture`) and
+pushes; if someone pushed first it rebases and retries, up to 3 times. It never force-pushes.
+Publishing is by capture id, kept in `<state-dir>/captures/published.json` once a push succeeds: a
+record is written once, then it is yours to edit, rename or delete, and is never written again. A
+record already in the repo (pushed before the map was saved) is adopted, not written twice. A name
+another file holds gets `-2`, `-3`, … (its images too). The receipt in `captures/inbox/` is never
+changed.
+
+`GET /api/notes/sync` (full or read access) reports `{"state", "pending", "last_push",
+"last_error"}`: `state` is `off`, `idle`, `pending`, `offline` (remote unreachable; retried next
+run) or `conflict` (a rebase onto the remote conflicted: the commit is kept and left pending, and
+`last_error` names the clone to resolve it in, e.g. `git reset --hard origin/main` there drops it,
+and the next run writes it under a free name).
+
 ### By email
 
 `workers/capture-email` is a Cloudflare Email Worker that posts each message sent to it to

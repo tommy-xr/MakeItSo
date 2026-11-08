@@ -40,7 +40,10 @@ impl World {
             state: dir.join("state"),
             dir,
         };
-        git(&w.dir, &["init", "--quiet", "--bare", "-b", "main", "remote.git"]);
+        git(
+            &w.dir,
+            &["init", "--quiet", "--bare", "-b", "main", "remote.git"],
+        );
         git(&w.dir, &["clone", "--quiet", "remote.git", "human"]);
         for (k, v) in [
             ("user.name", "Human"),
@@ -120,7 +123,10 @@ impl World {
     }
 
     fn human_pull(&self) {
-        git(&self.human, &["pull", "--quiet", "--ff-only", "origin", "main"]);
+        git(
+            &self.human,
+            &["pull", "--quiet", "--ff-only", "origin", "main"],
+        );
     }
 
     /// Run `sh` in the human's clone (caught up first) just before the publisher's
@@ -186,11 +192,20 @@ fn two_captures_make_one_commit_and_a_second_run_does_nothing() {
         "--format=%an <%ae>|%cn <%ce>|%(trailers:key=MIS-Writer,valueonly,separator=)",
         "main",
     ]);
-    assert_eq!(who, "Make It So <mis@localhost>|Make It So <mis@localhost>|capture");
+    assert_eq!(
+        who,
+        "Make It So <mis@localhost>|Make It So <mis@localhost>|capture"
+    );
     let map = w.map();
     let head = w.head();
     assert_eq!(map.len(), 2);
-    assert_eq!(map[&a.id], Published { path: a_md, commit: head.clone() });
+    assert_eq!(
+        map[&a.id],
+        Published {
+            path: a_md,
+            commit: head.clone()
+        }
+    );
     assert_eq!(map[&b.id].path, b_md);
     let again = notes.run();
     assert_eq!((again.state, again.pending), (Idle, 0));
@@ -209,7 +224,10 @@ fn a_resend_after_restart_is_not_published_twice() {
     let head = w.head();
     // Restarted: a new inbox and publisher over the same state dir.
     let again = w.capture("resend me", &[JPEG]);
-    assert_eq!((again.id, &again.file, again.new), (first.id, &first.file, false));
+    assert_eq!(
+        (again.id, &again.file, again.new),
+        (first.id, &first.file, false)
+    );
     let s = w.notes().run();
     assert_eq!((s.state, s.pending), (Idle, 0));
     assert_eq!(w.head(), head);
@@ -227,7 +245,15 @@ fn a_record_the_human_deleted_is_not_published_again() {
     let b = w.capture("a new one", &[]);
     let s = w.notes().run();
     assert_eq!((s.state, s.pending), (Idle, 0));
-    assert_eq!(w.log(), ["capture: 1 item", "drop a capture", "capture: 1 item", "init"]);
+    assert_eq!(
+        w.log(),
+        [
+            "capture: 1 item",
+            "drop a capture",
+            "capture: 1 item",
+            "init"
+        ]
+    );
     let files = w.files();
     assert!(!files.contains(&format!("inbox/{}", a.file)), "{files:?}");
     assert!(files.contains(&format!("inbox/{}", b.file)), "{files:?}");
@@ -241,7 +267,11 @@ fn a_record_the_human_edited_is_left_alone() {
     w.human_pull();
     let path = w.human.join("inbox").join(&a.file);
     let md = std::fs::read_to_string(&path).unwrap();
-    let edited = md.replacen("schema: 1\n", "schema: 1\ntitle: \"Renamed\"\npara: area\n", 1);
+    let edited = md.replacen(
+        "schema: 1\n",
+        "schema: 1\ntitle: \"Renamed\"\npara: area\n",
+        1,
+    );
     assert_ne!(md, edited);
     std::fs::write(&path, &edited).unwrap();
     w.human_commit("title a capture");
@@ -263,10 +293,18 @@ fn a_human_push_racing_the_publisher_is_rebased_onto() {
     );
     let s = w.notes().run();
     assert_eq!((s.state, s.pending, &s.last_error), (Idle, 0, &None));
-    assert!(!w.state.join("notes/.git/hooks/pre-push").exists(), "the race ran");
+    assert!(
+        !w.state.join("notes/.git/hooks/pre-push").exists(),
+        "the race ran"
+    );
     assert_eq!(
         w.log(),
-        ["capture: 1 item", "human: project note", "capture: 1 item", "init"]
+        [
+            "capture: 1 item",
+            "human: project note",
+            "capture: 1 item",
+            "init"
+        ]
     );
     // Rebased, not merged: one parent, the human's commit.
     let parents = w.remote_git(&["log", "-1", "--format=%P", "main"]);
@@ -293,10 +331,16 @@ fn a_human_push_to_the_same_path_is_a_conflict_and_the_remote_is_untouched() {
     assert_eq!((s.state, s.pending), (Conflict, 1));
     let clone = w.state.join("notes");
     let why = s.last_error.unwrap();
-    assert_eq!(why, format!("notes repo conflict, resolve in {}", clone.display()));
+    assert_eq!(
+        why,
+        format!("notes repo conflict, resolve in {}", clone.display())
+    );
     let human = w.head();
     assert_eq!(w.log()[0], "human: same name");
-    assert_eq!(w.show(&format!("inbox/{}", a.file)), b"the human got here first\n");
+    assert_eq!(
+        w.show(&format!("inbox/{}", a.file)),
+        b"the human got here first\n"
+    );
     assert!(!w.map().contains_key(&a.id), "still pending");
     assert!(!clone.join(".git/rebase-merge").exists(), "rebase aborted");
     // Stays a conflict, remote untouched, until a human resolves it.
@@ -326,8 +370,15 @@ fn a_crash_after_pushing_adopts_instead_of_duplicating() {
     assert_eq!(w.head(), head, "nothing pushed");
     assert_eq!(w.map(), map);
     let files = w.files();
-    assert_eq!(files.iter().filter(|f| f.ends_with(".md")).count(), 3, "{files:?}");
-    assert!(files.contains(&format!("inbox/{}", a.file)) && files.contains(&format!("inbox/{}", b.file)));
+    assert_eq!(
+        files.iter().filter(|f| f.ends_with(".md")).count(),
+        3,
+        "{files:?}"
+    );
+    assert!(
+        files.contains(&format!("inbox/{}", a.file))
+            && files.contains(&format!("inbox/{}", b.file))
+    );
 }
 
 #[test]
@@ -369,8 +420,15 @@ fn a_name_held_by_another_record_gets_a_number() {
     let s = w.notes().run();
     assert_eq!((s.state, s.pending), (Idle, 0));
     let stem = a.file.strip_suffix(".md").unwrap();
-    let (md, jpg) = (format!("inbox/{stem}-2.md"), format!("inbox/{stem}-2-1.jpg"));
-    assert_eq!(w.show(&format!("inbox/{}", a.file)), other.as_bytes(), "untouched");
+    let (md, jpg) = (
+        format!("inbox/{stem}-2.md"),
+        format!("inbox/{stem}-2-1.jpg"),
+    );
+    assert_eq!(
+        w.show(&format!("inbox/{}", a.file)),
+        other.as_bytes(),
+        "untouched"
+    );
     assert_eq!(w.show(&jpg), JPEG);
     let receipt = String::from_utf8(w.receipt(&a.file)).unwrap();
     let want = receipt.replace(
