@@ -34,6 +34,7 @@ pub mod evidence;
 pub mod images;
 pub mod ledger;
 pub mod note;
+pub mod notes;
 pub mod plan;
 pub mod push;
 pub mod records;
@@ -120,6 +121,8 @@ pub struct App {
     evidence: Option<Arc<evidence::Store>>,
     /// Where captures are kept. None: they are refused.
     captures: Option<Arc<capture::Inbox>>,
+    /// Publishes captures to the notes repo. None: off.
+    notes: Option<Arc<notes::Notes>>,
     /// Where the ledger is saved. None: task history is lost on restart.
     ledger_dir: Option<std::path::PathBuf>,
     /// Open once serving, until shut down.
@@ -168,6 +171,7 @@ impl App {
             images: None,
             evidence: None,
             captures: None,
+            notes: None,
             ledger_dir: None,
             store: Default::default(),
             channel: None,
@@ -271,6 +275,12 @@ impl App {
     /// Keep captures in `inbox`.
     pub fn with_captures(mut self, inbox: capture::Inbox) -> Self {
         self.captures = Some(Arc::new(inbox));
+        self
+    }
+
+    /// Publish captures to the notes repo with `notes`.
+    pub fn with_notes(mut self, notes: notes::Notes) -> Self {
+        self.notes = Some(Arc::new(notes));
         self
     }
 
@@ -1034,6 +1044,7 @@ pub fn router(app: App) -> Router {
             "/api/capture",
             post(capture).layer(axum::extract::DefaultBodyLimit::max(CAPTURE_BODY)),
         )
+        .route("/api/notes/sync", get(notes_sync))
         .route("/api/images/{id}", get(image))
         .route("/api/evidence/{id}", get(evidence_file))
         .route("/api/update", get(update_status).post(set_update))
@@ -1089,6 +1100,9 @@ pub async fn serve_until(
     app.spawn_liveness();
     app.spawn_routines();
     app.spawn_image_sweep();
+    if let Some(notes) = app.notes.clone() {
+        tokio::spawn(notes.publish_loop());
+    }
     let svc = router(app.clone()).into_make_service_with_connect_info::<SocketAddr>();
     tokio::select! {
         served = axum::serve(listener, svc) => served?,
@@ -1480,6 +1494,9 @@ async fn capture(
         Ok(Ok(saved)) => {
             let url = url.as_deref().unwrap_or("");
             tracing::info!(file = %saved.file, new = saved.new, url, shared, images, skipped, ?note, "captured");
+            if let (true, Some(notes)) = (saved.new, &app.notes) {
+                notes.captured();
+            }
             let status = match saved.new {
                 true => StatusCode::CREATED,
                 false => StatusCode::OK,
@@ -1492,6 +1509,19 @@ async fn capture(
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+/// How publishing captures to the notes repo stands. Read-only, like task status.
+async fn notes_sync(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if !app.admit(&headers, peer, "/api/notes/sync").await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let sync = app.notes.as_ref().map_or(NotesSync::OFF, |n| n.status());
+    Json(sync).into_response()
 }
 
 /// A capture form's fields, checked; else why not.
