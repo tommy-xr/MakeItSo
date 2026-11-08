@@ -4773,6 +4773,13 @@ async fn the_sdk_is_served_to_anyone_signed_in() {
     }
     let bare = format!("\r\nHost: {HOME}\r\nCF-Ray: 8f00-SJC");
     assert_eq!(app_get(&apps, "/a/_/mis.js", &bare).await.0, 401);
-    assert_eq!(app_get(&apps, "/a/_/nope.js", &someone).await.0, 404);
+    // Anything else under `_` is no app's: refused like one not shared, never a 500.
+    for path in ["/a/_/nope.js", "/a/_/api/v1/me", "/a/_/api/v1/export"] {
+        assert_eq!(app_get(&apps, path, &someone).await.0, 403, "{path}");
+        assert_eq!(app_get(&apps, path, "").await.0, 404, "{path}");
+    }
+    // A decoded slug that walks back to a real app gets nothing either.
+    let sneaky = "/a/demo%2F..%2Fdemo/api/v1/export";
+    assert_eq!(app_get(&apps, sneaky, "").await.0, 404);
     std::fs::remove_dir_all(dir).unwrap();
 }

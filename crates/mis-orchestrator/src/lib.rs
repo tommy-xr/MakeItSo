@@ -982,7 +982,7 @@ fn bearer_from(headers: &HeaderMap) -> Option<&str> {
 
 /// `Origin` names the server itself, i.e. the request comes from the page at `/`:
 /// `https://x:443` matches `Host: x:443`.
-fn same_origin(origin: &str, host: &str) -> bool {
+pub(crate) fn same_origin(origin: &str, host: &str) -> bool {
     origin
         .strip_prefix("https://")
         .or_else(|| origin.strip_prefix("http://"))

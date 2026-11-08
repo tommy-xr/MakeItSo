@@ -355,9 +355,10 @@ only GET and POST.
 ### Records
 
 Each app keeps JSON records in its own SQLite database, `<state-dir>/apps/<name>/data.sqlite`
-(`0600`, outside every bundle; an app reaches only its own). A record is
+(`0600`, outside every bundle). Apps share one origin, so any app's page can call another app's
+API as the member viewing it, with their role there: publish only code you trust. A record is
 `{"id", "rev", "by", "at", "data"}`: an id the app chooses (1-128 of `A-Za-z0-9._:-`), a revision
-(1 when created, +1 each write), who wrote it last and when (Unix ms; set by the server), and any
+(1 for a new id, +1 each write), who wrote it last and when (Unix ms; set by the server), and any
 JSON up to 64 KiB. Records live in a space, `shared` (every member's) or `me` (only its writer's:
 no other member sees it, owners neither), and a collection (`a-z0-9_-`, up to 64), made on first
 write. The schema inside `data` is the app's.
@@ -376,7 +377,9 @@ Every write names the `rev` it read; `0` means the record must not exist yet. An
 revision is a conflict: 409 `{"current": record-or-null}`, for the app to merge and retry at
 `current.rev`. Sending a write again after its response was lost is safe: if the stored record
 is exactly what it produced (same data and writer, `rev` + 1), the answer is 200 with it.
-Removing a missing record is 200 too.
+Removing a missing record is 200 too. A removed record's id keeps its revision: created again,
+it continues from there, so a late write aimed at the old record conflicts instead of landing.
+`export` reads everything visible at once (fine at household scale).
 
 `q` (all optional): `{"where": {"score": {"gte": 1, "lt": 5}, "done": {"eq": false}}, "order_by":
 ["score", "desc"], "limit": 20, "cursor": "..."}`. Fields are top-level keys of `data`
@@ -387,7 +390,7 @@ without the field sort first ascending. Pass `cursor` from a page to get the nex
 
 Viewers read; editors and owners write (403 otherwise). A write's body must be
 `Content-Type: application/json`, and a browser's `Origin` must be `--apps-public-url`'s or the
-loopback address it was sent to (403 otherwise), so no other page can write through a member's
+loopback address it was sent to (403 otherwise), so no other site can write through a member's
 browser or through loopback, which is owner. Caps: 64 KiB of `data` per record and 100 MiB per
 app database (413), 100 records per page (400). MIS tokens and the MIS Access login open nothing
 here.
@@ -413,7 +416,7 @@ Open any app page with `?mock=1` (add `&role=viewer` to try a viewer) and `mis` 
 `mis-mock.js`, an in-memory twin with the same revisions, conflicts, create-only, retries, caps,
 queries and viewer 403s, so screenshots and UI tests need no data. `(await mis.mock).setRole(r)`
 changes the role; nothing is kept across reloads. Both are tested by
-`node --test crates/mis-orchestrator/tests`.
+`node --test crates/mis-orchestrator/tests/sdk.test.mjs`.
 
 ### Household setup
 

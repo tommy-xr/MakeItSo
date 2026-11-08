@@ -131,12 +131,7 @@ async fn admit(
     req: &mut Request,
 ) -> Result<(), (StatusCode, &'static str)> {
     let headers = req.headers();
-    let header = |name| {
-        headers
-            .get(name)
-            .and_then(|v: &HeaderValue| v.to_str().ok())
-    };
-    let host = header(header::HOST);
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
     if !app_access::host_allowed(host, auth.public_host.as_deref()) {
         return Err((StatusCode::MISDIRECTED_REQUEST, "unknown host"));
     }
@@ -153,8 +148,9 @@ async fn admit(
         StatusCode::UNAUTHORIZED,
         "sign in through Cloudflare Access",
     ))?;
-    // `/a/_/…` is the SDK, for anyone signed in.
-    let Some(slug) = app_access::app_of(req.uri().path()).filter(|s| *s != "_") else {
+    // The SDK is for anyone signed in.
+    let sdk = matches!(req.uri().path(), "/a/_/mis.js" | "/a/_/mis-mock.js");
+    let Some(slug) = app_access::app_of(req.uri().path()).filter(|_| !sdk) else {
         req.extensions_mut().insert(subject);
         return Ok(());
     };
@@ -230,7 +226,8 @@ async fn off_thread(f: impl FnOnce() -> Response + Send + 'static) -> Response {
 
 /// Why `m` may not do `action` in `slug`: it isn't live, or their role doesn't allow it.
 fn denied(apps: &Apps, slug: &str, m: &Member, action: Action) -> Option<Response> {
-    if apps.live(slug).is_none() {
+    // Checked again: the path's slug was, but this one is decoded (`a%2F..%2Fa`).
+    if !apps::valid_slug(slug) || apps.live(slug).is_none() {
         return Some(StatusCode::NOT_FOUND.into_response());
     }
     if !app_access::allows(m.role, action) {
@@ -382,8 +379,7 @@ async fn file(
 
 /// [`serve`] off the async workers: reads may be large, and the orchestrator shares them.
 async fn blocking(apps: Arc<Apps>, slug: String, path: String) -> Response {
-    let served = tokio::task::spawn_blocking(move || serve(&apps, &slug, &path));
-    served.await.expect("serving doesn't panic")
+    off_thread(move || serve(&apps, &slug, &path)).await
 }
 
 /// `path` (empty: the entry) from `slug`'s live release; an extensionless miss gets the entry.

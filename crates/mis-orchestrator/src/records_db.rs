@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex};
 use mis_types::{Envelope, Mutation, Page, RecordQuery, Space};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
-use crate::records::{self, Change, Compiled, Refusal};
+use crate::records::{self, Change, Compiled, Current, Refusal};
 
+/// `data` NULL: a removed record, kept for its revision ([`Current::Gone`]).
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS records (
     space TEXT NOT NULL,
     owner TEXT NOT NULL,
@@ -19,9 +20,10 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS records (
     rev INTEGER NOT NULL,
     \"by\" TEXT NOT NULL,
     at INTEGER NOT NULL,
-    data TEXT NOT NULL,
+    data TEXT,
+    base INTEGER NOT NULL,
     PRIMARY KEY (space, owner, collection, id)
-) WITHOUT ROWID";
+)";
 
 /// The apps folder's databases, opened on first use.
 pub struct Records {
@@ -61,6 +63,8 @@ impl Records {
         std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
         opts.open(&path)?;
         let conn = Connection::open(&path)?;
+        // Another connection (a backup, an overlapping restart) waits rather than fails.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
         anyhow::ensure!(mode == "wal", "{}: journal mode {mode}", path.display());
         conn.execute_batch(SCHEMA)?;
@@ -79,7 +83,10 @@ impl Records {
     ) -> anyhow::Result<Option<Envelope>> {
         let db = self.db(slug)?;
         let conn = db.lock().unwrap();
-        Ok(read(&conn, space, owner, collection, id)?)
+        Ok(match read(&conn, space, owner, collection, id)? {
+            Current::Live { record, .. } => Some(record),
+            Current::Gone(_) => None,
+        })
     }
 
     /// One page of `q` (already [`records::compile`]d as `c`).
@@ -129,26 +136,20 @@ impl Records {
         let mut conn = db.lock().unwrap();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current = read(&tx, *space, owner, collection, id)?;
-        let reply = match records::apply(current.as_ref(), op, actor, now) {
+        let reply = match records::apply(&current, op, actor, now) {
             Err(refused) => return Ok(Err(refused)),
             Ok(Change::Unchanged(e)) => return Ok(Ok(e)),
             Ok(Change::Remove) => {
                 tx.execute(
-                    "DELETE FROM records WHERE space = ? AND owner = ? AND collection = ? AND id = ?",
+                    "UPDATE records SET data = NULL \
+                     WHERE space = ? AND owner = ? AND collection = ? AND id = ?",
                     params![space.as_str(), owner, collection, id],
                 )?;
                 None
             }
-            Ok(Change::Put(e)) => {
-                let data = e.data.to_string();
-                if !records::fits(used(&tx)?, data.len(), self.cap) {
-                    return Ok(Err(Refusal::TooLarge(format!(
-                        "this app's records are at their {} MiB cap",
-                        self.cap >> 20
-                    ))));
-                }
+            Ok(Change::Put { record: e, base }) => {
                 tx.execute(
-                    "INSERT OR REPLACE INTO records VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO records VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         space.as_str(),
                         owner,
@@ -157,9 +158,18 @@ impl Records {
                         e.rev,
                         e.by,
                         e.at,
-                        data
+                        e.data.to_string(),
+                        base
                     ],
                 )?;
+                // Measured after the write, so a replacement is charged only what it adds;
+                // returning drops `tx`, rolling it back.
+                if used(&tx)? > self.cap {
+                    return Ok(Err(Refusal::TooLarge(format!(
+                        "this app's records are at their {} MiB cap",
+                        self.cap >> 20
+                    ))));
+                }
                 Some(e)
             }
         };
@@ -173,7 +183,8 @@ impl Records {
         let conn = db.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, rev, \"by\", at, data, space, collection FROM records \
-             WHERE (space = 'shared' AND owner = '') OR (space = 'me' AND owner = ?) \
+             WHERE data IS NOT NULL \
+             AND ((space = 'shared' AND owner = '') OR (space = 'me' AND owner = ?)) \
              ORDER BY collection, id",
         )?;
         let rows = stmt.query_map([subject], |r| {
@@ -189,23 +200,32 @@ impl Records {
     }
 }
 
+/// What an id holds.
 fn read(
     conn: &Connection,
     space: Space,
     owner: &str,
     collection: &str,
     id: &str,
-) -> rusqlite::Result<Option<Envelope>> {
-    conn.query_row(
-        "SELECT id, rev, \"by\", at, data FROM records \
-         WHERE space = ? AND owner = ? AND collection = ? AND id = ?",
-        params![space.as_str(), owner, collection, id],
-        envelope,
-    )
-    .optional()
+) -> rusqlite::Result<Current> {
+    let row = conn
+        .query_row(
+            "SELECT id, rev, \"by\", at, data, base FROM records \
+             WHERE space = ? AND owner = ? AND collection = ? AND id = ?",
+            params![space.as_str(), owner, collection, id],
+            |r| match r.get::<_, Option<String>>(4)? {
+                Some(_) => Ok(Current::Live {
+                    record: envelope(r)?,
+                    base: r.get(5)?,
+                }),
+                None => Ok(Current::Gone(r.get(1)?)),
+            },
+        )
+        .optional()?;
+    Ok(row.unwrap_or(Current::Gone(0)))
 }
 
-/// Columns `id, rev, by, at, data` first.
+/// Columns `id, rev, by, at, data` first; `data` not NULL.
 fn envelope(r: &rusqlite::Row) -> rusqlite::Result<Envelope> {
     let data: String = r.get(4)?;
     Ok(Envelope {
@@ -404,13 +424,13 @@ mod tests {
     }
 
     #[test]
-    fn writes_stop_at_the_database_cap_but_removes_go_through() {
+    fn writes_stop_at_the_database_cap_but_same_size_updates_and_removes_go_through() {
         let (mut r, dir) = temp();
         r.cap = 256 << 10;
-        let blob = json!("x".repeat(60 << 10));
+        let blob = |c: &str| json!(c.repeat(60 << 10));
         let mut stored = 0;
         let refused = loop {
-            let op = put(Space::Shared, &stored.to_string(), 0, blob.clone());
+            let op = put(Space::Shared, &stored.to_string(), 0, blob("x"));
             match r.mutate("pool", &op, "me", 1).unwrap() {
                 Ok(_) => stored += 1,
                 Err(refused) => break refused,
@@ -418,16 +438,55 @@ mod tests {
         };
         assert!(matches!(refused, Refusal::TooLarge(_)), "{refused:?}");
         assert!((1..5).contains(&stored), "{stored}");
+        // Nothing of the refused write was kept.
+        let gone = r.get("pool", Space::Shared, "", "notes", &stored.to_string());
+        assert_eq!(gone.unwrap(), None);
+        // At the cap, replacing a record with one its size still fits.
+        let op = put(Space::Shared, "0", 1, blob("y"));
+        assert_eq!(
+            r.mutate("pool", &op, "me", 2)
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .rev,
+            2
+        );
         let rm = Mutation::Remove {
             space: Space::Shared,
             collection: "notes".into(),
             id: "0".into(),
-            rev: 1,
+            rev: 2,
         };
         assert_eq!(r.mutate("pool", &rm, "me", 2).unwrap(), Ok(None));
         // The freed pages make room again.
-        let op = put(Space::Shared, "again", 0, blob);
+        let op = put(Space::Shared, "again", 0, blob("x"));
         assert!(r.mutate("pool", &op, "me", 3).unwrap().is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn removed_records_vanish_but_their_revisions_stay() {
+        let (r, dir) = temp();
+        let w = |op: &Mutation| r.mutate("pool", op, "me", 1).unwrap();
+        w(&put(Space::Shared, "a", 0, json!(1))).unwrap();
+        let rm = |rev| Mutation::Remove {
+            space: Space::Shared,
+            collection: "notes".into(),
+            id: "a".into(),
+            rev,
+        };
+        assert_eq!(w(&rm(1)), Ok(None));
+        assert_eq!(
+            r.get("pool", Space::Shared, "", "notes", "a").unwrap(),
+            None
+        );
+        assert_eq!(page(&r, json!({})).records, []);
+        assert!(r.visible("pool", "me").unwrap().0.is_empty());
+        // Created again: rev 2, so the first remove, delivered late, conflicts.
+        let again = w(&put(Space::Shared, "a", 0, json!(2))).unwrap().unwrap();
+        assert_eq!(again.rev, 2);
+        assert_eq!(w(&rm(1)), Err(Refusal::Conflict(Some(again.clone()))));
+        assert_eq!(page(&r, json!({})).records, [again]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

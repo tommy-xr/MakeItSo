@@ -66,7 +66,7 @@
   const params = new URLSearchParams(location.search);
   if (params.get('mock') === '1') {
     const src = new URL('mis-mock.js', document.currentScript.src);
-    const mock = import(src).then((m) => m.createMock({ role: params.get('role') || 'owner' }));
+    const mock = import(src).then((m) => m.createMock({ role: params.get('role') || 'owner', Err: MisError }));
     globalThis.mis = { ...front(mock), mock };
   } else {
     const slug = location.pathname.split('/')[2];

@@ -8,7 +8,7 @@ use serde_json::Value;
 
 /// Largest record `data`, as JSON text.
 pub const MAX_DATA: usize = 64 << 10;
-/// Largest app database: writes stop growing it past this.
+/// Largest app database: a put that would leave it larger is refused.
 pub const MAX_DB: u64 = 100 << 20;
 /// Most records a page holds, and the default.
 pub const MAX_PAGE: u32 = 100;
@@ -38,11 +38,23 @@ pub fn owner(space: Space, subject: &str) -> &str {
     }
 }
 
+/// What an id holds now.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Current {
+    /// A record. `base`: the revisions its id reached before this record was created, so
+    /// its first was `base + 1`.
+    Live { record: Envelope, base: u64 },
+    /// No record: the last revision of the one removed (0: never written). A new record
+    /// continues from it, so a late write aimed at the removed one can't land on the new one.
+    Gone(u64),
+}
+
 /// What a mutation does to the stored record.
 #[derive(Debug, PartialEq)]
 pub enum Change {
-    /// Store this (a create or an update).
-    Put(Envelope),
+    /// Store this (a create or an update); `base` as in [`Current::Live`].
+    Put { record: Envelope, base: u64 },
+    /// Remove the record, keeping its revision ([`Current::Gone`]).
     Remove,
     /// Nothing to write; reply with this. A retry of a put that already landed, or a
     /// remove of a missing record.
@@ -59,48 +71,51 @@ pub enum Refusal {
     Invalid(String),
 }
 
-/// `op` against the `current` record, by `actor` at Unix millis `now`.
-pub fn apply(
-    current: Option<&Envelope>,
-    op: &Mutation,
-    actor: &str,
-    now: u64,
-) -> Result<Change, Refusal> {
+/// `op` against what its id holds (`current`), by `actor` at Unix millis `now`.
+pub fn apply(current: &Current, op: &Mutation, actor: &str, now: u64) -> Result<Change, Refusal> {
     let (Mutation::Put { collection, id, .. } | Mutation::Remove { collection, id, .. }) = op;
     check_key(collection, id)?;
-    match op {
-        Mutation::Remove { rev, .. } => match current {
-            None => Ok(Change::Unchanged(None)),
-            Some(c) if c.rev == *rev => Ok(Change::Remove),
-            Some(c) => Err(Refusal::Conflict(Some(c.clone()))),
-        },
-        Mutation::Put { id, rev, data, .. } => {
+    match (op, current) {
+        (Mutation::Remove { .. }, Current::Gone(_)) => Ok(Change::Unchanged(None)),
+        (Mutation::Remove { rev, .. }, Current::Live { record: c, .. }) if c.rev == *rev => {
+            Ok(Change::Remove)
+        }
+        (Mutation::Remove { .. }, Current::Live { record: c, .. }) => {
+            Err(Refusal::Conflict(Some(c.clone())))
+        }
+        (Mutation::Put { id, rev, data, .. }, current) => {
             let len = data.to_string().len();
             if len > MAX_DATA {
                 return Err(Refusal::TooLarge(format!(
                     "data is {len} bytes; the most is {MAX_DATA}"
                 )));
             }
-            let put = |rev| {
-                Ok(Change::Put(Envelope {
+            let put = |rev, base| {
+                let record = Envelope {
                     id: id.clone(),
                     rev,
                     by: actor.into(),
                     at: now,
                     data: data.clone(),
-                }))
+                };
+                Ok(Change::Put { record, base })
             };
             match current {
-                None if *rev == 0 => put(1),
-                None => Err(Refusal::Conflict(None)),
-                Some(c) if c.rev == *rev => put(rev + 1),
+                Current::Gone(last) if *rev == 0 => put(last + 1, *last),
+                Current::Gone(_) => Err(Refusal::Conflict(None)),
+                Current::Live { record: c, base } if c.rev == *rev => put(rev + 1, *base),
                 // The response to this very write was lost: it landed, so it succeeded.
-                Some(c)
-                    if Some(c.rev) == rev.checked_add(1) && c.by == actor && c.data == *data =>
+                Current::Live { record: c, base }
+                    if c.by == actor
+                        && c.data == *data
+                        && match rev {
+                            0 => c.rev == base + 1,
+                            _ => rev > base && Some(c.rev) == rev.checked_add(1),
+                        } =>
                 {
                     Ok(Change::Unchanged(Some(c.clone())))
                 }
-                Some(c) => Err(Refusal::Conflict(Some(c.clone()))),
+                Current::Live { record: c, .. } => Err(Refusal::Conflict(Some(c.clone()))),
             }
         }
     }
@@ -118,11 +133,6 @@ fn check_key(collection: &str, id: &str) -> Result<(), Refusal> {
         )));
     }
     Ok(())
-}
-
-/// Room for `data_len` more bytes in an app database using `used` of `cap` ([`MAX_DB`]).
-pub fn fits(used: u64, data_len: usize, cap: u64) -> bool {
-    used.saturating_add(data_len as u64) <= cap
 }
 
 /// A list query as SQL over `records`, its parameters in order. Rows come back as
@@ -175,7 +185,9 @@ pub fn compile(
         }
         None => sql.push_str("NULL"),
     }
-    sql.push_str(" FROM records WHERE space = ? AND owner = ? AND collection = ?");
+    sql.push_str(
+        " FROM records WHERE data IS NOT NULL AND space = ? AND owner = ? AND collection = ?",
+    );
     params.extend([
         Sql::Text(space.as_str().into()),
         Sql::Text(owner.into()),
@@ -374,29 +386,40 @@ mod tests {
         }
     }
 
+    /// A live record `env(rev, by, data)` first created at revision `base + 1`.
+    fn live(record: Envelope, base: u64) -> Current {
+        Current::Live { record, base }
+    }
+
+    fn stored(record: Envelope, base: u64) -> Result<Change, Refusal> {
+        Ok(Change::Put { record, base })
+    }
+
+    const NEVER: Current = Current::Gone(0);
+
     #[test]
     fn create_update_and_stale_writes() {
         let d = json!({"t": 1});
         // Create: rev 0 on nothing.
         assert_eq!(
-            apply(None, &put(0, d.clone()), "me", 9),
-            Ok(Change::Put(env(1, "me", d.clone())))
+            apply(&NEVER, &put(0, d.clone()), "me", 9),
+            stored(env(1, "me", d.clone()), 0)
         );
         // A rev on nothing: it was removed (or never was).
         assert_eq!(
-            apply(None, &put(3, d.clone()), "me", 9),
+            apply(&NEVER, &put(3, d.clone()), "me", 9),
             Err(Refusal::Conflict(None))
         );
         // Update at the stored rev: next rev, new by and at.
         let cur = env(4, "other", json!({"t": 0}));
         assert_eq!(
-            apply(Some(&cur), &put(4, d.clone()), "me", 9),
-            Ok(Change::Put(env(5, "me", d.clone())))
+            apply(&live(cur.clone(), 0), &put(4, d.clone()), "me", 9),
+            stored(env(5, "me", d.clone()), 0)
         );
         // Stale: 409 with what is there.
         for rev in [0, 2, 3, 5, 6] {
             assert_eq!(
-                apply(Some(&cur), &put(rev, d.clone()), "me", 9),
+                apply(&live(cur.clone(), 0), &put(rev, d.clone()), "me", 9),
                 Err(Refusal::Conflict(Some(cur.clone()))),
                 "{rev}"
             );
@@ -409,7 +432,7 @@ mod tests {
         let mine = env(1, "me", d.clone());
         // My own create, retried after a lost response.
         assert_eq!(
-            apply(Some(&mine), &put(0, d.clone()), "me", 9),
+            apply(&live(mine.clone(), 0), &put(0, d.clone()), "me", 9),
             Ok(Change::Unchanged(Some(mine.clone())))
         );
         // Someone else's record, or other data, or already moved on: a conflict.
@@ -419,7 +442,7 @@ mod tests {
             env(2, "me", d.clone()),
         ] {
             assert_eq!(
-                apply(Some(&cur), &put(0, d.clone()), "me", 9),
+                apply(&live(cur.clone(), 0), &put(0, d.clone()), "me", 9),
                 Err(Refusal::Conflict(Some(cur.clone())))
             );
         }
@@ -428,50 +451,87 @@ mod tests {
     #[test]
     fn an_update_retried_after_it_landed_succeeds() {
         let d = json!({"t": 1, "n": [1, 2]});
-        let landed = env(5, "me", d.clone());
+        let landed = live(env(5, "me", d.clone()), 0);
         assert_eq!(
-            apply(
-                Some(&landed),
-                &put(4, json!({"n": [1, 2], "t": 1})),
-                "me",
-                9
-            ),
-            Ok(Change::Unchanged(Some(landed.clone())))
+            apply(&landed, &put(4, json!({"n": [1, 2], "t": 1})), "me", 9),
+            Ok(Change::Unchanged(Some(env(5, "me", d.clone()))))
         );
-        assert!(apply(Some(&landed), &put(4, json!({"t": 2})), "me", 9).is_err());
-        assert!(apply(Some(&landed), &put(4, d.clone()), "you", 9).is_err());
-        assert!(apply(Some(&landed), &put(3, d.clone()), "me", 9).is_err());
+        assert!(apply(&landed, &put(4, json!({"t": 2})), "me", 9).is_err());
+        assert!(apply(&landed, &put(4, d.clone()), "you", 9).is_err());
+        assert!(apply(&landed, &put(3, d.clone()), "me", 9).is_err());
         // No overflow at the top.
-        let top = env(u64::MAX, "me", d.clone());
-        assert!(apply(Some(&top), &put(u64::MAX - 1, d.clone()), "me", 9).is_ok());
-        assert!(apply(Some(&env(0, "me", d.clone())), &put(u64::MAX, d), "me", 9).is_err());
+        let top = live(env(u64::MAX, "me", d.clone()), 0);
+        assert!(apply(&top, &put(u64::MAX - 1, d.clone()), "me", 9).is_ok());
+        assert!(apply(
+            &live(env(1, "me", d.clone()), 0),
+            &put(u64::MAX, d),
+            "me",
+            9
+        )
+        .is_err());
     }
 
     #[test]
     fn removes() {
         let cur = env(2, "x", json!(1));
-        assert_eq!(apply(Some(&cur), &remove(2), "me", 9), Ok(Change::Remove));
         assert_eq!(
-            apply(Some(&cur), &remove(1), "me", 9),
+            apply(&live(cur.clone(), 0), &remove(2), "me", 9),
+            Ok(Change::Remove)
+        );
+        assert_eq!(
+            apply(&live(cur.clone(), 0), &remove(1), "me", 9),
             Err(Refusal::Conflict(Some(cur.clone())))
         );
         // Missing (already removed, or never there): done.
         assert_eq!(
-            apply(None, &remove(7), "me", 9),
+            apply(&Current::Gone(2), &remove(2), "me", 9),
             Ok(Change::Unchanged(None))
         );
+        assert_eq!(
+            apply(&NEVER, &remove(7), "me", 9),
+            Ok(Change::Unchanged(None))
+        );
+    }
+
+    #[test]
+    fn a_recreated_id_continues_its_revisions_so_late_writes_conflict() {
+        let d = json!({"t": 1});
+        // Removed at rev 3, then created again: rev 4, not 1.
+        let again = env(4, "me", d.clone());
+        assert_eq!(
+            apply(&Current::Gone(3), &put(0, d.clone()), "me", 9),
+            stored(again.clone(), 3)
+        );
+        let now = live(again.clone(), 3);
+        // Late writes aimed at the removed record: conflicts, not hits on the new one.
+        for op in [remove(1), remove(3), put(1, d.clone()), put(3, d.clone())] {
+            assert_eq!(
+                apply(&now, &op, "me", 9),
+                Err(Refusal::Conflict(Some(again.clone()))),
+                "{op:?}"
+            );
+        }
+        // Its own create, retried: still a success.
+        assert_eq!(
+            apply(&now, &put(0, d.clone()), "me", 9),
+            Ok(Change::Unchanged(Some(again.clone())))
+        );
+        // Updated since: a create retry no longer matches.
+        let later = live(env(5, "me", d.clone()), 3);
+        assert!(apply(&later, &put(0, d.clone()), "me", 9).is_err());
+        assert!(apply(&later, &put(4, d.clone()), "me", 9).is_ok());
     }
 
     #[test]
     fn caps_and_keys() {
         let big = json!({"s": "x".repeat(MAX_DATA)});
         assert!(matches!(
-            apply(None, &put(0, big), "me", 9),
+            apply(&NEVER, &put(0, big), "me", 9),
             Err(Refusal::TooLarge(_))
         ));
         // Exactly at the cap is fine: `"…"` is the string plus its quotes.
         let edge = json!("x".repeat(MAX_DATA - 2));
-        assert!(apply(None, &put(0, edge), "me", 9).is_ok());
+        assert!(apply(&NEVER, &put(0, edge), "me", 9).is_ok());
         let keyed = |collection: &str, id: &str| Mutation::Remove {
             space: Space::Me,
             collection: collection.into(),
@@ -479,15 +539,13 @@ mod tests {
             rev: 0,
         };
         assert!(matches!(
-            apply(None, &keyed("Notes", "a"), "me", 9),
+            apply(&NEVER, &keyed("Notes", "a"), "me", 9),
             Err(Refusal::Invalid(_))
         ));
         assert!(matches!(
-            apply(None, &keyed("notes", "a/b"), "me", 9),
+            apply(&NEVER, &keyed("notes", "a/b"), "me", 9),
             Err(Refusal::Invalid(_))
         ));
-        assert!(fits(MAX_DB - 10, 10, MAX_DB) && !fits(MAX_DB - 10, 11, MAX_DB));
-        assert!(!fits(u64::MAX, 1, MAX_DB));
     }
 
     #[test]
@@ -538,7 +596,8 @@ mod tests {
         assert_eq!(
             c.sql,
             "SELECT id, rev, \"by\", at, data, NULL FROM records \
-             WHERE space = ? AND owner = ? AND collection = ? ORDER BY id ASC LIMIT ?"
+             WHERE data IS NOT NULL AND space = ? AND owner = ? AND collection = ? \
+             ORDER BY id ASC LIMIT ?"
         );
         let text = |s: &str| Sql::Text(s.into());
         assert_eq!(

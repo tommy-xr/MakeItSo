@@ -11,7 +11,7 @@ use serde_json::Value;
 pub struct Envelope {
     /// 1–128 of `[A-Za-z0-9._:-]`, chosen by the client.
     pub id: String,
-    /// 1 when created, +1 each write.
+    /// 1 for a new id, +1 each write (a removed id's continues when it is created again).
     pub rev: u64,
     /// Who wrote it last: their email, or `local`.
     pub by: String,

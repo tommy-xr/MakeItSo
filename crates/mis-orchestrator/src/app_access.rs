@@ -166,14 +166,11 @@ pub fn write_allowed(
         let mime = t.split(';').next().unwrap_or("").trim();
         mime.eq_ignore_ascii_case("application/json")
     });
-    let from_here = match origin.map(|o| o.split_once("://")) {
-        None => true,
-        Some(Some(("https", a))) if public.is_some_and(|p| a.eq_ignore_ascii_case(p)) => true,
-        Some(Some(("http" | "https", a))) => {
-            crate::loopback_host(a) && host.is_some_and(|h| a.eq_ignore_ascii_case(h))
-        }
-        Some(_) => false,
-    };
+    let from_here = origin.is_none_or(|o| {
+        let public_page = o.strip_prefix("https://").zip(public);
+        public_page.is_some_and(|(a, p)| a.eq_ignore_ascii_case(p))
+            || host.is_some_and(|h| crate::loopback_host(h) && crate::same_origin(o, h))
+    });
     json && from_here
 }
 

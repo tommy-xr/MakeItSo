@@ -1,5 +1,5 @@
 // The apps SDK (static/mis.js) against a stubbed fetch, and its in-memory twin
-// (static/mis-mock.mjs). Run: node --test crates/mis-orchestrator/tests
+// (static/mis-mock.mjs). Run: node --test crates/mis-orchestrator/tests/sdk.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -135,4 +135,32 @@ test('mock: me records are their writer\'s, and export shows what the caller see
   assert.deepEqual(Object.keys(x.shared), ['notes']);
   assert.equal(x.me.drafts[0].data.t, 'mine');
   assert.equal((await m.records.get('shared', 'drafts', 'd')), null);
+});
+
+test('mock: a recreated id continues its revisions, so a late remove conflicts', async () => {
+  const m = createMock();
+  await m.records.put('shared', 'notes', 'a', 0, { v: 1 });
+  await m.records.remove('shared', 'notes', 'a', 1);
+  const again = await m.records.put('shared', 'notes', 'a', 0, { v: 2 });
+  assert.equal(again.rev, 2);
+  await assert.rejects(m.records.remove('shared', 'notes', 'a', 1), (e) => e.status === 409 && e.current.rev === 2);
+  // Its own create, retried: still a success.
+  assert.deepEqual(await m.records.put('shared', 'notes', 'a', 0, { v: 2 }), again);
+});
+
+test('mock: refuses what the server refuses, and any collection name works', async () => {
+  const m = createMock();
+  for (const q of [{ order_by: ['score'] }, { order_by: ['score', 'asc', 'x'] }, { filter: {} }, { where: { a: { constructor: 1 } } }]) {
+    await assert.rejects(m.records.list('shared', 'notes', q), (e) => e.status === 400, JSON.stringify(q));
+  }
+  for (const c of ['constructor', '__proto__']) await m.records.put('shared', c, 'a', 0, { constructor: 1 });
+  const x = await m.export();
+  assert.deepEqual(Object.keys(x.shared).sort(), ['__proto__', 'constructor']);
+  assert.deepEqual(await m.records.list('shared', 'constructor', { where: { toString: { eq: 1 } } }), { records: [], cursor: null });
+});
+
+test('mis.js in mock mode rejects with its own MisError class', async () => {
+  class E extends Error {}
+  const m = createMock({ role: 'viewer', Err: E });
+  await assert.rejects(m.records.put('shared', 'notes', 'a', 0, {}), (e) => e instanceof E);
 });
