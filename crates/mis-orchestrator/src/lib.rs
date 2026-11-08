@@ -35,6 +35,8 @@ pub mod ledger;
 pub mod note;
 pub mod plan;
 pub mod push;
+pub mod records;
+pub mod records_db;
 pub mod routine;
 pub mod scope;
 pub mod self_update;
