@@ -97,6 +97,17 @@ pub enum BackupKind {
     Manual,
 }
 
+impl BackupKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Daily => "daily",
+            Self::PreActivation => "pre-activation",
+            Self::PreRestore => "pre-restore",
+            Self::Manual => "manual",
+        }
+    }
+}
+
 /// `POST /api/apps/{slug}/restore`: replace the app's records with snapshot `backup`, and its
 /// members with that moment's too if `with_policy`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

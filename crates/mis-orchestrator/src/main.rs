@@ -418,8 +418,6 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(apps) = &apps {
         app = app.with_apps(apps.clone());
-    }
-    if let Some(apps) = &apps {
         tokio::spawn(mis_orchestrator::backups::run_daily(apps.clone()));
     }
     if let (Some(listener), Some(apps)) = (apps_listener, apps) {

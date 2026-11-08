@@ -4898,6 +4898,9 @@ async fn activating_a_release_backs_up_first() {
     assert_eq!(status, 204);
     let page = "/api/apps/demo/releases?activate=true";
     assert_eq!(publish(&mis, page, "s", &demo("v3")).await.0, 201);
+    // Activating the live release again takes none.
+    let (status, _) = post_json(&mis, "/api/apps/demo/activate", "s", r#"{"release": 3}"#).await;
+    assert_eq!(status, 204);
     let (_, body) = get_json(&mis, "/api/apps/demo/backups", "s").await;
     let list: Vec<AppBackup> = serde_json::from_str(&body).unwrap();
     let names: Vec<_> = list.iter().map(|b| &b.name[..7]).collect();

@@ -428,7 +428,7 @@ database) into `<state-dir>/apps/<name>/backups/`: `<snapshot>.sqlite` (`0600`, 
 | Kind | Taken | Kept |
 | --- | --- | --- |
 | `daily-<time>` | once a local day, checked hourly and at start, if its records changed since its last snapshot | 7 |
-| `pre-v<n>-<time>` | before release n goes live (no snapshot, no activation) | 5 |
+| `pre-v<n>-<time>` | before release n goes live (no snapshot, no activation; none if already live) | 5 |
 | `pre-restore-<time>` | before every restore | 5 |
 | `manual-<time>` | `mis apps backup` | 5 |
 
@@ -441,7 +441,9 @@ mis apps restore pool daily-20261107T080000.000Z --with-policy   # members too
 
 A restore takes the pre-restore snapshot and copies the chosen one into the live database in one
 hold of the app's write lock, so every write lands either in that snapshot or after the restore.
-Members change only with `--with-policy`. `GET /api/apps/<name>/backups` lists them (read-only
+Restored revisions continue past every earlier one (and ids the snapshot lacks stay removed), so a
+page still holding a revision from before gets a 409 instead of overwriting. Members change only
+with `--with-policy`. A file that isn't an intact records database is refused. `GET /api/apps/<name>/backups` lists them (read-only
 tokens too); `POST /api/apps/<name>/backups` (manual) and `POST /api/apps/<name>/restore`
 (`{"backup", "with_policy"}`) need the full token. Snapshots stay on this machine: copy
 `<state-dir>/apps` elsewhere yourself to survive losing it.

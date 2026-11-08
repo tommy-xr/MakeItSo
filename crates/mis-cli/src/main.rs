@@ -363,10 +363,13 @@ fn app_lines(a: &AppView, now: u64) -> String {
 
 /// `manual-20261108T031500.000Z · manual · 5m ago · 12.0 KiB`.
 fn backup_line(b: &AppBackup, now: u64) -> String {
-    let kind = serde_json::to_value(b.kind).expect("kind serializes");
-    let kind = kind.as_str().unwrap_or_default().replace('_', "-");
     let ago = fmt_elapsed(now.saturating_sub(b.at));
-    format!("{} · {kind} · {ago} ago · {}", b.name, size_text(b.size))
+    format!(
+        "{} · {} · {ago} ago · {}",
+        b.name,
+        b.kind.as_str(),
+        size_text(b.size)
+    )
 }
 
 /// `512 B`, `1.5 KiB`, `2.0 MiB`.

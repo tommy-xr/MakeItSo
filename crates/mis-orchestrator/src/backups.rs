@@ -12,11 +12,12 @@ use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
 use crate::app_access::Policy;
+use crate::apps::POLICY;
 use crate::records_db::Records;
 
 const DIR: &str = "backups";
 const DB: &str = ".sqlite";
-const POLICY: &str = ".policy.json";
+const SIDECAR: &str = ".policy.json";
 /// UTC, sortable, no `-`: `20261108T031500.123Z`.
 const STAMP: &str = "%Y%m%dT%H%M%S%.3fZ";
 
@@ -87,11 +88,16 @@ pub struct Daily<'a> {
 
 /// The apps owed a daily snapshot at `now`: changed, and none taken yet this local day in `tz`.
 pub fn due_backups<'a, Tz: TimeZone>(apps: &[Daily<'a>], now: u64, tz: &Tz) -> Vec<&'a str> {
-    let day = |ms: u64| -> NaiveDate { tz.timestamp_millis_opt(ms as i64).unwrap().date_naive() };
     (apps.iter())
-        .filter(|a| a.changed && a.last_daily.is_none_or(|at| day(at) < day(now)))
+        .filter(|a| a.changed && new_day(a.last_daily, now, tz))
         .map(|a| a.slug)
         .collect()
+}
+
+/// No daily snapshot yet in `now`'s local day in `tz`.
+pub fn new_day<Tz: TimeZone>(last_daily: Option<u64>, now: u64, tz: &Tz) -> bool {
+    let day = |ms: u64| -> NaiveDate { tz.timestamp_millis_opt(ms as i64).unwrap().date_naive() };
+    last_daily.is_none_or(|at| day(at) < day(now))
 }
 
 /// The `kind` snapshots in `list` beyond its newest [`keep`]: the ones to delete.
@@ -111,6 +117,8 @@ pub enum BackupError {
     NoSuchBackup,
     /// Not a name [`name`] makes.
     BadName,
+    /// Not an intact records database.
+    NotABackup,
     Io(String),
 }
 
@@ -194,20 +202,31 @@ pub fn restore(
     }
     // Read first, so a missing policy fails before anything changes.
     let policy = (with_policy)
-        .then(|| std::fs::read(file(app, name, POLICY)))
+        .then(|| std::fs::read(file(app, name, SIDECAR)))
         .transpose()?;
     let src = Connection::open_with_flags(&from, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let had = records.has(slug);
+    // A file copied in by hand: refused unless it is an intact records database.
+    let check: Result<String, _> = src.query_row("PRAGMA quick_check", [], |r| r.get(0));
+    let has_records = src.prepare("SELECT 1 FROM records LIMIT 1").is_ok();
+    if check.as_deref() != Ok("ok") || !has_records {
+        return Err(BackupError::NotABackup);
+    }
     let db = records.db(slug)?;
     let mut conn = db.lock().unwrap();
+    // Checked under the lock, so a first write racing the restore is in the snapshot.
+    let had: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM records)", [], |r| r.get(0))?;
     let pre_restore = (had)
         .then(|| snapshot(app, &conn, Take::PreRestore, at))
         .transpose()?;
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS temp.pre; CREATE TEMP TABLE pre AS SELECT * FROM records",
+    )?;
     copy_pages(&src, &mut conn)?;
+    supersede(&mut conn)?;
     // Closed before pruning, which may delete the file (Windows can't while it's open).
     drop((conn, src));
     if let Some(policy) = policy {
-        crate::push::write_private(&app.join("policy.json"), &policy)?;
+        crate::push::write_private(&app.join(POLICY), &policy)?;
     }
     prune_kind(app, BackupKind::PreRestore);
     Ok(Restored { pre_restore })
@@ -242,6 +261,10 @@ pub fn daily<Tz: TimeZone>(
     let last_daily = (all.iter().rev())
         .find(|b| b.kind == BackupKind::Daily)
         .map(|b| b.at);
+    // Fingerprinting reads every record: only once today's snapshot is owed.
+    if !new_day(last_daily, now, tz) {
+        return Ok(None);
+    }
     let changed = match all.last() {
         Some(b) => changed_since(app, records, slug, &b.name)?,
         None => true,
@@ -265,14 +288,14 @@ fn snapshot(app: &Path, conn: &Connection, take: Take, mut at: u64) -> anyhow::R
         at += 1;
     }
     let name = name(take, at);
-    let policy = match std::fs::read(app.join("policy.json")) {
+    let policy = match std::fs::read(app.join(POLICY)) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             serde_json::to_vec_pretty(&Policy::default()).expect("policy serializes")
         }
         Err(e) => return Err(e.into()),
     };
-    let side = file(app, &name, POLICY);
+    let side = file(app, &name, SIDECAR);
     crate::push::write_private(&side, &policy)?;
     // Copied to a temp name, so a half-written snapshot is never listed.
     let tmp = app.join(DIR).join(format!(".tmp-{}", uuid::Uuid::new_v4()));
@@ -293,7 +316,7 @@ fn snapshot(app: &Path, conn: &Connection, take: Take, mut at: u64) -> anyhow::R
 
 fn prune_kind(app: &Path, kind: BackupKind) {
     for old in prune(&list(app), kind) {
-        for ext in [DB, POLICY] {
+        for ext in [DB, SIDECAR] {
             if let Err(e) = std::fs::remove_file(file(app, &old, ext)) {
                 tracing::warn!("removing backup {old}{ext}: {e}");
             }
@@ -313,6 +336,22 @@ fn copy_to(conn: &Connection, to: &Path) -> anyhow::Result<()> {
     let mode: String = dst.query_row("PRAGMA journal_mode = DELETE", [], |r| r.get(0))?;
     anyhow::ensure!(mode == "delete", "{}: journal mode {mode}", to.display());
     Ok(())
+}
+
+/// After a restore over the rows saved in `temp.pre`: each restored revision moves past every
+/// earlier one, and ids only the earlier rows had stay as removed ones, so a client still
+/// holding a revision from before (rev 2, restored to rev 1, rewritten to rev 2) conflicts
+/// instead of overwriting.
+fn supersede(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "UPDATE records SET rev = rev + (SELECT COALESCE(MAX(rev), 0) FROM temp.pre),
+             base = base + (SELECT COALESCE(MAX(rev), 0) FROM temp.pre);
+         INSERT OR IGNORE INTO records SELECT space, owner, collection, id,
+             (SELECT MAX(rev) FROM temp.pre), \"by\", at, NULL, base FROM temp.pre;
+         DROP TABLE temp.pre;",
+    )?;
+    tx.commit()
 }
 
 /// Every page of `from` into `to`, in one step so no write can land between pages.
@@ -344,7 +383,10 @@ pub async fn run_daily(apps: std::sync::Arc<crate::apps::Apps>) {
     loop {
         tick.tick().await;
         let (apps, now) = (apps.clone(), crate::unix_ms());
-        let _ = tokio::task::spawn_blocking(move || apps.daily_backups(now, &chrono::Local)).await;
+        let ran = tokio::task::spawn_blocking(move || apps.daily_backups(now, &chrono::Local));
+        if let Err(e) = ran.await {
+            tracing::warn!("daily backups: {e}");
+        }
     }
 }
 
@@ -454,7 +496,7 @@ mod tests {
         (Records::new(dir.clone()), dir.join("pool"), dir)
     }
 
-    fn put(r: &Records, id: &str, rev: u64, v: i64) {
+    fn try_put(r: &Records, id: &str, rev: u64, v: i64) -> Result<(), crate::records::Refusal> {
         let op = Mutation::Put {
             space: Space::Shared,
             collection: "notes".into(),
@@ -462,7 +504,18 @@ mod tests {
             rev,
             data: json!(v),
         };
-        r.mutate("pool", &op, "me", 1).unwrap().unwrap();
+        r.mutate("pool", &op, "me", 1).unwrap().map(|_| ())
+    }
+
+    fn put(r: &Records, id: &str, rev: u64, v: i64) {
+        try_put(r, id, rev, v).unwrap();
+    }
+
+    fn rev(r: &Records, id: &str) -> u64 {
+        r.get("pool", Space::Shared, "", "notes", id)
+            .unwrap()
+            .unwrap()
+            .rev
     }
 
     /// `pool`'s shared notes: (id, data).
@@ -491,6 +544,11 @@ mod tests {
         let newer = notes(&r);
         let done = restore(&app, &r, "pool", &snap.name, false, 10).unwrap();
         assert_eq!(notes(&r), [("a".into(), json!(1))]);
+        // Revisions held from before the restore (a: 1 and 2, b: 1) conflict, never overwrite.
+        for (id, stale) in [("a", 1), ("a", 2), ("b", 1)] {
+            assert!(try_put(&r, id, stale, 9).is_err(), "{id} {stale}");
+        }
+        assert_eq!(rev(&r, "a"), 3);
         // Members stay unless asked for.
         assert_eq!(std::fs::read(app.join("policy.json")).unwrap(), b"{}");
         let pre = done.pre_restore.unwrap();
@@ -503,7 +561,7 @@ mod tests {
             br#"{"members":{"x@y":"editor"}}"#
         );
         // Writes go on from the restored revisions.
-        put(&r, "a", 1, 4);
+        put(&r, "a", rev(&r, "a"), 4);
         assert!(matches!(
             restore(&app, &r, "pool", "../data", false, 13),
             Err(BackupError::BadName)
@@ -512,12 +570,22 @@ mod tests {
             restore(&app, &r, "pool", &name(Take::Daily, 5), false, 13),
             Err(BackupError::NoSuchBackup)
         ));
+        // A file with a backup's name that isn't one changes nothing.
+        let fake = name(Take::Daily, 7);
+        std::fs::write(file(&app, &fake, DB), b"not sqlite").unwrap();
+        let before = notes(&r);
+        assert!(matches!(
+            restore(&app, &r, "pool", &fake, false, 14),
+            Err(BackupError::NotABackup)
+        ));
+        assert_eq!(notes(&r), before);
+        std::fs::remove_file(file(&app, &fake, DB)).unwrap();
         // One file each, no WAL beside it, readable only by this user.
         let kinds: Vec<_> = list(&app).iter().map(|b| b.kind).collect();
         assert_eq!(kinds.len(), 5, "{kinds:?}");
         for e in std::fs::read_dir(app.join(DIR)).unwrap().flatten() {
             let name = e.file_name().into_string().unwrap();
-            assert!(name.ends_with(DB) || name.ends_with(POLICY), "{name}");
+            assert!(name.ends_with(DB) || name.ends_with(SIDECAR), "{name}");
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;

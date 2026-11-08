@@ -29,7 +29,7 @@ const MANIFEST: &str = "app.json";
 /// Beside the bundle in its release folder; bundles can't hold it (dot files are refused).
 const META: &str = ".release.json";
 /// Beside `releases/`, so no bundle can ship or replace it.
-const POLICY: &str = "policy.json";
+pub(crate) const POLICY: &str = "policy.json";
 const MAX_TITLE_CHARS: usize = 80;
 
 /// `[a-z0-9][a-z0-9-]{0,31}`: `pool`, `chores-2`.
@@ -380,6 +380,9 @@ impl Apps {
 
     /// Snapshot `slug`'s records before release `n` goes live; failing, it doesn't.
     fn pre_activation(&self, slug: &str, n: u32, at: u64) -> anyhow::Result<()> {
+        if self.active_n(slug) == Some(n) {
+            return Ok(());
+        }
         let app = self.dir.join(slug);
         match backups::take(&app, &self.records, slug, Take::PreActivation(n), at) {
             Ok(_) => Ok(()),

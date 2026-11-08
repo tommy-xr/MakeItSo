@@ -1831,6 +1831,7 @@ fn backup_refused(e: backups::BackupError) -> Response {
         NoSuchApp => (StatusCode::NOT_FOUND, "no such app").into_response(),
         NoSuchBackup => (StatusCode::NOT_FOUND, "no such backup").into_response(),
         BadName => (StatusCode::BAD_REQUEST, "not a backup name").into_response(),
+        NotABackup => (StatusCode::BAD_REQUEST, "not an intact records backup").into_response(),
         Io(e) => {
             tracing::warn!("app backup: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
