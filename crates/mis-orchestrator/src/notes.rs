@@ -1,14 +1,15 @@
 //! Publishes capture receipts (`<state>/captures/inbox/`) as records in a clone of the
 //! notes repo (`inbox/`), by capture id: each is written once, then left to the human,
-//! who may edit, rename or delete it. Choosing what to write is pure ([`plan`],
+//! who may edit, rename, file or delete it. Choosing what to write is pure ([`plan`],
 //! [`record`]); [`Notes`] is the `git` shell around it.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write as _;
+use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mis_types::{NotesSync, SyncState};
 use serde::{Deserialize, Serialize};
@@ -18,8 +19,14 @@ use uuid::Uuid;
 const INBOX: &str = "inbox";
 /// The remote branch published to.
 const BRANCH: &str = "main";
-/// Pushes refused (someone pushed first) before giving up until the next run.
-const PUSH_TRIES: usize = 3;
+/// Times a push refused because someone pushed first is retried, after a rebase.
+const PUSH_RETRIES: usize = 3;
+/// Trailer naming each record a commit publishes: `MIS-Capture: <id> <path>`.
+const CAPTURE_TRAILER: &str = "MIS-Capture";
+/// In the clone's `.git`: the files a run is writing, until committed.
+const WRITING: &str = "mis-writing";
+/// Any one `git` command is killed after this long.
+const GIT_DEADLINE: Duration = Duration::from_secs(5 * 60);
 /// A run waits this long after a capture, so a burst lands in one commit.
 pub const AFTER_CAPTURE: Duration = Duration::from_secs(30);
 /// And runs this often regardless.
@@ -38,9 +45,9 @@ pub struct Receipt {
 /// Where a capture was published.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Published {
-    /// Repo path at the time, e.g. `inbox/2026-11-08-foo.md`.
+    /// Repo path it was written to, e.g. `inbox/2026-11-08-foo.md`.
     pub path: String,
-    /// Remote commit that held it when this was recorded.
+    /// Remote commit that published it (or held it, when adopted).
     pub commit: String,
 }
 
@@ -59,7 +66,7 @@ pub enum Action {
 
 /// What to do with each receipt, given the map and the repo's `inbox/` files (path ->
 /// record id; None for images and files without one). A new record keeps the receipt's
-/// name unless that, or one of its images' names, is taken: then `-2`, `-3`, …
+/// name unless another file uses it (see [`crate::capture::free_stem`]): then `-2`, `-3`, …
 pub fn plan(receipts: &[Receipt], map: &Map, repo: &BTreeMap<String, Option<Uuid>>) -> Vec<Action> {
     let mut at: BTreeMap<Uuid, &String> = BTreeMap::new();
     for (path, id) in repo {
@@ -67,27 +74,24 @@ pub fn plan(receipts: &[Receipt], map: &Map, repo: &BTreeMap<String, Option<Uuid
             at.entry(*id).or_insert(path);
         }
     }
-    // Lowercased: macOS file names ignore case.
-    let mut taken: BTreeSet<String> = repo.keys().map(|p| p.to_lowercase()).collect();
+    let prefix = format!("{INBOX}/");
+    let mut names: Vec<String> = (repo.keys())
+        .map(|p| p.strip_prefix(&prefix).unwrap_or(p).to_string())
+        .collect();
     let mut actions = Vec::new();
     for r in receipts {
         let id = r.id;
         if map.contains_key(&id) {
             actions.push(Action::Skip { id });
         } else if let Some(path) = at.get(&id) {
-            actions.push(Action::Adopt {
-                id,
-                path: path.to_string(),
-            });
+            let path = path.to_string();
+            actions.push(Action::Adopt { id, path });
         } else {
-            let base = stem(&r.file);
-            let files = std::iter::once(base.to_string())
-                .chain((2..).map(|n| format!("{base}-{n}")))
-                .map(|s| paths(r, &s))
-                .find(|f| f.iter().all(|p| !taken.contains(&p.to_lowercase())))
-                .expect("unbounded");
-            taken.extend(files.iter().map(|p| p.to_lowercase()));
-            let path = files.into_iter().next().expect("the record");
+            let from = stem(&r.file);
+            let to = crate::capture::free_stem(from, &names);
+            names.extend(r.assets.iter().map(|a| renamed(a, from, &to)));
+            names.push(format!("{to}.md"));
+            let path = format!("{prefix}{to}.md");
             actions.push(Action::Write { id, path });
         }
     }
@@ -104,18 +108,6 @@ fn renamed(asset: &str, from: &str, to: &str) -> String {
         Some(rest) => format!("{to}{rest}"),
         None => asset.to_string(),
     }
-}
-
-/// Repo paths of `r` written as `stem`: the record, then its images.
-fn paths(r: &Receipt, stem_: &str) -> Vec<String> {
-    let from = stem(&r.file);
-    std::iter::once(format!("{INBOX}/{stem_}.md"))
-        .chain(
-            r.assets
-                .iter()
-                .map(|a| format!("{INBOX}/{}", renamed(a, from, stem_))),
-        )
-        .collect()
 }
 
 /// Receipt `r` (text `md`) written as `path`: the record's text, and each image as
@@ -136,35 +128,50 @@ pub fn record(md: &str, r: &Receipt, path: &str) -> (String, Vec<(String, String
     (front + &md[end..], images)
 }
 
-/// `git cat-file --batch` output: each object's contents, None where it is missing.
-fn batch(mut out: &[u8]) -> Vec<Option<&[u8]>> {
-    let mut objects = Vec::new();
-    while let Some(nl) = out.iter().position(|b| *b == b'\n') {
-        let head = String::from_utf8_lossy(&out[..nl]);
-        out = &out[nl + 1..];
-        // `<oid> blob <size>`, else `<name> missing`.
-        match head
-            .rsplit(' ')
-            .next()
-            .and_then(|s| s.parse::<usize>().ok())
-        {
-            Some(n) if out.len() > n => {
-                objects.push(Some(&out[..n]));
-                out = &out[n + 1..];
-            }
-            // Cut short: what follows is contents, not headers.
-            Some(_) => break,
-            None => objects.push(None),
-        }
+/// The commit message publishing `writes` (id, path).
+fn message(writes: &[(Uuid, &str)]) -> String {
+    let n = writes.len();
+    let mut msg = format!("capture: {n} item{}\n\n", if n == 1 { "" } else { "s" });
+    msg += "MIS-Writer: capture\n";
+    for (id, path) in writes {
+        msg += &format!("{CAPTURE_TRAILER}: {id} {path}\n");
     }
-    objects
+    msg
 }
 
-/// Whether `git push --porcelain` says the remote refused the ref: someone pushed first
-/// (`[rejected] (fetch first)`, `[remote rejected] (incorrect old value provided)`).
-/// Otherwise a failed push never reached it.
-fn refused(stdout: &str) -> bool {
-    stdout.lines().any(|l| l.starts_with("!\t"))
+/// Every capture a history published, from `git log --format=` [`LOG_FORMAT`]: the repo
+/// remembers what it was given even if the map is lost and the records since moved.
+fn published_in(log: &str) -> Map {
+    let mut map = Map::new();
+    let mut commit = "";
+    for line in log.lines() {
+        if let Some(c) = line.strip_prefix("commit ") {
+            commit = c;
+        } else if let Some((id, path)) = line.split_once(' ') {
+            if let Ok(id) = id.parse() {
+                let (path, commit) = (path.to_string(), commit.to_string());
+                map.entry(id).or_insert(Published { path, commit });
+            }
+        }
+    }
+    map
+}
+
+const LOG_FORMAT: &str = "--format=commit %H%n%(trailers:key=MIS-Capture,valueonly)";
+
+/// Whether `git push --porcelain` says someone pushed first, so a rebase and retry may
+/// succeed. Seen with git 2.54: `[rejected] (fetch first)` after a stale fetch, `[remote
+/// rejected] (incorrect old value provided)` for a push racing ours.
+fn raced(stdout: &str) -> bool {
+    let reasons = [
+        "(fetch first)",
+        "(non-fast-forward)",
+        "(incorrect old value provided)",
+        "(stale info)",
+    ];
+    (stdout.lines())
+        .filter(|l| l.starts_with("!\t"))
+        .any(|l| reasons.iter().any(|r| l.ends_with(r)))
 }
 
 /// What the status shows after a run that left `pending` captures.
@@ -228,6 +235,8 @@ pub struct Notes {
     receipts: PathBuf,
     map: PathBuf,
     status: Mutex<NotesSync>,
+    /// Captures kept since start, so ones arriving mid-run still count as pending.
+    arrived: AtomicUsize,
     /// Woken by each new capture.
     kick: tokio::sync::Notify,
     after_capture: Duration,
@@ -246,6 +255,7 @@ impl Notes {
                 state: SyncState::Idle,
                 ..NotesSync::OFF
             }),
+            arrived: AtomicUsize::new(0),
             kick: Default::default(),
             after_capture: AFTER_CAPTURE,
             every: EVERY,
@@ -266,6 +276,7 @@ impl Notes {
     /// A new capture was kept: count it and publish soon.
     pub fn captured(&self) {
         let mut s = self.status.lock().unwrap();
+        self.arrived.fetch_add(1, Ordering::SeqCst);
         s.pending += 1;
         if s.state == SyncState::Idle {
             s.state = SyncState::Pending;
@@ -291,10 +302,13 @@ impl Notes {
 
     /// One publish (blocking: runs `git`), then the status it leaves.
     pub fn run(&self) -> NotesSync {
+        let before = self.arrived.load(Ordering::SeqCst);
         let (pending, run) = self.publish();
         let mut s = self.status.lock().unwrap();
-        s.state = state(pending, &run);
-        s.pending = pending;
+        // Captures kept mid-run may postdate the receipts it read. Counted before
+        // reading them, so at worst one is counted twice until the next run.
+        s.pending = pending + (self.arrived.load(Ordering::SeqCst) - before);
+        s.state = state(s.pending, &run);
         match &run {
             Ok(pushed) => {
                 if *pushed {
@@ -303,8 +317,9 @@ impl Notes {
                 s.last_error = None;
             }
             Err(f) => {
-                tracing::warn!(state = ?s.state, "publishing captures: {}", f.why());
-                s.last_error = Some(f.why().to_string());
+                let why = f.why().replace(&self.remote, "<remote>");
+                tracing::warn!(state = ?s.state, "publishing captures: {why}");
+                s.last_error = Some(why);
             }
         }
         s.clone()
@@ -316,7 +331,11 @@ impl Notes {
             Ok(read) => read,
             Err(f) => return (self.status().pending, Err(f)),
         };
-        let unpublished = |map: &Map| receipts.iter().filter(|r| !map.contains_key(&r.id)).count();
+        let unpublished = |map: &Map| {
+            (receipts.iter())
+                .filter(|r| !map.contains_key(&r.id))
+                .count()
+        };
         let pending = unpublished(&map);
         if pending == 0 {
             return (0, Ok(false));
@@ -341,17 +360,18 @@ impl Notes {
             }
             let md = std::fs::read_to_string(e.path())?;
             if let Some(k) = crate::capture::parse(&md) {
+                let assets = k.assets;
                 receipts.push(Receipt {
                     id: k.id,
                     file,
-                    assets: k.assets,
+                    assets,
                 });
             }
         }
         receipts.sort_by(|a, b| a.file.cmp(&b.file));
         let map = match std::fs::read(&self.map) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Map::new(),
-            // A corrupt map is never overwritten: that would publish everything again.
+            // A corrupt map is never overwritten, though history would rebuild most of it.
             r => serde_json::from_slice(&r?)
                 .map_err(|e| Failure::Other(format!("{}: {e}", self.map.display())))?,
         };
@@ -362,42 +382,46 @@ impl Notes {
     /// then record it in `map` and save that. Ok(true): it pushed.
     fn publish_new(&self, receipts: &[Receipt], map: &mut Map) -> Result<bool, Failure> {
         self.sync()?;
-        let mut tries = 0;
+        let mut retries = 0;
         let (actions, pushed) = loop {
-            let actions = plan(receipts, map, &self.scan()?);
+            // Published per history counts as published, map or not.
+            let mut known = self.history()?;
+            known.extend(map.iter().map(|(id, p)| (*id, p.clone())));
+            let actions = plan(receipts, &known, &self.scan()?);
             self.commit(receipts, &actions)?;
             let ahead = self.git(&["rev-list", "--count", &format!("origin/{BRANCH}..HEAD")])?;
             if ahead.check("rev-list", Failure::Other)?.text() == "0" {
                 break (actions, false);
             }
-            let push = self.git(&[
-                "push",
-                "--porcelain",
-                "origin",
-                &format!("HEAD:refs/heads/{BRANCH}"),
-            ])?;
+            let to = format!("HEAD:refs/heads/{BRANCH}");
+            let push = self.git(&["push", "--porcelain", "origin", &to])?;
             if push.ok {
                 break (actions, true);
             }
-            tries += 1;
-            if !refused(&String::from_utf8_lossy(&push.stdout)) {
+            if !raced(&String::from_utf8_lossy(&push.stdout)) {
                 return Err(Failure::Offline(format!("push: {}", push.stderr.trim())));
             }
-            if tries == PUSH_TRIES {
-                return Err(Failure::Other(format!(
-                    "push refused {PUSH_TRIES} times: {}",
+            if retries == PUSH_RETRIES {
+                let why = format!(
+                    "push refused after {PUSH_RETRIES} retries: {}",
                     push.stderr.trim()
-                )));
+                );
+                return Err(Failure::Other(why));
             }
+            retries += 1;
             // Someone pushed first: replay onto theirs and try again.
             self.fetch_rebase()?;
         };
+        // HEAD is the remote's now: what its history published, plus what was adopted.
+        for (id, p) in self.history()? {
+            map.entry(id).or_insert(p);
+        }
         let head = self.git(&["rev-parse", "HEAD"])?;
         let commit = head.check("rev-parse", Failure::Other)?.text();
         for a in actions {
-            if let Action::Write { id, path } | Action::Adopt { id, path } = a {
+            if let Action::Adopt { id, path } = a {
                 let commit = commit.clone();
-                map.insert(id, Published { path, commit });
+                map.entry(id).or_insert(Published { path, commit });
             }
         }
         let json = serde_json::to_vec_pretty(map).expect("serializes");
@@ -408,29 +432,54 @@ impl Notes {
         Ok(pushed)
     }
 
-    /// Clone if needed, point at the configured remote, clear what an interrupted run
-    /// left uncommitted, then fetch and rebase. A rebase someone else left open stays.
+    /// Clone if needed, point at the configured remote, remove what an interrupted run
+    /// left uncommitted, then fetch and rebase. Anything else uncommitted is a human's:
+    /// an open rebase, merge or cherry-pick is a conflict, other changes stop the rebase.
     fn sync(&self) -> Result<(), Failure> {
-        if !self.clone.join(".git").exists() {
-            let parent = self.clone.parent().expect("in the state dir");
-            std::fs::create_dir_all(parent)?;
-            let name = self.clone.file_name().expect("notes").to_string_lossy();
-            let out = git(parent, &["clone", "--quiet", "--", &self.remote, &name])?;
-            out.check("clone", Failure::Offline)?;
-        }
         let git_dir = self.clone.join(".git");
-        if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+        if !git_dir.exists() {
+            // Into a temp dir first, so a clone cut short is never taken for one.
+            let tmp = self.clone.with_extension("tmp");
+            let _ = std::fs::remove_dir_all(&tmp);
+            std::fs::create_dir_all(&tmp)?;
+            let out = self.git_in(&tmp, &["clone", "--quiet", "--", &self.remote, "."])?;
+            out.check("clone", Failure::Offline)?;
+            std::fs::rename(&tmp, &self.clone)?;
+        }
+        let open = [
+            "rebase-merge",
+            "rebase-apply",
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+        ];
+        if open.iter().any(|f| git_dir.join(f).exists()) {
             return Err(self.conflict());
+        }
+        let branch = self.git(&["symbolic-ref", "--short", "-q", "HEAD"])?.text();
+        if branch != BRANCH {
+            let why = format!("{} is on {branch:?}, not {BRANCH}", self.clone.display());
+            return Err(Failure::Other(why));
         }
         let set = self.git(&["remote", "set-url", "origin", &self.remote])?;
         set.check("remote set-url", Failure::Other)?;
-        // Only this publisher writes here, and runs never overlap: anything uncommitted is
-        // a record file from a run cut short, rewritten below if still wanted.
-        let reset = self.git(&["reset", "--hard", "--quiet", "HEAD"])?;
-        reset.check("reset", Failure::Other)?;
-        let clean = self.git(&["clean", "-fdq", "--", INBOX])?;
-        clean.check("clean", Failure::Other)?;
+        self.undo_writing()?;
         self.fetch_rebase()
+    }
+
+    /// Unstage and delete the files a run cut short was writing, unless it committed them.
+    fn undo_writing(&self) -> Result<(), Failure> {
+        let marker = self.clone.join(".git").join(WRITING);
+        let paths = match std::fs::read_to_string(&marker) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            r => r?,
+        };
+        let paths: Vec<&str> = paths.lines().collect();
+        for cmd in [["reset", "-q"].as_slice(), &["clean", "-fq"]] {
+            let args: Vec<&str> = [cmd, &["--"], &paths].concat();
+            self.git(&args)?.check(cmd[0], Failure::Other)?;
+        }
+        std::fs::remove_file(marker)?;
+        Ok(())
     }
 
     fn fetch_rebase(&self) -> Result<(), Failure> {
@@ -444,142 +493,179 @@ impl Notes {
         if !git_dir.join("rebase-merge").exists() && !git_dir.join("rebase-apply").exists() {
             return Err(Failure::Other(format!("rebase: {}", rebase.stderr.trim())));
         }
-        // Back to the unpublished commit; it stays pending until a human resolves it.
+        // Ours: `sync` refuses to start with one open. Back to the unpublished commit; it
+        // stays pending until a human resolves it.
         let abort = self.git(&["rebase", "--abort"])?;
         abort.check("rebase --abort", Failure::Other)?;
         Err(self.conflict())
     }
 
     fn conflict(&self) -> Failure {
-        Failure::Conflict(format!(
-            "notes repo conflict, resolve in {}",
-            self.clone.display()
-        ))
+        let at = self.clone.display();
+        Failure::Conflict(format!("notes repo conflict, resolve in {at}"))
     }
 
-    /// The committed `inbox/` files (HEAD, not the working tree), with their record ids.
+    /// What HEAD's history says it published.
+    fn history(&self) -> Result<Map, Failure> {
+        let log = self
+            .git(&["log", LOG_FORMAT, "HEAD"])?
+            .check("log", Failure::Other)?;
+        Ok(published_in(&log.text()))
+    }
+
+    /// HEAD's `inbox/` files, with their record ids. Read from the working tree: after a
+    /// clean rebase or commit, its tracked files are HEAD's.
     fn scan(&self) -> Result<BTreeMap<String, Option<Uuid>>, Failure> {
         let ls = self.git(&["ls-tree", "-z", "--name-only", "HEAD", &format!("{INBOX}/")])?;
         let ls = ls.check("ls-tree", Failure::Other)?;
-        let paths: Vec<String> = (ls.stdout.split(|b| *b == 0))
+        let paths = (ls.stdout.split(|b| *b == 0))
             .filter(|p| !p.is_empty())
-            .map(|p| String::from_utf8_lossy(p).into_owned())
-            .collect();
-        let md: Vec<&String> = paths.iter().filter(|p| p.ends_with(".md")).collect();
-        let input: String = md.iter().map(|p| format!("HEAD:{p}\n")).collect();
-        let cat = self.git_with(&["cat-file", "--batch"], input.as_bytes())?;
-        let cat = cat.check("cat-file", Failure::Other)?;
-        let ids: BTreeMap<&String, Uuid> = (md.iter().copied())
-            .zip(batch(&cat.stdout))
-            .filter_map(|(p, text)| {
-                let k = crate::capture::parse(&String::from_utf8_lossy(text?))?;
-                Some((p, k.id))
-            })
-            .collect();
+            .map(|p| String::from_utf8_lossy(p).into_owned());
         Ok(paths
-            .iter()
-            .map(|p| (p.clone(), ids.get(p).copied()))
+            .map(|p| {
+                let md = (p.ends_with(".md"))
+                    .then(|| std::fs::read_to_string(self.clone.join(&p)).ok())
+                    .flatten();
+                let id = md.as_deref().and_then(crate::capture::parse).map(|k| k.id);
+                (p, id)
+            })
             .collect())
     }
 
     /// Write and commit the records `actions` says to write, if any.
     fn commit(&self, receipts: &[Receipt], actions: &[Action]) -> Result<(), Failure> {
-        let mut added = Vec::new();
+        let mut files = Vec::new();
+        let mut writes = Vec::new();
         for a in actions {
             let Action::Write { id, path } = a else {
                 continue;
             };
-            std::fs::create_dir_all(self.clone.join(INBOX))?;
-            let r = receipts
-                .iter()
+            let r = (receipts.iter())
                 .find(|r| r.id == *id)
                 .expect("planned from these");
             let md = std::fs::read_to_string(self.receipts.join(&r.file))?;
             let (md, images) = record(&md, r, path);
-            for (from, to) in images {
-                std::fs::copy(self.receipts.join(from), self.clone.join(&to))?;
-                added.push(to);
-            }
-            std::fs::write(self.clone.join(path), md)?;
-            added.push(path.clone());
+            files.push((path.clone(), None));
+            files.extend(images.into_iter().map(|(from, to)| (to, Some(from))));
+            writes.push((r, *id, path.as_str(), md));
         }
-        if added.is_empty() {
+        if writes.is_empty() {
             return Ok(());
         }
-        let n = actions
-            .iter()
-            .filter(|a| matches!(a, Action::Write { .. }))
-            .count();
-        let subject = format!("capture: {n} item{}", if n == 1 { "" } else { "s" });
-        let mut add = vec!["add", "--"];
-        add.extend(added.iter().map(String::as_str));
+        let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        let marker = self.clone.join(".git").join(WRITING);
+        crate::push::write_private(&marker, paths.join("\n").as_bytes())?;
+        std::fs::create_dir_all(self.clone.join(INBOX))?;
+        for (to, from) in &files {
+            if let Some(from) = from {
+                std::fs::copy(self.receipts.join(from), self.clone.join(to))?;
+            }
+        }
+        for (_, _, path, md) in &writes {
+            std::fs::write(self.clone.join(path), md)?;
+        }
+        let add: Vec<&str> = [&["add", "--"], paths.as_slice()].concat();
         self.git(&add)?.check("add", Failure::Other)?;
-        let commit = [
-            "commit",
-            "--quiet",
-            "-m",
-            &subject,
-            "-m",
-            "MIS-Writer: capture",
-        ];
+        let msg = message(
+            &writes
+                .iter()
+                .map(|(_, id, p, _)| (*id, *p))
+                .collect::<Vec<_>>(),
+        );
+        // Only these paths, whatever else is staged.
+        let commit: Vec<&str> =
+            [&["commit", "--quiet", "-m", &msg, "--"], paths.as_slice()].concat();
         self.git(&commit)?.check("commit", Failure::Other)?;
+        std::fs::remove_file(marker)?;
         Ok(())
     }
 
     fn git(&self, args: &[&str]) -> Result<Out, Failure> {
-        Ok(git(&self.clone, args)?)
+        self.git_in(&self.clone, args)
     }
 
-    fn git_with(&self, args: &[&str], input: &[u8]) -> Result<Out, Failure> {
-        Ok(run_git(&self.clone, args, Some(input))?)
+    /// `git args` in `dir`, with the remote's URL kept out of what it says.
+    fn git_in(&self, dir: &Path, args: &[&str]) -> Result<Out, Failure> {
+        let mut out = run_git(dir, args, GIT_DEADLINE)?;
+        out.stderr = out.stderr.replace(&self.remote, "<remote>");
+        Ok(out)
     }
 }
 
-fn git(dir: &Path, args: &[&str]) -> std::io::Result<Out> {
-    run_git(dir, args, None)
-}
-
-/// `git args` in `dir`, never waiting on a person: no prompts, editors or signing.
-/// Commits are Make It So's; the user's own git config (credential helper) still applies.
-fn run_git(dir: &Path, args: &[&str], input: Option<&[u8]>) -> std::io::Result<Out> {
+/// `git args` in `dir`, never waiting on a person: no prompts, askpass, editors, hooks or
+/// signing, and killed (with whatever it started) after `deadline`. Commits are Make It
+/// So's; the user's own git config (the credential helper) still applies.
+fn run_git(dir: &Path, args: &[&str], deadline: Duration) -> std::io::Result<Out> {
     let mut cmd = Command::new("git");
     cmd.current_dir(dir)
-        // A stalled transfer (under 1 KB/s for a minute) fails instead of hanging.
         .args([
             "-c",
             "commit.gpgsign=false",
             "-c",
-            "http.lowSpeedLimit=1000",
+            "core.hooksPath=/dev/null",
         ])
-        .args(["-c", "http.lowSpeedTime=60"])
+        .args(["-c", "core.askPass="])
+        // A stalled transfer (under 1 KB/s for a minute) fails sooner than the deadline.
+        .args([
+            "-c",
+            "http.lowSpeedLimit=1000",
+            "-c",
+            "http.lowSpeedTime=60",
+        ])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
+        .env_remove("GIT_ASKPASS")
+        .env_remove("SSH_ASKPASS")
         .env("GIT_AUTHOR_NAME", "Make It So")
         .env("GIT_AUTHOR_EMAIL", "mis@localhost")
         .env("GIT_COMMITTER_NAME", "Make It So")
         .env("GIT_COMMITTER_EMAIL", "mis@localhost")
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Its own process group, so the deadline also kills ssh and credential helpers.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let mut child = cmd.spawn()?;
-    // Fed from a thread: cat-file answers as it reads, and would block on a full stdout
-    // pipe while we block on a full stdin one.
-    let feed = (input.map(<[u8]>::to_vec))
-        .zip(child.stdin.take())
-        .map(|(input, mut stdin)| std::thread::spawn(move || stdin.write_all(&input)));
-    let out = child.wait_with_output()?;
-    if let Some(feed) = feed {
-        feed.join().expect("stdin writer")?;
-    }
+    let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Some(status);
+        }
+        if start.elapsed() >= deadline {
+            #[cfg(unix)]
+            // SAFETY: signals only the group spawned above, whose leader we haven't reaped.
+            unsafe {
+                libc::killpg(child.id() as i32, libc::SIGKILL);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let stdout = stdout.join().expect("reader");
+    let stderr = String::from_utf8_lossy(&stderr.join().expect("reader")).into_owned();
     Ok(Out {
-        ok: out.status.success(),
-        stdout: out.stdout,
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        ok: status.is_some_and(|s| s.success()),
+        stdout,
+        stderr: match status {
+            Some(_) => stderr,
+            None => format!("timed out after {}s", deadline.as_secs_f32()),
+        },
+    })
+}
+
+/// Read `pipe` to the end on a thread, so neither pipe fills while we wait.
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut out);
+        }
+        out
     })
 }
 
@@ -693,20 +779,52 @@ mod tests {
     }
 
     #[test]
-    fn reads_cat_file_batch_output() {
-        let out = b"45b9 blob 3\nhi\n\nHEAD:nope.md missing\n0123 blob 0\n\n";
-        assert_eq!(batch(out), [Some(&b"hi\n"[..]), None, Some(&b""[..])]);
-        assert_eq!(batch(b"0123 blob 9\nshort\n"), [], "truncated");
+    fn history_names_what_each_commit_published() {
+        let msg = message(&[(id(1), "inbox/a.md"), (id(2), "inbox/b-2.md")]);
+        assert_eq!(
+            msg,
+            format!(
+                "capture: 2 items\n\nMIS-Writer: capture\nMIS-Capture: {} inbox/a.md\n\
+                 MIS-Capture: {} inbox/b-2.md\n",
+                id(1),
+                id(2)
+            )
+        );
+        assert!(message(&[(id(1), "inbox/a.md")]).starts_with("capture: 1 item\n"));
+        // `git log` newest first; a human commit has no trailers.
+        let log = format!(
+            "commit c3\n\ncommit c2\n{} inbox/a.md\n{} inbox/b-2.md\n\ncommit c1\n",
+            id(1),
+            id(2)
+        );
+        let map = published_in(&log);
+        let at = |path: &str, commit: &str| Published {
+            path: path.into(),
+            commit: commit.into(),
+        };
+        assert_eq!(
+            map,
+            Map::from([
+                (id(1), at("inbox/a.md", "c2")),
+                (id(2), at("inbox/b-2.md", "c2"))
+            ])
+        );
+        assert_eq!(published_in("commit c1\nnot-an-id x\n"), Map::new());
     }
 
     #[test]
-    fn a_refused_push_is_told_from_an_unreachable_remote() {
-        // As git 2.54 prints them (scratch repos, a stale fetch and a racing push).
-        let fetch_first = "To /r.git\n!\tHEAD:refs/heads/main\t[rejected] (fetch first)\nDone\n";
-        let raced = "To /r.git\n!\tHEAD:refs/heads/main\t[remote rejected] (incorrect old value provided)\nDone\n";
-        assert!(refused(fetch_first) && refused(raced));
-        assert!(!refused(""), "unreachable: nothing on stdout");
-        assert!(!refused(
+    fn only_a_push_someone_beat_is_retried() {
+        // As git 2.54 prints them (scratch repos: a stale fetch, a racing push, a hook).
+        let line = |why: &str| format!("To /r.git\n!\tHEAD:refs/heads/main\t{why}\nDone\n");
+        assert!(raced(&line("[rejected] (fetch first)")));
+        assert!(raced(&line(
+            "[remote rejected] (incorrect old value provided)"
+        )));
+        assert!(!raced(&line(
+            "[remote rejected] (pre-receive hook declined)"
+        )));
+        assert!(!raced(""), "unreachable: nothing on stdout");
+        assert!(!raced(
             "To /r.git\n \tHEAD:refs/heads/main\t[up to date]\nDone\n"
         ));
     }
@@ -721,5 +839,27 @@ mod tests {
         assert_eq!(state(0, &other()), Pending, "failed before counting");
         assert_eq!(state(1, &Err(Failure::Offline("x".into()))), Offline);
         assert_eq!(state(1, &Err(Failure::Conflict("x".into()))), Conflict);
+    }
+
+    #[test]
+    fn a_hung_git_is_killed_with_what_it_started() {
+        let dir = std::env::temp_dir();
+        let start = Instant::now();
+        let hang = ["-c", "alias.hang=!sleep 30", "hang"];
+        let out = run_git(&dir, &hang, Duration::from_millis(300)).unwrap();
+        assert!(!out.ok);
+        assert_eq!(out.stderr, "timed out after 0.3s");
+        // The readers saw EOF, so `sleep` (git's grandchild) died too.
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+        let ok = run_git(&dir, &["--version"], GIT_DEADLINE).unwrap();
+        assert!(
+            ok.ok && ok.text().starts_with("git version"),
+            "{}",
+            ok.stderr
+        );
     }
 }

@@ -271,13 +271,17 @@ publishes each capture there as a record in `inbox/` on `main`: 30 s after a cap
 `gh auth login` then `gh auth setup-git` on the orchestrator's machine. Unset: nothing is published.
 
 Each run fetches, rebases its own unpushed commits onto `origin/main`, writes the new records in one
-commit (`capture: N items`, author `Make It So <mis@localhost>`, trailer `MIS-Writer: capture`) and
-pushes; if someone pushed first it rebases and retries, up to 3 times. It never force-pushes.
-Publishing is by capture id, kept in `<state-dir>/captures/published.json` once a push succeeds: a
-record is written once, then it is yours to edit, rename or delete, and is never written again. A
-record already in the repo (pushed before the map was saved) is adopted, not written twice. A name
-another file holds gets `-2`, `-3`, … (its images too). The receipt in `captures/inbox/` is never
-changed.
+commit (`capture: N items`, author `Make It So <mis@localhost>`, trailers `MIS-Writer: capture` and
+one `MIS-Capture: <id> <path>` per record) and pushes; if someone pushed first it rebases and
+retries, up to 3 times. It never force-pushes. Git runs without prompts, askpass, hooks or signing,
+and any one command is killed after 5 minutes.
+Publishing is by capture id, kept in `<state-dir>/captures/published.json` once a push succeeds,
+and in the repo's history through those trailers: a record is written once, then it is yours to
+edit, rename, file elsewhere or delete, and is never written again, even if the map is lost. A
+record already in the repo is adopted, not written twice. A name another file holds gets `-2`,
+`-3`, … (its images too). The receipt in `captures/inbox/` is never changed. The clone is the
+publisher's: files a run cut short left uncommitted are removed, and other uncommitted changes
+there stop it until you commit or discard them.
 
 `GET /api/notes/sync` (full or read access) reports `{"state", "pending", "last_push",
 "last_error"}`: `state` is `off`, `idle`, `pending`, `offline` (remote unreachable; retried next

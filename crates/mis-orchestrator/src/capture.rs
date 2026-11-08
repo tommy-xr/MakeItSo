@@ -236,7 +236,7 @@ fn taken(stem: &str, existing: &[String]) -> bool {
 }
 
 /// `base`, else `base-2`, `base-3`, … whichever `existing` doesn't use.
-fn free_stem(base: &str, existing: &[String]) -> String {
+pub(crate) fn free_stem(base: &str, existing: &[String]) -> String {
     std::iter::once(base.to_string())
         .chain((2..).map(|n| format!("{base}-{n}")))
         .find(|s| !taken(s, existing))

@@ -129,22 +129,31 @@ impl World {
         );
     }
 
-    /// Run `sh` in the human's clone (caught up first) just before the publisher's
-    /// next push leaves: someone pushing between its fetch and its push.
+    /// Run `sh` in the human's clone (caught up first) when the publisher's next push
+    /// connects, before the remote lists its refs: someone pushing after its fetch.
+    /// (Its hooks are off, so this wraps the remote's receive-pack instead.)
     fn on_next_push(&self, sh: &str) {
-        let clone = self.state.join("notes");
-        git(&clone, &["config", "core.hooksPath", ".git/hooks"]);
-        let hook = clone.join(".git/hooks/pre-push");
+        let wrapper = self.dir.join("receive-pack");
+        let once = self.dir.join("raced");
         let script = format!(
-            "#!/bin/sh\ncat >/dev/null\nrm -f \"$0\"\n\
-             unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL \
-             GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL\n\
-             cd '{}' && git pull --quiet --ff-only origin main && {sh}\n",
-            self.human.display()
+            "#!/bin/sh\nif [ ! -e '{once}' ]; then touch '{once}'; (\n\
+             unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT \
+             GIT_PROTOCOL GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL\n\
+             cd '{}' && git pull --quiet --ff-only origin main && {sh}\n) >&2; fi\n\
+             exec git-receive-pack \"$@\"\n",
+            self.human.display(),
+            once = once.display(),
         );
-        std::fs::write(&hook, script).unwrap();
+        std::fs::write(&wrapper, script).unwrap();
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let clone = self.state.join("notes");
+        let wrapper = wrapper.to_str().unwrap();
+        git(&clone, &["config", "remote.origin.receivepack", wrapper]);
+    }
+
+    fn raced(&self) -> bool {
+        self.dir.join("raced").exists()
     }
 }
 
@@ -293,10 +302,7 @@ fn a_human_push_racing_the_publisher_is_rebased_onto() {
     );
     let s = w.notes().run();
     assert_eq!((s.state, s.pending, &s.last_error), (Idle, 0, &None));
-    assert!(
-        !w.state.join("notes/.git/hooks/pre-push").exists(),
-        "the race ran"
-    );
+    assert!(w.raced());
     assert_eq!(
         w.log(),
         [
@@ -328,6 +334,7 @@ fn a_human_push_to_the_same_path_is_a_conflict_and_the_remote_is_untouched() {
     ));
     let notes = w.notes();
     let s = notes.run();
+    assert!(w.raced());
     assert_eq!((s.state, s.pending), (Conflict, 1));
     let clone = w.state.join("notes");
     let why = s.last_error.unwrap();
@@ -346,6 +353,22 @@ fn a_human_push_to_the_same_path_is_a_conflict_and_the_remote_is_untouched() {
     // Stays a conflict, remote untouched, until a human resolves it.
     assert_eq!(notes.run().state, Conflict);
     assert_eq!(w.head(), human);
+    // A human resolving it mid-rebase: the publisher leaves their rebase alone.
+    let rebase = Command::new("git")
+        .current_dir(&clone)
+        .args([
+            "-c",
+            "user.name=Human",
+            "-c",
+            "user.email=human@example.com",
+        ])
+        .args(["rebase", "--quiet", "origin/main"])
+        .output()
+        .unwrap();
+    assert!(!rebase.status.success(), "conflicts");
+    assert_eq!(notes.run().state, Conflict);
+    assert!(clone.join(".git/rebase-merge").exists(), "still theirs");
+    git(&clone, &["rebase", "--abort"]);
     // Resolved by dropping the publisher's commit: it publishes under the next free name.
     git(&clone, &["reset", "--quiet", "--hard", "origin/main"]);
     let s = notes.run();
@@ -379,6 +402,82 @@ fn a_crash_after_pushing_adopts_instead_of_duplicating() {
         files.contains(&format!("inbox/{}", a.file))
             && files.contains(&format!("inbox/{}", b.file))
     );
+}
+
+#[test]
+fn a_lost_map_never_brings_back_what_the_human_deleted_or_filed() {
+    let w = World::new();
+    let a = w.capture("deleted while the map was lost", &[]);
+    let b = w.capture("filed while the map was lost", &[]);
+    w.notes().run();
+    let map = w.map();
+    // The map is lost (a crash after pushing, or an older state dir restored)...
+    std::fs::remove_file(w.state.join("captures/published.json")).unwrap();
+    // ...and meanwhile the human deleted one record and filed the other out of inbox/.
+    w.human_pull();
+    std::fs::remove_file(w.human.join("inbox").join(&a.file)).unwrap();
+    std::fs::create_dir_all(w.human.join("projects")).unwrap();
+    let filed = w.human.join("projects").join(&b.file);
+    std::fs::rename(w.human.join("inbox").join(&b.file), filed).unwrap();
+    w.human_commit("tidy the inbox");
+    let c = w.capture("a new one", &[]);
+    let s = w.notes().run();
+    assert_eq!((s.state, s.pending), (Idle, 0));
+    assert_eq!(
+        w.log(),
+        [
+            "capture: 1 item",
+            "tidy the inbox",
+            "capture: 2 items",
+            "init"
+        ]
+    );
+    let inbox: Vec<String> = (w.files().into_iter())
+        .filter(|f| f.starts_with("inbox/") && f.ends_with(".md"))
+        .collect();
+    assert_eq!(inbox, [format!("inbox/{}", c.file)]);
+    // Rebuilt from the repo's history: where each was published, by which commit.
+    let rebuilt = w.map();
+    assert_eq!(
+        (rebuilt[&a.id].clone(), rebuilt[&b.id].clone()),
+        (map[&a.id].clone(), map[&b.id].clone())
+    );
+}
+
+#[test]
+fn files_from_an_interrupted_run_are_cleared_and_a_humans_are_kept() {
+    let w = World::new();
+    w.capture("first", &[]);
+    w.notes().run();
+    let a = w.capture("cut short", &[JPEG]);
+    // As if a run stopped after writing (and staging) a's files, before committing.
+    let clone = w.state.join("notes");
+    let (md, jpg) = (
+        format!("inbox/{}", a.file),
+        format!("inbox/{}", image_of(&a.file)),
+    );
+    std::fs::write(clone.join(&md), "half written").unwrap();
+    std::fs::write(clone.join(&jpg), "half").unwrap();
+    git(&clone, &["add", "--", &md, &jpg]);
+    std::fs::write(clone.join(".git/mis-writing"), format!("{md}\n{jpg}")).unwrap();
+    // A draft a human left in the clone, and a commit to rebase onto.
+    std::fs::write(clone.join("inbox/draft.md"), "mine").unwrap();
+    w.human_pull();
+    std::fs::write(w.human.join("README.md"), "# notes, edited\n").unwrap();
+    w.human_commit("human: readme");
+    let s = w.notes().run();
+    assert_eq!((s.state, s.pending, &s.last_error), (Idle, 0, &None));
+    assert_eq!(w.show(&md), w.receipt(&a.file));
+    assert_eq!(w.show(&jpg), JPEG);
+    assert_eq!(
+        std::fs::read_to_string(clone.join("inbox/draft.md")).unwrap(),
+        "mine"
+    );
+    assert!(
+        !w.files().contains(&"inbox/draft.md".to_string()),
+        "not published"
+    );
+    assert!(!clone.join(".git/mis-writing").exists());
 }
 
 #[test]
