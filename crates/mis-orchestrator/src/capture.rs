@@ -130,7 +130,7 @@ impl Capture {
 }
 
 /// An http(s) URL of at most [`MAX_URL_BYTES`].
-fn web_url(s: &str) -> bool {
+pub(crate) fn web_url(s: &str) -> bool {
     s.len() <= MAX_URL_BYTES
         && reqwest::Url::parse(s).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
 }

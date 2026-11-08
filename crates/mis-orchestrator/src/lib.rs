@@ -28,6 +28,7 @@ pub mod app_access;
 pub mod apps;
 pub mod apps_http;
 pub mod capture;
+pub mod email;
 pub mod evidence;
 pub mod images;
 pub mod ledger;
@@ -1413,7 +1414,7 @@ async fn upload(
 }
 
 /// Keep a link, text and/or images shared from a phone (multipart `url`, `text`, `via`,
-/// up to 4 `image` files; or those text fields url-encoded) in the inbox before replying `{"id", "file"}`: 201, or 200
+/// up to 4 `image` files; or those text fields url-encoded; or a raw `message/rfc822` email) in the inbox before replying `{"id", "file"}`: 201, or 200
 /// for a resend of one already kept. Capture tokens and full access only.
 async fn capture(
     State(app): State<App>,
@@ -1433,15 +1434,12 @@ async fn capture(
     };
     // Parsed only once admitted, so strangers learn nothing about the form.
     // iOS Shortcuts sends multipart only when a file is attached; else url-encoded.
-    let url_encoded = req
-        .headers()
-        .get(header::CONTENT_TYPE)
+    // The email Worker sends the raw message.
+    let content_type = (req.headers().get(header::CONTENT_TYPE))
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|t| {
-            t.to_ascii_lowercase()
-                .starts_with("application/x-www-form-urlencoded")
-        });
-    let c = if url_encoded {
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    let c = if content_type.starts_with("application/x-www-form-urlencoded") {
         match axum::Form::<TextCapture>::from_request(req, &()).await {
             Ok(axum::Form(f)) => text_capture(f),
             // Unknown or repeated fields: 400 like the multipart path, not axum's 422.
@@ -1449,6 +1447,11 @@ async fn capture(
                 StatusCode::UNPROCESSABLE_ENTITY => Err((StatusCode::BAD_REQUEST, e.body_text())),
                 status => Err((status, e.body_text())),
             },
+        }
+    } else if content_type.starts_with("message/rfc822") {
+        match axum::body::Bytes::from_request(req, &()).await {
+            Ok(raw) => email::capture(&raw).map_err(refused_capture),
+            Err(e) => return e.into_response(),
         }
     } else {
         match axum::extract::Multipart::from_request(req, &()).await {
