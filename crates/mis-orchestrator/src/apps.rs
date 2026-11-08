@@ -1,16 +1,19 @@
 //! Apps: static bundles published as numbered releases, served on their own listener.
 //! On disk under `<state>/apps`: `<slug>/releases/<n>/` (the bundle plus `.release.json`,
-//! all kept) and `<slug>/active` (the live n). `unpack` and the path rules are pure;
-//! `Apps` is the filesystem shell around them.
+//! all kept), `<slug>/active` (the live n) and `<slug>/policy.json` (its members, see
+//! [`crate::app_access`]). `unpack` and the path rules are pure; `Apps` is the filesystem
+//! shell around them.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use mis_types::{AppRelease, AppView};
+use mis_types::{AppMember, AppRelease, AppRole, AppView};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::app_access::{self, Policy};
 
 /// Largest bundle, its files' bytes added up.
 pub const MAX_BYTES: u64 = 20 << 20;
@@ -22,6 +25,8 @@ const TAR_OVERHEAD: u64 = 8 << 20;
 const MANIFEST: &str = "app.json";
 /// Beside the bundle in its release folder; bundles can't hold it (dot files are refused).
 const META: &str = ".release.json";
+/// Beside `releases/`, so no bundle can ship or replace it.
+const POLICY: &str = "policy.json";
 const MAX_TITLE_CHARS: usize = 80;
 
 /// `[a-z0-9][a-z0-9-]{0,31}`: `pool`, `chores-2`.
@@ -270,7 +275,16 @@ pub enum ActivateError {
     Io(String),
 }
 
-/// The apps folder. Publishing and activating take `lock`, so each publish gets its own n.
+#[derive(Debug, PartialEq)]
+pub enum MemberError {
+    NoSuchApp,
+    /// Not an email address.
+    Invalid(String),
+    Io(String),
+}
+
+/// The apps folder. Publishing, activating and sharing take `lock`, so each publish gets its
+/// own n and concurrent shares don't drop each other.
 pub struct Apps {
     dir: PathBuf,
     /// See [`base_url`].
@@ -373,6 +387,42 @@ impl Apps {
         })
     }
 
+    /// `slug`'s members. Missing: shared with no one. Unreadable: also no one (fail closed).
+    pub fn policy(&self, slug: &str) -> Policy {
+        self.read_policy(slug).unwrap_or_else(|e| {
+            tracing::warn!("apps/{slug}/policy.json: {e}; shared with no one");
+            Policy::default()
+        })
+    }
+
+    fn read_policy(&self, slug: &str) -> Result<Policy, String> {
+        match std::fs::read(self.dir.join(slug).join(POLICY)) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Policy::default()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Give `email` `role` in `slug` (None: remove them); its members after.
+    pub fn set_member(
+        &self,
+        slug: &str,
+        email: &str,
+        role: Option<AppRole>,
+    ) -> Result<Vec<AppMember>, MemberError> {
+        let _held = self.lock.lock().unwrap();
+        if self.release_ns(slug).is_empty() {
+            return Err(MemberError::NoSuchApp);
+        }
+        // A policy that doesn't parse is left for a person to fix, not overwritten.
+        let policy = self.read_policy(slug).map_err(MemberError::Io)?;
+        let policy = app_access::set_member(policy, email, role).map_err(MemberError::Invalid)?;
+        let json = serde_json::to_vec_pretty(&policy).expect("policy serializes");
+        crate::push::write_private(&self.dir.join(slug).join(POLICY), &json)
+            .map_err(|e| MemberError::Io(e.to_string()))?;
+        Ok(policy.list())
+    }
+
     /// `/a/<slug>/` on this server, if it is served.
     pub fn url(&self, slug: &str) -> Option<String> {
         Some(format!("{}/a/{slug}/", self.base_url.as_ref()?))
@@ -414,6 +464,7 @@ impl Apps {
             url: self.url(slug),
             active,
             releases,
+            members: self.policy(slug).list(),
         })
     }
 }
@@ -750,6 +801,41 @@ mod tests {
         let mut sorted = ns.clone();
         sorted.sort();
         assert_eq!(sorted, (1..=8).collect::<Vec<_>>());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn members_persist_outside_the_bundle_and_bad_policies_fail_closed() {
+        let dir = temp();
+        let apps = Apps::new(dir.clone(), None);
+        let editor = Some(AppRole::Editor);
+        assert_eq!(
+            apps.set_member("pool", "a@b.c", editor),
+            Err(MemberError::NoSuchApp)
+        );
+        let b = unpack(&tar_gz(&[("app.json", APP_JSON), ("index.html", b"")])).unwrap();
+        apps.publish("pool", &b, 0, true).unwrap();
+        let shared = apps.set_member("pool", "Me@B.c", editor).unwrap();
+        let me = AppMember {
+            email: "me@b.c".into(),
+            role: AppRole::Editor,
+        };
+        assert_eq!(shared, vec![me.clone()]);
+        assert_eq!(apps.list()[0].members, [me]);
+        let raw = std::fs::read_to_string(dir.join("pool/policy.json")).unwrap();
+        assert!(raw.contains(r#""me@b.c": "editor""#), "{raw}");
+        assert!(matches!(
+            apps.set_member("pool", "nope", editor),
+            Err(MemberError::Invalid(_))
+        ));
+        assert_eq!(apps.set_member("pool", "me@b.c", None).unwrap(), []);
+        // Unparseable: nobody gets in, and sharing refuses to overwrite it.
+        std::fs::write(dir.join("pool/policy.json"), "{oops").unwrap();
+        assert_eq!(apps.policy("pool"), Policy::default());
+        assert!(matches!(
+            apps.set_member("pool", "a@b.c", editor),
+            Err(MemberError::Io(_))
+        ));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

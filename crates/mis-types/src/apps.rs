@@ -15,6 +15,41 @@ pub struct AppView {
     pub active: Option<u32>,
     /// Oldest first.
     pub releases: Vec<AppRelease>,
+    /// Who it is shared with, by email. Direct loopback requests are its owner too.
+    pub members: Vec<AppMember>,
+}
+
+/// What a member may do with an app: viewers read, editors also write, owners also admin.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AppRole {
+    Owner,
+    Editor,
+    Viewer,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AppMember {
+    /// Lower-case.
+    pub email: String,
+    pub role: AppRole,
+}
+
+/// `POST /api/apps/{slug}/members`: give `email` `role`; `role: null` removes them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SetMember {
+    pub email: String,
+    pub role: Option<AppRole>,
+}
+
+/// `GET /a/{slug}/api/v1/me` on the apps listener: who is asking and their role.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AppMe {
+    /// Their email, or `local` for a direct loopback request.
+    pub user: String,
+    pub role: AppRole,
+    /// The app's slug.
+    pub app: String,
 }
 
 /// One published bundle.

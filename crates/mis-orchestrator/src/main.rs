@@ -36,11 +36,13 @@ struct Args {
     #[arg(long, env = "MIS_PUBLIC_URL")]
     public_url: Option<String>,
     /// Serve published apps at `/a/<slug>/` on this address, e.g. `127.0.0.1:7475`. Unset: not
-    /// served. It checks no identity yet: requests through Cloudflare are refused.
+    /// served. Each app to its members only (`mis apps share`), signed in through the Access
+    /// app of --apps-cf-access-aud; direct loopback requests are every app's owner.
     #[arg(long, env = "MIS_APPS_BIND")]
     apps_bind: Option<String>,
     /// Where the apps listener is reached from outside, e.g. `https://home.example.com`; app
-    /// links point there. Default: the --apps-bind address.
+    /// links point there, and its host is the only non-loopback Host the listener answers.
+    /// Default: the --apps-bind address.
     #[arg(long, env = "MIS_APPS_PUBLIC_URL")]
     apps_public_url: Option<String>,
     /// Browser origin allowed to connect, e.g. `https://mis.example.com` (repeatable).
@@ -81,6 +83,10 @@ struct Args {
     /// capture-only service token). Its JWT is accepted there only, and only to capture.
     #[arg(long, env = "MIS_CF_ACCESS_CAPTURE_AUD")]
     cf_access_capture_aud: Option<String>,
+    /// AUD tag of the Access app in front of the apps listener (its own hostname and
+    /// policy, same team). Its JWTs are accepted there only; the MIS app's are refused there.
+    #[arg(long, env = "MIS_APPS_CF_ACCESS_AUD")]
+    apps_cf_access_aud: Option<String>,
     /// Fetch Access keys from here instead of the team's certs URL (testing).
     #[arg(long, hide = true)]
     cf_access_certs_url: Option<String>,
@@ -181,6 +187,34 @@ fn nonempty(v: &Option<String>) -> Option<String> {
     v.clone().filter(|v| !v.is_empty())
 }
 
+fn certs_url(args: &Args, team: &str) -> String {
+    nonempty(&args.cf_access_certs_url).unwrap_or_else(|| access::certs_url(team))
+}
+
+/// `--apps-cf-access-aud`: a gate of its own, so a JWT for one Access app never opens the
+/// other. Needs the MIS app's team (checked by [`access_gate`]) and a public URL.
+async fn apps_access_gate(args: &Args) -> anyhow::Result<Option<AccessGate>> {
+    let Some(aud) = nonempty(&args.apps_cf_access_aud) else {
+        return Ok(None);
+    };
+    let Some(team) = nonempty(&args.cf_access_team) else {
+        anyhow::bail!("--apps-cf-access-aud needs --cf-access-team/-aud");
+    };
+    if nonempty(&args.apps_bind).is_none() || nonempty(&args.apps_public_url).is_none() {
+        anyhow::bail!("--apps-cf-access-aud needs --apps-bind and --apps-public-url");
+    }
+    let others = [&args.cf_access_aud, &args.cf_access_capture_aud];
+    if others.iter().any(|a| nonempty(a).as_ref() == Some(&aud)) {
+        anyhow::bail!("--apps-cf-access-aud must be the home Access app's own AUD");
+    }
+    let gate = AccessGate::remote(team.clone(), aud, certs_url(args, &team));
+    if let Err(e) = gate.refresh().await {
+        tracing::warn!("fetching Cloudflare Access keys (apps): {e:#}; retrying on first request");
+    }
+    tracing::info!("Cloudflare Access: apps need the home Access app's JWT");
+    Ok(Some(gate))
+}
+
 /// `--cf-access-team` / `--cf-access-aud`: both or neither; `MIS_..=` means unset.
 async fn access_gate(args: &Args) -> anyhow::Result<Option<AccessGate>> {
     let capture_aud = nonempty(&args.cf_access_capture_aud);
@@ -199,7 +233,7 @@ async fn access_gate(args: &Args) -> anyhow::Result<Option<AccessGate>> {
     if !team.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         anyhow::bail!("--cf-access-team is the <team> in <team>.cloudflareaccess.com");
     }
-    let url = nonempty(&args.cf_access_certs_url).unwrap_or_else(|| access::certs_url(&team));
+    let url = certs_url(args, &team);
     tracing::info!(%team, "Cloudflare Access: non-local requests need its JWT");
     let mut gate = AccessGate::remote(team, aud, url);
     if let Some(aud) = capture_aud {
@@ -292,6 +326,7 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("refusing to bind {addr} without --token / MIS_TOKEN");
     }
     let gate = access_gate(&args).await?;
+    let apps_gate = apps_access_gate(&args).await?;
     // `MIS_ACCESS_SUBJECTS=` means unset; a list of only blanks (`,`) is a mistake, not "anyone".
     let given =
         args.access_subjects.iter().any(|s| !s.is_empty()) || args.access_subjects.len() > 1;
@@ -319,15 +354,17 @@ async fn main() -> anyhow::Result<()> {
     let apps_addr = apps_listener.as_ref().map(|l| l.local_addr()).transpose()?;
     if let Some(addr) = apps_addr {
         tracing::info!("serving apps on http://{addr}/a/");
-        if !addr.ip().is_loopback() {
-            tracing::warn!(
-                "apps on {addr} are open to anyone who can reach it: no identity check yet"
-            );
+        if apps_gate.is_none() {
+            tracing::info!("no --apps-cf-access-aud: apps answer direct loopback requests only");
         }
         if addr.ip().is_unspecified() && nonempty(&args.apps_public_url).is_none() {
             tracing::warn!("no --apps-public-url: app links are left out ({addr} names no host)");
         }
     }
+    let apps_public_host = nonempty(&args.apps_public_url)
+        .map(|u| mis_orchestrator::app_access::public_authority(&u))
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("--apps-public-url {e}"))?;
     let apps = state_dir.as_ref().map(|dir| {
         let base =
             mis_orchestrator::apps::base_url(nonempty(&args.apps_public_url).as_deref(), apps_addr);
@@ -384,7 +421,11 @@ async fn main() -> anyhow::Result<()> {
     }
     if let (Some(listener), Some(apps)) = (apps_listener, apps) {
         tokio::spawn(async move {
-            if let Err(e) = mis_orchestrator::serve_apps(listener, apps).await {
+            let auth = mis_orchestrator::apps_http::Auth {
+                gate: apps_gate,
+                public_host: apps_public_host,
+            };
+            if let Err(e) = mis_orchestrator::serve_apps(listener, apps, auth).await {
                 tracing::error!("apps listener stopped: {e:#}");
             }
         });
