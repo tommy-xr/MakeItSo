@@ -4174,9 +4174,11 @@ async fn apps_refuse_traversal_and_link_archives() {
 async fn apps_port_has_no_orchestrator_routes() {
     let (mis, apps, dir) = start_with_apps(App::new(None)).await;
     assert_eq!(get_json(&mis, "/api/info", "").await.0, 200);
-    for path in ["/", "/api/info", "/api/apps", "/ws/client", "/ws/worker"] {
+    for path in ["/api/info", "/api/apps", "/ws/client", "/ws/worker"] {
         assert_eq!(app_get(&apps, path, "").await.0, 404, "{path}");
     }
+    // `/` sends you to the apps directory, never the orchestrator's page.
+    assert_eq!(app_get(&apps, "/", "").await.0, 307);
     let (status, _, _) = http(&apps, "POST /mcp HTTP/1.1", b"{}").await;
     assert_eq!(status, 404);
     let (status, _, _) = http(&apps, "POST /api/apps/demo/releases HTTP/1.1", &demo("x")).await;
@@ -4288,6 +4290,13 @@ async fn apps_open_to_members_only_through_their_own_access_app() {
     let (status, _, list) = app_get(&apps, "/a/", &other).await;
     assert_eq!(status, 200);
     assert!(!list.contains("demo"), "{list}");
+    assert!(list.contains("No apps are shared with you yet."), "{list}");
+    // The bare hostname lands on the directory.
+    for path in ["/", "/a"] {
+        let (status, head, _) = app_get(&apps, path, &other).await;
+        assert_eq!(status, 307, "{path}");
+        assert!(head.to_lowercase().contains("location: /a/"), "{head}");
+    }
     // The MIS app's JWT doesn't open apps; the apps JWT doesn't open MIS.
     let mis_jwt = via_home(&access_jwt_for(ACCESS_AUD, "me@example.com"));
     assert_eq!(app_get(&apps, "/a/demo/", &mis_jwt).await.0, 401);
