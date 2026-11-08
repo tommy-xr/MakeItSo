@@ -672,10 +672,7 @@ fn run_git(dir: &Path, args: &[&str], deadline: Duration) -> std::io::Result<Out
             status = child.try_wait()?;
         }
         if start.elapsed() >= deadline {
-            // TERM first, so git removes its lock files; then KILL what's left.
-            signal_group(&child, libc::SIGTERM);
-            std::thread::sleep(Duration::from_millis(200));
-            signal_group(&child, libc::SIGKILL);
+            kill_group(&child);
             let _ = child.kill();
             let _ = child.wait();
             // Readers still blocked (on a pipe held outside the group) are left behind.
@@ -697,15 +694,19 @@ fn run_git(dir: &Path, args: &[&str], deadline: Duration) -> std::io::Result<Out
     })
 }
 
-/// Signal the process group `child` leads (see `process_group(0)` above).
-fn signal_group(child: &std::process::Child, signal: i32) {
+/// Stop the process group `child` leads (see `process_group(0)` above): TERM first, so
+/// git removes its lock files, then KILL what's left. Elsewhere only `child` is killed.
+fn kill_group(child: &std::process::Child) {
     #[cfg(unix)]
-    // SAFETY: a plain syscall on the group spawned with this child; at worst it is gone.
-    unsafe {
-        libc::killpg(child.id() as i32, signal);
+    for (signal, then) in [(libc::SIGTERM, 200), (libc::SIGKILL, 0)] {
+        // SAFETY: a plain syscall on the group spawned with this child; at worst it is gone.
+        unsafe {
+            libc::killpg(child.id() as i32, signal);
+        }
+        std::thread::sleep(Duration::from_millis(then));
     }
     #[cfg(not(unix))]
-    let _ = (child, signal);
+    let _ = child;
 }
 
 /// Read `pipe` to the end on a thread, so neither pipe fills while we wait.
