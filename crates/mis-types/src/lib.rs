@@ -12,7 +12,10 @@ use uuid::Uuid;
 mod access;
 pub use access::access_headers;
 mod apps;
-pub use apps::{AppMe, AppMember, AppRelease, AppRole, AppView, SetMember};
+pub use apps::{
+    AppBackup, AppMe, AppMember, AppRelease, AppRole, AppView, BackupKind, RestoreBackup, Restored,
+    SetMember,
+};
 pub mod diff;
 pub use diff::{DiffBase, DiffStat, TaskDiff};
 pub mod evidence;

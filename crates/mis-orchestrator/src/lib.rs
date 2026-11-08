@@ -27,6 +27,7 @@ pub mod access_gate;
 pub mod app_access;
 pub mod apps;
 pub mod apps_http;
+pub mod backups;
 pub mod capture;
 pub mod email;
 pub mod evidence;

@@ -29,7 +29,7 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 web-push-native.workspace = true
 mail-parser = "1.0.1"
-rusqlite = { version = "0.41.1", features = ["bundled", "fallible_uint"] }
+rusqlite = { version = "0.41.1", features = ["backup", "bundled", "fallible_uint"] }
 
 [dev-dependencies]
 mis-update = { workspace = true, features = ["testing"] }
