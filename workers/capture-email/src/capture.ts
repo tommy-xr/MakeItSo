@@ -48,12 +48,21 @@ export function bounce(status: number, body: string): string {
 
 /** Consumes `message.raw` once, or rejects it so the sender gets a bounce saying why. */
 export async function handle(message: ForwardableEmailMessage, env: Env, fetcher = fetch): Promise<void> {
-  const why = refusal(message.from, message.headers.get("Authentication-Results"), env.ALLOWED_FROM);
-  if (why) return message.setReject(why);
+  const auth = message.headers.get("Authentication-Results");
+  const why = refusal(message.from, auth, env.ALLOWED_FROM);
+  // One line per message in the Worker's logs: who, what Email Routing verified, the outcome.
+  const log = (outcome: string) => console.log(JSON.stringify({ from: message.from, auth, outcome }));
+  if (why) {
+    log(`refused: ${why}`);
+    return message.setReject(why);
+  }
   try {
     const res = await fetcher(...captureRequest(env, message.raw));
-    if (!res.ok) message.setReject(bounce(res.status, await res.text()));
+    const body = res.ok ? "" : await res.text();
+    log(res.ok ? `captured ${res.status}` : `mis refused: ${bounce(res.status, body)}`);
+    if (!res.ok) message.setReject(bounce(res.status, body));
   } catch (e) {
+    log(`mis unreachable: ${String(e).slice(0, 200)}`);
     message.setReject(`MIS unreachable: ${String(e).slice(0, 200)}`);
   }
 }
