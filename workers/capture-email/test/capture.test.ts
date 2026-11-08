@@ -27,6 +27,9 @@ test("only listed senders whose SPF passed at Cloudflare may capture", () => {
     // A sender-supplied header after Cloudflare's doesn't count.
     "mx.cloudflare.net; spf=none, mx.evil.example; spf=pass",
     "mx.evil.example; spf=pass",
+    "mx.cloudflare.net.evil.example; spf=pass",
+    // `spf=pass` inside a sender-controlled value.
+    "mx.cloudflare.net; dkim=pass header.i=spf=pass@evil.example; spf=fail",
   ]) {
     assert.equal(refusal("a@example.com", auth, env.ALLOWED_FROM), "sender not verified (SPF)", String(auth));
   }
