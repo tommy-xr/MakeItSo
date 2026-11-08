@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
-use axum::http::{header, HeaderValue, Method, StatusCode};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -36,8 +36,7 @@ pub const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' '
     img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; \
     base-uri 'none'; form-action 'self'";
 
-/// The SDK every app may load (`_` is no app's slug), and its in-memory twin.
-pub const SDK_PATH: &str = "/a/_/mis.js";
+/// The SDK every app may load from `/a/_/mis.js` (`_` is no app's slug), and its in-memory twin.
 const SDK: &str = include_str!("../static/mis.js");
 const SDK_MOCK: &str = include_str!("../static/mis-mock.mjs");
 
@@ -47,12 +46,18 @@ pub fn router(apps: Arc<Apps>, auth: Arc<Auth>) -> Router {
     let records = Arc::new(Records::new(apps.dir().to_path_buf()));
     Router::new()
         .route("/a/", get(directory))
-        .route(SDK_PATH, get(|| async { js(SDK) }))
+        .route("/a/_/mis.js", get(|| async { js(SDK) }))
         .route("/a/_/mis-mock.js", get(|| async { js(SDK_MOCK) }))
         .route("/a/{slug}", get(add_slash))
         .route("/a/{slug}/", get(entry))
         .route("/a/{slug}/api/v1/me", get(me))
-        .route("/a/{slug}/api/v1/mutations", post(mutate))
+        .route(
+            "/a/{slug}/api/v1/mutations",
+            post(mutate).layer(axum::middleware::from_fn_with_state(
+                auth.clone(),
+                from_own_page,
+            )),
+        )
         .route("/a/{slug}/api/v1/records/{space}/{collection}", get(list))
         .route(
             "/a/{slug}/api/v1/records/{space}/{collection}/{id}",
@@ -71,6 +76,20 @@ pub fn router(apps: Arc<Apps>, auth: Arc<Auth>) -> Router {
 fn js(body: &'static str) -> Response {
     let ct = "text/javascript; charset=utf-8";
     ([(header::CONTENT_TYPE, ct)], body).into_response()
+}
+
+/// Every POST route's layer: see [`app_access::write_allowed`].
+async fn from_own_page(State(auth): State<Arc<Auth>>, req: Request, next: Next) -> Response {
+    let ok = {
+        let h = |name| req.headers().get(name).and_then(|v| v.to_str().ok());
+        let (ct, origin, host) = (h(header::CONTENT_TYPE), h(header::ORIGIN), h(header::HOST));
+        app_access::write_allowed(ct, origin, host, auth.public_host.as_deref())
+    };
+    if !ok {
+        let why = "writes take JSON from this app's own page";
+        return (StatusCode::FORBIDDEN, why).into_response();
+    }
+    next.run(req).await
 }
 
 /// Admits members only ([`admit`]), and sets the security headers on every response.
@@ -120,20 +139,6 @@ async fn admit(
     let host = header(header::HOST);
     if !app_access::host_allowed(host, auth.public_host.as_deref()) {
         return Err((StatusCode::MISDIRECTED_REQUEST, "unknown host"));
-    }
-    let write = !matches!(*req.method(), Method::GET | Method::HEAD);
-    if write
-        && !app_access::write_allowed(
-            header(header::CONTENT_TYPE),
-            header(header::ORIGIN),
-            host,
-            auth.public_host.as_deref(),
-        )
-    {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "writes take JSON from this app's own page",
-        ));
     }
     let jwt = match (headers.get(JWT_HEADER), &auth.gate) {
         (None, _) => None,

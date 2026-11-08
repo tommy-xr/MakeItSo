@@ -4383,3 +4383,396 @@ async fn read_token_sees_members_but_cannot_share() {
     assert_eq!(status, 404);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// POST `body` (JSON) to `path` on the apps listener with extra head lines: status, body.
+async fn app_post(apps: &str, path: &str, extra: &str, body: &str) -> (u16, String) {
+    let head = format!("POST {path} HTTP/1.1\r\nContent-Type: application/json{extra}");
+    let (status, _, body) = http(apps, &head, body.as_bytes()).await;
+    (status, String::from_utf8(body).unwrap())
+}
+
+const MUTATIONS: &str = "/a/demo/api/v1/mutations";
+
+fn put_op(space: &str, id: &str, rev: u64, data: serde_json::Value) -> String {
+    serde_json::json!({"op": "put", "space": space, "collection": "notes", "id": id, "rev": rev, "data": data})
+        .to_string()
+}
+
+/// The `q` parameter for `query`.
+fn q(query: serde_json::Value) -> String {
+    let raw = query.to_string();
+    let enc: String = (raw.bytes())
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    format!("?q={enc}")
+}
+
+/// A live demo app on a fresh apps listener (`app` takes full token `s`); loopback requests
+/// are its owner.
+async fn live_demo(
+    app: App,
+    auth: mis_orchestrator::apps_http::Auth,
+) -> (String, String, std::path::PathBuf) {
+    let (mis, apps, dir) = start_with_apps_auth(app, auth).await;
+    let page = "/api/apps/demo/releases?activate=true";
+    assert_eq!(publish(&mis, page, "s", &demo("v1")).await.0, 201);
+    (mis, apps, dir)
+}
+
+#[tokio::test]
+async fn records_put_get_list_and_page() {
+    let (_, apps, dir) = live_demo(with_read_token(), Default::default()).await;
+    for (id, score) in [("a", 3), ("b", 1), ("c", 2), ("d", 3), ("e", 5)] {
+        let op = put_op(
+            "shared",
+            id,
+            0,
+            serde_json::json!({"score": score, "odd": score % 2 == 1}),
+        );
+        let (status, body) = app_post(&apps, MUTATIONS, "", &op).await;
+        assert_eq!(status, 200, "{body}");
+        let w: Written = serde_json::from_str(&body).unwrap();
+        let e = w.record.unwrap();
+        assert_eq!((e.id.as_str(), e.rev, e.by.as_str()), (id, 1, "local"));
+    }
+    let (status, _, body) = app_get(&apps, "/a/demo/api/v1/records/shared/notes/c", "").await;
+    assert_eq!(status, 200);
+    let e: Envelope = serde_json::from_str(&body).unwrap();
+    assert_eq!(e.data, serde_json::json!({"score": 2, "odd": false}));
+    assert_eq!(
+        app_get(&apps, "/a/demo/api/v1/records/shared/notes/zz", "")
+            .await
+            .0,
+        404
+    );
+    // Odd scores, highest first, two a page: e, then a and d (tied, by id descending), then b.
+    let query = serde_json::json!({"where": {"odd": {"eq": true}}, "order_by": ["score", "desc"], "limit": 2});
+    let mut seen = vec![];
+    let mut next = query.clone();
+    let mut pages = 0;
+    loop {
+        let path = format!("/a/demo/api/v1/records/shared/notes{}", q(next.clone()));
+        let (status, _, body) = app_get(&apps, &path, "").await;
+        assert_eq!(status, 200, "{body}");
+        let page: Page = serde_json::from_str(&body).unwrap();
+        pages += 1;
+        seen.extend(page.records.into_iter().map(|e| e.id));
+        match page.cursor {
+            Some(c) => next["cursor"] = c.into(),
+            None => break,
+        }
+    }
+    assert_eq!(
+        (seen, pages),
+        (vec!["e".to_string(), "d".into(), "a".into(), "b".into()], 2)
+    );
+    // Refused queries, names and spaces.
+    for path in [
+        format!(
+            "/a/demo/api/v1/records/shared/notes{}",
+            q(serde_json::json!({"limit": 101}))
+        ),
+        format!(
+            "/a/demo/api/v1/records/shared/notes{}",
+            q(serde_json::json!({"where": {"a') OR 1=1 --": {"eq": 1}}}))
+        ),
+        "/a/demo/api/v1/records/shared/notes?q=nope".into(),
+        "/a/demo/api/v1/records/shared/Notes".into(),
+        "/a/demo/api/v1/records/everyone/notes".into(),
+    ] {
+        assert_eq!(app_get(&apps, &path, "").await.0, 400, "{path}");
+    }
+    let (status, body) = app_post(&apps, MUTATIONS, "", r#"{"op":"put","space":"shared"}"#).await;
+    assert_eq!(status, 400, "{body}");
+    let big = put_op("shared", "big", 0, serde_json::json!("x".repeat(70_000)));
+    assert_eq!(app_post(&apps, MUTATIONS, "", &big).await.0, 413);
+    // An app with no live release has no records.
+    let (status, _) = app_post(
+        &apps,
+        "/a/nope/api/v1/mutations",
+        "",
+        &put_op("shared", "a", 0, 1.into()),
+    )
+    .await;
+    assert_eq!(status, 404);
+    // GET and POST only.
+    let (status, _, _) = http(
+        &apps,
+        "PUT /a/demo/api/v1/mutations HTTP/1.1\r\nContent-Type: application/json",
+        b"{}",
+    )
+    .await;
+    assert_eq!(status, 405);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn records_conflict_once_and_retries_succeed() {
+    let (_, apps, dir) = live_demo(with_read_token(), Default::default()).await;
+    let first = put_op("shared", "a", 0, serde_json::json!({"n": 0}));
+    assert_eq!(app_post(&apps, MUTATIONS, "", &first).await.0, 200);
+    // Two writers read rev 1 and write at once: exactly one wins.
+    let (w1, w2) = (
+        put_op("shared", "a", 1, serde_json::json!({"n": 1})),
+        put_op("shared", "a", 1, serde_json::json!({"n": 2})),
+    );
+    let (one, two) = tokio::join!(
+        app_post(&apps, MUTATIONS, "", &w1),
+        app_post(&apps, MUTATIONS, "", &w2),
+    );
+    let mut statuses = [one.0, two.0];
+    statuses.sort();
+    assert_eq!(statuses, [200, 409], "{one:?} {two:?}");
+    let lost = if one.0 == 409 { &one.1 } else { &two.1 };
+    let c: Conflict = serde_json::from_str(lost).unwrap();
+    assert_eq!(c.current.as_ref().unwrap().rev, 2);
+    // The winner's write, sent again (its response lost): 200 with the same record.
+    let won = c.current.unwrap();
+    let again = put_op("shared", "a", 1, won.data.clone());
+    let (status, body) = app_post(&apps, MUTATIONS, "", &again).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_str::<Written>(&body).unwrap().record,
+        Some(won)
+    );
+    // Create-only on an existing record with other data: 409.
+    assert_eq!(
+        app_post(&apps, MUTATIONS, "", &first.replace("0}", "9}"))
+            .await
+            .0,
+        409
+    );
+    // Removes: stale is 409, then done, then done again.
+    let rm = |rev: u64| {
+        serde_json::json!({"op": "remove", "space": "shared", "collection": "notes", "id": "a", "rev": rev}).to_string()
+    };
+    assert_eq!(app_post(&apps, MUTATIONS, "", &rm(1)).await.0, 409);
+    assert_eq!(
+        app_post(&apps, MUTATIONS, "", &rm(2)).await,
+        (200, r#"{"record":null}"#.into())
+    );
+    assert_eq!(
+        app_post(&apps, MUTATIONS, "", &rm(2)).await,
+        (200, r#"{"record":null}"#.into())
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn records_follow_roles_and_me_stays_private() {
+    let (mis, apps, dir) = live_demo(behind_access(), apps_auth()).await;
+    for (email, role) in [
+        ("ed@example.com", "editor"),
+        ("vi@example.com", "viewer"),
+        ("ow@example.com", "owner"),
+    ] {
+        let share = format!(r#"{{"email":"{email}","role":"{role}"}}"#);
+        assert_eq!(
+            post_json(&mis, "/api/apps/demo/members", "s", &share)
+                .await
+                .0,
+            200
+        );
+    }
+    let who = |email: &str| {
+        format!(
+            "{}\r\nOrigin: https://{HOME}",
+            via_home(&access_jwt_for(APPS_AUD, email))
+        )
+    };
+    let (ed, vi, ow) = (
+        who("ed@example.com"),
+        who("vi@example.com"),
+        who("ow@example.com"),
+    );
+    let note = put_op("shared", "n", 0, serde_json::json!({"t": "all"}));
+    assert_eq!(app_post(&apps, MUTATIONS, &ed, &note).await.0, 200);
+    let draft = put_op("me", "d", 0, serde_json::json!({"t": "mine"}));
+    assert_eq!(app_post(&apps, MUTATIONS, &ed, &draft).await.0, 200);
+    // Viewers read, but can't write, not even their own `me` records.
+    assert_eq!(
+        app_get(&apps, "/a/demo/api/v1/records/shared/notes/n", &vi)
+            .await
+            .0,
+        200
+    );
+    let (status, body) = app_post(&apps, MUTATIONS, &vi, &put_op("shared", "v", 0, 1.into())).await;
+    assert_eq!(
+        (status, body.as_str()),
+        (403, "a viewer can't do that here")
+    );
+    assert_eq!(
+        app_post(&apps, MUTATIONS, &vi, &put_op("me", "v", 0, 1.into()))
+            .await
+            .0,
+        403
+    );
+    // The editor's `me` record: theirs alone, not even the owner's to see.
+    assert_eq!(
+        app_get(&apps, "/a/demo/api/v1/records/me/notes/d", &ed)
+            .await
+            .0,
+        200
+    );
+    for other in [&vi, &ow] {
+        assert_eq!(
+            app_get(&apps, "/a/demo/api/v1/records/me/notes/d", other)
+                .await
+                .0,
+            404
+        );
+        let (_, _, body) = app_get(&apps, "/a/demo/api/v1/records/me/notes", other).await;
+        assert_eq!(serde_json::from_str::<Page>(&body).unwrap().records, []);
+        let (_, _, body) = app_get(&apps, "/a/demo/api/v1/export", other).await;
+        let x: Export = serde_json::from_str(&body).unwrap();
+        assert_eq!((x.version, x.shared["notes"].len(), x.me.len()), (1, 1, 0));
+        assert!(!body.contains("mine"), "{body}");
+    }
+    // The owner writing the same `me` id makes their own record, not the editor's.
+    assert_eq!(app_post(&apps, MUTATIONS, &ow, &draft).await.0, 200);
+    let (status, _, body) = app_get(&apps, "/a/demo/api/v1/export", &ed).await;
+    assert_eq!(status, 200);
+    let x: Export = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        (x.app.as_str(), x.user.as_str()),
+        ("demo", "ed@example.com")
+    );
+    assert_eq!(x.me["notes"][0].by, "ed@example.com");
+    // Non-members: still 403 before any record.
+    let stranger = who("x@example.com");
+    assert_eq!(
+        app_get(&apps, "/a/demo/api/v1/export", &stranger).await.0,
+        403
+    );
+    assert_eq!(app_post(&apps, MUTATIONS, &stranger, &note).await.0, 403);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn record_writes_need_json_from_the_apps_own_origin() {
+    let (_, apps, dir) = live_demo(behind_access(), apps_auth()).await;
+    let op = put_op("shared", "a", 0, 1.into());
+    let addr = &apps[5..];
+    // Loopback is owner, so a page on another origin must not write through it.
+    for origin in [
+        "https://evil.example",
+        "http://localhost:9",
+        "null",
+        &format!("http://{HOME}"),
+    ] {
+        let (status, body) =
+            app_post(&apps, MUTATIONS, &format!("\r\nOrigin: {origin}"), &op).await;
+        assert_eq!(
+            (status, body.as_str()),
+            (403, "writes take JSON from this app's own page"),
+            "{origin}"
+        );
+    }
+    // No JSON content type: what an HTML form or a no-preflight fetch sends.
+    for ct in ["text/plain", "application/x-www-form-urlencoded"] {
+        let head = format!("POST {MUTATIONS} HTTP/1.1\r\nContent-Type: {ct}");
+        assert_eq!(http(&apps, &head, op.as_bytes()).await.0, 403, "{ct}");
+    }
+    let (status, _, _) = http(&apps, &format!("POST {MUTATIONS} HTTP/1.1"), op.as_bytes()).await;
+    assert_eq!(status, 403);
+    assert_eq!(
+        app_get(&apps, "/a/demo/api/v1/records/shared/notes/a", "")
+            .await
+            .0,
+        404
+    );
+    // Its own page, on loopback or through the public name; or no browser at all.
+    let own = format!("\r\nOrigin: http://{addr}");
+    assert_eq!(app_post(&apps, MUTATIONS, &own, &op).await.0, 200);
+    let member = via_home(&access_jwt_for(APPS_AUD, "me@example.com"));
+    let public = format!("{member}\r\nOrigin: https://{HOME}");
+    let op = put_op("shared", "b", 0, 1.into());
+    assert_eq!(app_post(&apps, MUTATIONS, &public, &op).await.0, 403); // not a member yet
+    assert_eq!(
+        app_post(&apps, MUTATIONS, "", &put_op("shared", "c", 0, 1.into()))
+            .await
+            .0,
+        200
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn records_survive_a_restart() {
+    let (_, apps, dir) = live_demo(with_read_token(), Default::default()).await;
+    let op = put_op("shared", "a", 0, serde_json::json!({"kept": true}));
+    assert_eq!(app_post(&apps, MUTATIONS, "", &op).await.0, 200);
+    // A second listener over the same folder: a restarted orchestrator.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let again = format!("ws://{}", listener.local_addr().unwrap());
+    let store = std::sync::Arc::new(mis_orchestrator::apps::Apps::new(dir.clone(), None));
+    tokio::spawn(mis_orchestrator::serve_apps(
+        listener,
+        store,
+        Default::default(),
+    ));
+    let (status, _, body) = app_get(&again, "/a/demo/api/v1/records/shared/notes/a", "").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_str::<Envelope>(&body).unwrap().data,
+        serde_json::json!({"kept": true})
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.join("demo/data.sqlite"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn mis_credentials_cannot_reach_records() {
+    let (mis, apps, dir) = live_demo(behind_access(), apps_auth()).await;
+    let path = "/a/demo/api/v1/export";
+    // The full token, the MIS Access app's JWT: refused on the apps listener.
+    let tunnel = format!("\r\nHost: {HOME}\r\nCF-Ray: 8f00-SJC");
+    let bearer = format!("{tunnel}\r\nAuthorization: Bearer s");
+    assert_eq!(app_get(&apps, path, &bearer).await.0, 401);
+    let mis_jwt = via_home(&access_jwt_for(ACCESS_AUD, "me@example.com"));
+    assert_eq!(app_get(&apps, path, &mis_jwt).await.0, 401);
+    let op = put_op("shared", "a", 0, 1.into());
+    assert_eq!(
+        app_post(
+            &apps,
+            MUTATIONS,
+            &format!("{mis_jwt}\r\nOrigin: https://{HOME}"),
+            &op
+        )
+        .await
+        .0,
+        401
+    );
+    // And the orchestrator has no records routes.
+    assert_eq!(get_json(&mis, path, "s").await.0, 404);
+    assert_eq!(post_json(&mis, MUTATIONS, "s", &op).await.0, 404);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn the_sdk_is_served_to_anyone_signed_in() {
+    let (_, apps, dir) = live_demo(behind_access(), apps_auth()).await;
+    // Not a member of any app, but signed in.
+    let someone = via_home(&access_jwt_for(APPS_AUD, "x@example.com"));
+    for path in ["/a/_/mis.js", "/a/_/mis-mock.js"] {
+        let (status, head, body) = app_get(&apps, path, &someone).await;
+        assert_eq!(status, 200, "{path}");
+        assert!(head.contains("text/javascript"), "{head}");
+        assert!(body.contains("MisError"), "{path}");
+    }
+    let bare = format!("\r\nHost: {HOME}\r\nCF-Ray: 8f00-SJC");
+    assert_eq!(app_get(&apps, "/a/_/mis.js", &bare).await.0, 401);
+    assert_eq!(app_get(&apps, "/a/_/nope.js", &someone).await.0, 404);
+    std::fs::remove_dir_all(dir).unwrap();
+}
