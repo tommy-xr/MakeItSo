@@ -35,6 +35,8 @@ pub mod ledger;
 pub mod note;
 pub mod plan;
 pub mod push;
+pub mod records;
+pub mod records_db;
 pub mod routine;
 pub mod scope;
 pub mod self_update;
@@ -980,7 +982,7 @@ fn bearer_from(headers: &HeaderMap) -> Option<&str> {
 
 /// `Origin` names the server itself, i.e. the request comes from the page at `/`:
 /// `https://x:443` matches `Host: x:443`.
-fn same_origin(origin: &str, host: &str) -> bool {
+pub(crate) fn same_origin(origin: &str, host: &str) -> bool {
     origin
         .strip_prefix("https://")
         .or_else(|| origin.strip_prefix("http://"))
@@ -1060,8 +1062,8 @@ fn unix_secs() -> u64 {
     unix_ms() / 1000
 }
 
-/// Wall-clock millis, only for display (task timing).
-fn unix_ms() -> u64 {
+/// Wall-clock millis, for display (task timing) and record times.
+pub(crate) fn unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)

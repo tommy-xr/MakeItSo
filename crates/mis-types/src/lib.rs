@@ -31,8 +31,12 @@ pub use merge::{
 pub mod mcp;
 mod permissions;
 mod plan;
+mod records;
 pub use permissions::{Approval, Decision, PermissionMode, Permissions, MAX_APPROVAL_DETAIL};
 pub use plan::{bound_plan, PlanItem, PlanStatus, MAX_PLAN_ITEMS, MAX_PLAN_ITEM_CHARS};
+pub use records::{
+    Condition, Conflict, Direction, Envelope, Export, Mutation, Page, RecordQuery, Space, Written,
+};
 mod sessions;
 pub use sessions::{
     Answer, Delivered, LiveSession, LiveState, Query, Role, SendMode, SendTo, Session,

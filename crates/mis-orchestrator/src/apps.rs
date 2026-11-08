@@ -316,6 +316,11 @@ impl Apps {
         }
     }
 
+    /// The apps folder.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     fn releases_dir(&self, slug: &str) -> PathBuf {
         self.dir.join(slug).join("releases")
     }

@@ -152,6 +152,28 @@ pub fn host_allowed(host: Option<&str>, public: Option<&str>) -> bool {
     public.is_some_and(|p| host.eq_ignore_ascii_case(p)) || crate::loopback_host(host)
 }
 
+/// A write (any method but GET and HEAD) from a browser only from the apps' own page: a
+/// JSON body (no HTML form can send one, and fetch can't cross origins with it unasked),
+/// and an `Origin`, if any, of `https://<public>` or the loopback name it was sent to.
+/// No `Origin`: not a browser (e.g. a functor client). Matters since loopback is owner.
+pub fn write_allowed(
+    content_type: Option<&str>,
+    origin: Option<&str>,
+    host: Option<&str>,
+    public: Option<&str>,
+) -> bool {
+    let json = content_type.is_some_and(|t| {
+        let mime = t.split(';').next().unwrap_or("").trim();
+        mime.eq_ignore_ascii_case("application/json")
+    });
+    let from_here = origin.is_none_or(|o| {
+        let public_page = o.strip_prefix("https://").zip(public);
+        public_page.is_some_and(|(a, p)| a.eq_ignore_ascii_case(p))
+            || host.is_some_and(|h| crate::loopback_host(h) && crate::same_origin(o, h))
+    });
+    json && from_here
+}
+
 /// `/a/pool/x.js` -> `pool`; `/a/` and other paths -> None.
 pub fn app_of(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("/a/")?;
@@ -297,6 +319,63 @@ mod tests {
         }
         assert!(!host_allowed(Some("home.example.com"), None));
         assert!(!host_allowed(None, public));
+    }
+
+    #[test]
+    fn writes_need_json_from_the_apps_own_origin() {
+        let json = Some("application/json");
+        let public = Some("home.example.com");
+        let home = Some("home.example.com");
+        let w = |ct, origin, host| write_allowed(ct, origin, host, public);
+        assert!(w(json, Some("https://home.example.com"), home));
+        assert!(w(
+            Some("Application/JSON; charset=utf-8"),
+            Some("https://HOME.example.com"),
+            home
+        ));
+        // cloudflared may hand on a loopback Host; the public origin still counts.
+        assert!(w(
+            json,
+            Some("https://home.example.com"),
+            Some("localhost:7475")
+        ));
+        assert!(w(
+            json,
+            Some("http://127.0.0.1:7475"),
+            Some("127.0.0.1:7475")
+        ));
+        assert!(w(
+            json,
+            Some("http://localhost:7475"),
+            Some("localhost:7475")
+        ));
+        assert!(w(json, None, home)); // not a browser
+        for ct in [
+            None,
+            Some("text/plain"),
+            Some("application/x-www-form-urlencoded"),
+            Some("multipart/form-data; boundary=x"),
+            Some("application/jsonx"),
+        ] {
+            assert!(!w(ct, Some("https://home.example.com"), home), "{ct:?}");
+        }
+        for origin in [
+            "https://evil.example",
+            "http://home.example.com", // not https
+            "https://home.example.com.evil.example",
+            "http://localhost:8080", // another local page
+            "null",
+            "",
+        ] {
+            assert!(!w(json, Some(origin), Some("localhost:7475")), "{origin}");
+            assert!(!w(json, Some(origin), home), "{origin}");
+        }
+        assert!(!write_allowed(
+            json,
+            Some("https://home.example.com"),
+            home,
+            None
+        ));
     }
 
     #[test]
