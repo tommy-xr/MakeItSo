@@ -3856,6 +3856,109 @@ async fn capture_takes_the_url_encoded_form_shortcuts_send_without_a_file() {
 }
 
 #[tokio::test]
+async fn capture_takes_a_raw_email() {
+    use sha2::Digest;
+    let dir = std::env::temp_dir().join(format!("mis-e2e-capture-{}", uuid::Uuid::new_v4()));
+    let base = start_app(capturing(&dir)).await;
+    let inbox = dir.join("captures/inbox");
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/email");
+    let post = |headers: &'static [(&'static str, &'static str)], raw: Vec<u8>| {
+        let body = Some(("message/rfc822".to_string(), raw));
+        call(&base, "POST", "/api/capture", headers, body)
+    };
+    let bearer: &[(&str, &str)] = &[("authorization", "Bearer c")];
+    // Synthetic fixtures (see make.py): url, note, shared text (the body), project, kept
+    // images as (extension, first 16 hex of sha256, from Python's own decoding).
+    type Row<'a> = (
+        &'a str,
+        Option<&'a str>,
+        &'a str,
+        Option<&'a str>,
+        Option<&'a str>,
+        &'a [(&'a str, &'a str)],
+    );
+    let iphone = Some("Sent from my iPhone");
+    let rows: [Row; 6] = [
+        (
+            "a-ios-safari-link",
+            Some("https://example.com/articles/liminal-spaces"),
+            "Liminal spaces: empty malls at night",
+            Some("https://example.com/articles/liminal-spaces\n\nSent from my iPhone"),
+            None,
+            &[],
+        ),
+        ("b-ios-photo", None, "", iphone, None, &[("jpg", "8c5d478a22f67f64")]),
+        (
+            "c-ios-five-photos",
+            None,
+            "Kitchen ideas #home",
+            iphone,
+            Some("home"),
+            &[
+                ("jpg", "e86a831e769f3f95"),
+                ("jpg", "1065ba3c53df2ba4"),
+                ("jpg", "966ba070f120d9d1"),
+                ("jpg", "9031bdff68ecd061"),
+            ],
+        ),
+        (
+            "d-outlook-html",
+            Some("https://example.com/news/great-article?utm=mail&id=7"),
+            "FW: Great article #amf",
+            Some("Worth a read: Great article\nDemo User"),
+            Some("amf"),
+            &[("png", "ae4c625d0e4302fb")],
+        ),
+        (
+            "e-utf8-qp",
+            Some("https://example.com/places/cafe-with-a-rather-long-name-that-wraps?ref=notes&lang=en"),
+            "\u{1F4CC} Café notes #mis",
+            Some("Notes from the café — try the cortado.\nhttps://example.com/places/cafe-with-a-rather-long-name-that-wraps?ref=notes&lang=en"),
+            Some("mis"),
+            &[],
+        ),
+        ("f-ios-heic", None, "Sunset", iphone, None, &[]),
+    ];
+    for (name, url, text, shared, project, assets) in rows {
+        let raw = std::fs::read(fixtures.join(format!("{name}.eml"))).unwrap();
+        let (status, body) = post(bearer, raw).await;
+        assert_eq!(status, 201, "{name}: {body}");
+        let saved: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let file = saved["file"].as_str().unwrap();
+        let md = std::fs::read_to_string(inbox.join(file)).unwrap();
+        assert!(md.contains("via: \"email\"\n"), "{name}: {md}");
+        let line = |key: &str, v: Option<&str>| v.map(|v| format!("{key}: {v:?}\n"));
+        for (key, want) in [("url", url), ("shared", shared), ("project", project)] {
+            match line(key, want) {
+                Some(l) => assert!(md.contains(&l), "{name}: {md}"),
+                None => assert!(!md.contains(&format!("\n{key}: ")), "{name}: {md}"),
+            }
+        }
+        assert!(md.ends_with(&format!("---\n{text}")), "{name}: {md}");
+        let stem = file.trim_end_matches(".md");
+        for (i, (ext, sha)) in assets.iter().enumerate() {
+            let bytes = std::fs::read(inbox.join(format!("{stem}-{}.{ext}", i + 1))).unwrap();
+            let hex: String = (sha2::Sha256::digest(&bytes).iter())
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            assert!(hex.starts_with(sha), "{name} image {}", i + 1);
+        }
+        let kept = std::fs::read_dir(&inbox).unwrap().flatten();
+        let names: Vec<_> = kept
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(&format!("{stem}-")) || n == file)
+            .collect();
+        assert_eq!(names.len(), 1 + assets.len(), "{name}: {names:?}");
+    }
+    // Refused: no capture token, or nothing to keep.
+    let raw = std::fs::read(fixtures.join("a-ios-safari-link.eml")).unwrap();
+    assert_eq!(post(&[("authorization", "Bearer r")], raw).await.0, 401);
+    let (status, body) = post(bearer, b"Subject: \r\n\r\n\r\n".to_vec()).await;
+    assert_eq!((status, body.as_str()), (400, "send a url, text or image"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn capture_app_jwt_opens_only_the_capture_route() {
     let dir = std::env::temp_dir().join(format!("mis-e2e-capture-{}", uuid::Uuid::new_v4()));
     let jwks = serde_json::from_str(include_str!("fixtures/access-test-jwks.json")).unwrap();

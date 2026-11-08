@@ -1,0 +1,13 @@
+// Email Routing rule capture@m6o.app -> this Worker. Secrets (wrangler secret put):
+// ALLOWED_FROM, CAPTURE_TOKEN, CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mis-capture-email",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": false,
+  "vars": {
+    "MIS_CAPTURE_URL": "https://capture.m6o.app/api/capture"
+  },
+  "observability": { "enabled": true }
+}

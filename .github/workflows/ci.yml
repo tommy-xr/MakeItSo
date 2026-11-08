@@ -32,6 +32,11 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --no-fail-fast # every failing test, not just the first crate's
       - run: node --test crates/mis-orchestrator/tests/md.test.mjs # the page's markdown renderer
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test # the email Worker; no install needed
+        working-directory: workers/capture-email
 
   # Only pushes (main, tags) publish builds; PRs leave the scarce macOS runners to them.
   build:

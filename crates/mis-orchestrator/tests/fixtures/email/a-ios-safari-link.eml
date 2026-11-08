@@ -1,0 +1,28 @@
+Received: from mx.example.net by mx.m6o.app; Sun, 8 Nov 2026 12:00:00 +0000
+From: Demo User <demo@example.com>
+To: capture@m6o.app
+Date: Sun, 08 Nov 2026 12:00:00 +0000
+Message-ID: <fixture-1@example.com>
+X-Mailer: iPhone Mail (22A3354)
+Subject: Liminal spaces: empty malls at night
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="Apple-Mail-A1"
+
+--Apple-Mail-A1
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+https://example.com/articles/liminal-spaces
+
+Sent from my iPhone
+
+--Apple-Mail-A1
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+<html><body dir=3D"auto"><a href=3D"https://example.com/articles/liminal-spac=
+es">https://example.com/articles/liminal-spaces</a><br><br><div dir=3D"ltr">S=
+ent from my iPhone</div></body></html>
+
+--Apple-Mail-A1--

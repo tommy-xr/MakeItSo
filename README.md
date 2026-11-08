@@ -250,6 +250,10 @@ Captures are kept: never swept or edited. Image parts that aren't JPEG, PNG, Web
 photos are HEIC, so have the
 Shortcut *Convert Image* to JPEG (and resize, e.g. 1600 px) first.
 
+A raw email may be posted too, as `Content-Type: message/rfc822`: its subject is the `text`, its
+text body (else its HTML body as text) the `shared` text, cut to 64 KB, an HTML body's first http(s)
+link the `url`, and its image parts, attached or inline, the `image`s; `via` is `email`.
+
 Capture tokens (`MIS_CAPTURE_TOKENS`, comma-separated, or `--capture-token`; need `MIS_TOKEN`) may
 call `POST /api/capture` and nothing else. The full token and an Access login may capture too; read
 tokens may not. Behind Access, add a second Access app on path `/api/capture` with a *Service Auth*
@@ -257,6 +261,33 @@ policy for a capture-only service token, and pass its AUD as `--cf-access-captur
 `MIS_CF_ACCESS_CAPTURE_AUD`. Its JWT is accepted only there, still needs a capture (or full) token,
 and grants no more than capturing, so keep the main app's policies naming their own service tokens. A capture token is
 never upgraded by an Access login.
+
+### By email
+
+`workers/capture-email` is a Cloudflare Email Worker that posts each message sent to it to
+`/api/capture` unparsed. It takes mail only from listed envelope senders whose SPF passed at
+Cloudflare (Email Routing's `Authentication-Results`); anything else, and any refusal from MIS
+(`400: send a url, text or image`), redirect or outage, bounces to the sender with the reason; resend
+after fixing it. SPF vouches for the sending server, not the mailbox, so list only addresses whose
+provider stops its other users sending as them. To deploy (needs Node 22+):
+
+```sh
+cd workers/capture-email && npm ci
+npx wrangler login
+npx wrangler secret put ALLOWED_FROM            # comma-separated sender addresses
+npx wrangler secret put CAPTURE_TOKEN           # one of MIS_CAPTURE_TOKENS
+npx wrangler secret put CF_ACCESS_CLIENT_ID     # the capture app's service token
+npx wrangler secret put CF_ACCESS_CLIENT_SECRET
+npx wrangler deploy                             # MIS_CAPTURE_URL is in wrangler.jsonc
+```
+
+Then in the dashboard (*Compute > Email Service > Email Routing*), onboard the domain (it adds MX,
+SPF and DKIM records, so it takes over the domain's inbound mail) and create a routing rule from
+the capture address (e.g. `capture@m6o.app`) with action *Send to a Worker*: `mis-capture-email`.
+`npm test` runs its unit tests; `npm run dev` serves it locally, where
+`POST http://localhost:8787/cdn-cgi/local/email?from=…&to=…` with a raw message (with a
+`Message-ID` and `From`, plus the `Authentication-Results` line Email Routing would add) runs it
+against `.dev.vars`.
 
 ## Apps
 
