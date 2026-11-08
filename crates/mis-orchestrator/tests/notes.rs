@@ -1,5 +1,7 @@
 //! Publishing captures to a notes repo: each scenario runs the publisher against a temp
-//! bare remote, with a human's clone beside it. Synthetic captures only.
+//! bare remote, with a human's clone beside it. Synthetic captures only. Unix: the race
+//! is injected with a shell script.
+#![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

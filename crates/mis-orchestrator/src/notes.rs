@@ -892,6 +892,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // process groups
     fn a_hung_git_is_killed_with_what_it_started() {
         let dir = std::env::temp_dir();
         let start = Instant::now();
