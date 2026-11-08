@@ -3877,13 +3877,14 @@ async fn capture_takes_a_raw_email() {
         Option<&'a str>,
         &'a [(&'a str, &'a str)],
     );
-    let iphone = Some("Sent from my iPhone");
+    // iOS bodies hold only the link or "Sent from my iPhone": nothing left as shared text.
+    let iphone = None;
     let rows: [Row; 6] = [
         (
             "a-ios-safari-link",
             Some("https://example.com/articles/liminal-spaces"),
             "Liminal spaces: empty malls at night",
-            Some("https://example.com/articles/liminal-spaces\n\nSent from my iPhone"),
+            iphone,
             None,
             &[],
         ),

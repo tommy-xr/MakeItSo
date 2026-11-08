@@ -34,9 +34,48 @@ pub fn capture(raw: &[u8]) -> Result<Capture, Refused> {
         .filter(|b| ImageKind::sniff(b).is_some())
         .take(MAX_IMAGES)
         .collect();
-    let mut c = Capture::new(url, text, Some(cut(body)), images, Some("email".into()))?;
+    let shared = Some(cut(strip_boilerplate(&body)));
+    let mut c = Capture::new(url, text, shared, images, Some("email".into()))?;
     c.skipped = parts.len() - c.images.len();
     Ok(c)
+}
+
+/// `body` less what mail apps add on their own: phone signatures ("Sent from my iPhone")
+/// and attachment placeholders (`[IMG_3717.PNG]`). E.g. a photo shared from iOS Mail,
+/// `"[IMG_3717.PNG]\n\nSent from my iPhone"`, leaves nothing.
+fn strip_boilerplate(body: &str) -> String {
+    const SIGNATURES: [&str; 4] = [
+        "sent from my iphone",
+        "sent from my ipad",
+        "sent from outlook for ios",
+        "get outlook for ios",
+    ];
+    let placeholder = |l: &str| {
+        let name = l.strip_prefix('[').and_then(|l| l.strip_suffix(']'));
+        let Some(name) = name.filter(|n| !n.contains(['[', ']'])) else {
+            return false;
+        };
+        let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+        let media = ["png", "jpg", "jpeg", "heic", "gif", "webp", "mov", "mp4"];
+        ext.is_some_and(|e| media.contains(&e.as_str()))
+    };
+    // Outlook's signature carries one `<link>`: `Get Outlook for iOS<https://aka.ms/x>`.
+    let link = |rest: &str| {
+        let inner = rest.strip_prefix('<').and_then(|r| r.strip_suffix('>'));
+        inner.is_some_and(|i| !i.is_empty() && !i.contains(['<', '>', ' ']))
+    };
+    let signature = |l: &str| {
+        let l = l.to_ascii_lowercase();
+        SIGNATURES
+            .iter()
+            .any(|s| l.strip_prefix(s).is_some_and(|r| r.is_empty() || link(r)))
+    };
+    body.lines()
+        .filter(|l| !(placeholder(l.trim()) || signature(l.trim())))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }
 
 /// `s` cut to at most [`MAX_TEXT_BYTES`], at a char boundary.
@@ -73,6 +112,35 @@ fn first_href(html: &str) -> Option<String> {
 mod tests {
     use super::*;
     use mis_types::MAX_IMAGE_BYTES;
+
+    #[test]
+    fn drops_what_mail_apps_add() {
+        // Bodies as iOS Mail sent them in the first live test.
+        let link = "https://news.ycombinator.com/item?id=1\n\nSent from my iPhone";
+        assert_eq!(
+            strip_boilerplate(link),
+            "https://news.ycombinator.com/item?id=1"
+        );
+        assert_eq!(
+            strip_boilerplate("[IMG_3717.PNG]\n\nSent from my iPhone"),
+            ""
+        );
+        let outlook = "see this\r\n\r\nGet Outlook for iOS<https://aka.ms/o0ukef>";
+        assert_eq!(strip_boilerplate(outlook), "see this");
+        // Only whole lines: the same words inside a note stay.
+        for note in [
+            "[draft] sent from my iphone, oddly",
+            "[before.png] versus [after.png]",
+            "Sent from my iPhone<https://example.com> — please investigate",
+        ] {
+            assert_eq!(strip_boilerplate(note), note);
+        }
+        let c = capture(b"Subject: \r\n\r\n[IMG_1.JPG]\r\n\r\nSent from my iPhone\r\n");
+        assert!(
+            matches!(c, Err(Refused::Invalid(_))),
+            "nothing left to keep"
+        );
+    }
 
     #[test]
     fn subject_is_the_note_and_body_the_shared_text() {
