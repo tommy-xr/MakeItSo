@@ -7,8 +7,8 @@ use crate::capture::{Capture, Refused, MAX_TEXT_BYTES};
 
 /// Read `raw` as a capture `via` email. The subject is the note (`#project` works); the
 /// text body (else the HTML body as text) is the shared text, with `\n` line ends, cut
-/// to [`MAX_TEXT_BYTES`];
-/// an HTML body's first http(s) `href` is the url, as its links' text rarely shows them.
+/// to [`MAX_TEXT_BYTES`]; the HTML body's first http(s) `href` is the url, as its links'
+/// text rarely shows them.
 /// Image parts, attached or inline, in order, are the images; other parts are ignored.
 pub fn capture(raw: &[u8]) -> Result<Capture, Refused> {
     let msg = MessageParser::new()
@@ -16,7 +16,7 @@ pub fn capture(raw: &[u8]) -> Result<Capture, Refused> {
         .ok_or_else(|| Refused::Invalid("not an email".into()))?;
     let text = msg.subject().map(Into::into);
     let body = (msg.text_bodies().collect::<Vec<_>>().join("\n")).replace("\r\n", "\n");
-    let url = (msg.text_body())
+    let url = (msg.html_body())
         .filter(|p| matches!(p.kind(), PartKind::Html))
         .find_map(|p| first_href(&p.text()?));
     let images = (msg.root().parts())
@@ -39,15 +39,23 @@ fn cut(mut s: String) -> String {
     s
 }
 
-/// The first quoted `href` that is an http(s) URL: `<a HREF="https://x.com/?a=1&amp;b">`
-/// -> `https://x.com/?a=1&b`.
+/// The first `href` attribute that is an http(s) URL: `<a HREF = "https://x.com/?a=1&amp;b">`
+/// -> `https://x.com/?a=1&b`. Not `data-href`; only `&amp;` is decoded.
 fn first_href(html: &str) -> Option<String> {
     // ASCII lowercasing keeps byte offsets, so matches index `html` too.
     let lower = html.to_ascii_lowercase();
-    lower.match_indices("href=").find_map(|(i, _)| {
-        let rest = &html[i + 5..];
-        let quote = rest.chars().next().filter(|c| matches!(c, '"' | '\''))?;
-        let value = rest[1..].split(quote).next()?.trim().replace("&amp;", "&");
+    lower.match_indices("href").find_map(|(i, _)| {
+        if !html[..i].ends_with(|c: char| c.is_ascii_whitespace()) {
+            return None;
+        }
+        let rest = html[i + 4..].trim_start().strip_prefix('=')?.trim_start();
+        let value = match rest.chars().next()? {
+            q @ ('"' | '\'') => rest[1..].split(q).next()?,
+            _ => rest
+                .split(|c: char| c.is_ascii_whitespace() || c == '>')
+                .next()?,
+        };
+        let value = value.trim().replace("&amp;", "&");
         crate::capture::web_url(&value).then_some(value)
     })
 }
@@ -77,6 +85,27 @@ mod tests {
         assert_eq!(c.text, None, "blank subject");
         assert_eq!(c.url.as_deref(), Some("https://example.com/p?a=1&b=2"));
         assert_eq!(c.shared.as_deref().map(str::trim), Some("Read me this"));
+        for (html, url) in [
+            (
+                "<a data-href=\"https://no.example\" href = \"https://x.com/a\">",
+                "https://x.com/a",
+            ),
+            ("<a\nhref=https://x.com/b>b</a>", "https://x.com/b"),
+        ] {
+            assert_eq!(first_href(html).as_deref(), Some(url), "{html}");
+        }
+    }
+
+    #[test]
+    fn link_comes_from_the_html_alternative() {
+        // The text alternative shows only the link's text.
+        let raw = b"Subject: s\r\nContent-Type: multipart/alternative; boundary=b\r\n\r\n\
+                    --b\r\nContent-Type: text/plain\r\n\r\nRead this\r\n\
+                    --b\r\nContent-Type: text/html\r\n\r\n<a href=\"https://x.com/a\">Read this</a>\r\n\
+                    --b--\r\n";
+        let c = capture(raw).unwrap();
+        assert_eq!(c.url.as_deref(), Some("https://x.com/a"));
+        assert_eq!(c.shared.as_deref(), Some("Read this"));
     }
 
     #[test]

@@ -16,6 +16,13 @@ test("only listed senders whose SPF passed at Cloudflare may capture", () => {
   for (const from of ["a@example.com", "b@example.org", " B@EXAMPLE.ORG "]) {
     assert.equal(refusal(from, SPF_PASS, env.ALLOWED_FROM), null, from);
   }
+  // Cloudflare's documented form, and one with a comment and a HELO result.
+  for (const auth of [
+    "mx.cloudflare.net; spf=pass; dkim=pass; dmarc=pass",
+    "mx.cloudflare.net; spf=pass (domain of a@example.com; designates 192.0.2.1) smtp.mailfrom=a@example.com; spf=pass smtp.helo=mail.example.com",
+  ]) {
+    assert.equal(refusal("a@example.com", auth, env.ALLOWED_FROM), null, auth);
+  }
   for (const from of ["", "c@example.com", "a@example.com.evil", "xa@example.com"]) {
     assert.equal(refusal(from, SPF_PASS, env.ALLOWED_FROM), "sender not allowed", from);
   }
@@ -30,6 +37,9 @@ test("only listed senders whose SPF passed at Cloudflare may capture", () => {
     "mx.cloudflare.net.evil.example; spf=pass",
     // `spf=pass` inside a sender-controlled value.
     "mx.cloudflare.net; dkim=pass header.i=spf=pass@evil.example; spf=fail",
+    // HELO passed, MAIL FROM didn't.
+    "mx.cloudflare.net; spf=pass smtp.helo=evil.example; spf=fail smtp.mailfrom=a@example.com",
+    "mx.cloudflare.net (spf=pass); spf=fail",
   ]) {
     assert.equal(refusal("a@example.com", auth, env.ALLOWED_FROM), "sender not verified (SPF)", String(auth));
   }

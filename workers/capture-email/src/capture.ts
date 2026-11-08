@@ -18,11 +18,14 @@ export function refusal(from: string, auth: string | null, allowed: string): str
   const sender = from.trim().toLowerCase();
   const listed = allowed.split(",").some((a) => a.trim().toLowerCase() === sender);
   if (!sender || !listed) return "sender not allowed";
-  // `Headers.get` joins repeats with ", "; Cloudflare's is first. `spf=pass` must start a
-  // `;` result, not sit in a value (`header.i=spf=pass@x`); a comma before it fails closed.
-  const [authserv, ...results] = (auth ?? "").split(",")[0].split(";").map((s) => s.trim());
-  const spf = results.some((r) => /^spf=pass\b/i.test(r));
-  if (authserv.toLowerCase() !== "mx.cloudflare.net" || !spf) return "sender not verified (SPF)";
+  // `Headers.get` joins repeats with ", "; Cloudflare's is first, so a comma ends it (one
+  // inside it fails closed). Comments dropped, it is `authserv; method=result props; …`:
+  // every SPF result (MAIL FROM, HELO) must pass, and there must be one.
+  const first = (auth ?? "").replace(/\([^)]*\)/g, "").split(",")[0];
+  const [authserv, ...results] = first.split(";").map((s) => s.trim().toLowerCase());
+  const spf = results.filter((r) => r.startsWith("spf="));
+  const passed = spf.length > 0 && spf.every((r) => /^spf=pass\b/.test(r));
+  if (authserv !== "mx.cloudflare.net" || !passed) return "sender not verified (SPF)";
   return null;
 }
 
