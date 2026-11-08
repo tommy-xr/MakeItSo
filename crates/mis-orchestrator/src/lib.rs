@@ -1330,7 +1330,7 @@ async fn upload(
 }
 
 /// Keep a link, text and/or images shared from a phone (multipart `url`, `text`, `via`,
-/// up to 4 `image` files; or the same text fields url-encoded) in the inbox before replying `{"id", "file"}`: 201, or 200
+/// up to 4 `image` files; or those text fields url-encoded) in the inbox before replying `{"id", "file"}`: 201, or 200
 /// for a resend of one already kept. Capture tokens and full access only.
 async fn capture(
     State(app): State<App>,
@@ -1361,8 +1361,11 @@ async fn capture(
     let c = if url_encoded {
         match axum::Form::<TextCapture>::from_request(req, &()).await {
             Ok(axum::Form(f)) => text_capture(f),
-            // 400 like the multipart path, not axum's 422, for unknown or repeated fields.
-            Err(e) => Err((StatusCode::BAD_REQUEST, e.body_text())),
+            // Unknown or repeated fields: 400 like the multipart path, not axum's 422.
+            Err(e) => match e.status() {
+                StatusCode::UNPROCESSABLE_ENTITY => Err((StatusCode::BAD_REQUEST, e.body_text())),
+                status => Err((status, e.body_text())),
+            },
         }
     } else {
         match axum::extract::Multipart::from_request(req, &()).await {
@@ -1429,7 +1432,7 @@ struct TextCapture {
     url: Option<String>,
     text: Option<String>,
     via: Option<String>,
-    /// Shortcuts sends an empty file field as `image=`.
+    /// Tolerated empty, in case a client sends an empty file field as `image=`.
     image: Option<String>,
 }
 
