@@ -463,7 +463,8 @@ async fn main() -> anyhow::Result<()> {
                 Err(e) => tracing::warn!("captures off: {e:#}"),
             }
             if let Some(remote) = nonempty(&args.notes_remote) {
-                tracing::info!(%remote, "publishing captures to the notes repo");
+                // Not the URL: it may carry a token.
+                tracing::info!("publishing captures to the notes repo");
                 app = app.with_notes(mis_orchestrator::notes::Notes::new(remote, &dir));
             }
         }
