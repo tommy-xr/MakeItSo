@@ -3297,7 +3297,7 @@ function renderNav() {
     : rs.map((r) => ['#routines', routineState(r), r.name]));
   const as = hosted && hosted.list;
   fillNav($('nav-apps'), !hosted ? [['Loading…']] : hosted.error ? [[hosted.error]] : !as.length ? [['No apps']]
-    : as.map((a) => (a.active && a.url ? [a.url, 'done', a.title] : ['#apps', '', a.title])));
+    : as.map((a) => [a.active && a.url ? a.url : '#apps', a.active ? 'done' : '', a.title]));
   fillNav($('nav-workers'), !workers.length ? [['No workers']] : workers.map((w) => [`#worker/${w.id}`, workerState(w), w.info.hostname]));
 }
 function fillNav(ul, rows) {
