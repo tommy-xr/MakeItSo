@@ -351,3 +351,269 @@ pub async fn run_daily(apps: std::sync::Arc<crate::apps::Apps>) {
         let _ = tokio::task::spawn_blocking(move || apps.daily_backups(now, &chrono::Local)).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{FixedOffset, Utc};
+    use mis_types::{Mutation, Space};
+    use serde_json::json;
+
+    fn ms(rfc3339: &str) -> u64 {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .timestamp_millis() as u64
+    }
+
+    #[test]
+    fn names_round_trip_and_nothing_else_parses() {
+        let at = ms("2026-11-08T03:15:00.123Z");
+        for (take, want) in [
+            (Take::Daily, "daily-20261108T031500.123Z"),
+            (Take::PreActivation(3), "pre-v3-20261108T031500.123Z"),
+            (Take::PreRestore, "pre-restore-20261108T031500.123Z"),
+            (Take::Manual, "manual-20261108T031500.123Z"),
+        ] {
+            assert_eq!(name(take, at), want);
+            assert_eq!(parse(want), Some((take, at)));
+        }
+        for bad in [
+            "",
+            "manual",
+            "manual-",
+            "../manual-20261108T031500.123Z",
+            "manual-20261108T031500.123Z/..",
+            "manual-20261108T031500.123Z.sqlite",
+            "manual-20261108T031500Z",
+            "Manual-20261108T031500.123Z",
+            "pre-v03-20261108T031500.123Z",
+            "pre-v-20261108T031500.123Z",
+            "weekly-20261108T031500.123Z",
+            "manual-20261332T031500.123Z",
+            "manual-20261108T031500.123Z\0",
+        ] {
+            assert_eq!(parse(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn daily_is_due_once_a_local_day_and_only_when_changed() {
+        let ny = FixedOffset::west_opt(5 * 3600).unwrap();
+        let app = |slug, last_daily: Option<&str>, changed| Daily {
+            slug,
+            last_daily: last_daily.map(ms),
+            changed,
+        };
+        // 23:30 on the 7th in New York (04:30 UTC on the 8th).
+        let late = ms("2026-11-08T04:30:00Z");
+        let apps = [
+            app("never", None, true),
+            app("unchanged", None, false),
+            // 01:00 on the 7th in New York, but the 7th in UTC too.
+            app("same-day", Some("2026-11-07T06:00:00Z"), true),
+            app("yesterday", Some("2026-11-06T20:00:00Z"), true),
+            app("yesterday-unchanged", Some("2026-11-06T20:00:00Z"), false),
+        ];
+        assert_eq!(due_backups(&apps, late, &ny), ["never", "yesterday"]);
+        // In UTC it is already the 8th, so same-day's snapshot is a day old.
+        assert_eq!(
+            due_backups(&apps, late, &Utc),
+            ["never", "same-day", "yesterday"]
+        );
+        // An hour later it is the 8th in New York too.
+        let next = ms("2026-11-08T05:30:00Z");
+        assert_eq!(
+            due_backups(&apps, next, &ny),
+            ["never", "same-day", "yesterday"]
+        );
+    }
+
+    #[test]
+    fn prune_keeps_each_kinds_newest() {
+        let b = |kind, at| AppBackup {
+            name: format!("{kind:?}-{at}"),
+            kind,
+            at,
+            size: 1,
+        };
+        let mut list: Vec<AppBackup> = (1..=9).map(|at| b(BackupKind::Daily, at)).collect();
+        list.extend((1..=6).map(|at| b(BackupKind::Manual, at * 100)));
+        list.extend((1..=5).map(|at| b(BackupKind::PreActivation, at)));
+        list.push(b(BackupKind::PreRestore, 1));
+        assert_eq!(prune(&list, BackupKind::Daily), ["Daily-2", "Daily-1"]);
+        assert_eq!(prune(&list, BackupKind::Manual), ["Manual-100"]);
+        assert!(prune(&list, BackupKind::PreActivation).is_empty());
+        assert!(prune(&list, BackupKind::PreRestore).is_empty());
+        let pre: Vec<_> = (1..=8).map(|at| b(BackupKind::PreRestore, at)).collect();
+        assert_eq!(
+            prune(&pre, BackupKind::PreRestore),
+            ["PreRestore-3", "PreRestore-2", "PreRestore-1"]
+        );
+    }
+
+    /// An apps folder with app `pool` (no records yet), its store, and `pool`'s folder.
+    fn temp() -> (Records, PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("mis-backups-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("pool")).unwrap();
+        (Records::new(dir.clone()), dir.join("pool"), dir)
+    }
+
+    fn put(r: &Records, id: &str, rev: u64, v: i64) {
+        let op = Mutation::Put {
+            space: Space::Shared,
+            collection: "notes".into(),
+            id: id.into(),
+            rev,
+            data: json!(v),
+        };
+        r.mutate("pool", &op, "me", 1).unwrap().unwrap();
+    }
+
+    /// `pool`'s shared notes: (id, data).
+    fn notes(r: &Records) -> Vec<(String, serde_json::Value)> {
+        let (shared, _) = r.visible("pool", "me").unwrap();
+        (shared.get("notes").into_iter().flatten())
+            .map(|e| (e.id.clone(), e.data.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn snapshots_restore_and_the_pre_restore_one_undoes_it() {
+        let (r, app, dir) = temp();
+        assert!(take(&app, &r, "pool", Take::Manual, 1).unwrap().is_none());
+        assert!(!r.has("pool"), "no database made just to back it up");
+        put(&r, "a", 0, 1);
+        std::fs::write(app.join("policy.json"), br#"{"members":{"x@y":"editor"}}"#).unwrap();
+        let snap = take(&app, &r, "pool", Take::Manual, 1).unwrap().unwrap();
+        assert_eq!(snap.name, name(Take::Manual, 1));
+        // A second in the same millisecond gets its own name.
+        let again = take(&app, &r, "pool", Take::Manual, 1).unwrap().unwrap();
+        assert_eq!(again.at, 2);
+        put(&r, "a", 1, 2);
+        put(&r, "b", 0, 3);
+        std::fs::write(app.join("policy.json"), b"{}").unwrap();
+        let newer = notes(&r);
+        let done = restore(&app, &r, "pool", &snap.name, false, 10).unwrap();
+        assert_eq!(notes(&r), [("a".into(), json!(1))]);
+        // Members stay unless asked for.
+        assert_eq!(std::fs::read(app.join("policy.json")).unwrap(), b"{}");
+        let pre = done.pre_restore.unwrap();
+        assert_eq!(pre.kind, BackupKind::PreRestore);
+        restore(&app, &r, "pool", &pre.name, false, 11).unwrap();
+        assert_eq!(notes(&r), newer);
+        restore(&app, &r, "pool", &snap.name, true, 12).unwrap();
+        assert_eq!(
+            std::fs::read(app.join("policy.json")).unwrap(),
+            br#"{"members":{"x@y":"editor"}}"#
+        );
+        // Writes go on from the restored revisions.
+        put(&r, "a", 1, 4);
+        assert!(matches!(
+            restore(&app, &r, "pool", "../data", false, 13),
+            Err(BackupError::BadName)
+        ));
+        assert!(matches!(
+            restore(&app, &r, "pool", &name(Take::Daily, 5), false, 13),
+            Err(BackupError::NoSuchBackup)
+        ));
+        // One file each, no WAL beside it, readable only by this user.
+        let kinds: Vec<_> = list(&app).iter().map(|b| b.kind).collect();
+        assert_eq!(kinds.len(), 5, "{kinds:?}");
+        for e in std::fs::read_dir(app.join(DIR)).unwrap().flatten() {
+            let name = e.file_name().into_string().unwrap();
+            assert!(name.ends_with(DB) || name.ends_with(POLICY), "{name}");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = e.metadata().unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o600, "{name}");
+            }
+        }
+        drop(r);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn each_kind_keeps_its_newest() {
+        let (r, app, dir) = temp();
+        put(&r, "a", 0, 1);
+        for at in 0..7 {
+            take(&app, &r, "pool", Take::Manual, at * 1000).unwrap();
+            take(&app, &r, "pool", Take::Daily, at * 1000).unwrap();
+        }
+        let left = list(&app);
+        let of = |k| left.iter().filter(|b| b.kind == k).count();
+        assert_eq!((of(BackupKind::Manual), of(BackupKind::Daily)), (5, 7));
+        assert_eq!(left[0].at, 0, "the oldest daily stays");
+        // Their policies went with them.
+        let files = std::fs::read_dir(app.join(DIR)).unwrap().count();
+        assert_eq!(files, 24);
+        drop(r);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn daily_skips_unchanged_apps_and_takes_one_a_day() {
+        let (r, app, dir) = temp();
+        let day1 = ms("2026-11-08T12:00:00Z");
+        let day2 = ms("2026-11-09T12:00:00Z");
+        assert!(daily(&app, &r, "pool", day1, &Utc).unwrap().is_none());
+        put(&r, "a", 0, 1);
+        assert!(daily(&app, &r, "pool", day1, &Utc).unwrap().is_some());
+        put(&r, "a", 1, 2);
+        // Changed, but today's is taken.
+        assert!(daily(&app, &r, "pool", day1 + 3_600_000, &Utc)
+            .unwrap()
+            .is_none());
+        // Unchanged since a manual snapshot: nothing to keep.
+        take(&app, &r, "pool", Take::Manual, day1 + 7_200_000).unwrap();
+        assert!(daily(&app, &r, "pool", day2, &Utc).unwrap().is_none());
+        // A remove is a change too.
+        let rm = Mutation::Remove {
+            space: Space::Shared,
+            collection: "notes".into(),
+            id: "a".into(),
+            rev: 2,
+        };
+        r.mutate("pool", &rm, "me", 1).unwrap().unwrap();
+        assert!(daily(&app, &r, "pool", day2, &Utc).unwrap().is_some());
+        drop(r);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn writes_during_a_restore_land_before_or_after_it_never_lost() {
+        let (r, app, dir) = temp();
+        put(&r, "seed", 0, 0);
+        let snap = take(&app, &r, "pool", Take::Manual, 1).unwrap().unwrap();
+        let r = std::sync::Arc::new(r);
+        let writer = {
+            let r = r.clone();
+            std::thread::spawn(move || {
+                for i in 0..300 {
+                    put(&r, &format!("w{i:03}"), 0, i);
+                }
+            })
+        };
+        while notes(&r).len() < 20 {
+            std::thread::yield_now();
+        }
+        let done = restore(&app, &r, "pool", &snap.name, false, 2).unwrap();
+        writer.join().unwrap();
+        let pre = done.pre_restore.unwrap();
+        let after: Vec<String> = notes(&r).into_iter().map(|(id, _)| id).collect();
+        restore(&app, &r, "pool", &pre.name, false, 3).unwrap();
+        let before: Vec<String> = notes(&r).into_iter().map(|(id, _)| id).collect();
+        // Every write is in exactly one: those before the restore in its pre-restore
+        // snapshot, the rest after it.
+        let k = before.len() - 1;
+        assert!((20..300).contains(&k), "{k}");
+        let ids = |r: std::ops::Range<usize>| -> Vec<String> {
+            r.map(|i| format!("w{i:03}")).collect()
+        };
+        assert_eq!(before, [vec!["seed".to_string()], ids(0..k)].concat());
+        assert_eq!(after, [vec!["seed".to_string()], ids(k..300)].concat());
+        drop(r);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

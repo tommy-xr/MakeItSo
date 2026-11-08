@@ -3712,6 +3712,9 @@ async fn refused_everywhere_else(base: &str, headers: &[(&'static str, &str)]) {
         ("POST", "/api/apps/a/releases".into()),
         ("POST", "/api/apps/a/activate".into()),
         ("POST", "/api/apps/a/members".into()),
+        ("GET", "/api/apps/a/backups".into()),
+        ("POST", "/api/apps/a/backups".into()),
+        ("POST", "/api/apps/a/restore".into()),
         ("GET", "/api/sessions".into()),
         ("GET", format!("/api/workers/{id}/sessions")),
         ("GET", format!("/api/workers/{id}/sessions/claude/{id}")),
@@ -4788,4 +4791,163 @@ async fn the_sdk_is_served_to_anyone_signed_in() {
     let sneaky = "/a/demo%2F..%2Fdemo/api/v1/export";
     assert_eq!(app_get(&apps, sneaky, "").await.0, 404);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// `demo`'s shared notes on the apps listener: (id, data).
+async fn demo_notes(apps: &str) -> Vec<(String, serde_json::Value)> {
+    let (status, _, body) = app_get(apps, "/a/demo/api/v1/records/shared/notes", "").await;
+    assert_eq!(status, 200, "{body}");
+    let page: Page = serde_json::from_str(&body).unwrap();
+    (page.records.into_iter())
+        .map(|e| (e.id, e.data))
+        .collect()
+}
+
+async fn restore_demo(mis: &str, backup: &str, with_policy: bool) -> Restored {
+    let body = serde_json::json!({"backup": backup, "with_policy": with_policy}).to_string();
+    let (status, body) = post_json(mis, "/api/apps/demo/restore", "s", &body).await;
+    assert_eq!(status, 200, "{body}");
+    serde_json::from_str(&body).unwrap()
+}
+
+#[tokio::test]
+async fn app_backups_restore_and_the_pre_restore_one_undoes_it() {
+    let (mis, apps, dir) = live_demo(with_read_token(), Default::default()).await;
+    let write = |id: &'static str, rev, v: i64| {
+        let apps = apps.clone();
+        async move {
+            let op = put_op("shared", id, rev, v.into());
+            assert_eq!(app_post(&apps, MUTATIONS, "", &op).await.0, 200);
+        }
+    };
+    // No records yet: nothing to back up.
+    assert_eq!(post_json(&mis, "/api/apps/demo/backups", "s", "").await.0, 409);
+    write("a", 0, 1).await;
+    let (status, body) = post_json(&mis, "/api/apps/demo/backups", "s", "").await;
+    assert_eq!(status, 201, "{body}");
+    let snap: AppBackup = serde_json::from_str(&body).unwrap();
+    assert_eq!(snap.kind, BackupKind::Manual);
+    let taken = demo_notes(&apps).await;
+    write("a", 1, 2).await;
+    write("b", 0, 3).await;
+    let newer = demo_notes(&apps).await;
+    let restored = restore_demo(&mis, &snap.name, false).await;
+    assert_eq!(demo_notes(&apps).await, taken);
+    // The snapshot taken first puts the newer records back.
+    let pre = restored.pre_restore.unwrap();
+    assert_eq!(pre.kind, BackupKind::PreRestore);
+    restore_demo(&mis, &pre.name, false).await;
+    assert_eq!(demo_notes(&apps).await, newer);
+    let (status, body) = get_json(&mis, "/api/apps/demo/backups", "r").await;
+    assert_eq!(status, 200);
+    let list: Vec<AppBackup> = serde_json::from_str(&body).unwrap();
+    let kinds: Vec<_> = list.iter().map(|b| b.kind).collect();
+    use BackupKind::*;
+    assert_eq!(kinds, [Manual, PreRestore, PreRestore]);
+    assert!(list.iter().all(|b| b.size > 0));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn restore_brings_back_members_only_when_asked() {
+    let (mis, apps, dir) = live_demo(with_read_token(), Default::default()).await;
+    let op = put_op("shared", "a", 0, 1.into());
+    assert_eq!(app_post(&apps, MUTATIONS, "", &op).await.0, 200);
+    let share = r#"{"email": "x@example.com", "role": "editor"}"#;
+    assert_eq!(post_json(&mis, "/api/apps/demo/members", "s", share).await.0, 200);
+    let (_, body) = post_json(&mis, "/api/apps/demo/backups", "s", "").await;
+    let snap: AppBackup = serde_json::from_str(&body).unwrap();
+    let unshare = r#"{"email": "x@example.com", "role": null}"#;
+    assert_eq!(post_json(&mis, "/api/apps/demo/members", "s", unshare).await.0, 200);
+    let members = |mis: String| async move {
+        let (_, body) = get_json(&mis, "/api/apps", "s").await;
+        serde_json::from_str::<Vec<AppView>>(&body).unwrap()[0].members.len()
+    };
+    restore_demo(&mis, &snap.name, false).await;
+    assert_eq!(members(mis.clone()).await, 0);
+    restore_demo(&mis, &snap.name, true).await;
+    assert_eq!(members(mis.clone()).await, 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn activating_a_release_backs_up_first() {
+    let (mis, apps, dir) = live_demo(with_read_token(), Default::default()).await;
+    let op = put_op("shared", "a", 0, 1.into());
+    assert_eq!(app_post(&apps, MUTATIONS, "", &op).await.0, 200);
+    assert_eq!(publish(&mis, "/api/apps/demo/releases", "s", &demo("v2")).await.0, 201);
+    let (status, _) = post_json(&mis, "/api/apps/demo/activate", "s", r#"{"release": 2}"#).await;
+    assert_eq!(status, 204);
+    let page = "/api/apps/demo/releases?activate=true";
+    assert_eq!(publish(&mis, page, "s", &demo("v3")).await.0, 201);
+    let (_, body) = get_json(&mis, "/api/apps/demo/backups", "s").await;
+    let list: Vec<AppBackup> = serde_json::from_str(&body).unwrap();
+    let names: Vec<_> = list.iter().map(|b| &b.name[..7]).collect();
+    assert_eq!(names, ["pre-v2-", "pre-v3-"]);
+    assert!(list.iter().all(|b| b.kind == BackupKind::PreActivation));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn read_token_lists_backups_but_cannot_take_or_restore_and_bad_names_are_refused() {
+    let (mis, apps, dir) = live_demo(with_read_token(), Default::default()).await;
+    let op = put_op("shared", "a", 0, 1.into());
+    assert_eq!(app_post(&apps, MUTATIONS, "", &op).await.0, 200);
+    let (_, body) = post_json(&mis, "/api/apps/demo/backups", "s", "").await;
+    let snap: AppBackup = serde_json::from_str(&body).unwrap();
+    assert_eq!(get_json(&mis, "/api/apps/demo/backups", "r").await.0, 200);
+    assert_eq!(post_json(&mis, "/api/apps/demo/backups", "r", "").await.0, 403);
+    let body = serde_json::json!({"backup": snap.name}).to_string();
+    assert_eq!(post_json(&mis, "/api/apps/demo/restore", "r", &body).await.0, 403);
+    for bad in [
+        "../data",
+        "../../demo/data",
+        "manual-x",
+        &format!("{}/../../data", snap.name),
+        &format!("{}.sqlite", snap.name),
+    ] {
+        let body = serde_json::json!({"backup": bad}).to_string();
+        let (status, _) = post_json(&mis, "/api/apps/demo/restore", "s", &body).await;
+        assert_eq!(status, 400, "{bad}");
+    }
+    let body = serde_json::json!({"backup": "daily-20200101T000000.000Z"}).to_string();
+    assert_eq!(post_json(&mis, "/api/apps/demo/restore", "s", &body).await.0, 404);
+    assert_eq!(get_json(&mis, "/api/apps/nope/backups", "s").await.0, 404);
+    assert_eq!(post_json(&mis, "/api/apps/nope/backups", "s", "").await.0, 404);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn writes_during_a_restore_are_kept_or_backed_up_never_lost() {
+    let (mis, apps, dir) = live_demo(with_read_token(), Default::default()).await;
+    let op = put_op("shared", "seed", 0, 0.into());
+    assert_eq!(app_post(&apps, MUTATIONS, "", &op).await.0, 200);
+    let (_, body) = post_json(&mis, "/api/apps/demo/backups", "s", "").await;
+    let snap: AppBackup = serde_json::from_str(&body).unwrap();
+    let writer = {
+        let apps = apps.clone();
+        tokio::spawn(async move {
+            for i in 0..60 {
+                let op = put_op("shared", &format!("w{i:02}"), 0, i.into());
+                let (status, body) = app_post(&apps, MUTATIONS, "", &op).await;
+                assert_eq!(status, 200, "{body}");
+            }
+        })
+    };
+    while demo_notes(&apps).await.len() < 10 {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let pre = restore_demo(&mis, &snap.name, false).await.pre_restore.unwrap();
+    writer.await.unwrap();
+    let ids = |notes: Vec<(String, serde_json::Value)>| -> Vec<String> {
+        notes.into_iter().map(|(id, _)| id).filter(|id| id != "seed").collect()
+    };
+    let after = ids(demo_notes(&apps).await);
+    restore_demo(&mis, &pre.name, false).await;
+    let before = ids(demo_notes(&apps).await);
+    // Each write is in one of them: in order, before the restore or after it.
+    let all: Vec<String> = (0..60).map(|i| format!("w{i:02}")).collect();
+    assert_eq!([before.clone(), after].concat(), all);
+    assert!(before.len() >= 10);
+    let _ = std::fs::remove_dir_all(dir);
 }
