@@ -623,6 +623,15 @@ pub enum RoutineMode {
     Live,
 }
 
+/// `POST /api/routines`: a routine to write as `<name>.md`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NewRoutine {
+    pub name: String,
+    /// An interval (`6h`) or a cron line (`0 9 * * 1-5`).
+    pub schedule: String,
+    pub prompt: String,
+}
+
 /// A routine file as `GET /api/routines` lists it, with its schedule.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RoutineView {

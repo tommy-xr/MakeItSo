@@ -180,6 +180,12 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .ngrp [aria-expanded=true] .chev { transform: rotate(180deg); }
   #menu .nsub a { gap: .625rem; min-height: 2.5rem; padding-left: 1.5rem; font-size: .875rem; }
   .nsub .sd { background: var(--s, var(--faint)); } /* never run: faint, as on Routines */
+  /* New routine: name, schedule and prompt atop Routines. 16px fields: iOS zooms into smaller ones. */
+  #routine-new { display: grid; gap: .5rem; margin: 0 0 1rem; padding: .875rem; border-radius: 1rem; background: var(--card); }
+  #routine-new :is(input, textarea) { width: 100%; font-size: 1rem; }
+  #routine-new input { min-height: 2.75rem; padding: 0 .75rem; }
+  #routine-new p { margin: 0; font-size: .8125rem; overflow-wrap: anywhere; }
+  #routine-new .row { margin: 0; }
   .nsub .dim { padding: .5rem 1.5rem; font-size: .8125rem; }
   #menu fieldset { margin: 1.25rem 0 0; padding: 0; border: 0; }
   #menu legend { padding: 0 .5rem .5rem; color: var(--dim); font: 600 .75rem var(--sans); }
@@ -701,7 +707,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
     <div class="sheet-top"><span class="title">Make It So</span><button type="button" id="menu-close" class="ibtn" aria-label="Close menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
     <nav aria-label="Views">
       <a href="#" data-view="list">Home</a>
-      <div class="ngrp"><a href="#routines" data-view="routines">Routines</a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-routines" aria-label="Show routines"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
+      <div class="ngrp"><a href="#routines" data-view="routines">Routines</a><button type="button" id="routine-add" class="ibtn" aria-label="New routine" title="New routine"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-routines" aria-label="Show routines"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
       <ul id="nav-routines" class="nsub" hidden></ul>
       <div class="ngrp"><a href="#workers" data-view="workers">Workers</a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-workers" aria-label="Show workers"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
       <ul id="nav-workers" class="nsub" hidden></ul>
@@ -757,6 +763,14 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
 </main>
 
 <main id="routines" hidden>
+  <form id="routine-new" hidden>
+    <input id="rn-name" aria-label="Name" placeholder="Name, e.g. pr-grooming" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+    <input id="rn-schedule" aria-label="Schedule" placeholder="Schedule: 30m, 6h, 1d or 0 9 * * 1-5" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+    <textarea id="rn-prompt" aria-label="Prompt" placeholder="What each run does" required></textarea>
+    <p class="dim">It starts paused and report-only: resume it here when ready.</p>
+    <p id="rn-error" class="bad" hidden></p>
+    <div class="row"><button>Create</button><button type="button" id="rn-cancel">Cancel</button></div>
+  </form>
   <ul id="routine-list"></ul>
 </main>
 
@@ -3249,7 +3263,7 @@ function renderRoutines() {
   const now = Date.now() + skew;
   if (routines.error) { $('routine-list').replaceChildren(el('li', { className: 'bad' }, routines.error)); return; }
   $('routine-list').replaceChildren(...routines.list.map((r) => routineRow(r, now)));
-  if (!routines.list.length) $('routine-list').append(el('li', { className: 'dim' }, 'No routines yet: add a .md file to the orchestrator’s routines folder'));
+  if (!routines.list.length) $('routine-list').append(el('li', { className: 'dim' }, `No routines yet: ${readOnly ? '' : 'tap + by Routines in the menu, or '}add a .md file to the orchestrator’s routines folder`));
   // A routine picked in the menu: scroll to it once.
   const pick = routineFocus && [...$('routine-list').children].find((li) => li.dataset.name === routineFocus);
   routineFocus = null;
@@ -3259,6 +3273,7 @@ function renderRoutines() {
 // The menu's unfolded lists: one link per routine (to its row on Routines) and per worker, with its status dot.
 let routineFocus = null; // routine to scroll to when Routines next renders
 function renderNav() {
+  $('routine-add').hidden = readOnly;
   if (!$('menu').open) return;
   // Rows as [href, dot class, name], or [text] for a note; a list is rebuilt only when they change, so focus stays.
   const rs = routines && routines.list;
@@ -3731,11 +3746,41 @@ $('menu-btn').onclick = () => {
   if (!$('nav-routines').hidden) loadRoutines();
   renderNav();
 };
+// + opens the new-routine form atop Routines; the orchestrator writes `<name>.md`, paused.
+function showNewRoutine(on) {
+  $('routine-new').hidden = !on;
+  $('rn-error').hidden = true;
+  if (on) $('rn-name').focus();
+}
+$('routine-add').onclick = () => {
+  $('menu').close();
+  location.hash = '#routines';
+  render(); // shown now, so the name field can take focus
+  showNewRoutine(true);
+};
+$('rn-cancel').onclick = () => { $('routine-new').reset(); showNewRoutine(false); };
+$('routine-new').onsubmit = async (e) => {
+  e.preventDefault();
+  const body = { name: $('rn-name').value.trim(), schedule: $('rn-schedule').value, prompt: $('rn-prompt').value };
+  const btn = $('routine-new').querySelector('.row button');
+  btn.disabled = true;
+  let why = '';
+  try {
+    const r = await fetch('/api/routines', { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
+    if (!r.ok) why = (await r.text()) || `error ${r.status}`;
+  } catch { why = 'couldn’t reach the orchestrator'; }
+  btn.disabled = false;
+  if (why) { $('rn-error').textContent = why; $('rn-error').hidden = false; return; }
+  $('routine-new').reset();
+  showNewRoutine(false);
+  routineFocus = body.name;
+  await loadRoutines();
+};
 // A chevron unfolds its list; opening Routines' fetches them fresh.
 for (const b of $('menu').querySelectorAll('.ngrp button[aria-controls]')) b.onclick = () => {
   const open = b.getAttribute('aria-expanded') !== 'true';
   b.setAttribute('aria-expanded', String(open));
-  b.setAttribute('aria-label', `${open ? 'Hide' : 'Show'} ${b.previousElementSibling.textContent.toLowerCase()}`);
+  b.setAttribute('aria-label', `${open ? 'Hide' : 'Show'} ${b.parentElement.querySelector('a').textContent.toLowerCase()}`);
   $(b.getAttribute('aria-controls')).hidden = !open;
   if (open && b.getAttribute('aria-controls') === 'nav-routines') loadRoutines();
 };

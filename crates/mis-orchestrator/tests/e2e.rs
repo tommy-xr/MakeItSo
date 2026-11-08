@@ -3335,6 +3335,43 @@ async fn routine_files_run_as_tagged_tasks_run_now_and_pause() {
 }
 
 #[tokio::test]
+async fn new_routine_is_written_paused() {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-new-routine-{}", uuid::Uuid::new_v4()));
+    let every = std::time::Duration::from_secs(60);
+    let base = start_app(with_read_token().with_routines(dir.clone(), every)).await;
+    let body = r#"{"name":"deps","schedule":"1d","prompt":"Check deps."}"#;
+
+    assert_eq!(post_json(&base, "/api/routines", "r", body).await.0, 403);
+    let (status, reply) = post_json(&base, "/api/routines", "s", body).await;
+    assert_eq!(status, 201, "{reply}");
+    let text = std::fs::read_to_string(dir.join("deps.md")).unwrap();
+    assert_eq!(text, "---\nevery: 1d\npaused: true\n---\nCheck deps.\n");
+    let (_, list) = get_json(&base, "/api/routines", "r").await;
+    let list: Vec<RoutineView> = serde_json::from_str(&list).unwrap();
+    assert!(list[0].name == "deps" && list[0].paused && list[0].mode == Some(RoutineMode::Report));
+
+    // Taken names and bad schedules are refused, and nothing is overwritten.
+    assert_eq!(post_json(&base, "/api/routines", "s", body).await.0, 409);
+    let bad = r#"{"name":"x","schedule":"soon","prompt":"Hi."}"#;
+    let (status, reply) = post_json(&base, "/api/routines", "s", bad).await;
+    assert!(
+        status == 400 && reply.contains("schedule"),
+        "{status} {reply}"
+    );
+    assert!(!dir.join("x.md").exists());
+
+    // A name reused after its file is deleted starts paused, not as the old one was left.
+    let resume = "/api/routines/deps/resume";
+    assert_eq!(post_json(&base, resume, "s", "").await.0, 204);
+    std::fs::remove_file(dir.join("deps.md")).unwrap();
+    assert_eq!(post_json(&base, "/api/routines", "s", body).await.0, 201);
+    let (_, list) = get_json(&base, "/api/routines", "r").await;
+    let list: Vec<RoutineView> = serde_json::from_str(&list).unwrap();
+    assert!(list[0].paused && list[0].next_at.is_none(), "{list:?}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn acting_routine_runs_dry_until_switched_live() {
     let dir = std::env::temp_dir().join(format!("mis-e2e-act-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();

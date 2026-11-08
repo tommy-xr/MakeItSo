@@ -1023,7 +1023,7 @@ pub fn router(app: App) -> Router {
         .route("/api/update", get(update_status).post(set_update))
         .route("/api/tasks/{id}/cancel", post(cancel))
         .route("/api/tasks/{id}/diff", get(task_diff))
-        .route("/api/routines", get(routines))
+        .route("/api/routines", get(routines).post(new_routine))
         .route("/api/routines/{name}/{action}", post(routine_action))
         .route("/api/sessions", get(live_sessions))
         .route("/api/workers/{id}/sessions", get(sessions))
@@ -1220,6 +1220,62 @@ async fn routines(
     }
     let defs = app.routine_defs().await;
     Json(app.ledger().routine_views(&defs, &chrono::Local)).into_response()
+}
+
+/// Write a routine file from a [`mis_types::NewRoutine`]: 201, 400 with why it
+/// doesn't parse, 409 if its name is taken. Read-only tokens get 403.
+async fn new_routine(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/routines").await {
+        return refused.into_response();
+    }
+    let Some(dir) = app.routines_dir.clone() else {
+        return (StatusCode::NOT_FOUND, "routines are off").into_response();
+    };
+    let new = match serde_json::from_slice::<mis_types::NewRoutine>(&body) {
+        Ok(new) => new,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let (file, text) = match routine::new_file(&new) {
+        Ok(f) => f,
+        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
+    };
+    // Another file may name itself this; the file itself is caught by `create_new`.
+    let name = routine::stem(&file).to_string();
+    if app
+        .routine_defs()
+        .await
+        .iter()
+        .flatten()
+        .any(|r| r.name == name)
+    {
+        return (StatusCode::CONFLICT, "a routine has that name").into_response();
+    }
+    // Before the file exists, so the scheduler never pairs it with an old routine's state.
+    app.ledger().reset_routine(&name);
+    app.save_now().await;
+    let write = move || {
+        use std::io::Write;
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(file);
+        let mut f = std::fs::File::options()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        f.write_all(text.as_bytes())
+    };
+    match tokio::task::spawn_blocking(write).await {
+        Ok(Ok(())) => StatusCode::CREATED.into_response(),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            (StatusCode::CONFLICT, "a routine file has that name").into_response()
+        }
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 /// `run` (replies `{"task": id}`), `pause`, `resume`, `live` or `dry-run` routine
