@@ -279,9 +279,8 @@ Publishing is by capture id, kept in `<state-dir>/captures/published.json` once 
 and in the repo's history through those trailers: a record is written once, then it is yours to
 edit, rename, file elsewhere or delete, and is never written again, even if the map is lost. A
 record already in the repo is adopted, not written twice. A name another file holds gets `-2`,
-`-3`, … (its images too). The receipt in `captures/inbox/` is never changed. The clone is the
-publisher's: files a run cut short left uncommitted are removed, and other uncommitted changes
-there stop it until you commit or discard them.
+`-3`, … (its images too). The receipt in `captures/inbox/` is never changed. In the clone, files a run
+cut short left uncommitted are removed; anything else uncommitted there is left alone.
 
 `GET /api/notes/sync` (full or read access) reports `{"state", "pending", "last_push",
 "last_error"}`: `state` is `off`, `idle`, `pending`, `offline` (remote unreachable; retried next
