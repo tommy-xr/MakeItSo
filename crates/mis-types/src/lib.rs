@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 mod access;
 pub use access::access_headers;
+mod apps;
+pub use apps::{AppRelease, AppView};
 pub mod diff;
 pub use diff::{DiffBase, DiffStat, TaskDiff};
 pub mod evidence;
