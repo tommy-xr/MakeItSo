@@ -326,9 +326,9 @@ isolated from each other. An entry page at `/a/<name>/scores/2026` resolves rela
 ### Who sees an app
 
 Each app opens only for its members, in `<state-dir>/apps/<name>/policy.json` (outside every
-bundle): `{"members": {"spouse@example.com": "editor"}}`. Any member may open the app; its role
-(viewer, editor or owner) is what `/api/v1/me` reports, for the app to act on until the server
-stores app data. Emails match ignoring case. An app shared with no one opens for nobody but
+bundle): `{"members": {"spouse@example.com": "editor"}}`. Any member may open the app and read
+its records; editors and owners also write them (see [Records](#records)). Emails match ignoring
+case. An app shared with no one opens for nobody but
 direct loopback requests.
 
 ```sh
@@ -351,6 +351,69 @@ else: 421, so a DNS-rebound name gets nothing). Who is asking:
 `/a/` lists only your apps; another app's paths answer 403. `GET /a/<name>/api/v1/me` returns
 `{"user", "role", "app"}`. `/a/<name>/api/` belongs to the server, not the bundle; its routes take
 only GET and POST.
+
+### Records
+
+Each app keeps JSON records in its own SQLite database, `<state-dir>/apps/<name>/data.sqlite`
+(`0600`, outside every bundle; an app reaches only its own). A record is
+`{"id", "rev", "by", "at", "data"}`: an id the app chooses (1-128 of `A-Za-z0-9._:-`), a revision
+(1 when created, +1 each write), who wrote it last and when (Unix ms; set by the server), and any
+JSON up to 64 KiB. Records live in a space, `shared` (every member's) or `me` (only its writer's:
+no other member sees it, owners neither), and a collection (`a-z0-9_-`, up to 64), made on first
+write. The schema inside `data` is the app's.
+
+Under `/a/<name>/api/v1/`, GET and POST only (so clients that have just those work):
+
+| Request | Answer |
+| --- | --- |
+| `POST mutations` `{"op": "put", "space", "collection", "id", "rev", "data"}` | `{"record": {...}}` |
+| `POST mutations` `{"op": "remove", "space", "collection", "id", "rev"}` | `{"record": null}` |
+| `GET records/<space>/<collection>/<id>` | the record, or 404 |
+| `GET records/<space>/<collection>?q=<json>` | `{"records": [...], "cursor"}` |
+| `GET export` | `{"version": 1, "app", "user", "at", "shared": {collection: [...]}, "me": {...}}` |
+
+Every write names the `rev` it read; `0` means the record must not exist yet. Any other stored
+revision is a conflict: 409 `{"current": record-or-null}`, for the app to merge and retry at
+`current.rev`. Sending a write again after its response was lost is safe: if the stored record
+is exactly what it produced (same data and writer, `rev` + 1), the answer is 200 with it.
+Removing a missing record is 200 too.
+
+`q` (all optional): `{"where": {"score": {"gte": 1, "lt": 5}, "done": {"eq": false}}, "order_by":
+["score", "desc"], "limit": 20, "cursor": "..."}`. Fields are top-level keys of `data`
+(`A-Za-z0-9_`); a bound (`eq`, `gt`, `gte`, `lt`, `lte`) is a string, number or boolean, and
+matches only values of the same JSON type. Ties, and lists with no `order_by`, go by id; records
+without the field sort first ascending. Pass `cursor` from a page to get the next (same
+`order_by`); none means it was the last. Values are bound as SQL parameters, never spliced in.
+
+Viewers read; editors and owners write (403 otherwise). A write's body must be
+`Content-Type: application/json`, and a browser's `Origin` must be `--apps-public-url`'s or the
+loopback address it was sent to (403 otherwise), so no other page can write through a member's
+browser or through loopback, which is owner. Caps: 64 KiB of `data` per record and 100 MiB per
+app database (413), 100 records per page (400). MIS tokens and the MIS Access login open nothing
+here.
+
+#### SDK
+
+Apps load `<script src="/a/_/mis.js"></script>` (no dependencies, served by the apps listener)
+and get `mis`, each method returning a promise:
+
+```js
+await mis.me();                                         // {user, role, app}
+const r = await mis.records.put('shared', 'chores', 'dishes', 0, {done: false}); // create
+await mis.records.put('shared', 'chores', 'dishes', r.rev, {done: true});        // update
+await mis.records.get('shared', 'chores', 'dishes');    // the record, or null
+await mis.records.list('shared', 'chores', {where: {done: {eq: false}}, limit: 20});
+await mis.records.remove('shared', 'chores', 'dishes', 2);
+await mis.export();
+```
+
+Refusals reject with a `MisError`: `status` (403, 409, 413…), `message`, and on a 409 `current`.
+
+Open any app page with `?mock=1` (add `&role=viewer` to try a viewer) and `mis` talks to
+`mis-mock.js`, an in-memory twin with the same revisions, conflicts, create-only, retries, caps,
+queries and viewer 403s, so screenshots and UI tests need no data. `(await mis.mock).setRole(r)`
+changes the role; nothing is kept across reloads. Both are tested by
+`node --test crates/mis-orchestrator/tests`.
 
 ### Household setup
 
