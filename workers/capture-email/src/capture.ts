@@ -37,7 +37,8 @@ export function captureRequest(env: Env, raw: ReadableStream | Uint8Array): [str
     "CF-Access-Client-Id": env.CF_ACCESS_CLIENT_ID,
     "CF-Access-Client-Secret": env.CF_ACCESS_CLIENT_SECRET,
   };
-  return [env.MIS_CAPTURE_URL, { method: "POST", headers, body: raw }];
+  // Not followed: Access answers a bad service token with a 302 to its login page.
+  return [env.MIS_CAPTURE_URL, { method: "POST", headers, body: raw, redirect: "manual" }];
 }
 
 /** The bounce text for MIS's refusal: `413: images are limited to 10 MB`. */

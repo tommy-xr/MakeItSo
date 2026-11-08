@@ -3867,28 +3867,32 @@ async fn capture_takes_a_raw_email() {
         call(&base, "POST", "/api/capture", headers, body)
     };
     let bearer: &[(&str, &str)] = &[("authorization", "Bearer c")];
-    // Synthetic fixtures (see make.py): url, note, project, kept images as
-    // (extension, first 16 hex of sha256, from Python's own decoding).
+    // Synthetic fixtures (see make.py): url, note, shared text (the body), project, kept
+    // images as (extension, first 16 hex of sha256, from Python's own decoding).
     type Row<'a> = (
         &'a str,
         Option<&'a str>,
         &'a str,
         Option<&'a str>,
+        Option<&'a str>,
         &'a [(&'a str, &'a str)],
     );
+    let iphone = Some("Sent from my iPhone");
     let rows: [Row; 6] = [
         (
             "a-ios-safari-link",
             Some("https://example.com/articles/liminal-spaces"),
             "Liminal spaces: empty malls at night",
+            Some("https://example.com/articles/liminal-spaces\n\nSent from my iPhone"),
             None,
             &[],
         ),
-        ("b-ios-photo", None, "", None, &[("jpg", "8c5d478a22f67f64")]),
+        ("b-ios-photo", None, "", iphone, None, &[("jpg", "8c5d478a22f67f64")]),
         (
             "c-ios-five-photos",
             None,
             "Kitchen ideas #home",
+            iphone,
             Some("home"),
             &[
                 ("jpg", "e86a831e769f3f95"),
@@ -3901,6 +3905,7 @@ async fn capture_takes_a_raw_email() {
             "d-outlook-html",
             Some("https://example.com/news/great-article?utm=mail&id=7"),
             "FW: Great article #amf",
+            Some("Worth a read: Great article\nDemo User"),
             Some("amf"),
             &[("png", "ae4c625d0e4302fb")],
         ),
@@ -3908,12 +3913,13 @@ async fn capture_takes_a_raw_email() {
             "e-utf8-qp",
             Some("https://example.com/places/cafe-with-a-rather-long-name-that-wraps?ref=notes&lang=en"),
             "\u{1F4CC} Café notes #mis",
+            Some("Notes from the café — try the cortado.\nhttps://example.com/places/cafe-with-a-rather-long-name-that-wraps?ref=notes&lang=en"),
             Some("mis"),
             &[],
         ),
-        ("f-ios-heic", None, "Sunset", None, &[]),
+        ("f-ios-heic", None, "Sunset", iphone, None, &[]),
     ];
-    for (name, url, text, project, assets) in rows {
+    for (name, url, text, shared, project, assets) in rows {
         let raw = std::fs::read(fixtures.join(format!("{name}.eml"))).unwrap();
         let (status, body) = post(bearer, raw).await;
         assert_eq!(status, 201, "{name}: {body}");
@@ -3922,7 +3928,7 @@ async fn capture_takes_a_raw_email() {
         let md = std::fs::read_to_string(inbox.join(file)).unwrap();
         assert!(md.contains("via: \"email\"\n"), "{name}: {md}");
         let line = |key: &str, v: Option<&str>| v.map(|v| format!("{key}: {v:?}\n"));
-        for (key, want) in [("url", url), ("project", project)] {
+        for (key, want) in [("url", url), ("shared", shared), ("project", project)] {
             match line(key, want) {
                 Some(l) => assert!(md.contains(&l), "{name}: {md}"),
                 None => assert!(!md.contains(&format!("\n{key}: ")), "{name}: {md}"),
@@ -3944,15 +3950,6 @@ async fn capture_takes_a_raw_email() {
             .collect();
         assert_eq!(names.len(), 1 + assets.len(), "{name}: {names:?}");
     }
-    // The body is the shared text: a photo share keeps its signature, a link share its rest.
-    let (_, body) = post(
-        bearer,
-        std::fs::read(fixtures.join("b-ios-photo.eml")).unwrap(),
-    )
-    .await;
-    let saved: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let md = std::fs::read_to_string(inbox.join(saved["file"].as_str().unwrap())).unwrap();
-    assert!(md.contains("shared: \"Sent from my iPhone\"\n"), "{md}");
     // Refused: no capture token, or nothing to keep.
     let raw = std::fs::read(fixtures.join("a-ios-safari-link.eml")).unwrap();
     assert_eq!(post(&[("authorization", "Bearer r")], raw).await.0, 401);

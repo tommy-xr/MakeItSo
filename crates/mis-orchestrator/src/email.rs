@@ -2,14 +2,16 @@
 //! text, image parts as images. Pure; the HTTP handler feeds it the request body.
 
 use mail_parser::{MessageParser, PartKind};
+use mis_types::{ImageKind, MAX_IMAGES, MAX_IMAGE_BYTES};
 
 use crate::capture::{Capture, Refused, MAX_TEXT_BYTES};
 
 /// Read `raw` as a capture `via` email. The subject is the note (`#project` works); the
 /// text body (else the HTML body as text) is the shared text, with `\n` line ends, cut
 /// to [`MAX_TEXT_BYTES`]; the HTML body's first http(s) `href` is the url, as its links'
-/// text rarely shows them.
-/// Image parts, attached or inline, in order, are the images; other parts are ignored.
+/// text rarely shows them. The first [`MAX_IMAGES`] JPEG, PNG, WebP or GIF image parts,
+/// attached or inline, are the images; other image parts count as `skipped`, and the
+/// rest of the parts are ignored.
 pub fn capture(raw: &[u8]) -> Result<Capture, Refused> {
     let msg = MessageParser::new()
         .parse(raw)
@@ -19,15 +21,22 @@ pub fn capture(raw: &[u8]) -> Result<Capture, Refused> {
     let url = (msg.html_body())
         .filter(|p| matches!(p.kind(), PartKind::Html))
         .find_map(|p| first_href(&p.text()?));
-    let images = (msg.root().parts())
+    let parts: Vec<_> = (msg.root().parts())
         .filter(|p| matches!(p.kind(), PartKind::Binary | PartKind::InlineBinary))
         .filter(|p| {
             p.content_type()
                 .is_some_and(|t| t.ctype().eq_ignore_ascii_case("image"))
         })
-        .map(|p| p.decoded().into_owned())
         .collect();
-    Capture::new(url, text, Some(cut(body)), images, Some("email".into()))
+    // Chosen before `Capture::new`, so a big HEIC or 5th photo is skipped, not refused.
+    let images: Vec<_> = (parts.iter())
+        .map(|p| p.decoded().into_owned())
+        .filter(|b| ImageKind::sniff(b).is_some())
+        .take(MAX_IMAGES)
+        .collect();
+    let mut c = Capture::new(url, text, Some(cut(body)), images, Some("email".into()))?;
+    c.skipped = parts.len() - c.images.len();
+    Ok(c)
 }
 
 /// `s` cut to at most [`MAX_TEXT_BYTES`], at a char boundary.
@@ -63,7 +72,6 @@ fn first_href(html: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mis_types::ImageKind;
 
     #[test]
     fn subject_is_the_note_and_body_the_shared_text() {
@@ -115,16 +123,35 @@ mod tests {
             let b64 = <base64ct::Base64 as base64ct::Encoding>::encode_string(bytes);
             format!("--b\r\nContent-Type: {ctype}\r\nContent-Transfer-Encoding: base64\r\n\r\n{b64}\r\n")
         };
-        let raw = format!(
-            "Subject: pics\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n\
-             --b\r\nContent-Type: text/plain\r\n\r\nhi\r\n{}{}{}--b--\r\n",
-            part("application/pdf", b"%PDF-1.4"),
-            part("image/jpeg", jpeg),
-            part("image/heic", b"\0\0\0\x18ftypheic"),
-        );
-        let c = capture(raw.as_bytes()).unwrap();
+        let raw = |parts: &[String]| {
+            format!(
+                "Subject: pics\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n\
+                 --b\r\nContent-Type: text/plain\r\n\r\nhi\r\n{}--b--\r\n",
+                parts.concat()
+            )
+        };
+        let c = capture(
+            raw(&[
+                part("application/pdf", b"%PDF-1.4"),
+                part("image/jpeg", jpeg),
+                part("image/heic", b"\0\0\0\x18ftypheic"),
+            ])
+            .as_bytes(),
+        )
+        .unwrap();
         assert_eq!(c.images, [(ImageKind::Jpeg, jpeg.to_vec())]);
         assert_eq!(c.skipped, 1, "heic");
+        // Past the first 4, or not a kept kind, a part too big to keep is skipped, not refused.
+        let mut big = jpeg.to_vec();
+        big.resize(MAX_IMAGE_BYTES + 1, 0);
+        let mut parts = vec![part("image/heic", &[0; MAX_IMAGE_BYTES + 1])];
+        parts.extend(std::iter::repeat_n(part("image/jpeg", jpeg), 4));
+        parts.push(part("image/jpeg", &big));
+        let c = capture(raw(&parts).as_bytes()).unwrap();
+        assert_eq!((c.images.len(), c.skipped), (4, 2));
+        // A kept one too big still refuses the capture.
+        let r = capture(raw(&[part("image/jpeg", &big)]).as_bytes());
+        assert!(matches!(r, Err(Refused::TooLarge(_))));
     }
 
     #[test]

@@ -51,6 +51,7 @@ test("the request carries the raw message and every credential", () => {
   assert.equal(url, env.MIS_CAPTURE_URL);
   assert.equal(init.method, "POST");
   assert.equal(init.body, raw);
+  assert.equal(init.redirect, "manual");
   assert.deepEqual(init.headers, {
     "Content-Type": "message/rfc822",
     Authorization: "Bearer tok",
@@ -94,10 +95,15 @@ test("handle posts allowed mail and bounces refusals", async () => {
   await handle(refused as never, env, replying(400, "send a url, text or image") as never);
   assert.equal(refused.rejected, "400: send a url, text or image");
 
+  // Access's answer to a bad service token: a redirect to its login page.
+  const login = message("a@example.com");
+  await handle(login as never, env, replying(302, "") as never);
+  assert.equal(login.rejected, "302: ");
+
   const stranger = message("c@example.com");
   await handle(stranger as never, env, replying(201, "{}") as never);
   assert.equal(stranger.rejected, "sender not allowed");
-  assert.equal(sent.length, 2, "strangers never reach MIS");
+  assert.equal(sent.length, 3, "strangers never reach MIS");
 
   const down = message("a@example.com");
   await handle(down as never, env, (async () => {

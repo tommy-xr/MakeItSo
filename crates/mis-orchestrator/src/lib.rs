@@ -1414,8 +1414,9 @@ async fn upload(
 }
 
 /// Keep a link, text and/or images shared from a phone (multipart `url`, `text`, `via`,
-/// up to 4 `image` files; or those text fields url-encoded; or a raw `message/rfc822` email) in the inbox before replying `{"id", "file"}`: 201, or 200
-/// for a resend of one already kept. Capture tokens and full access only.
+/// up to 4 `image` files; or those text fields url-encoded; or a raw `message/rfc822`
+/// email) in the inbox before replying `{"id", "file"}`: 201, or 200 for a resend of one
+/// already kept. Capture tokens and full access only.
 async fn capture(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
