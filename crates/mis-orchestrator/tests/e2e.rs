@@ -3775,7 +3775,14 @@ async fn capture_is_kept_once_and_its_token_opens_nothing_else() {
     assert_eq!(std::fs::read_dir(&inbox).unwrap().count(), 2);
     // Refused: SVG, no content, unknown fields, read or no token. Full access may capture.
     let svg: [(&str, Option<&str>, &[u8]); 1] = [("image", Some("x.svg"), b"<svg xmlns=")];
-    assert_eq!(capture(&base, &[bearer], &svg).await.0, 415);
+    assert_eq!(capture(&base, &[bearer], &svg).await.0, 400);
+    // What a Shortcut sends when its image step is skipped: kept, placeholder left out.
+    let placeholder: [(&str, Option<&str>, &[u8]); 2] = [
+        ("shared", None, b"https://example.com/p"),
+        ("image", Some("URL.txt"), b"URL"),
+    ];
+    let (status, body) = capture(&base, &[bearer], &placeholder).await;
+    assert_eq!(status, 201, "{body}");
     let via: [(&str, Option<&str>, &[u8]); 1] = [("via", None, b"shortcut")];
     assert_eq!(capture(&base, &[bearer], &via).await.0, 400);
     let prompt: [(&str, Option<&str>, &[u8]); 1] = [("prompt", None, b"rm -rf")];
