@@ -1438,7 +1438,8 @@ async fn capture(
     let (url, shared, images) = (c.url.clone(), c.shared.is_some(), c.images.len());
     match tokio::task::spawn_blocking(move || inbox.store(&c)).await {
         Ok(Ok(saved)) => {
-            tracing::info!(file = %saved.file, new = saved.new, ?url, shared, images, %note, "captured");
+            let url = url.as_deref().unwrap_or("");
+            tracing::info!(file = %saved.file, new = saved.new, url, shared, images, ?note, "captured");
             let status = match saved.new {
                 true => StatusCode::CREATED,
                 false => StatusCode::OK,

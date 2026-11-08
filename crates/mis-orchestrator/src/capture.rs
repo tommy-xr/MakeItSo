@@ -23,7 +23,7 @@ const SLUG_CHARS: usize = 60;
 /// One capture, checked: at least one of url, text, image.
 #[derive(Debug)]
 pub struct Capture {
-    /// `http(s)` URL as sent, trimmed.
+    /// `http(s)` URL as sent, trimmed, else the first link in `shared`.
     pub url: Option<String>,
     /// As sent, trimmed.
     pub text: Option<String>,
@@ -66,9 +66,8 @@ impl Capture {
                     "url is limited to {MAX_URL_BYTES} bytes"
                 )));
             }
-            match reqwest::Url::parse(u) {
-                Ok(p) if matches!(p.scheme(), "http" | "https") => {}
-                _ => return Err(Refused::Invalid("url must be http(s)".into())),
+            if !web_url(u) {
+                return Err(Refused::Invalid("url must be http(s)".into()));
             }
         }
         let (text, shared) = (trimmed(text), trimmed(shared));
@@ -134,11 +133,21 @@ impl Capture {
     }
 }
 
-/// The first whitespace-separated http(s) URL in `s`, e.g. `see https://a.b/c ok` -> `https://a.b/c`.
+/// An http(s) URL of at most [`MAX_URL_BYTES`].
+fn web_url(s: &str) -> bool {
+    s.len() <= MAX_URL_BYTES
+        && reqwest::Url::parse(s).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
+}
+
+/// The first http(s) URL among `s`'s words, less wrapping punctuation:
+/// `see (https://a.b/c).` -> `https://a.b/c`.
 fn first_link(s: &str) -> Option<String> {
     s.split_whitespace()
-        .filter(|w| w.len() <= MAX_URL_BYTES)
-        .find(|w| reqwest::Url::parse(w).is_ok_and(|u| matches!(u.scheme(), "http" | "https")))
+        .map(|w| {
+            w.trim_start_matches(['(', '<', '[', '"', '\''])
+                .trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '>', ']', '"', '\''])
+        })
+        .find(|w| web_url(w))
         .map(Into::into)
 }
 
@@ -261,7 +270,7 @@ pub fn plan(
     let base = format!(
         "{}-{}",
         date.format("%Y-%m-%d"),
-        slug(c.text.as_deref(), c.url.as_deref())
+        slug(c.text.as_deref().or(c.shared.as_deref()), c.url.as_deref())
     );
     let stem = free_stem(&base, existing);
     let assets: Vec<String> = (c.images.iter().enumerate())
@@ -517,6 +526,17 @@ mod tests {
         let c = new(None, " https://www.example.com/news/a-b \n");
         assert_eq!(c.url.as_deref(), Some("https://www.example.com/news/a-b"));
         assert_eq!(c.shared, None);
+        for wrapped in [
+            "see (https://x.com/a).",
+            "<https://x.com/a>",
+            "\"https://x.com/a\",",
+        ] {
+            assert_eq!(
+                new(None, wrapped).url.as_deref(),
+                Some("https://x.com/a"),
+                "{wrapped}"
+            );
+        }
         let c = new(None, "Read this: https://x.com/a and ftp://y.z");
         assert_eq!(c.url.as_deref(), Some("https://x.com/a"));
         assert_eq!(
