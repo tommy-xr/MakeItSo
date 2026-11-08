@@ -73,7 +73,7 @@ pub struct App {
     token: Option<String>,
     /// Tokens that may look (status, transcripts, MCP) but not act.
     read_tokens: Vec<String>,
-    /// Access identities let in, lowercased; empty: any the Access app admits.
+    /// Access identities let in (any case); empty: any the Access app admits.
     access_subjects: Vec<String>,
     /// Browser `Origin`s permitted to connect; requests without `Origin` are always let through.
     allowed_origins: Vec<String>,
@@ -209,11 +209,7 @@ impl App {
     /// Only these Access identities (emails, service token client ids) get in;
     /// others are refused as if they had no JWT. Empty: any the Access app admits.
     pub fn with_access_subjects(mut self, subjects: Vec<String>) -> Self {
-        self.access_subjects = subjects
-            .iter()
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect();
+        self.access_subjects = subjects;
         self
     }
 

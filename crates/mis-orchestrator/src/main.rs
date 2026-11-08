@@ -246,7 +246,15 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("refusing to bind {addr} without --token / MIS_TOKEN");
     }
     let gate = access_gate(&args).await?;
-    args.access_subjects.retain(|s| !s.trim().is_empty());
+    // `MIS_ACCESS_SUBJECTS=` means unset; a list of only blanks (`,`) is a mistake, not "anyone".
+    let given =
+        args.access_subjects.iter().any(|s| !s.is_empty()) || args.access_subjects.len() > 1;
+    args.access_subjects = (args.access_subjects.iter().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if given && args.access_subjects.is_empty() {
+        anyhow::bail!("--access-subject / MIS_ACCESS_SUBJECTS lists no one");
+    }
     match (&gate, args.access_subjects.is_empty()) {
         (None, false) => anyhow::bail!("--access-subject / MIS_ACCESS_SUBJECTS needs Cloudflare Access"),
         (Some(_), true) => tracing::warn!(

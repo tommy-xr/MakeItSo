@@ -561,13 +561,18 @@ const ACCESS_AUD: &str = "aud-tag";
 
 /// Orchestrator behind (simulated) Cloudflare Access, with test keys injected.
 async fn start_behind_access() -> String {
+    start_app(behind_access()).await
+}
+
+/// App checking Access JWTs signed by the fixture key.
+fn behind_access() -> App {
     let jwks = serde_json::from_str(include_str!("fixtures/access-test-jwks.json")).unwrap();
     let gate = mis_orchestrator::access_gate::AccessGate::with_keys(
         "team".into(),
         ACCESS_AUD.into(),
         jwks,
     );
-    start_app(App::new(Some("s".into())).with_access(gate)).await
+    App::new(Some("s".into())).with_access(gate)
 }
 
 /// RS256 Access JWT signed by the fixture key, valid for an hour.
@@ -629,15 +634,7 @@ async fn access_jwt_admits_and_bad_or_missing_is_401() {
 
 #[tokio::test]
 async fn access_subjects_limit_who_gets_in() {
-    let jwks = serde_json::from_str(include_str!("fixtures/access-test-jwks.json")).unwrap();
-    let gate = mis_orchestrator::access_gate::AccessGate::with_keys(
-        "team".into(),
-        ACCESS_AUD.into(),
-        jwks,
-    );
-    let app = App::new(Some("s".into()))
-        .with_access(gate)
-        .with_access_subjects(vec![" Me@Example.com ".into()]);
+    let app = behind_access().with_access_subjects(vec!["Me@Example.com".into()]);
     let base = start_app(app).await;
     let via_tunnel = ("cf-ray", "8f00-SJC");
     let me = access_jwt(ACCESS_AUD);
