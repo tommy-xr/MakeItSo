@@ -2335,8 +2335,13 @@ async fn http(base: &str, head: &str, body: &[u8]) -> (u16, String, Vec<u8>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let addr = base.trim_start_matches("ws://");
     let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    // `Host: <addr>` unless `head` names one.
+    let host = match head.to_ascii_lowercase().contains("\r\nhost:") {
+        true => String::new(),
+        false => format!("\r\nHost: {addr}"),
+    };
     let req = format!(
-        "{head}\r\nHost: {addr}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "{head}{host}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     s.write_all(&[req.as_bytes(), body].concat()).await.unwrap();
@@ -3706,6 +3711,7 @@ async fn refused_everywhere_else(base: &str, headers: &[(&'static str, &str)]) {
         ("GET", "/api/apps".into()),
         ("POST", "/api/apps/a/releases".into()),
         ("POST", "/api/apps/a/activate".into()),
+        ("POST", "/api/apps/a/members".into()),
         ("GET", "/api/sessions".into()),
         ("GET", format!("/api/workers/{id}/sessions")),
         ("GET", format!("/api/workers/{id}/sessions/claude/{id}")),
@@ -3882,12 +3888,20 @@ async fn capture_app_jwt_opens_only_the_capture_route() {
 /// The orchestrator with apps kept in a fresh temp dir, and its apps listener: their bases
 /// (`ws://` like the rest) and the dir.
 async fn start_with_apps(app: App) -> (String, String, std::path::PathBuf) {
+    start_with_apps_auth(app, Default::default()).await
+}
+
+/// [`start_with_apps`] with the apps listener checking `auth`.
+async fn start_with_apps_auth(
+    app: App,
+    auth: mis_orchestrator::apps_http::Auth,
+) -> (String, String, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!("mis-e2e-apps-{}", uuid::Uuid::new_v4()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base = mis_orchestrator::apps::base_url(None, Some(addr));
     let apps = std::sync::Arc::new(mis_orchestrator::apps::Apps::new(dir.clone(), base));
-    tokio::spawn(mis_orchestrator::serve_apps(listener, apps.clone()));
+    tokio::spawn(mis_orchestrator::serve_apps(listener, apps.clone(), auth));
     let mis = start_app(app.with_apps(apps)).await;
     (mis, format!("ws://{addr}"), dir)
 }
@@ -4080,7 +4094,7 @@ async fn read_token_lists_apps_but_cannot_publish_or_activate() {
 }
 
 #[tokio::test]
-async fn apps_port_refuses_cloudflare_traffic() {
+async fn apps_port_refuses_cloudflare_traffic_without_a_jwt() {
     let (mis, apps, dir) = start_with_apps(App::new(None)).await;
     publish(
         &mis,
@@ -4097,9 +4111,165 @@ async fn apps_port_refuses_cloudflare_traffic() {
     ] {
         for path in ["/a/demo/", "/a/", "/nope"] {
             let (status, head, _) = app_get(&apps, path, &format!("\r\n{h}")).await;
-            assert_eq!(status, 403, "{h} {path}");
+            assert_eq!(status, 401, "{h} {path}");
             assert!(head.contains("nosniff"), "{head}");
         }
     }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+const APPS_AUD: &str = "apps-aud";
+const HOME: &str = "home.example.test";
+
+/// The apps listener's auth: the fixture key's JWTs for [`APPS_AUD`], public host [`HOME`].
+fn apps_auth() -> mis_orchestrator::apps_http::Auth {
+    let jwks = serde_json::from_str(include_str!("fixtures/access-test-jwks.json")).unwrap();
+    let gate =
+        mis_orchestrator::access_gate::AccessGate::with_keys("team".into(), APPS_AUD.into(), jwks);
+    mis_orchestrator::apps_http::Auth {
+        gate: Some(gate),
+        public_host: Some(HOME.into()),
+    }
+}
+
+/// Request-head lines for a request through the tunnel to [`HOME`], signed in as `jwt`.
+fn via_home(jwt: &str) -> String {
+    format!("\r\nHost: {HOME}\r\nCF-Ray: 8f00-SJC\r\nCf-Access-Jwt-Assertion: {jwt}")
+}
+
+#[tokio::test]
+async fn apps_open_to_members_only_through_their_own_access_app() {
+    let (mis, apps, dir) = start_with_apps_auth(behind_access(), apps_auth()).await;
+    let page = "/api/apps/demo/releases?activate=true";
+    assert_eq!(publish(&mis, page, "s", &demo("v1")).await.0, 201);
+    let share = r#"{"email":"Me@Example.com","role":"editor"}"#;
+    let (status, body) = post_json(&mis, "/api/apps/demo/members", "s", share).await;
+    assert_eq!(
+        (status, body.as_str()),
+        (200, r#"[{"email":"me@example.com","role":"editor"}]"#)
+    );
+    // A member, through the tunnel.
+    let me = via_home(&access_jwt_for(APPS_AUD, "me@example.com"));
+    let (status, _, page) = app_get(&apps, "/a/demo/", &me).await;
+    assert_eq!((status, page.as_str()), (200, "v1"));
+    let (status, _, who) = app_get(&apps, "/a/demo/api/v1/me", &me).await;
+    let who: mis_types::AppMe = serde_json::from_str(&who).unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(
+        (who.user.as_str(), who.role, who.app.as_str()),
+        ("me@example.com", mis_types::AppRole::Editor, "demo")
+    );
+    assert!(app_get(&apps, "/a/", &me).await.2.contains("/a/demo/"));
+    // Signed in, but not a member: refused, and not listed.
+    let other = via_home(&access_jwt_for(APPS_AUD, "other@example.com"));
+    for path in [
+        "/a/demo/",
+        "/a/demo/app.json",
+        "/a/demo/api/v1/me",
+        "/a/demo",
+        "/a/nope/",
+    ] {
+        assert_eq!(app_get(&apps, path, &other).await.0, 403, "{path}");
+    }
+    let (status, _, list) = app_get(&apps, "/a/", &other).await;
+    assert_eq!(status, 200);
+    assert!(!list.contains("demo"), "{list}");
+    // The MIS app's JWT doesn't open apps; the apps JWT doesn't open MIS.
+    let mis_jwt = via_home(&access_jwt_for(ACCESS_AUD, "me@example.com"));
+    assert_eq!(app_get(&apps, "/a/demo/", &mis_jwt).await.0, 401);
+    let apps_jwt = access_jwt_for(APPS_AUD, "me@example.com");
+    let tunnel = [
+        ("cf-ray", "8f00-SJC"),
+        ("cf-access-jwt-assertion", apps_jwt.as_str()),
+    ];
+    assert_eq!(client_status(&mis, &tunnel).await, 401);
+    assert_eq!(call(&mis, "GET", "/api/apps", &tunnel, None).await.0, 401);
+    // Another Host (a DNS-rebound name), even with a member's JWT.
+    let rebound = me.replace(HOME, "evil.example");
+    assert_eq!(app_get(&apps, "/a/demo/", &rebound).await.0, 421);
+    // Through the tunnel with no JWT: Access isn't in front, so nobody gets in.
+    let bare = format!("\r\nHost: {HOME}\r\nCF-Ray: 8f00-SJC");
+    assert_eq!(app_get(&apps, "/a/demo/", &bare).await.0, 401);
+    // Direct on loopback, no Cloudflare headers: `local`, owner of every app.
+    let (status, _, who) = app_get(&apps, "/a/demo/api/v1/me", "").await;
+    assert_eq!(
+        (status, who.as_str()),
+        (200, r#"{"user":"local","role":"owner","app":"demo"}"#)
+    );
+    // `/api/` is the server's: no entry-page fallback, GET only for /me.
+    for path in [
+        "/a/demo/api/v1/nope",
+        "/a/demo/api",
+        "/a/demo/api/",
+        "/a/demo/%61pi/v1/x",
+    ] {
+        assert_eq!(app_get(&apps, path, "").await.0, 404, "{path}");
+    }
+    let (status, _, _) = http(&apps, "PUT /a/demo/api/v1/me HTTP/1.1", b"").await;
+    assert_eq!(status, 405);
+    // Unshared again: refused.
+    let unshare = r#"{"email":"me@example.com","role":null}"#;
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/members", "s", unshare).await,
+        (200, "[]".into())
+    );
+    assert_eq!(app_get(&apps, "/a/demo/", &me).await.0, 403);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn apps_refuse_lan_requests_without_a_jwt() {
+    use axum::extract::connect_info::MockConnectInfo;
+    let dir = std::env::temp_dir().join(format!("mis-e2e-apps-{}", uuid::Uuid::new_v4()));
+    let apps = std::sync::Arc::new(mis_orchestrator::apps::Apps::new(dir.clone(), None));
+    let bundle = mis_orchestrator::apps::unpack(&demo("v1")).unwrap();
+    apps.publish("demo", &bundle, 0, true).unwrap();
+    apps.set_member("demo", "me@example.com", Some(mis_types::AppRole::Viewer))
+        .unwrap();
+    // Every request seems to come from a LAN peer.
+    let lan = std::net::SocketAddr::from(([192, 168, 1, 9], 50000));
+    let router = mis_orchestrator::apps_http::router(apps, std::sync::Arc::new(apps_auth()))
+        .layer(MockConnectInfo(lan));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("ws://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    let host = format!("\r\nHost: {HOME}");
+    assert_eq!(app_get(&base, "/a/demo/", "").await.0, 401);
+    assert_eq!(app_get(&base, "/a/demo/", &host).await.0, 401);
+    // With the apps JWT it is let in.
+    let jwt = access_jwt_for(APPS_AUD, "me@example.com");
+    let signed = format!("{host}\r\nCf-Access-Jwt-Assertion: {jwt}");
+    assert_eq!(app_get(&base, "/a/demo/", &signed).await.0, 200);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn read_token_sees_members_but_cannot_share() {
+    let (mis, _, dir) = start_with_apps(with_read_token()).await;
+    assert_eq!(
+        publish(&mis, "/api/apps/demo/releases", "s", &demo("v1"))
+            .await
+            .0,
+        201
+    );
+    let share = r#"{"email":"k@example.com","role":"viewer"}"#;
+    let (status, _) = post_json(&mis, "/api/apps/demo/members", "r", share).await;
+    assert_eq!(status, 403);
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/members", "s", share)
+            .await
+            .0,
+        200
+    );
+    let (_, body) = get_json(&mis, "/api/apps", "r").await;
+    let list: Vec<AppView> = serde_json::from_str(&body).unwrap();
+    assert_eq!(list[0].members[0].email, "k@example.com");
+    let bad = r#"{"email":"not-an-email","role":"viewer"}"#;
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/members", "s", bad).await.0,
+        400
+    );
+    let (status, _) = post_json(&mis, "/api/apps/nope/members", "s", share).await;
+    assert_eq!(status, 404);
     std::fs::remove_dir_all(dir).unwrap();
 }

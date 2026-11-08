@@ -357,6 +357,14 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .app .row button { min-height: 2.25rem; padding: 0 .875rem; border-radius: .625rem; font-size: .8125rem; }
   .app .golive { background: var(--bg); }
   .app .err { margin-top: .25rem; overflow-wrap: anywhere; }
+  /* Members: email, role and remove per row; then email + role + Share. 16px fields: iOS zooms into smaller ones. */
+  .members { margin: .75rem 0 0; padding: 0; list-style: none; }
+  .mrow { display: flex; align-items: center; gap: .5rem; min-height: 2.25rem; }
+  .mrow .one { flex: 1; min-width: 0; }
+  .app .mrow button, .share button { min-height: 2rem; padding: 0 .75rem; border-radius: .625rem; font-size: .8125rem; }
+  .share { display: flex; gap: .5rem; margin: .5rem 0 0; }
+  .share input { flex: 1; min-width: 0; min-height: 2.5rem; padding: 0 .75rem; font-size: 1rem; }
+  .share select { min-height: 2.5rem; font-size: 1rem; }
   /* A merge approval: the PR's facts as a small grid. */
   .appr dl { display: grid; grid-template-columns: auto 1fr; gap: .125rem .75rem; margin: .25rem 0 .5rem; font-size: .8125rem; }
   .appr dt { color: var(--dim); }
@@ -3313,11 +3321,13 @@ function pickRoutine(e, name) {
   if (route().view === 'routines') { e.preventDefault(); renderRoutines(); }
 }
 
-// Apps the orchestrator hosts, fetched on open, every 10 s while shown, and after an activation.
+// Apps the orchestrator hosts, fetched on open, every 10 s while shown, and after an activation or share.
 let hosted = null; // { list } | { error } | null while reading
 let hostedAsked = null;
-let appAsk = null, appBusy = null; // slug whose activate confirm is open; slug activating
-const appErr = new Map(); // slug -> why its activation failed
+let appAsk = null, appBusy = null; // slug whose activate confirm is open; slug activating or sharing
+let memberAsk = null; // [slug, email] whose remove confirm is open
+const appErr = new Map(); // slug -> why its last activation or share failed
+const shareDraft = new Map(); // slug -> { email, role } typed into its share form
 async function loadApps() {
   const ask = {};
   hostedAsked = ask;
@@ -3341,6 +3351,47 @@ async function activateApp(slug, n) {
   appBusy = null;
   await loadApps();
 }
+// Share `slug` with `email` as `role`; null role stops sharing.
+async function setMember(slug, email, role) {
+  memberAsk = null; appBusy = slug;
+  renderApps();
+  try {
+    const r = await fetch(`/api/apps/${encodeURIComponent(slug)}/members`, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ email, role }) });
+    if (r.ok) { appErr.delete(slug); if (role) shareDraft.delete(slug); } else appErr.set(slug, (await r.text()) || `error ${r.status}`);
+  } catch { appErr.set(slug, 'couldn’t reach the orchestrator'); }
+  appBusy = null;
+  await loadApps();
+}
+// Who an app is shared with; full access can share it and, after a confirm, stop sharing.
+function appMembers(a, busy) {
+  const askRemove = (who) => { memberAsk = who; renderApps(); };
+  const rows = a.members.map((m) => {
+    const asking = memberAsk && memberAsk[0] === a.slug && memberAsk[1] === m.email;
+    return el('li', {},
+      el('div', { className: 'mrow' }, el('span', { className: 'one' }, m.email), el('span', { className: 'dim' }, m.role),
+        readOnly ? '' : el('button', { type: 'button', disabled: busy || asking, onclick: () => askRemove([a.slug, m.email]) }, 'Remove')),
+      !asking ? '' : el('div', { className: 'golive' },
+        el('p', {}, `Stop sharing ${a.title} with ${m.email}? Their next request is refused.`),
+        el('div', { className: 'row' },
+          el('button', { disabled: busy, onclick: () => setMember(a.slug, m.email, null) }, 'Yes, stop sharing'),
+          el('button', { type: 'button', onclick: () => askRemove(null) }, 'Keep'))));
+  });
+  const list = rows.length ? el('ul', { className: 'members' }, ...rows) : el('div', { className: 'sub dim' }, 'Shared with no one');
+  if (readOnly) return list;
+  const draft = shareDraft.get(a.slug) || { email: '', role: 'viewer' };
+  const keep = () => shareDraft.set(a.slug, { email: email.value, role: role.value });
+  const email = el('input', { type: 'email', placeholder: 'Email', ariaLabel: `Share ${a.title} with`, autocomplete: 'off', autocapitalize: 'off', spellcheck: false, required: true, value: draft.email, oninput: keep });
+  const role = el('select', { ariaLabel: 'Role', onchange: keep }, ...['viewer', 'editor', 'owner'].map((r) => el('option', { value: r, selected: r === draft.role }, r)));
+  const form = el('form', { className: 'share', onsubmit: (e) => { e.preventDefault(); setMember(a.slug, email.value.trim(), role.value); } },
+    email, role, el('button', { disabled: busy }, 'Share'));
+  return el('div', {}, list, form);
+}
+// A relative time that renderApps refreshes in place.
+function appAge(at, now) {
+  const s = el('span', {}, ago(now - at));
+  s.dataset.at = at;
+  return s;
+}
 function appRow(a, now) {
   const newest = a.releases[a.releases.length - 1];
   const ready = newest && newest.n > (a.active || 0) ? newest : null;
@@ -3357,16 +3408,23 @@ function appRow(a, now) {
     el('div', { className: 'head' }, el('strong', {}, a.title),
       a.active && a.url ? el('a', { href: a.url, target: '_blank', rel: 'noopener' }, 'Open ↗') : ''),
     el('div', { className: 'sub dim' }, ...dots([a.slug, a.active ? `v${a.active} live` : 'not live', plural(a.releases.length, 'release')])),
-    ready ? el('div', { className: 'sub dim' }, `v${ready.n} ready · published ${ago(now - ready.at)}`) : '',
+    ready ? el('div', { className: 'sub dim' }, `v${ready.n} ready · published `, appAge(ready.at, now)) : '',
     err ? el('div', { className: 'err bad' }, err) : '',
-    actions, confirm);
+    actions, confirm, appMembers(a, busy));
 }
 function renderApps() {
   if (!everOpen) return; // fetch once connected, with the token in place
-  if (!hosted) { if (!$('app-list').querySelector('.skel')) $('app-list').replaceChildren(el('li', {}, skel())); if (!hostedAsked) loadApps(); return; }
-  if (hosted.error) { $('app-list').replaceChildren(el('li', { className: 'bad' }, hosted.error)); return; }
+  if (!hosted) { delete $('app-list').dataset.key; if (!$('app-list').querySelector('.skel')) $('app-list').replaceChildren(el('li', {}, skel())); if (!hostedAsked) loadApps(); return; }
+  if (hosted.error) { delete $('app-list').dataset.key; $('app-list').replaceChildren(el('li', { className: 'bad' }, hosted.error)); return; }
+  // Rebuilt only when something shown changes, so a share form being typed into survives other updates.
+  const key = JSON.stringify([hosted.list, appAsk, appBusy, memberAsk, [...appErr], readOnly]);
   const now = Date.now() + skew;
+  if ($('app-list').dataset.key === key) {
+    for (const s of $('app-list').querySelectorAll('[data-at]')) s.textContent = ago(now - Number(s.dataset.at));
+    return;
+  }
   $('app-list').replaceChildren(...hosted.list.map((a) => appRow(a, now)));
+  $('app-list').dataset.key = key;
   if (!hosted.list.length) $('app-list').append(el('li', { className: 'dim' }, 'No apps yet: publish one with mis apps publish <name> <folder>'));
 }
 

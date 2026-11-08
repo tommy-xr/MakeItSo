@@ -279,8 +279,8 @@ Each publish is a new numbered release, all kept, in `<state-dir>/apps/<name>/re
 `<state-dir>/apps/<name>/active` holds the live n. Names are `a-z`, `0-9` and `-`, up to 32.
 `POST /api/apps/<name>/releases` (raw `.tar.gz` body, `?activate=true` to go live) and
 `POST /api/apps/<name>/activate` (`{"release": n}`) need the full token; `GET /api/apps` lists
-them for read-only tokens too. Menu -> Apps shows each app, links out to the live one and asks
-before making a newer release live.
+them for read-only tokens too. Menu -> Apps shows each app and who it's shared with, links out to
+the live one and asks before making a newer release live or removing someone.
 
 The apps listener serves the live release at `/a/<name>/` (paths without an extension fall back to
 the entry page, for client-side routes) and a list of live apps at `/a/`. Every response sends
@@ -290,6 +290,47 @@ isolated from each other. An entry page at `/a/<name>/scores/2026` resolves rela
 `scores/`, so client-side routers should use absolute asset paths (`/a/<name>/...`) or hash routes. Set `--apps-public-url` / `MIS_APPS_PUBLIC_URL` (e.g.
 `https://home.example.com`) so app links point there (needed when it binds `0.0.0.0`).
 
-**Don't route a tunnel to the apps port yet.** It checks no identity: until it does, it refuses
-every request that came through Cloudflare, and anyone who can reach it directly (bind beyond
-loopback) sees every live app.
+### Who sees an app
+
+Each app opens only for its members, in `<state-dir>/apps/<name>/policy.json` (outside every
+bundle): `{"members": {"spouse@example.com": "editor"}}`. Any member may open the app; its role
+(viewer, editor or owner) is what `/api/v1/me` reports, for the app to act on until the server
+stores app data. Emails match ignoring case. An app shared with no one opens for nobody but
+direct loopback requests.
+
+```sh
+mis apps share pool spouse@example.com --role editor   # viewer (default), editor or owner
+mis apps unshare pool spouse@example.com
+mis apps list                                          # members under each app
+```
+
+`POST /api/apps/<name>/members` (`{"email", "role"}`, `role: null` removes) needs the full token.
+The apps listener answers only to the host of `--apps-public-url` or a loopback name (anything
+else: 421, so a DNS-rebound name gets nothing). Who is asking:
+
+- a valid JWT of the home Access app (`--apps-cf-access-aud`): that email. The MIS Access app's
+  JWT is refused here, and this one is refused by the orchestrator;
+- a direct loopback request with no Cloudflare headers: `local`, owner of every app (dev, tests).
+  So a proxy on this machine other than cloudflared (e.g. `tailscale serve`) makes everyone it
+  admits an owner;
+- anything else (through the tunnel without a JWT, or from the LAN): 401.
+
+`/a/` lists only your apps; another app's paths answer 403. `GET /a/<name>/api/v1/me` returns
+`{"user", "role", "app"}`. `/a/<name>/api/` belongs to the server, not the bundle; its routes take
+only GET and POST.
+
+### Household setup
+
+1. Tunnel: add an ingress rule `home.<domain>` -> `http://localhost:7475` beside the MIS one.
+2. Access -> Applications -> Add -> Self-hosted for `home.<domain>`: a policy *Allow* with
+   *Emails* you and your spouse, login by Google or one-time PIN, session ~1 month. **Never reuse
+   an Access policy or group between the MIS and home Access apps**: adding someone to the
+   household must never let them into MIS.
+3. Run the orchestrator with that app's AUD (same team as `MIS_CF_ACCESS_TEAM`):
+
+   ```sh
+   MIS_APPS_BIND=127.0.0.1:7475 MIS_APPS_PUBLIC_URL=https://home.<domain> \
+   MIS_APPS_CF_ACCESS_AUD=<home-aud-tag> mis-orchestrator --cf-access-team <team> --cf-access-aud <aud-tag>
+   ```
+
+4. `mis apps share <name> <email> --role editor` for each person and app.

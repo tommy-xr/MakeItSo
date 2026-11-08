@@ -132,6 +132,33 @@ enum AppsCmd {
     },
     /// Make release `n` live; an earlier n reverts.
     Activate { slug: String, n: u32 },
+    /// Let `email` open the app (signed in through the home Access app), as `role`.
+    Share {
+        slug: String,
+        email: String,
+        #[arg(long, value_enum, default_value = "viewer")]
+        role: Role,
+    },
+    /// Stop sharing the app with `email`.
+    Unshare { slug: String, email: String },
+}
+
+/// [`AppRole`], for clap.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Role {
+    Owner,
+    Editor,
+    Viewer,
+}
+
+impl From<Role> for AppRole {
+    fn from(r: Role) -> Self {
+        match r {
+            Role::Owner => AppRole::Owner,
+            Role::Editor => AppRole::Editor,
+            Role::Viewer => AppRole::Viewer,
+        }
+    }
 }
 
 async fn apps(args: &Args, cmd: &AppsCmd) -> Result<()> {
@@ -174,7 +201,38 @@ async fn apps(args: &Args, cmd: &AppsCmd) -> Result<()> {
             call(args, req).await?;
             println!("{slug}: release {n} live");
         }
+        AppsCmd::Share { slug, email, role } => {
+            set_member(args, &client, &base, slug, email, Some((*role).into())).await?;
+            println!(
+                "{slug}: shared with {email} as {}",
+                AppRole::from(*role).as_str()
+            );
+        }
+        AppsCmd::Unshare { slug, email } => {
+            set_member(args, &client, &base, slug, email, None).await?;
+            println!("{slug}: no longer shared with {email}");
+        }
     }
+    Ok(())
+}
+
+async fn set_member(
+    args: &Args,
+    client: &reqwest::Client,
+    base: &str,
+    slug: &str,
+    email: &str,
+    role: Option<AppRole>,
+) -> Result<()> {
+    let body = SetMember {
+        email: email.into(),
+        role,
+    };
+    let req = client
+        .post(format!("{base}/api/apps/{slug}/members"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_string(&body)?);
+    call(args, req).await?;
     Ok(())
 }
 
@@ -232,6 +290,13 @@ fn app_lines(a: &AppView, now: u64) -> String {
     }
     head.extend(a.url.clone());
     let mut out = head.join(" · ");
+    let members: Vec<String> = (a.members.iter())
+        .map(|m| format!("{} ({})", m.email, m.role.as_str()))
+        .collect();
+    out.push_str(&match members.is_empty() {
+        true => "\n    shared with no one".into(),
+        false => format!("\n    shared with {}", members.join(", ")),
+    });
     for r in a.releases.iter().rev() {
         let live = if Some(r.n) == a.active {
             " · live"
@@ -1359,19 +1424,32 @@ mod tests {
             url: Some("http://127.0.0.1:7475/a/demo/".into()),
             active: Some(1),
             releases: vec![r(1, 0, 512), r(2, 60_000, 1536)],
+            members: vec![
+                AppMember {
+                    email: "me@example.com".into(),
+                    role: AppRole::Owner,
+                },
+                AppMember {
+                    email: "k@example.com".into(),
+                    role: AppRole::Viewer,
+                },
+            ],
         };
         assert_eq!(
             app_lines(&a, 120_000),
             "demo · Demo · v1 live · v2 ready · http://127.0.0.1:7475/a/demo/\n    \
+             shared with me@example.com (owner), k@example.com (viewer)\n    \
              v2 · 1m00s ago · 1.5 KiB · abababababab\n    \
              v1 · 2m00s ago · 512 B · abababababab · live"
         );
         let staged = AppView {
             active: None,
             url: None,
+            members: vec![],
             ..a
         };
-        assert!(app_lines(&staged, 0).starts_with("demo · Demo · not live · v2 ready\n"));
+        assert!(app_lines(&staged, 0)
+            .starts_with("demo · Demo · not live · v2 ready\n    shared with no one\n"));
     }
 
     #[test]

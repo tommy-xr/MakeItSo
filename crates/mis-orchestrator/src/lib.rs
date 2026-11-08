@@ -24,6 +24,7 @@ pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("MIS_GIT_
 
 pub mod access;
 pub mod access_gate;
+pub mod app_access;
 pub mod apps;
 pub mod apps_http;
 pub mod capture;
@@ -986,7 +987,7 @@ fn same_origin(origin: &str, host: &str) -> bool {
 }
 
 /// `localhost:7474`, `127.0.0.1`, `[::1]:7474`.
-fn loopback_host(host: &str) -> bool {
+pub(crate) fn loopback_host(host: &str) -> bool {
     let Ok(a) = host.parse::<axum::http::uri::Authority>() else {
         return false;
     };
@@ -1039,6 +1040,7 @@ pub fn router(app: App) -> Router {
         .route("/api/apps", get(list_apps))
         .route("/api/apps/{slug}/releases", post(publish_app))
         .route("/api/apps/{slug}/activate", post(activate_app))
+        .route("/api/apps/{slug}/members", post(set_app_member))
         .route("/api/sessions", get(live_sessions))
         .route("/api/workers/{id}/sessions", get(sessions))
         .route(
@@ -1089,8 +1091,14 @@ pub async fn serve_until(
 }
 
 /// The apps listener; see [`apps_http`].
-pub async fn serve_apps(listener: TcpListener, apps: Arc<apps::Apps>) -> anyhow::Result<()> {
-    Ok(axum::serve(listener, apps_http::router(apps)).await?)
+pub async fn serve_apps(
+    listener: TcpListener,
+    apps: Arc<apps::Apps>,
+    auth: apps_http::Auth,
+) -> anyhow::Result<()> {
+    let svc =
+        apps_http::router(apps, Arc::new(auth)).into_make_service_with_connect_info::<SocketAddr>();
+    Ok(axum::serve(listener, svc).await?)
 }
 
 /// `--self-test`: this build can read the task history in `dir` (without taking its lock: the
@@ -1680,6 +1688,45 @@ async fn activate_app(
         Err(apps::ActivateError::Io(e)) => {
             tracing::warn!("activating an app: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Share an app with an email as a role, or (`role: null`) stop sharing it; its members after.
+async fn set_app_member(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    body: Bytes,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/apps").await {
+        return refused.into_response();
+    }
+    let Some(apps) = &app.apps else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "apps are off: no state dir",
+        )
+            .into_response();
+    };
+    let change = match serde_json::from_slice::<mis_types::SetMember>(&body) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    if !apps::valid_slug(&slug) {
+        return (StatusCode::NOT_FOUND, "no such app").into_response();
+    }
+    let apps = apps.clone();
+    let set =
+        tokio::task::spawn_blocking(move || apps.set_member(&slug, &change.email, change.role));
+    match set.await.expect("sharing doesn't panic") {
+        Ok(members) => Json(members).into_response(),
+        Err(apps::MemberError::NoSuchApp) => (StatusCode::NOT_FOUND, "no such app").into_response(),
+        Err(apps::MemberError::Invalid(why)) => (StatusCode::BAD_REQUEST, why).into_response(),
+        Err(apps::MemberError::Io(e)) => {
+            tracing::warn!("sharing an app: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
         }
     }
 }
