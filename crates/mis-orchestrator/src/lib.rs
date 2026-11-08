@@ -1386,7 +1386,7 @@ async fn upload(
 }
 
 /// Keep a link, text and/or images shared from a phone (multipart `url`, `text`, `via`,
-/// up to 4 `image` files) in the inbox before replying `{"id", "file"}`: 201, or 200
+/// up to 4 `image` files; or those text fields url-encoded) in the inbox before replying `{"id", "file"}`: 201, or 200
 /// for a resend of one already kept. Capture tokens and full access only.
 async fn capture(
     State(app): State<App>,
@@ -1405,11 +1405,31 @@ async fn capture(
         return (StatusCode::SERVICE_UNAVAILABLE, "captures are off").into_response();
     };
     // Parsed only once admitted, so strangers learn nothing about the form.
-    let form = match axum::extract::Multipart::from_request(req, &()).await {
-        Ok(form) => form,
-        Err(e) => return e.into_response(),
+    // iOS Shortcuts sends multipart only when a file is attached; else url-encoded.
+    let url_encoded = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|t| {
+            t.to_ascii_lowercase()
+                .starts_with("application/x-www-form-urlencoded")
+        });
+    let c = if url_encoded {
+        match axum::Form::<TextCapture>::from_request(req, &()).await {
+            Ok(axum::Form(f)) => text_capture(f),
+            // Unknown or repeated fields: 400 like the multipart path, not axum's 422.
+            Err(e) => match e.status() {
+                StatusCode::UNPROCESSABLE_ENTITY => Err((StatusCode::BAD_REQUEST, e.body_text())),
+                status => Err((status, e.body_text())),
+            },
+        }
+    } else {
+        match axum::extract::Multipart::from_request(req, &()).await {
+            Ok(form) => capture_form(form).await,
+            Err(e) => return e.into_response(),
+        }
     };
-    let c = match capture_form(form).await {
+    let c = match c {
         Ok(c) => c,
         Err(refused) => return refused.into_response(),
     };
@@ -1457,11 +1477,35 @@ async fn capture_form(
         }
         *slot = Some(field.text().await.map_err(refuse)?);
     }
-    capture::Capture::new(url, text, images, via).map_err(|r| match r {
+    capture::Capture::new(url, text, images, via).map_err(refused_capture)
+}
+
+/// A url-encoded capture: the same fields, no files. Duplicates and unknown fields
+/// are refused by serde.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TextCapture {
+    url: Option<String>,
+    text: Option<String>,
+    via: Option<String>,
+    /// Tolerated empty, in case a client sends an empty file field as `image=`.
+    image: Option<String>,
+}
+
+fn text_capture(f: TextCapture) -> Result<capture::Capture, (StatusCode, String)> {
+    if f.image.is_some_and(|i| !i.is_empty()) {
+        let why = "images need multipart/form-data".to_string();
+        return Err((StatusCode::BAD_REQUEST, why));
+    }
+    capture::Capture::new(f.url, f.text, Vec::new(), f.via).map_err(refused_capture)
+}
+
+fn refused_capture(r: capture::Refused) -> (StatusCode, String) {
+    match r {
         capture::Refused::Invalid(why) => (StatusCode::BAD_REQUEST, why),
         capture::Refused::TooLarge(why) => (StatusCode::PAYLOAD_TOO_LARGE, why),
         capture::Refused::NotAnImage(why) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, why),
-    })
+    }
 }
 
 /// For `scripts/mis-up --watch`: the update shown to clients, and how many
