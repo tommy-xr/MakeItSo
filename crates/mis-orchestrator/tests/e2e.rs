@@ -3703,6 +3703,9 @@ async fn refused_everywhere_else(base: &str, headers: &[(&'static str, &str)]) {
         ("GET", format!("/api/tasks/{id}/diff")),
         ("GET", "/api/routines".into()),
         ("POST", "/api/routines/r/run".into()),
+        ("GET", "/api/apps".into()),
+        ("POST", "/api/apps/a/releases".into()),
+        ("POST", "/api/apps/a/activate".into()),
         ("GET", "/api/sessions".into()),
         ("GET", format!("/api/workers/{id}/sessions")),
         ("GET", format!("/api/workers/{id}/sessions/claude/{id}")),
@@ -3778,6 +3781,89 @@ async fn capture_is_kept_once_and_its_token_opens_nothing_else() {
     let full = ("authorization", "Bearer s");
     assert_eq!(capture(&base, &[full], &text).await.0, 201);
     refused_everywhere_else(&base, &[bearer]).await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn capture_takes_the_url_encoded_form_shortcuts_send_without_a_file() {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-capture-{}", uuid::Uuid::new_v4()));
+    let base = start_app(capturing(&dir)).await;
+    let bearer = [("authorization", "Bearer c")];
+    let post = |body: &str| {
+        let body = (
+            "application/x-www-form-urlencoded".to_string(),
+            body.as_bytes().to_vec(),
+        );
+        call(&base, "POST", "/api/capture", &bearer, Some(body))
+    };
+    // Byte for byte what iOS Shortcuts sent for a shared page with a note.
+    let (status, body) =
+        post("url=https%3A%2F%2Fexample.com%2Fpage&text=debug+note+%23amf&via=shortcut").await;
+    assert_eq!(status, 201, "{body}");
+    let saved: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let md = std::fs::read_to_string(
+        dir.join("captures/inbox")
+            .join(saved["file"].as_str().unwrap()),
+    )
+    .unwrap();
+    assert!(md.contains("url: \"https://example.com/page\"\n"), "{md}");
+    assert!(md.ends_with("---\ndebug note #amf"), "{md}");
+    // An empty file field comes through as `image=`; a value there isn't a file.
+    assert_eq!(post("text=two&image=").await.0, 201);
+    assert_eq!(post("text=three&image=aGk%3D").await.0, 400);
+    assert_eq!(post("text=a&text=b").await.0, 400);
+    assert_eq!(post("prompt=rm").await.0, 400);
+    assert_eq!(post("url=&text=&via=shortcut").await.0, 400);
+    let read = [("authorization", "Bearer r")];
+    let body = (
+        "application/x-www-form-urlencoded".to_string(),
+        b"text=x".to_vec(),
+    );
+    assert_eq!(
+        call(&base, "POST", "/api/capture", &read, Some(body))
+            .await
+            .0,
+        401
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn capture_app_jwt_opens_only_the_capture_route() {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-capture-{}", uuid::Uuid::new_v4()));
+    let jwks = serde_json::from_str(include_str!("fixtures/access-test-jwks.json")).unwrap();
+    let gate = mis_orchestrator::access_gate::AccessGate::with_keys(
+        "team".into(),
+        ACCESS_AUD.into(),
+        jwks,
+    )
+    .with_capture_aud("capture-aud".into());
+    let base = start_app(capturing(&dir).with_access(gate)).await;
+    let jwt = access_jwt("capture-aud");
+    let tunnel = [
+        ("cf-ray", "8f00-SJC"),
+        ("cf-access-jwt-assertion", jwt.as_str()),
+    ];
+    let with = |token| [tunnel[0], tunnel[1], ("authorization", token)];
+    let text: [(&str, Option<&str>, &[u8]); 1] = [("text", None, b"from the phone")];
+    assert_eq!(capture(&base, &with("Bearer c"), &text).await.0, 201);
+    // The JWT alone can't capture, and opens nothing else, whatever token rides along.
+    assert_eq!(capture(&base, &tunnel, &text).await.0, 401);
+    refused_everywhere_else(&base, &tunnel).await;
+    for token in ["Bearer c", "Bearer s", "Bearer r"] {
+        refused_everywhere_else(&base, &with(token)).await;
+    }
+    // A main-app login still opens everything, but not for a capture token.
+    let main = access_jwt(ACCESS_AUD);
+    let login = [
+        ("cf-ray", "8f00-SJC"),
+        ("cf-access-jwt-assertion", main.as_str()),
+    ];
+    assert_eq!(client_status(&base, &login).await, 101);
+    let login_with_capture = [login[0], login[1], ("authorization", "Bearer c")];
+    refused_everywhere_else(&base, &login_with_capture).await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
 
 /// The orchestrator with apps kept in a fresh temp dir, and its apps listener: their bases
 /// (`ws://` like the rest) and the dir.
@@ -3915,50 +4001,6 @@ async fn apps_publish_activate_and_serve() {
 }
 
 #[tokio::test]
-async fn capture_takes_the_url_encoded_form_shortcuts_send_without_a_file() {
-    let dir = std::env::temp_dir().join(format!("mis-e2e-capture-{}", uuid::Uuid::new_v4()));
-    let base = start_app(capturing(&dir)).await;
-    let bearer = [("authorization", "Bearer c")];
-    let post = |body: &str| {
-        let body = (
-            "application/x-www-form-urlencoded".to_string(),
-            body.as_bytes().to_vec(),
-        );
-        call(&base, "POST", "/api/capture", &bearer, Some(body))
-    };
-    // Byte for byte what iOS Shortcuts sent for a shared page with a note.
-    let (status, body) =
-        post("url=https%3A%2F%2Fexample.com%2Fpage&text=debug+note+%23amf&via=shortcut").await;
-    assert_eq!(status, 201, "{body}");
-    let saved: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let md = std::fs::read_to_string(
-        dir.join("captures/inbox")
-            .join(saved["file"].as_str().unwrap()),
-    )
-    .unwrap();
-    assert!(md.contains("url: \"https://example.com/page\"\n"), "{md}");
-    assert!(md.ends_with("---\ndebug note #amf"), "{md}");
-    // An empty file field comes through as `image=`; a value there isn't a file.
-    assert_eq!(post("text=two&image=").await.0, 201);
-    assert_eq!(post("text=three&image=aGk%3D").await.0, 400);
-    assert_eq!(post("text=a&text=b").await.0, 400);
-    assert_eq!(post("prompt=rm").await.0, 400);
-    assert_eq!(post("url=&text=&via=shortcut").await.0, 400);
-    let read = [("authorization", "Bearer r")];
-    let body = (
-        "application/x-www-form-urlencoded".to_string(),
-        b"text=x".to_vec(),
-    );
-    assert_eq!(
-        call(&base, "POST", "/api/capture", &read, Some(body))
-            .await
-            .0,
-        401
-    );
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[tokio::test]
 async fn apps_refuse_traversal_and_link_archives() {
     let (mis, _, dir) = start_with_apps(App::new(None)).await;
     let app_json: &[u8] = br#"{"title":"Demo","clients":{"web":"index.html"}}"#;
@@ -4020,43 +4062,6 @@ async fn read_token_lists_apps_but_cannot_publish_or_activate() {
     let (_, body) = get_json(&mis, "/api/apps", "r").await;
     let list: Vec<AppView> = serde_json::from_str(&body).unwrap();
     assert_eq!((list[0].active, list[0].releases.len()), (None, 1));
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[tokio::test]
-async fn capture_app_jwt_opens_only_the_capture_route() {
-    let dir = std::env::temp_dir().join(format!("mis-e2e-capture-{}", uuid::Uuid::new_v4()));
-    let jwks = serde_json::from_str(include_str!("fixtures/access-test-jwks.json")).unwrap();
-    let gate = mis_orchestrator::access_gate::AccessGate::with_keys(
-        "team".into(),
-        ACCESS_AUD.into(),
-        jwks,
-    )
-    .with_capture_aud("capture-aud".into());
-    let base = start_app(capturing(&dir).with_access(gate)).await;
-    let jwt = access_jwt("capture-aud");
-    let tunnel = [
-        ("cf-ray", "8f00-SJC"),
-        ("cf-access-jwt-assertion", jwt.as_str()),
-    ];
-    let with = |token| [tunnel[0], tunnel[1], ("authorization", token)];
-    let text: [(&str, Option<&str>, &[u8]); 1] = [("text", None, b"from the phone")];
-    assert_eq!(capture(&base, &with("Bearer c"), &text).await.0, 201);
-    // The JWT alone can't capture, and opens nothing else, whatever token rides along.
-    assert_eq!(capture(&base, &tunnel, &text).await.0, 401);
-    refused_everywhere_else(&base, &tunnel).await;
-    for token in ["Bearer c", "Bearer s", "Bearer r"] {
-        refused_everywhere_else(&base, &with(token)).await;
-    }
-    // A main-app login still opens everything, but not for a capture token.
-    let main = access_jwt(ACCESS_AUD);
-    let login = [
-        ("cf-ray", "8f00-SJC"),
-        ("cf-access-jwt-assertion", main.as_str()),
-    ];
-    assert_eq!(client_status(&base, &login).await, 101);
-    let login_with_capture = [login[0], login[1], ("authorization", "Bearer c")];
-    refused_everywhere_else(&base, &login_with_capture).await;
     std::fs::remove_dir_all(dir).unwrap();
 }
 
