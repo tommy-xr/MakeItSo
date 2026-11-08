@@ -74,3 +74,52 @@ pub struct AppRelease {
     /// Bytes of its files.
     pub size: u64,
 }
+
+/// One snapshot of an app's records, as `GET /api/apps/{slug}/backups` lists it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AppBackup {
+    /// E.g. `daily-20261108T031500.000Z`, `pre-v3-…`: what `restore` takes.
+    pub name: String,
+    pub kind: BackupKind,
+    /// Unix millis it was taken.
+    pub at: u64,
+    /// Bytes of its database.
+    pub size: u64,
+}
+
+/// Why a snapshot was taken; each kind keeps its own newest few.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupKind {
+    Daily,
+    PreActivation,
+    PreRestore,
+    Manual,
+}
+
+impl BackupKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Daily => "daily",
+            Self::PreActivation => "pre-activation",
+            Self::PreRestore => "pre-restore",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+/// `POST /api/apps/{slug}/restore`: replace the app's records with snapshot `backup`, and its
+/// members with that moment's too if `with_policy`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RestoreBackup {
+    pub backup: String,
+    #[serde(default)]
+    pub with_policy: bool,
+}
+
+/// What a restore replies: the snapshot taken just before it (restore it to undo). None: the
+/// app had no records yet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Restored {
+    pub pre_restore: Option<AppBackup>,
+}

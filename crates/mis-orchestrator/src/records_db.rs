@@ -49,8 +49,14 @@ impl Records {
         }
     }
 
-    /// `slug`'s database (a [`crate::apps::valid_slug`] whose folder exists).
-    fn db(&self, slug: &str) -> anyhow::Result<Arc<Mutex<Connection>>> {
+    /// Whether `slug` has a database yet.
+    pub fn has(&self, slug: &str) -> bool {
+        self.dir.join(slug).join("data.sqlite").exists()
+    }
+
+    /// `slug`'s database (a [`crate::apps::valid_slug`] whose folder exists); its lock
+    /// serializes every write.
+    pub(crate) fn db(&self, slug: &str) -> anyhow::Result<Arc<Mutex<Connection>>> {
         let mut open = self.open.lock().unwrap();
         if let Some(db) = open.get(slug) {
             return Ok(db.clone());

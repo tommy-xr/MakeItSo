@@ -419,6 +419,51 @@ queries and viewer 403s, so screenshots and UI tests need no data. `(await mis.m
 changes the role; nothing is kept across reloads. Both are tested by
 `node --test crates/mis-orchestrator/tests/sdk.test.mjs`.
 
+### Backups
+
+Each app's records are snapshotted through SQLite's backup API (never a file copy of the live
+database) into `<state-dir>/apps/<name>/backups/`: `<snapshot>.sqlite` (`0600`, one file) beside
+`<snapshot>.policy.json`, who it was shared with then. Each kind keeps its newest few:
+
+| Kind | Taken | Kept |
+| --- | --- | --- |
+| `daily-<time>` | once a local day, checked hourly and at start, if its records changed since its last snapshot | 7 |
+| `pre-v<n>-<time>` | before release n goes live (no snapshot, no activation; none if already live) | 5 |
+| `pre-restore-<time>` | before every restore | 5 |
+| `manual-<time>` | `mis apps backup` | 5 |
+
+```sh
+mis apps backups pool                                   # newest first: name, kind, age, size
+mis apps backup pool                                    # manual-20261108T031500.123Z
+mis apps restore pool manual-20261108T031500.123Z       # prints the pre-restore one, to undo
+mis apps restore pool daily-20261107T080000.000Z --with-policy   # members too
+```
+
+A restore takes the pre-restore snapshot and copies the chosen one into the live database in one
+hold of the app's write lock, so every write lands either in that snapshot or after the restore.
+Restored revisions continue past every earlier one (and ids the snapshot lacks stay removed), so a
+page still holding a revision from before gets a 409 instead of overwriting. Members change only
+with `--with-policy`. A file that isn't an intact records database is refused. `GET /api/apps/<name>/backups` lists them (read-only
+tokens too); `POST /api/apps/<name>/backups` (manual) and `POST /api/apps/<name>/restore`
+(`{"backup", "with_policy"}`) need the full token. Snapshots stay on this machine: copy
+`<state-dir>/apps` elsewhere yourself to survive losing it.
+
+#### Restore an app on a new machine
+
+Stop the orchestrator there if it's running, then for each app copy, from the old state dir (or
+your copy of it), a snapshot and the release folders:
+
+```sh
+OLD=/backup/mis-state/apps/pool NEW=~/.local/state/mis/apps/pool
+mkdir -p "$NEW" && cp -R "$OLD/releases" "$OLD/active" "$NEW/"
+cp "$OLD/backups/daily-20261107T080000.000Z.sqlite" "$NEW/data.sqlite"
+cp "$OLD/backups/daily-20261107T080000.000Z.policy.json" "$NEW/policy.json"
+chmod -R go-rwx "$NEW"
+```
+
+Start the orchestrator: the app serves its live release with those records and members. Without
+`active`, `mis apps activate pool <n>`.
+
 ### Household setup
 
 1. Tunnel: add an ingress rule `home.<domain>` -> `http://localhost:7475` beside the MIS one.

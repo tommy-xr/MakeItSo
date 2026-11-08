@@ -27,6 +27,7 @@ pub mod access_gate;
 pub mod app_access;
 pub mod apps;
 pub mod apps_http;
+pub mod backups;
 pub mod capture;
 pub mod email;
 pub mod evidence;
@@ -1044,6 +1045,11 @@ pub fn router(app: App) -> Router {
         .route("/api/apps/{slug}/releases", post(publish_app))
         .route("/api/apps/{slug}/activate", post(activate_app))
         .route("/api/apps/{slug}/members", post(set_app_member))
+        .route(
+            "/api/apps/{slug}/backups",
+            get(app_backups).post(back_up_app),
+        )
+        .route("/api/apps/{slug}/restore", post(restore_app))
         .route("/api/sessions", get(live_sessions))
         .route("/api/workers/{id}/sessions", get(sessions))
         .route(
@@ -1685,7 +1691,8 @@ async fn activate_app(
         return (StatusCode::NOT_FOUND, "no such release").into_response();
     }
     let apps = apps.clone();
-    let activated = tokio::task::spawn_blocking(move || apps.activate(&slug, n));
+    let at = unix_ms();
+    let activated = tokio::task::spawn_blocking(move || apps.activate(&slug, n, at));
     match activated.await.expect("activating doesn't panic") {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(apps::ActivateError::NoSuchRelease) => {
@@ -1732,6 +1739,101 @@ async fn set_app_member(
         Err(apps::MemberError::Invalid(why)) => (StatusCode::BAD_REQUEST, why).into_response(),
         Err(apps::MemberError::Io(e)) => {
             tracing::warn!("sharing an app: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
+        }
+    }
+}
+
+/// `slug`'s snapshots, oldest first (`Vec<AppBackup>`). Read-only, like the apps list.
+async fn app_backups(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> Response {
+    if !app.admit(&headers, peer, "/api/apps").await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(apps) = app.apps.clone() else {
+        let off = "apps are off: no state dir";
+        return (StatusCode::SERVICE_UNAVAILABLE, off).into_response();
+    };
+    if !apps::valid_slug(&slug) {
+        return (StatusCode::NOT_FOUND, "no such app").into_response();
+    }
+    let list = tokio::task::spawn_blocking(move || apps.backups(&slug));
+    match list.await.expect("listing backups doesn't panic") {
+        Some(list) => Json(list).into_response(),
+        None => (StatusCode::NOT_FOUND, "no such app").into_response(),
+    }
+}
+
+/// Snapshot `slug`'s records now: 201 with the `AppBackup`. Full scope only.
+async fn back_up_app(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/apps").await {
+        return refused.into_response();
+    }
+    let Some(apps) = app.apps.clone() else {
+        let off = "apps are off: no state dir";
+        return (StatusCode::SERVICE_UNAVAILABLE, off).into_response();
+    };
+    if !apps::valid_slug(&slug) {
+        return (StatusCode::NOT_FOUND, "no such app").into_response();
+    }
+    let at = unix_ms();
+    let made = tokio::task::spawn_blocking(move || apps.backup(&slug, at));
+    match made.await.expect("backing up doesn't panic") {
+        Ok(Some(b)) => (StatusCode::CREATED, Json(b)).into_response(),
+        Ok(None) => (StatusCode::CONFLICT, "nothing to back up: no records yet").into_response(),
+        Err(e) => backup_refused(e),
+    }
+}
+
+/// `RestoreBackup` into `slug`; replies `Restored` (the pre-restore snapshot). Full scope only.
+async fn restore_app(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    body: Bytes,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/apps").await {
+        return refused.into_response();
+    }
+    let Some(apps) = app.apps.clone() else {
+        let off = "apps are off: no state dir";
+        return (StatusCode::SERVICE_UNAVAILABLE, off).into_response();
+    };
+    let req = match serde_json::from_slice::<mis_types::RestoreBackup>(&body) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    if !apps::valid_slug(&slug) {
+        return (StatusCode::NOT_FOUND, "no such app").into_response();
+    }
+    let at = unix_ms();
+    let restored =
+        tokio::task::spawn_blocking(move || apps.restore(&slug, &req.backup, req.with_policy, at));
+    match restored.await.expect("restoring doesn't panic") {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => backup_refused(e),
+    }
+}
+
+fn backup_refused(e: backups::BackupError) -> Response {
+    use backups::BackupError::*;
+    match e {
+        NoSuchApp => (StatusCode::NOT_FOUND, "no such app").into_response(),
+        NoSuchBackup => (StatusCode::NOT_FOUND, "no such backup").into_response(),
+        BadName => (StatusCode::BAD_REQUEST, "not a backup name").into_response(),
+        NotABackup => (StatusCode::BAD_REQUEST, "not an intact records backup").into_response(),
+        Io(e) => {
+            tracing::warn!("app backup: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
         }
     }
