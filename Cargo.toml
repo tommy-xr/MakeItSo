@@ -18,7 +18,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4", "serde"] }
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 clap = { version = "4", features = ["derive", "env"] }
 if-addrs = "0.15"
 tracing = "0.1"

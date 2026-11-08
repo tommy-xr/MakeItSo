@@ -231,3 +231,24 @@ live in `<state-dir>/images/` and are deleted after 7 days, attached or not.
 
 On the page, the paperclip beside the mic attaches up to 4 photos (camera or library on a phone),
 shrunk to 1600 px JPEG before upload; a task's photos show in its view.
+
+## Capture
+
+`POST /api/capture`, `multipart/form-data` (an iOS Shortcut's *Get Contents of URL* -> *Form*):
+optional `url` (http/https), `text`, up to 4 `image` files (JPEG, PNG, WebP or GIF by content, 10 MB
+each) and `via` (default `shortcut`); at least one of url, text, image. Values are trimmed, blank
+fields and empty files count as absent, and of several URLs (one per line) only the first is kept.
+Each capture is written to `<state-dir>/captures/inbox/YYYY-MM-DD-<slug>.md` (YAML frontmatter, then the text) with its
+images beside it (`…-1.jpg`) before the reply `{"id", "file"}`: 201, or 200 with the first capture
+when the same url, text and images arrive again within 10 minutes. The slug is the text's first
+words, else the URL's host and last path segment; the first `#tag` in the text becomes `project`.
+Captures are kept: never swept or edited. iPhone photos are HEIC, which is refused (415): have the
+Shortcut *Convert Image* to JPEG (and resize, e.g. 1600 px) first.
+
+Capture tokens (`MIS_CAPTURE_TOKENS`, comma-separated, or `--capture-token`; need `MIS_TOKEN`) may
+call `POST /api/capture` and nothing else. The full token and an Access login may capture too; read
+tokens may not. Behind Access, add a second Access app on path `/api/capture` with a *Service Auth*
+policy for a capture-only service token, and pass its AUD as `--cf-access-capture-aud` /
+`MIS_CF_ACCESS_CAPTURE_AUD`. Its JWT is accepted only there, still needs a capture (or full) token,
+and grants no more than capturing, so keep the main app's policies naming their own service tokens. A capture token is
+never upgraded by an Access login.

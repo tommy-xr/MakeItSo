@@ -20,6 +20,8 @@ const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 pub struct AccessGate {
     team: String,
     aud: String,
+    /// AUD of a second, capture-only Access app (on `/api/capture`). None: there is none.
+    capture_aud: Option<String>,
     /// Keys and when they were fetched (None: never).
     keys: RwLock<(Jwks, Option<Instant>)>,
     /// None: keys were injected and never age or refetch.
@@ -45,6 +47,7 @@ impl AccessGate {
         Self {
             team,
             aud,
+            capture_aud: None,
             keys: RwLock::new((keys, None)),
             certs_url,
             last_refetch: Default::default(),
@@ -53,6 +56,17 @@ impl AccessGate {
                 .build()
                 .expect("http client"),
         }
+    }
+
+    /// Also accept JWTs for the capture-only Access app's `aud`, via [`Self::verify_capture`].
+    pub fn with_capture_aud(mut self, aud: String) -> Self {
+        self.capture_aud = Some(aud);
+        self
+    }
+
+    /// Verify `jwt` was issued for the capture-only app. None: no such app is configured.
+    pub async fn verify_capture(&self, jwt: &str) -> Option<Result<Identity, access::Error>> {
+        Some(self.verify_aud(jwt, self.capture_aud.as_deref()?).await)
     }
 
     /// Replace the keys with a fresh fetch; on error the old keys stay.
@@ -74,16 +88,20 @@ impl AccessGate {
         Ok(())
     }
 
-    /// Verify `jwt`, first refetching keys (rate-limited) if they are old or
-    /// lack its `kid`.
+    /// Verify `jwt` for the main app, first refetching keys (rate-limited) if
+    /// they are old or lack its `kid`.
     pub async fn verify(&self, jwt: &str) -> Result<Identity, access::Error> {
-        let (r, stale) = self.check(jwt);
+        self.verify_aud(jwt, &self.aud).await
+    }
+
+    async fn verify_aud(&self, jwt: &str, aud: &str) -> Result<Identity, access::Error> {
+        let (r, stale) = self.check(jwt, aud);
         if !stale && !matches!(r, Err(access::Error::UnknownKid)) {
             return r;
         }
         let mut last = self.last_refetch.lock().await;
         // A caller we waited on may have just refetched.
-        let (r, stale) = self.check(jwt);
+        let (r, stale) = self.check(jwt, aud);
         if (!stale && !matches!(r, Err(access::Error::UnknownKid)))
             || last.is_some_and(|t| t.elapsed() < REFETCH_EVERY)
         {
@@ -93,11 +111,11 @@ impl AccessGate {
         if let Err(e) = self.refresh().await {
             tracing::warn!("refetching Cloudflare Access keys: {e:#}");
         }
-        self.check(jwt).0
+        self.check(jwt, aud).0
     }
 
     /// Verify against the cached keys; also whether they are due a refetch.
-    fn check(&self, jwt: &str) -> (Result<Identity, access::Error>, bool) {
+    fn check(&self, jwt: &str, aud: &str) -> (Result<Identity, access::Error>, bool) {
         let (keys, fetched) = &*self.keys.read().unwrap();
         let age = match (&self.certs_url, fetched) {
             (None, _) => Duration::ZERO,
@@ -106,7 +124,7 @@ impl AccessGate {
         };
         let r = match age > MAX_AGE {
             true => Err(access::Error::UnknownKid),
-            false => access::verify(jwt, keys, &self.team, &self.aud, crate::unix_secs()),
+            false => access::verify(jwt, keys, &self.team, aud, crate::unix_secs()),
         };
         (r, age > REFRESH_AFTER)
     }
