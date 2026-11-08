@@ -205,7 +205,7 @@ async fn apps(args: &Args, cmd: &AppsCmd) -> Result<()> {
             set_member(args, &client, &base, slug, email, Some((*role).into())).await?;
             println!(
                 "{slug}: shared with {email} as {}",
-                role_name((*role).into())
+                AppRole::from(*role).as_str()
             );
         }
         AppsCmd::Unshare { slug, email } => {
@@ -234,14 +234,6 @@ async fn set_member(
         .body(serde_json::to_string(&body)?);
     call(args, req).await?;
     Ok(())
-}
-
-fn role_name(r: AppRole) -> &'static str {
-    match r {
-        AppRole::Owner => "owner",
-        AppRole::Editor => "editor",
-        AppRole::Viewer => "viewer",
-    }
 }
 
 /// `dir`'s files, hidden ones left out, as a `.tar.gz` in path order.
@@ -299,7 +291,7 @@ fn app_lines(a: &AppView, now: u64) -> String {
     head.extend(a.url.clone());
     let mut out = head.join(" · ");
     let members: Vec<String> = (a.members.iter())
-        .map(|m| format!("{} ({})", m.email, role_name(m.role)))
+        .map(|m| format!("{} ({})", m.email, m.role.as_str()))
         .collect();
     out.push_str(&match members.is_empty() {
         true => "\n    shared with no one".into(),

@@ -3386,6 +3386,12 @@ function appMembers(a, busy) {
     email, role, el('button', { disabled: busy }, 'Share'));
   return el('div', {}, list, form);
 }
+// A relative time that renderApps refreshes in place.
+function appAge(at, now) {
+  const s = el('span', {}, ago(now - at));
+  s.dataset.at = at;
+  return s;
+}
 function appRow(a, now) {
   const newest = a.releases[a.releases.length - 1];
   const ready = newest && newest.n > (a.active || 0) ? newest : null;
@@ -3402,7 +3408,7 @@ function appRow(a, now) {
     el('div', { className: 'head' }, el('strong', {}, a.title),
       a.active && a.url ? el('a', { href: a.url, target: '_blank', rel: 'noopener' }, 'Open ↗') : ''),
     el('div', { className: 'sub dim' }, ...dots([a.slug, a.active ? `v${a.active} live` : 'not live', plural(a.releases.length, 'release')])),
-    ready ? el('div', { className: 'sub dim' }, `v${ready.n} ready · published ${ago(now - ready.at)}`) : '',
+    ready ? el('div', { className: 'sub dim' }, `v${ready.n} ready · published `, appAge(ready.at, now)) : '',
     err ? el('div', { className: 'err bad' }, err) : '',
     actions, confirm, appMembers(a, busy));
 }
@@ -3412,10 +3418,13 @@ function renderApps() {
   if (hosted.error) { delete $('app-list').dataset.key; $('app-list').replaceChildren(el('li', { className: 'bad' }, hosted.error)); return; }
   // Rebuilt only when something shown changes, so a share form being typed into survives other updates.
   const key = JSON.stringify([hosted.list, appAsk, appBusy, memberAsk, [...appErr], readOnly]);
-  if ($('app-list').dataset.key === key) return;
-  $('app-list').dataset.key = key;
   const now = Date.now() + skew;
+  if ($('app-list').dataset.key === key) {
+    for (const s of $('app-list').querySelectorAll('[data-at]')) s.textContent = ago(now - Number(s.dataset.at));
+    return;
+  }
   $('app-list').replaceChildren(...hosted.list.map((a) => appRow(a, now)));
+  $('app-list').dataset.key = key;
   if (!hosted.list.length) $('app-list').append(el('li', { className: 'dim' }, 'No apps yet: publish one with mis apps publish <name> <folder>'));
 }
 

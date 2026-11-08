@@ -304,6 +304,9 @@ mod tests {
         assert_eq!(app_of("/a/pool/"), Some("pool"));
         assert_eq!(app_of("/a/pool"), Some("pool"));
         assert_eq!(app_of("/a/pool/api/v1/me"), Some("pool"));
+        // Raw, not decoded: an encoded slug isn't a valid one, so it gets no member's role.
+        assert_eq!(app_of("/a/po%6Fl/"), Some("po%6Fl"));
+        assert!(!crate::apps::valid_slug("po%6Fl"));
         assert_eq!(app_of("/a/"), None);
         assert_eq!(app_of("/a"), None);
         assert_eq!(app_of("/nope"), None);

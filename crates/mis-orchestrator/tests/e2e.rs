@@ -4183,7 +4183,14 @@ async fn apps_open_to_members_only_through_their_own_access_app() {
         (200, r#"{"user":"local","role":"owner","app":"demo"}"#)
     );
     // `/api/` is the server's: no entry-page fallback, GET only for /me.
-    assert_eq!(app_get(&apps, "/a/demo/api/v1/nope", "").await.0, 404);
+    for path in [
+        "/a/demo/api/v1/nope",
+        "/a/demo/api",
+        "/a/demo/api/",
+        "/a/demo/%61pi/v1/x",
+    ] {
+        assert_eq!(app_get(&apps, path, "").await.0, 404, "{path}");
+    }
     let (status, _, _) = http(&apps, "PUT /a/demo/api/v1/me HTTP/1.1", b"").await;
     assert_eq!(status, 405);
     // Unshared again: refused.

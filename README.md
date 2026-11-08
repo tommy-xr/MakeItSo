@@ -290,8 +290,9 @@ isolated from each other. An entry page at `/a/<name>/scores/2026` resolves rela
 ### Who sees an app
 
 Each app opens only for its members, in `<state-dir>/apps/<name>/policy.json` (outside every
-bundle): `{"members": {"spouse@example.com": "editor"}}`. Viewers read, editors also write, owners
-also administer. Emails match ignoring case. An app shared with no one opens for nobody but
+bundle): `{"members": {"spouse@example.com": "editor"}}`. Any member may open the app; its role
+(viewer, editor or owner) is what `/api/v1/me` reports, for the app to act on until the server
+stores app data. Emails match ignoring case. An app shared with no one opens for nobody but
 direct loopback requests.
 
 ```sh
@@ -306,7 +307,9 @@ else: 421, so a DNS-rebound name gets nothing). Who is asking:
 
 - a valid JWT of the home Access app (`--apps-cf-access-aud`): that email. The MIS Access app's
   JWT is refused here, and this one is refused by the orchestrator;
-- a direct loopback request with no Cloudflare headers: `local`, owner of every app (dev, tests);
+- a direct loopback request with no Cloudflare headers: `local`, owner of every app (dev, tests).
+  So a proxy on this machine other than cloudflared (e.g. `tailscale serve`) makes everyone it
+  admits an owner;
 - anything else (through the tunnel without a JWT, or from the LAN): 401.
 
 `/a/` lists only your apps; another app's paths answer 403. `GET /a/<name>/api/v1/me` returns

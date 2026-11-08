@@ -16,6 +16,7 @@ pub struct AppView {
     /// Oldest first.
     pub releases: Vec<AppRelease>,
     /// Who it is shared with, by email. Direct loopback requests are its owner too.
+    #[serde(default)]
     pub members: Vec<AppMember>,
 }
 
@@ -26,6 +27,16 @@ pub enum AppRole {
     Owner,
     Editor,
     Viewer,
+}
+
+impl AppRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Editor => "editor",
+            Self::Viewer => "viewer",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -91,6 +91,9 @@ fn entry_path(raw: &[u8]) -> Result<Option<String>, String> {
         return Ok(None);
     }
     let joined = segs.join("/");
+    if reserved(&joined) {
+        return Err(format!("{shown}: `api/` belongs to the server"));
+    }
     match clean_path(&joined) {
         Some(_) => Ok(Some(joined)),
         None => Err(format!("{shown}: hidden or odd name")),
@@ -212,13 +215,19 @@ pub fn next_release(existing: impl IntoIterator<Item = u32>) -> u32 {
     existing.into_iter().max().unwrap_or(0) + 1
 }
 
+/// `api` and `api/…` inside an app: the server's routes, never bundle files.
+pub fn reserved(path: &str) -> bool {
+    path.split('/').next() == Some("api")
+}
+
 /// Where `/a/` is reached: `public` (e.g. `https://home.example.com`), else the apps
-/// listener's address. None: not served, or bound to `0.0.0.0` / `[::]` with no `public`.
+/// listener's address if loopback. None: not served, or no `public` for a non-loopback bind.
 pub fn base_url(public: Option<&str>, bind: Option<std::net::SocketAddr>) -> Option<String> {
     let bind = bind?;
     match public {
         Some(p) => Some(p.trim_end_matches('/').to_string()),
-        None if bind.ip().is_unspecified() => None,
+        // The listener answers no other non-loopback Host, so such a link would only 421.
+        None if !bind.ip().is_loopback() => None,
         None => Some(format!("http://{bind}")),
     }
 }
@@ -724,6 +733,9 @@ mod tests {
         assert_eq!(base_url(None, None), None);
         assert_eq!(base_url(Some("https://h.example"), None), None);
         assert_eq!(base_url(None, "0.0.0.0:7475".parse().ok()), None);
+        assert_eq!(base_url(None, "192.168.1.5:7475".parse().ok()), None);
+        assert!(reserved("api") && reserved("api/v1/me") && reserved("api/"));
+        assert!(!reserved("apis/x") && !reserved("js/api") && !reserved(""));
         let any = "[::]:7475".parse().ok();
         assert_eq!(
             base_url(Some("https://h.example"), any).unwrap(),
@@ -802,6 +814,22 @@ mod tests {
         sorted.sort();
         assert_eq!(sorted, (1..=8).collect::<Vec<_>>());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn bundles_cannot_ship_the_servers_api_paths() {
+        let err = unpack(&tar_gz(&[
+            ("app.json", APP_JSON),
+            ("index.html", b""),
+            ("api/v1/me", b"x"),
+        ]));
+        assert!(err.unwrap_err().contains("`api/`"));
+        let ok = unpack(&tar_gz(&[
+            ("app.json", APP_JSON),
+            ("index.html", b""),
+            ("apis/x", b"x"),
+        ]));
+        assert!(ok.is_ok());
     }
 
     #[test]

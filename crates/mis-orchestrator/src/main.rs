@@ -357,8 +357,8 @@ async fn main() -> anyhow::Result<()> {
         if apps_gate.is_none() {
             tracing::info!("no --apps-cf-access-aud: apps answer direct loopback requests only");
         }
-        if addr.ip().is_unspecified() && nonempty(&args.apps_public_url).is_none() {
-            tracing::warn!("no --apps-public-url: app links are left out ({addr} names no host)");
+        if !addr.ip().is_loopback() && nonempty(&args.apps_public_url).is_none() {
+            tracing::warn!("no --apps-public-url: app links are left out (only loopback names and its host are answered)");
         }
     }
     let apps_public_host = nonempty(&args.apps_public_url)

@@ -8,7 +8,7 @@ use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::routing::{any, get};
+use axum::routing::get;
 use axum::{Extension, Json, Router};
 use mis_types::AppMe;
 
@@ -40,11 +40,6 @@ pub fn router(apps: Arc<Apps>, auth: Arc<Auth>) -> Router {
         .route("/a/{slug}", get(add_slash))
         .route("/a/{slug}/", get(entry))
         .route("/a/{slug}/api/v1/me", get(me))
-        // The server's, not the bundle's: unknown API paths 404 rather than get the entry page.
-        .route(
-            "/a/{slug}/api/{*rest}",
-            any(|| async { StatusCode::NOT_FOUND }),
-        )
         .route("/a/{slug}/{*path}", get(file))
         .layer(axum::middleware::from_fn_with_state(
             (apps.clone(), auth),
@@ -75,6 +70,11 @@ async fn guard(
         HeaderValue::from_static("nosniff"),
     );
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    // Other sites can't embed app files (members' cookies would ride along).
+    h.insert(
+        "cross-origin-resource-policy",
+        HeaderValue::from_static("same-origin"),
+    );
     resp
 }
 
@@ -192,7 +192,8 @@ async fn blocking(apps: Arc<Apps>, slug: String, path: String) -> Response {
 /// `path` (empty: the entry) from `slug`'s live release; an extensionless miss gets the entry.
 fn serve(apps: &Apps, slug: &str, path: &str) -> Response {
     let live = apps::valid_slug(slug).then(|| apps.live(slug)).flatten();
-    let Some(live) = live else {
+    // `api/…` is the server's: unknown API paths 404 rather than get the entry page.
+    let Some(live) = live.filter(|_| !apps::reserved(path)) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let read = |rel: &'_ str| Some((rel.to_string(), apps::read_file(&live.dir, rel)?));
