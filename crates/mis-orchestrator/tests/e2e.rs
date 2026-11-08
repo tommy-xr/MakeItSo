@@ -572,6 +572,11 @@ async fn start_behind_access() -> String {
 
 /// RS256 Access JWT signed by the fixture key, valid for an hour.
 fn access_jwt(aud: &str) -> String {
+    access_jwt_for(aud, "me@example.com")
+}
+
+/// [`access_jwt`] for another email.
+fn access_jwt_for(aud: &str, email: &str) -> String {
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -581,7 +586,7 @@ fn access_jwt(aud: &str) -> String {
     h.kid = Some("test-kid".into());
     let claims = serde_json::json!({
         "aud": [aud], "iss": "https://team.cloudflareaccess.com",
-        "exp": now + 3600, "iat": now, "email": "me@example.com",
+        "exp": now + 3600, "iat": now, "email": email,
     });
     let key = include_bytes!("fixtures/access-test-key.pem");
     encode(&h, &claims, &EncodingKey::from_rsa_pem(key).unwrap()).unwrap()
@@ -620,6 +625,32 @@ async fn access_jwt_admits_and_bad_or_missing_is_401() {
         101
     );
     assert_eq!(client_status(&base, &[]).await, 401);
+}
+
+#[tokio::test]
+async fn access_subjects_limit_who_gets_in() {
+    let jwks = serde_json::from_str(include_str!("fixtures/access-test-jwks.json")).unwrap();
+    let gate = mis_orchestrator::access_gate::AccessGate::with_keys(
+        "team".into(),
+        ACCESS_AUD.into(),
+        jwks,
+    );
+    let app = App::new(Some("s".into()))
+        .with_access(gate)
+        .with_access_subjects(vec![" Me@Example.com ".into()]);
+    let base = start_app(app).await;
+    let via_tunnel = ("cf-ray", "8f00-SJC");
+    let me = access_jwt(ACCESS_AUD);
+    let ok = [("cf-access-jwt-assertion", me.as_str()), via_tunnel];
+    assert_eq!(client_status(&base, &ok).await, 101);
+    // Another identity the Access app admits: refused, even with the token.
+    let other = access_jwt_for(ACCESS_AUD, "guest@example.com");
+    let refused = [
+        ("cf-access-jwt-assertion", other.as_str()),
+        via_tunnel,
+        ("authorization", "Bearer s"),
+    ];
+    assert_eq!(client_status(&base, &refused).await, 401);
 }
 
 #[tokio::test]

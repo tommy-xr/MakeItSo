@@ -153,7 +153,8 @@ and `-._` (e.g. `openssl rand -hex 24`).
 For read-only access (a dashboard, a teammate) add tokens in `MIS_READ_TOKENS` (comma-separated; or
 `--read-token`, though argv is visible to other local users). They load the page, status, transcripts
 and `/mcp`, but submitting or replying is refused and workers can't connect with them; the page hides
-its composers. They need `MIS_TOKEN` set too. A Cloudflare Access login is always full access.
+its composers. They need `MIS_TOKEN` set too. A Cloudflare Access login is full access (see
+`MIS_ACCESS_SUBJECTS` below to limit whose).
 
 ## Behind Cloudflare Access
 
@@ -170,9 +171,15 @@ In the Zero Trust dashboard:
 
 ```sh
 mis-orchestrator --cf-access-team <team> --cf-access-aud <aud-tag>   # or MIS_CF_ACCESS_TEAM / _AUD
+MIS_ACCESS_SUBJECTS=you@example.com,<id>.access mis-orchestrator ...  # only these get in
 CF_ACCESS_CLIENT_SECRET=<secret> mis-worker setup --url wss://mis.example.com \
   --cf-access-client-id <id>.access
 ```
+
+`MIS_ACCESS_SUBJECTS` (or repeated `--access-subject`) lists the emails and service token client
+ids let in; any other identity the Access app admits is refused as if it had no JWT. Unset, anyone
+the Access app admits gets full access, so set it before adding people to that Access app or
+sharing its policy with another app.
 
 Requests with a valid Access JWT need no `MIS_TOKEN`, so the page skips the token prompt. Requests
 without one are rejected unless they come straight from loopback, or from a private-network

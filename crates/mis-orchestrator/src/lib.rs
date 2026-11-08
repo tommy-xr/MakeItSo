@@ -73,6 +73,8 @@ pub struct App {
     token: Option<String>,
     /// Tokens that may look (status, transcripts, MCP) but not act.
     read_tokens: Vec<String>,
+    /// Access identities let in, lowercased; empty: any the Access app admits.
+    access_subjects: Vec<String>,
     /// Browser `Origin`s permitted to connect; requests without `Origin` are always let through.
     allowed_origins: Vec<String>,
     /// How long a disconnected worker may be gone before its tasks are failed.
@@ -130,6 +132,7 @@ impl App {
             events: broadcast::channel(256).0,
             token,
             read_tokens: Vec::new(),
+            access_subjects: Vec::new(),
             allowed_origins: Vec::new(),
             grace: Duration::from_secs(60),
             planner: None,
@@ -200,6 +203,17 @@ impl App {
     /// Require a valid Cloudflare Access JWT on non-local requests.
     pub fn with_access(mut self, gate: AccessGate) -> Self {
         self.access = Some(Arc::new(gate));
+        self
+    }
+
+    /// Only these Access identities (emails, service token client ids) get in;
+    /// others are refused as if they had no JWT. Empty: any the Access app admits.
+    pub fn with_access_subjects(mut self, subjects: Vec<String>) -> Self {
+        self.access_subjects = subjects
+            .iter()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
         self
     }
 
@@ -713,7 +727,11 @@ impl App {
             return Access::Failed;
         };
         match gate.verify(jwt.to_str().unwrap_or_default()).await {
-            Ok(id) => Access::Passed(id),
+            Ok(id) if subject_listed(&self.access_subjects, &id.subject) => Access::Passed(id),
+            Ok(id) => {
+                tracing::warn!(subject = %id.subject, "Cloudflare Access identity not in --access-subject");
+                Access::Failed
+            }
             Err(e) => {
                 tracing::warn!("rejected Cloudflare Access JWT: {e:?}");
                 Access::Failed
@@ -850,6 +868,11 @@ enum Access {
     Passed(Identity),
     /// No valid Access JWT.
     Failed,
+}
+
+/// Whether `subject` may pass: listed (case-insensitively), or no list.
+fn subject_listed(listed: &[String], subject: &str) -> bool {
+    listed.is_empty() || listed.iter().any(|l| l.eq_ignore_ascii_case(subject))
 }
 
 /// RFC 1918 / link-local IPv4, or unique-local / link-local IPv6: the same LAN.
@@ -2052,6 +2075,15 @@ mod tests {
             t.authorized(&headers(&page), lo, &Access::Off),
             Some(Scope::Read)
         );
+    }
+
+    #[test]
+    fn subjects_listed_case_insensitively_or_all_when_unset() {
+        assert!(subject_listed(&[], "anyone@example.com"));
+        let listed = list(&["me@example.com"]);
+        assert!(subject_listed(&listed, "Me@Example.com"));
+        assert!(!subject_listed(&listed, "guest@example.com"));
+        assert!(!subject_listed(&listed, ""));
     }
 
     #[test]
