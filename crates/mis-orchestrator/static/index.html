@@ -56,9 +56,11 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   html { min-height: 100%; background: var(--bg); -webkit-tap-highlight-color: transparent; }
   body { --pad: .75rem; box-sizing: border-box; margin: 0 auto; max-width: 46rem; min-height: 100svh; padding: 0 var(--pad) calc(var(--dock, 0px) + var(--kb, 0px) + 1.5rem); color: var(--fg); font: 1rem/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
   @media (min-width: 64rem) { body { --pad: 1.5rem; } }
-  /* Header: logo and name, limit gauges, needs-you pill and menu; under it, what's running. */
-  .strip { position: relative; margin: 0 calc(-1 * var(--pad)) .25rem; padding: calc(.625rem + env(safe-area-inset-top, 0px)) calc(var(--pad) - .25rem) .25rem calc(var(--pad) + .375rem); }
+  /* Header: menu, logo and name, limit gauges, needs-you pill; under it, what's running. */
+  .strip { position: relative; margin: 0 calc(-1 * var(--pad)) .25rem; padding: calc(.625rem + env(safe-area-inset-top, 0px)) var(--pad) .25rem calc(var(--pad) - .25rem); }
   .top { display: flex; align-items: center; gap: .625rem; min-height: 2.75rem; }
+  #menu-btn { margin-right: -.375rem; }
+  .strip .status { padding-left: .625rem; }
   .logo { flex: none; width: 1.375rem; height: 1.375rem; }
   .title { font: 600 1.0625rem/1 var(--sans); white-space: nowrap; color: var(--fg); }
   .status { display: flex; align-items: center; gap: .5rem; min-height: 1.75rem; font-size: .8125rem; color: var(--dim); }
@@ -158,19 +160,27 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   #opts select, #opts input { font-size: 1rem; }
   #opts input { min-height: 2.5rem; padding: 0 .75rem; width: 100%; }
   @keyframes rise { from { opacity: 0; transform: translateY(.25rem); } }
-  /* Menu: a sheet from the right over a dimmed page; Escape, a backdrop tap or ✕ close it. */
-  #menu { inset: 0; margin: 0 0 0 auto; width: min(18rem, 86vw); max-width: none; height: 100%; max-height: none; padding: 0; border: 0; color: var(--fg); background: var(--card); box-shadow: -12px 0 40px rgba(0, 0, 0, .3); }
+  /* Menu: a sheet from the left over a dimmed page; Escape, a backdrop tap or ✕ close it. */
+  #menu { inset: 0; margin: 0 auto 0 0; width: min(18rem, 86vw); max-width: none; height: 100%; max-height: none; padding: 0; border: 0; color: var(--fg); background: var(--card); box-shadow: 12px 0 40px rgba(0, 0, 0, .3); }
   #menu::backdrop { background: var(--scrim); }
   #menu[open] { animation: slide .15s ease-out; }
   #menu[open]::backdrop { animation: fade .15s ease-out; }
-  @keyframes slide { from { transform: translateX(100%); } }
+  @keyframes slide { from { transform: translateX(-100%); } }
   @keyframes fade { from { opacity: 0; } }
-  .sheet { display: flex; flex-direction: column; gap: .25rem; box-sizing: border-box; min-height: 100%; padding: calc(.75rem + env(safe-area-inset-top, 0px)) calc(1rem + env(safe-area-inset-right, 0px)) calc(1rem + env(safe-area-inset-bottom, 0px)) 1rem; }
+  .sheet { display: flex; flex-direction: column; gap: .25rem; box-sizing: border-box; min-height: 100%; padding: calc(.75rem + env(safe-area-inset-top, 0px)) 1rem calc(1rem + env(safe-area-inset-bottom, 0px)) calc(1rem + env(safe-area-inset-left, 0px)); }
   .sheet-top { display: flex; align-items: center; justify-content: space-between; padding: 0 0 .75rem .5rem; }
   #menu nav { display: grid; gap: .125rem; }
   #menu nav a { display: flex; align-items: center; min-height: 2.75rem; padding: 0 .75rem; border-radius: .75rem; text-decoration: none; font-size: .9375rem; color: var(--fg2); }
   @media (hover: hover) { #menu nav a:hover { background: var(--hover); } }
   #menu nav a[aria-current=page] { color: var(--fg); background: var(--bubble); font-weight: 500; }
+  /* Routines and Workers: the name opens the view, the chevron unfolds one link per routine or worker. */
+  .ngrp { display: flex; align-items: center; gap: .125rem; }
+  .ngrp > a { flex: 1; min-width: 0; }
+  .ngrp .chev { width: 1rem; height: 1rem; transition: transform .15s; }
+  .ngrp [aria-expanded=true] .chev { transform: rotate(180deg); }
+  #menu .nsub a { gap: .625rem; min-height: 2.5rem; padding-left: 1.5rem; font-size: .875rem; }
+  .nsub .sd { background: var(--s, var(--faint)); } /* never run: faint, as on Routines */
+  .nsub .dim { padding: .5rem 1.5rem; font-size: .8125rem; }
   #menu fieldset { margin: 1.25rem 0 0; padding: 0; border: 0; }
   #menu legend { padding: 0 .5rem .5rem; color: var(--dim); font: 600 .75rem var(--sans); }
   /* Theme: three segments on a track; the checked one raised. */
@@ -677,11 +687,11 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
 <body>
 <header class="strip">
   <div class="top">
+    <button type="button" id="menu-btn" class="ibtn" aria-label="Menu" aria-haspopup="dialog" aria-expanded="false" aria-controls="menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
     <svg class="logo" viewBox="0 0 18 18" aria-hidden="true"><rect x="1" y="3" width="6" height="12" rx="1" fill="var(--accent)"/><path d="M9 3h5l2 2-2 2H9z" fill="var(--accent)"/><path d="M9 8h5l2 2-2 2H9z" fill="#F2A65E"/></svg>
     <span class="title">Make It So</span>
     <a id="gauges" class="gauges" href="#workers" hidden></a>
-    <span class="end"><a id="need" hidden></a>
-    <button type="button" id="menu-btn" class="ibtn" aria-label="Menu" aria-haspopup="dialog" aria-expanded="false" aria-controls="menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button></span>
+    <span class="end"><a id="need" hidden></a></span>
   </div>
   <div class="status"><span id="dot" class="dot hollow" role="img" aria-label="connecting" title="connecting"></span><a id="ticker">Connecting…</a><button type="button" id="upd" class="upd" aria-expanded="false" hidden><span></span></button></div>
 </header>
@@ -691,8 +701,10 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
     <div class="sheet-top"><span class="title">Make It So</span><button type="button" id="menu-close" class="ibtn" aria-label="Close menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
     <nav aria-label="Views">
       <a href="#" data-view="list">Home</a>
-      <a href="#routines" data-view="routines">Routines</a>
-      <a href="#workers" data-view="workers">Workers</a>
+      <div class="ngrp"><a href="#routines" data-view="routines">Routines</a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-routines" aria-label="Show routines"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
+      <ul id="nav-routines" class="nsub" hidden></ul>
+      <div class="ngrp"><a href="#workers" data-view="workers">Workers</a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-workers" aria-label="Show workers"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
+      <ul id="nav-workers" class="nsub" hidden></ul>
     </nav>
     <fieldset><legend>Theme</legend><div class="seg">
       <label><input type="radio" name="theme" value="">System</label>
@@ -1663,6 +1675,7 @@ function render() {
     if (a.dataset.view === area) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
   $('clear').hidden = !store.get();
+  renderNav();
   views[r.view](r.id);
   fitAll();
   if (wantNew && !$('dock').hidden) { wantNew = false; $('prompt').focus(); }
@@ -3169,6 +3182,7 @@ async function loadRoutines() {
   if (routinesAsked !== ask) return;
   routines = got;
   if (route().view === 'routines') renderRoutines();
+  renderNav();
 }
 async function routineAct(name, action, body) {
   routineBusy.add(name);
@@ -3189,8 +3203,10 @@ function mergeSummary(m) {
 }
 // `in 2h`, `due`, or nothing when it won't run (paused).
 const nextText = (at, now) => (num(at) === null ? '' : at <= now ? 'due' : `next in ${span(at - now)}`);
+// The last run's status: the live task's if listed, else as the orchestrator last saw it.
+function lastStatus(r) { const t = r.last_task && tasks.find((x) => x.id === r.last_task); return (t && t.status) || r.last_status; }
 function routineRow(r, now) {
-  const t = r.last_task && tasks.find((x) => x.id === r.last_task), status = (t && t.status) || r.last_status;
+  const status = lastStatus(r);
   const last = num(r.last_at) === null ? 'never run'
     : el('a', { href: r.last_task ? `#task/${r.last_task}` : '#' }, `last ${ago(now - r.last_at)}`);
   const busy = routineBusy.has(r.name), err = routineErr.get(r.name) || r.error;
@@ -3215,7 +3231,7 @@ function routineRow(r, now) {
       // The pin is what this page read: a file changed since is refused, not approved unseen.
       el('button', { type: 'button', className: 'danger', disabled: busy, onclick: () => { routineLiveAsk = null; routineAct(r.name, 'live', { pin: r.pin }); } }, 'Yes, go live'),
       el('button', { type: 'button', onclick: () => ask(null) }, 'Keep dry run')));
-  return el('li', { className: `routine ${r.paused ? 'paused' : status || ''}` },
+  const li = el('li', { className: `routine ${r.paused ? 'paused' : status || ''}` },
     el('div', { className: 'head' }, status ? chip(status) : '', r.paused ? chip('paused') : '', modeChip(r.mode), el('strong', {}, r.name)),
     el('div', { className: 'sub dim' }, ...dots([r.trigger || r.file, nextText(r.next_at, now), last])),
     r.trigger ? el('div', { className: 'sub dim' }, ...dots([r.harness || 'claude', r.model, r.worker, r.cwd && folder(r.cwd)])) : '',
@@ -3223,6 +3239,8 @@ function routineRow(r, now) {
     r.changed && r.mode === 'dry_run' ? el('div', { className: 'changed' }, 'Changed since you went live: review it and go live again.') : '',
     err ? el('div', { className: 'err bad' }, err) : '',
     actions, confirm);
+  li.dataset.name = r.name;
+  return li;
 }
 function renderRoutines() {
   if (!everOpen) return; // fetch once connected, with the token in place
@@ -3231,6 +3249,21 @@ function renderRoutines() {
   if (routines.error) { $('routine-list').replaceChildren(el('li', { className: 'bad' }, routines.error)); return; }
   $('routine-list').replaceChildren(...routines.list.map((r) => routineRow(r, now)));
   if (!routines.list.length) $('routine-list').append(el('li', { className: 'dim' }, 'No routines yet: add a .md file to the orchestrator’s routines folder'));
+  // A routine picked in the menu: scroll to it once.
+  const pick = routineFocus && [...$('routine-list').children].find((li) => li.dataset.name === routineFocus);
+  if (pick) { routineFocus = null; pick.scrollIntoView({ block: 'center' }); }
+}
+
+// The menu's unfolded lists: one link per routine (to its row on Routines) and per worker, with its status dot.
+let routineFocus = null; // routine to scroll to when Routines next renders
+function renderNav() {
+  if (!$('menu').open) return;
+  const item = (href, cls, name, onclick) => el('li', {}, el('a', { href, onclick }, el('span', { className: `sd ${cls}` }), el('span', { className: 'one' }, name)));
+  const none = (text) => el('li', { className: 'dim' }, text);
+  const rs = routines && routines.list;
+  $('nav-routines').replaceChildren(...!routines ? [none('Loading…')] : routines.error ? [none(routines.error)] : !rs.length ? [none('No routines')]
+    : rs.map((r) => item('#routines', r.paused ? 'paused' : lastStatus(r) || '', r.name, () => { routineFocus = r.name; if (route().view === 'routines') renderRoutines(); })));
+  $('nav-workers').replaceChildren(...!workers.length ? [none('No workers')] : workers.map((w) => item(`#worker/${w.id}`, workerState(w), w.info.hostname)));
 }
 
 function renderWorkers() {
@@ -3679,7 +3712,20 @@ document.addEventListener('pointerdown', (e) => { if (!$('opts').hidden && !e.ta
 $('new').addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('opts').hidden) { showOpts(false); $('opt').focus(); } });
 
 // Menu: a modal sheet, so focus stays inside and Escape closes it; a backdrop tap or a view link closes it too.
-$('menu-btn').onclick = () => { $('menu').showModal(); $('menu-btn').setAttribute('aria-expanded', 'true'); };
+$('menu-btn').onclick = () => {
+  $('menu').showModal();
+  $('menu-btn').setAttribute('aria-expanded', 'true');
+  if (!$('nav-routines').hidden) loadRoutines();
+  renderNav();
+};
+// A chevron unfolds its list; opening Routines' fetches them fresh.
+for (const b of $('menu').querySelectorAll('.ngrp button[aria-controls]')) b.onclick = () => {
+  const open = b.getAttribute('aria-expanded') !== 'true';
+  b.setAttribute('aria-expanded', String(open));
+  b.setAttribute('aria-label', `${open ? 'Hide' : 'Show'} ${b.previousElementSibling.textContent.toLowerCase()}`);
+  $(b.getAttribute('aria-controls')).hidden = !open;
+  if (open && b.getAttribute('aria-controls') === 'nav-routines') loadRoutines();
+};
 $('menu').addEventListener('close', () => $('menu-btn').setAttribute('aria-expanded', 'false'));
 $('menu-close').onclick = () => $('menu').close();
 let downOnBackdrop = false;
