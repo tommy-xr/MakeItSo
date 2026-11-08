@@ -1435,11 +1435,12 @@ async fn capture(
     };
     // What arrived, for the operator's log: `note` is the first 80 chars of the typed text.
     let note: String = c.text.as_deref().unwrap_or("").chars().take(80).collect();
-    let (url, shared, images) = (c.url.clone(), c.shared.is_some(), c.images.len());
+    let (url, shared, images, skipped) =
+        (c.url.clone(), c.shared.is_some(), c.images.len(), c.skipped);
     match tokio::task::spawn_blocking(move || inbox.store(&c)).await {
         Ok(Ok(saved)) => {
             let url = url.as_deref().unwrap_or("");
-            tracing::info!(file = %saved.file, new = saved.new, url, shared, images, ?note, "captured");
+            tracing::info!(file = %saved.file, new = saved.new, url, shared, images, skipped, ?note, "captured");
             let status = match saved.new {
                 true => StatusCode::CREATED,
                 false => StatusCode::OK,
@@ -1512,7 +1513,6 @@ fn refused_capture(r: capture::Refused) -> (StatusCode, String) {
     match r {
         capture::Refused::Invalid(why) => (StatusCode::BAD_REQUEST, why),
         capture::Refused::TooLarge(why) => (StatusCode::PAYLOAD_TOO_LARGE, why),
-        capture::Refused::NotAnImage(why) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, why),
     }
 }
 

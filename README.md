@@ -245,7 +245,8 @@ Each capture is written to `<state-dir>/captures/inbox/YYYY-MM-DD-<slug>.md` (YA
 images beside it (`…-1.jpg`) before the reply `{"id", "file"}`: 201, or 200 with the first capture
 when the same url, text, shared text and images arrive again within 10 minutes. The slug is the
 text's (else shared text's) first words, else the URL's host and last path segment; the first `#tag` in the text becomes `project`.
-Captures are kept: never swept or edited. iPhone photos are HEIC, which is refused (415): have the
+Captures are kept: never swept or edited. Image parts that aren't JPEG, PNG, WebP or GIF are left out (logged as `skipped`), not refused; iPhone
+photos are HEIC, so have the
 Shortcut *Convert Image* to JPEG (and resize, e.g. 1600 px) first.
 
 Capture tokens (`MIS_CAPTURE_TOKENS`, comma-separated, or `--capture-token`; need `MIS_TOKEN`) may

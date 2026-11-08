@@ -31,6 +31,9 @@ pub struct Capture {
     /// page's text, or a link Shortcuts couldn't type as a URL.
     pub shared: Option<String>,
     pub images: Vec<(ImageKind, Vec<u8>)>,
+    /// Image parts that weren't JPEG, PNG, WebP or GIF, left out. A Shortcut can send a
+    /// placeholder there (e.g. `URL.txt` holding "URL"); the capture is kept without it.
+    pub skipped: usize,
     /// Each image's SHA-256, hex.
     hashes: Vec<String>,
     /// `[a-z0-9-]`: where it came from, e.g. `shortcut`.
@@ -42,7 +45,6 @@ pub struct Capture {
 pub enum Refused {
     Invalid(String),
     TooLarge(String),
-    NotAnImage(String),
 }
 
 impl Capture {
@@ -87,21 +89,15 @@ impl Capture {
         if images.len() > MAX_IMAGES {
             return Err(Refused::Invalid(format!("at most {MAX_IMAGES} images")));
         }
-        let images = (images.into_iter().enumerate())
-            .map(|(i, bytes)| {
-                if bytes.len() > MAX_IMAGE_BYTES {
-                    let why = format!("images are limited to {} MB", MAX_IMAGE_BYTES >> 20);
-                    return Err(Refused::TooLarge(why));
-                }
-                match ImageKind::sniff(&bytes) {
-                    Some(kind) => Ok((kind, bytes)),
-                    None => Err(Refused::NotAnImage(format!(
-                        "image {} is not JPEG, PNG, WebP or GIF",
-                        i + 1
-                    ))),
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        if images.iter().any(|b| b.len() > MAX_IMAGE_BYTES) {
+            let why = format!("images are limited to {} MB", MAX_IMAGE_BYTES >> 20);
+            return Err(Refused::TooLarge(why));
+        }
+        let sent = images.len();
+        let images: Vec<_> = (images.into_iter())
+            .filter_map(|bytes| ImageKind::sniff(&bytes).map(|kind| (kind, bytes)))
+            .collect();
+        let skipped = sent - images.len();
         let via = trimmed(via).map_or_else(|| "shortcut".into(), |v| v.to_ascii_lowercase());
         let token = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
         if via.len() > MAX_VIA_CHARS || !via.chars().all(token) {
@@ -116,6 +112,7 @@ impl Capture {
             url,
             text,
             shared,
+            skipped,
             hashes: images.iter().map(|(_, b)| sha256(b)).collect(),
             images,
             via,
@@ -600,11 +597,15 @@ mod tests {
             "empty image is absent"
         );
         assert!(invalid(new(None, None, vec![JPEG.to_vec(); 5], None)));
-        let svg = new(None, None, vec![b"<svg xmlns=".to_vec()], None);
-        assert_eq!(
-            svg.unwrap_err(),
-            Refused::NotAnImage("image 1 is not JPEG, PNG, WebP or GIF".into())
-        );
+        // Non-images are left out, not refused; alone they leave nothing to keep.
+        assert!(invalid(new(
+            None,
+            None,
+            vec![b"<svg xmlns=".to_vec()],
+            None
+        )));
+        let c = new(None, Some("t"), vec![b"URL".to_vec(), JPEG.to_vec()], None).unwrap();
+        assert_eq!((c.images.len(), c.skipped), (1, 1));
         let mut big = JPEG.to_vec();
         big.resize(MAX_IMAGE_BYTES + 1, 0);
         assert!(matches!(
