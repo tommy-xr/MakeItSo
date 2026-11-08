@@ -45,6 +45,9 @@ const SDK_MOCK: &str = include_str!("../static/mis-mock.mjs");
 pub fn router(apps: Arc<Apps>, auth: Arc<Auth>) -> Router {
     let records = apps.records();
     Router::new()
+        // The bare hostname and `/a` land on the directory.
+        .route("/", get(|| async { Redirect::temporary("/a/") }))
+        .route("/a", get(|| async { Redirect::temporary("/a/") }))
         .route("/a/", get(directory))
         .route("/a/_/mis.js", get(|| async { js(SDK) }))
         .route("/a/_/mis-mock.js", get(|| async { js(SDK_MOCK) }))
@@ -178,10 +181,15 @@ async fn directory(
             )
         })
         .collect();
+    let list = if items.is_empty() {
+        "<p>No apps are shared with you yet.</p>".to_string()
+    } else {
+        format!("<ul>{items}</ul>")
+    };
     Html(format!(
         "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\">\
          <title>Apps</title><style>body{{font:16px system-ui;margin:2rem}}li{{margin:.5rem 0}}</style>\
-         <h1>Apps</h1><ul>{items}</ul>"
+         <h1>Apps</h1>{list}"
     ))
 }
 
