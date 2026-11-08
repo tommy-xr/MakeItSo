@@ -1,0 +1,53 @@
+Received: from mx.example.net by mx.m6o.app; Sun, 8 Nov 2026 12:00:00 +0000
+From: Demo User <demo@example.com>
+To: capture@m6o.app
+Date: Sun, 08 Nov 2026 12:00:00 +0000
+Message-ID: <fixture-4@example.com>
+X-Mailer: Microsoft Outlook 16.0
+Subject: FW: Great article #amf
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="Outlook-Mixed-D1"
+
+--Outlook-Mixed-D1
+Content-Type: multipart/related; boundary="Outlook-Related-D2"
+
+--Outlook-Related-D2
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+<html><body><p>Worth a read: <a href=3D"https://example.com/news/great-articl=
+e?utm=3Dmail&amp;id=3D7">Great article</a></p><p>Demo User<br><img src=3D"cid=
+:logo001"></p></body></html>
+
+--Outlook-Related-D2
+Content-Type: image/png
+Content-Transfer-Encoding: base64
+Content-Disposition: inline; filename="image001.png"
+Content-ID: <logo001>
+MIME-Version: 1.0
+
+iVBORw0KGgoAAAANSUhEUgAAAEAAAAAwCAIAAAAuKetIAAAAZklEQVR4nNXOQREAIAzAsK7+/SEH
+RPDYNQoy95AmcRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIncRIn
+cRIncRIncRIncRIncRIncRIncRLnduDXA17qAjYxq2a3AAAAAElFTkSuQmCC
+
+--Outlook-Related-D2--
+
+--Outlook-Mixed-D1
+Content-Type: application/pdf
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="article.pdf"
+MIME-Version: 1.0
+
+JVBERi0xLjQKJSBzeW50aGV0aWMK
+
+--Outlook-Mixed-D1
+Content-Type: text/calendar; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+Content-Disposition: attachment; filename="invite.ics"
+MIME-Version: 1.0
+
+BEGIN:VCALENDAR
+VERSION:2.0
+END:VCALENDAR
+
+--Outlook-Mixed-D1--
