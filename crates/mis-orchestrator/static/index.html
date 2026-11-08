@@ -3205,6 +3205,7 @@ function mergeSummary(m) {
 const nextText = (at, now) => (num(at) === null ? '' : at <= now ? 'due' : `next in ${span(at - now)}`);
 // The last run's status: the live task's if listed, else as the orchestrator last saw it.
 function lastStatus(r) { const t = r.last_task && tasks.find((x) => x.id === r.last_task); return (t && t.status) || r.last_status; }
+const routineState = (r) => (r.paused ? 'paused' : lastStatus(r) || ''); // its dot's class
 function routineRow(r, now) {
   const status = lastStatus(r);
   const last = num(r.last_at) === null ? 'never run'
@@ -3231,7 +3232,7 @@ function routineRow(r, now) {
       // The pin is what this page read: a file changed since is refused, not approved unseen.
       el('button', { type: 'button', className: 'danger', disabled: busy, onclick: () => { routineLiveAsk = null; routineAct(r.name, 'live', { pin: r.pin }); } }, 'Yes, go live'),
       el('button', { type: 'button', onclick: () => ask(null) }, 'Keep dry run')));
-  const li = el('li', { className: `routine ${r.paused ? 'paused' : status || ''}` },
+  const li = el('li', { className: `routine ${routineState(r)}` },
     el('div', { className: 'head' }, status ? chip(status) : '', r.paused ? chip('paused') : '', modeChip(r.mode), el('strong', {}, r.name)),
     el('div', { className: 'sub dim' }, ...dots([r.trigger || r.file, nextText(r.next_at, now), last])),
     r.trigger ? el('div', { className: 'sub dim' }, ...dots([r.harness || 'claude', r.model, r.worker, r.cwd && folder(r.cwd)])) : '',
@@ -3251,19 +3252,31 @@ function renderRoutines() {
   if (!routines.list.length) $('routine-list').append(el('li', { className: 'dim' }, 'No routines yet: add a .md file to the orchestrator’s routines folder'));
   // A routine picked in the menu: scroll to it once.
   const pick = routineFocus && [...$('routine-list').children].find((li) => li.dataset.name === routineFocus);
-  if (pick) { routineFocus = null; pick.scrollIntoView({ block: 'center' }); }
+  routineFocus = null;
+  if (pick) pick.scrollIntoView({ block: 'center' });
 }
 
 // The menu's unfolded lists: one link per routine (to its row on Routines) and per worker, with its status dot.
 let routineFocus = null; // routine to scroll to when Routines next renders
 function renderNav() {
   if (!$('menu').open) return;
-  const item = (href, cls, name, onclick) => el('li', {}, el('a', { href, onclick }, el('span', { className: `sd ${cls}` }), el('span', { className: 'one' }, name)));
-  const none = (text) => el('li', { className: 'dim' }, text);
+  // Rows as [href, dot class, name], or [text] for a note; a list is rebuilt only when they change, so focus stays.
   const rs = routines && routines.list;
-  $('nav-routines').replaceChildren(...!routines ? [none('Loading…')] : routines.error ? [none(routines.error)] : !rs.length ? [none('No routines')]
-    : rs.map((r) => item('#routines', r.paused ? 'paused' : lastStatus(r) || '', r.name, () => { routineFocus = r.name; if (route().view === 'routines') renderRoutines(); })));
-  $('nav-workers').replaceChildren(...!workers.length ? [none('No workers')] : workers.map((w) => item(`#worker/${w.id}`, workerState(w), w.info.hostname)));
+  fillNav($('nav-routines'), !routines ? [['Loading…']] : routines.error ? [[routines.error]] : !rs.length ? [['No routines']]
+    : rs.map((r) => ['#routines', routineState(r), r.name]));
+  fillNav($('nav-workers'), !workers.length ? [['No workers']] : workers.map((w) => [`#worker/${w.id}`, workerState(w), w.info.hostname]));
+}
+function fillNav(ul, rows) {
+  const key = JSON.stringify(rows);
+  if (ul.dataset.key === key) return;
+  ul.dataset.key = key;
+  ul.replaceChildren(...rows.map(([href, cls, name]) => (cls === undefined ? el('li', { className: 'dim' }, href)
+    : el('li', {}, el('a', { href, onclick: href === '#routines' ? (e) => pickRoutine(e, name) : null }, el('span', { className: `sd ${cls}` }), el('span', { className: 'one' }, name))))));
+}
+// Already on Routines, the link's own jump to the top would undo the scroll to the row.
+function pickRoutine(e, name) {
+  routineFocus = name;
+  if (route().view === 'routines') { e.preventDefault(); renderRoutines(); }
 }
 
 function renderWorkers() {
