@@ -340,3 +340,14 @@ fn fingerprint(conn: &Connection) -> rusqlite::Result<[u8; 32]> {
     }
     Ok(h.finalize().into())
 }
+
+/// Daily snapshots of every app: checked at start, then hourly, by this machine's local day.
+pub async fn run_daily(apps: std::sync::Arc<crate::apps::Apps>) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        let (apps, now) = (apps.clone(), crate::unix_ms());
+        let _ = tokio::task::spawn_blocking(move || apps.daily_backups(now, &chrono::Local)).await;
+    }
+}

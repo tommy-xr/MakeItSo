@@ -7,13 +7,16 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use mis_types::{AppMember, AppRelease, AppRole, AppView};
+use chrono::TimeZone;
+use mis_types::{AppBackup, AppMember, AppRelease, AppRole, AppView, Restored};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::app_access::{self, Policy};
+use crate::backups::{self, BackupError, Take};
+use crate::records_db::Records;
 
 /// Largest bundle, its files' bytes added up.
 pub const MAX_BYTES: u64 = 20 << 20;
@@ -292,13 +295,15 @@ pub enum MemberError {
     Io(String),
 }
 
-/// The apps folder. Publishing, activating and sharing take `lock`, so each publish gets its
-/// own n and concurrent shares don't drop each other.
+/// The apps folder. Publishing, activating, sharing and backups take `lock`, so each publish
+/// gets its own n, concurrent shares don't drop each other and no prune races a restore.
 pub struct Apps {
     dir: PathBuf,
     /// See [`base_url`].
     base_url: Option<String>,
     lock: Mutex<()>,
+    /// Each app's records, shared with the apps listener so backups take the same locks.
+    records: Arc<Records>,
 }
 
 /// The live release of an app: its folder and manifest.
@@ -310,10 +315,15 @@ pub struct Live {
 impl Apps {
     pub fn new(dir: PathBuf, base_url: Option<String>) -> Self {
         Self {
+            records: Arc::new(Records::new(dir.clone())),
             dir,
             base_url,
             lock: Mutex::new(()),
         }
+    }
+
+    pub fn records(&self) -> Arc<Records> {
+        self.records.clone()
     }
 
     /// The apps folder.
@@ -341,6 +351,9 @@ impl Apps {
         let n = written.and_then(|()| {
             let _held = self.lock.lock().unwrap();
             let n = next_release(self.release_ns(slug));
+            if activate {
+                self.pre_activation(slug, n, at)?;
+            }
             std::fs::rename(&tmp, releases.join(n.to_string()))?;
             if activate {
                 self.write_active(slug, n)?;
@@ -353,14 +366,75 @@ impl Apps {
         n
     }
 
-    /// Make release `n` of `slug` the live one.
-    pub fn activate(&self, slug: &str, n: u32) -> Result<(), ActivateError> {
+    /// Make release `n` of `slug` the live one, at Unix millis `at`.
+    pub fn activate(&self, slug: &str, n: u32, at: u64) -> Result<(), ActivateError> {
         let _held = self.lock.lock().unwrap();
         if !self.release_ns(slug).contains(&n) {
             return Err(ActivateError::NoSuchRelease);
         }
+        self.pre_activation(slug, n, at)
+            .map_err(|e| ActivateError::Io(format!("{e:#}")))?;
         self.write_active(slug, n)
             .map_err(|e| ActivateError::Io(e.to_string()))
+    }
+
+    /// Snapshot `slug`'s records before release `n` goes live; failing, it doesn't.
+    fn pre_activation(&self, slug: &str, n: u32, at: u64) -> anyhow::Result<()> {
+        let app = self.dir.join(slug);
+        match backups::take(&app, &self.records, slug, Take::PreActivation(n), at) {
+            Ok(_) => Ok(()),
+            Err(e) => anyhow::bail!("backing up before activating: {e:?}"),
+        }
+    }
+
+    /// `slug`'s snapshots, oldest first. None: no such app.
+    pub fn backups(&self, slug: &str) -> Option<Vec<AppBackup>> {
+        let _held = self.lock.lock().unwrap();
+        let exists = !self.release_ns(slug).is_empty();
+        exists.then(|| backups::list(&self.dir.join(slug)))
+    }
+
+    /// Snapshot `slug` now (Unix millis `at`). None: it has no records yet.
+    pub fn backup(&self, slug: &str, at: u64) -> Result<Option<AppBackup>, BackupError> {
+        let _held = self.lock.lock().unwrap();
+        if self.release_ns(slug).is_empty() {
+            return Err(BackupError::NoSuchApp);
+        }
+        backups::take(&self.dir.join(slug), &self.records, slug, Take::Manual, at)
+    }
+
+    /// See [`backups::restore`].
+    pub fn restore(
+        &self,
+        slug: &str,
+        name: &str,
+        with_policy: bool,
+        at: u64,
+    ) -> Result<Restored, BackupError> {
+        let _held = self.lock.lock().unwrap();
+        if self.release_ns(slug).is_empty() {
+            return Err(BackupError::NoSuchApp);
+        }
+        let app = self.dir.join(slug);
+        backups::restore(&app, &self.records, slug, name, with_policy, at)
+    }
+
+    /// Each app's daily snapshot, if owed one at `now` (days in `tz`): the ones taken.
+    pub fn daily_backups<Tz: TimeZone>(&self, now: u64, tz: &Tz) -> Vec<AppBackup> {
+        let mut taken = vec![];
+        for app in self.list() {
+            let _held = self.lock.lock().unwrap();
+            let dir = self.dir.join(&app.slug);
+            match backups::daily(&dir, &self.records, &app.slug, now, tz) {
+                Ok(Some(made)) => {
+                    tracing::info!("apps/{}: backed up as {}", app.slug, made.name);
+                    taken.push(made);
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!("daily backup of {}: {e:?}", app.slug),
+            }
+        }
+        taken
     }
 
     fn write_active(&self, slug: &str, n: u32) -> std::io::Result<()> {
@@ -775,8 +849,8 @@ mod tests {
         assert_eq!(apps.publish("pool", &bundle(b"2"), 6, true).unwrap(), 2);
         let live = apps.live("pool").unwrap();
         assert_eq!(read_file(&live.dir, "index.html").unwrap(), b"2");
-        assert_eq!(apps.activate("pool", 3), Err(ActivateError::NoSuchRelease));
-        apps.activate("pool", 1).unwrap();
+        assert_eq!(apps.activate("pool", 3, 1), Err(ActivateError::NoSuchRelease));
+        apps.activate("pool", 1, 1).unwrap();
         let view = &apps.list()[0];
         assert_eq!(
             (view.slug.as_str(), view.title.as_str(), view.active),

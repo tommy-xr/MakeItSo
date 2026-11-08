@@ -43,7 +43,7 @@ const SDK_MOCK: &str = include_str!("../static/mis-mock.mjs");
 /// Needs [`ConnectInfo`]: serve with `into_make_service_with_connect_info::<SocketAddr>()`.
 /// Each app's records are kept beside its releases ([`Records`]).
 pub fn router(apps: Arc<Apps>, auth: Arc<Auth>) -> Router {
-    let records = Arc::new(Records::new(apps.dir().to_path_buf()));
+    let records = apps.records();
     Router::new()
         .route("/a/", get(directory))
         .route("/a/_/mis.js", get(|| async { js(SDK) }))

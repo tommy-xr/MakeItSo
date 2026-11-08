@@ -141,6 +141,18 @@ enum AppsCmd {
     },
     /// Stop sharing the app with `email`.
     Unshare { slug: String, email: String },
+    /// The app's snapshots of its records, newest first.
+    Backups { slug: String },
+    /// Snapshot the app's records now.
+    Backup { slug: String },
+    /// Replace the app's records with snapshot `name` (one taken first undoes it).
+    Restore {
+        slug: String,
+        name: String,
+        /// Also put back who it was shared with then.
+        #[arg(long)]
+        with_policy: bool,
+    },
 }
 
 /// [`AppRole`], for clap.
@@ -211,6 +223,41 @@ async fn apps(args: &Args, cmd: &AppsCmd) -> Result<()> {
         AppsCmd::Unshare { slug, email } => {
             set_member(args, &client, &base, slug, email, None).await?;
             println!("{slug}: no longer shared with {email}");
+        }
+        AppsCmd::Backups { slug } => {
+            let url = format!("{base}/api/apps/{slug}/backups");
+            let list: Vec<AppBackup> = serde_json::from_str(&call(args, client.get(url)).await?)?;
+            let now = unix_ms();
+            for b in list.iter().rev() {
+                println!("{}", backup_line(b, now));
+            }
+            if list.is_empty() {
+                println!("{slug}: no backups");
+            }
+        }
+        AppsCmd::Backup { slug } => {
+            let url = format!("{base}/api/apps/{slug}/backups");
+            let b: AppBackup = serde_json::from_str(&call(args, client.post(url)).await?)?;
+            println!("{slug}: backed up as {}", b.name);
+        }
+        AppsCmd::Restore {
+            slug,
+            name,
+            with_policy,
+        } => {
+            let body = RestoreBackup {
+                backup: name.clone(),
+                with_policy: *with_policy,
+            };
+            let req = client
+                .post(format!("{base}/api/apps/{slug}/restore"))
+                .header("content-type", "application/json")
+                .body(serde_json::to_string(&body)?);
+            let r: Restored = serde_json::from_str(&call(args, req).await?)?;
+            println!("{slug}: restored {name}");
+            if let Some(pre) = r.pre_restore {
+                println!("undo: mis apps restore {slug} {}", pre.name);
+            }
         }
     }
     Ok(())
@@ -312,6 +359,14 @@ fn app_lines(a: &AppView, now: u64) -> String {
         ));
     }
     out
+}
+
+/// `manual-20261108T031500.000Z · manual · 5m ago · 12.0 KiB`.
+fn backup_line(b: &AppBackup, now: u64) -> String {
+    let kind = serde_json::to_value(b.kind).expect("kind serializes");
+    let kind = kind.as_str().unwrap_or_default().replace('_', "-");
+    let ago = fmt_elapsed(now.saturating_sub(b.at));
+    format!("{} · {kind} · {ago} ago · {}", b.name, size_text(b.size))
 }
 
 /// `512 B`, `1.5 KiB`, `2.0 MiB`.
