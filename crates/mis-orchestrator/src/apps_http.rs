@@ -4,17 +4,20 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::{ConnectInfo, Path, Request, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::body::Bytes;
+use axum::extract::{ConnectInfo, Path, Query, Request, State};
+use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
-use mis_types::AppMe;
+use mis_types::{AppMe, Conflict, Export, Mutation, RecordQuery, Space, Written};
 
 use crate::access_gate::{AccessGate, JWT_HEADER};
-use crate::app_access::{self, Member, Subject};
+use crate::app_access::{self, Action, Member, Subject};
 use crate::apps::{self, Apps};
+use crate::records::{self, Refusal};
+use crate::records_db::Records;
 
 /// How the apps listener checks who is asking.
 #[derive(Default)]
@@ -33,19 +36,41 @@ pub const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' '
     img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; \
     base-uri 'none'; form-action 'self'";
 
+/// The SDK every app may load (`_` is no app's slug), and its in-memory twin.
+pub const SDK_PATH: &str = "/a/_/mis.js";
+const SDK: &str = include_str!("../static/mis.js");
+const SDK_MOCK: &str = include_str!("../static/mis-mock.mjs");
+
 /// Needs [`ConnectInfo`]: serve with `into_make_service_with_connect_info::<SocketAddr>()`.
+/// Each app's records are kept beside its releases ([`Records`]).
 pub fn router(apps: Arc<Apps>, auth: Arc<Auth>) -> Router {
+    let records = Arc::new(Records::new(apps.dir().to_path_buf()));
     Router::new()
         .route("/a/", get(directory))
+        .route(SDK_PATH, get(|| async { js(SDK) }))
+        .route("/a/_/mis-mock.js", get(|| async { js(SDK_MOCK) }))
         .route("/a/{slug}", get(add_slash))
         .route("/a/{slug}/", get(entry))
         .route("/a/{slug}/api/v1/me", get(me))
+        .route("/a/{slug}/api/v1/mutations", post(mutate))
+        .route("/a/{slug}/api/v1/records/{space}/{collection}", get(list))
+        .route(
+            "/a/{slug}/api/v1/records/{space}/{collection}/{id}",
+            get(get_record),
+        )
+        .route("/a/{slug}/api/v1/export", get(export))
         .route("/a/{slug}/{*path}", get(file))
+        .layer(Extension(records))
         .layer(axum::middleware::from_fn_with_state(
             (apps.clone(), auth),
             guard,
         ))
         .with_state(apps)
+}
+
+fn js(body: &'static str) -> Response {
+    let ct = "text/javascript; charset=utf-8";
+    ([(header::CONTENT_TYPE, ct)], body).into_response()
 }
 
 /// Admits members only ([`admit`]), and sets the security headers on every response.
@@ -87,9 +112,28 @@ async fn admit(
     req: &mut Request,
 ) -> Result<(), (StatusCode, &'static str)> {
     let headers = req.headers();
-    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    let header = |name| {
+        headers
+            .get(name)
+            .and_then(|v: &HeaderValue| v.to_str().ok())
+    };
+    let host = header(header::HOST);
     if !app_access::host_allowed(host, auth.public_host.as_deref()) {
         return Err((StatusCode::MISDIRECTED_REQUEST, "unknown host"));
+    }
+    let write = !matches!(*req.method(), Method::GET | Method::HEAD);
+    if write
+        && !app_access::write_allowed(
+            header(header::CONTENT_TYPE),
+            header(header::ORIGIN),
+            host,
+            auth.public_host.as_deref(),
+        )
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "writes take JSON from this app's own page",
+        ));
     }
     let jwt = match (headers.get(JWT_HEADER), &auth.gate) {
         (None, _) => None,
@@ -104,7 +148,8 @@ async fn admit(
         StatusCode::UNAUTHORIZED,
         "sign in through Cloudflare Access",
     ))?;
-    let Some(slug) = app_access::app_of(req.uri().path()) else {
+    // `/a/_/…` is the SDK, for anyone signed in.
+    let Some(slug) = app_access::app_of(req.uri().path()).filter(|s| *s != "_") else {
         req.extensions_mut().insert(subject);
         return Ok(());
     };
@@ -170,6 +215,153 @@ async fn me(
         app: slug,
     })
     .into_response()
+}
+
+/// `f` off the async workers: SQLite and the app's files block.
+async fn off_thread(f: impl FnOnce() -> Response + Send + 'static) -> Response {
+    let done = tokio::task::spawn_blocking(f).await;
+    done.unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Why `m` may not do `action` in `slug`: it isn't live, or their role doesn't allow it.
+fn denied(apps: &Apps, slug: &str, m: &Member, action: Action) -> Option<Response> {
+    if apps.live(slug).is_none() {
+        return Some(StatusCode::NOT_FOUND.into_response());
+    }
+    if !app_access::allows(m.role, action) {
+        let why = format!("a {} can't do that here", m.role.as_str());
+        return Some((StatusCode::FORBIDDEN, why).into_response());
+    }
+    None
+}
+
+fn refused(r: Refusal) -> Response {
+    match r {
+        Refusal::Conflict(current) => {
+            (StatusCode::CONFLICT, Json(Conflict { current })).into_response()
+        }
+        Refusal::TooLarge(why) => (StatusCode::PAYLOAD_TOO_LARGE, why).into_response(),
+        Refusal::Invalid(why) => (StatusCode::BAD_REQUEST, why).into_response(),
+    }
+}
+
+fn failed(slug: &str, e: anyhow::Error) -> Response {
+    tracing::error!("apps/{slug} records: {e:#}");
+    (StatusCode::INTERNAL_SERVER_ERROR, "records unavailable").into_response()
+}
+
+/// `POST /a/{slug}/api/v1/mutations`: a [`Mutation`]; 200 [`Written`], 409 [`Conflict`].
+async fn mutate(
+    State(apps): State<Arc<Apps>>,
+    Extension(records): Extension<Arc<Records>>,
+    Extension(m): Extension<Member>,
+    Path(slug): Path<String>,
+    body: Bytes,
+) -> Response {
+    off_thread(move || {
+        if let Some(r) = denied(&apps, &slug, &m, Action::Write) {
+            return r;
+        }
+        let op: Mutation = match serde_json::from_slice(&body) {
+            Ok(op) => op,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, format!("bad mutation: {e}")).into_response()
+            }
+        };
+        match records.mutate(&slug, &op, m.subject.name(), crate::unix_ms()) {
+            Ok(Ok(record)) => Json(Written { record }).into_response(),
+            Ok(Err(r)) => refused(r),
+            Err(e) => failed(&slug, e),
+        }
+    })
+    .await
+}
+
+#[derive(serde::Deserialize)]
+struct ListParams {
+    /// A [`RecordQuery`] as JSON.
+    q: Option<String>,
+}
+
+/// `GET /a/{slug}/api/v1/records/{space}/{collection}?q=`: a [`mis_types::Page`].
+async fn list(
+    State(apps): State<Arc<Apps>>,
+    Extension(records): Extension<Arc<Records>>,
+    Extension(m): Extension<Member>,
+    Path((slug, space, collection)): Path<(String, Space, String)>,
+    Query(params): Query<ListParams>,
+) -> Response {
+    off_thread(move || {
+        if let Some(r) = denied(&apps, &slug, &m, Action::Read) {
+            return r;
+        }
+        let q: RecordQuery = match params.q.as_deref().map(serde_json::from_str).transpose() {
+            Ok(q) => q.unwrap_or_default(),
+            Err(e) => return (StatusCode::BAD_REQUEST, format!("q: {e}")).into_response(),
+        };
+        let owner = records::owner(space, m.subject.name());
+        let c = match records::compile(space, owner, &collection, &q) {
+            Ok(c) => c,
+            Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
+        };
+        match records.list(&slug, &q, &c) {
+            Ok(page) => Json(page).into_response(),
+            Err(e) => failed(&slug, e),
+        }
+    })
+    .await
+}
+
+/// `GET /a/{slug}/api/v1/records/{space}/{collection}/{id}`: an [`mis_types::Envelope`].
+async fn get_record(
+    State(apps): State<Arc<Apps>>,
+    Extension(records): Extension<Arc<Records>>,
+    Extension(m): Extension<Member>,
+    Path((slug, space, collection, id)): Path<(String, Space, String, String)>,
+) -> Response {
+    off_thread(move || {
+        if let Some(r) = denied(&apps, &slug, &m, Action::Read) {
+            return r;
+        }
+        if !records::valid_collection(&collection) || !records::valid_id(&id) {
+            return (StatusCode::BAD_REQUEST, "bad collection or id").into_response();
+        }
+        let owner = records::owner(space, m.subject.name());
+        match records.get(&slug, space, owner, &collection, &id) {
+            Ok(Some(e)) => Json(e).into_response(),
+            Ok(None) => (StatusCode::NOT_FOUND, "no such record").into_response(),
+            Err(e) => failed(&slug, e),
+        }
+    })
+    .await
+}
+
+/// `GET /a/{slug}/api/v1/export`: an [`Export`] of what the asker can see.
+async fn export(
+    State(apps): State<Arc<Apps>>,
+    Extension(records): Extension<Arc<Records>>,
+    Extension(m): Extension<Member>,
+    Path(slug): Path<String>,
+) -> Response {
+    off_thread(move || {
+        if let Some(r) = denied(&apps, &slug, &m, Action::Read) {
+            return r;
+        }
+        let user = m.subject.name();
+        match records.visible(&slug, user) {
+            Ok((shared, me)) => Json(Export {
+                version: 1,
+                app: slug,
+                user: user.into(),
+                at: crate::unix_ms(),
+                shared,
+                me,
+            })
+            .into_response(),
+            Err(e) => failed(&slug, e),
+        }
+    })
+    .await
 }
 
 async fn entry(State(apps): State<Arc<Apps>>, Path(slug): Path<String>) -> Response {

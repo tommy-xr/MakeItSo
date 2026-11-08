@@ -1062,8 +1062,8 @@ fn unix_secs() -> u64 {
     unix_ms() / 1000
 }
 
-/// Wall-clock millis, only for display (task timing).
-fn unix_ms() -> u64 {
+/// Wall-clock millis, for display (task timing) and record times.
+pub(crate) fn unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
