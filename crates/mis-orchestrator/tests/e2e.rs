@@ -3869,7 +3869,13 @@ async fn capture_takes_a_raw_email() {
     let bearer: &[(&str, &str)] = &[("authorization", "Bearer c")];
     // Synthetic fixtures (see make.py): url, note, project, kept images as
     // (extension, first 16 hex of sha256, from Python's own decoding).
-    type Row<'a> = (&'a str, Option<&'a str>, &'a str, Option<&'a str>, &'a [(&'a str, &'a str)]);
+    type Row<'a> = (
+        &'a str,
+        Option<&'a str>,
+        &'a str,
+        Option<&'a str>,
+        &'a [(&'a str, &'a str)],
+    );
     let rows: [Row; 6] = [
         (
             "a-ios-safari-link",
@@ -3939,7 +3945,11 @@ async fn capture_takes_a_raw_email() {
         assert_eq!(names.len(), 1 + assets.len(), "{name}: {names:?}");
     }
     // The body is the shared text: a photo share keeps its signature, a link share its rest.
-    let (_, body) = post(bearer, std::fs::read(fixtures.join("b-ios-photo.eml")).unwrap()).await;
+    let (_, body) = post(
+        bearer,
+        std::fs::read(fixtures.join("b-ios-photo.eml")).unwrap(),
+    )
+    .await;
     let saved: serde_json::Value = serde_json::from_str(&body).unwrap();
     let md = std::fs::read_to_string(inbox.join(saved["file"].as_str().unwrap())).unwrap();
     assert!(md.contains("shared: \"Sent from my iPhone\"\n"), "{md}");

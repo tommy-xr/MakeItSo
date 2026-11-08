@@ -6,7 +6,8 @@ use mail_parser::{MessageParser, PartKind};
 use crate::capture::{Capture, Refused, MAX_TEXT_BYTES};
 
 /// Read `raw` as a capture `via` email. The subject is the note (`#project` works); the
-/// text body (else the HTML body as text) is the shared text, cut to [`MAX_TEXT_BYTES`];
+/// text body (else the HTML body as text) is the shared text, with `\n` line ends, cut
+/// to [`MAX_TEXT_BYTES`];
 /// an HTML body's first http(s) `href` is the url, as its links' text rarely shows them.
 /// Image parts, attached or inline, in order, are the images; other parts are ignored.
 pub fn capture(raw: &[u8]) -> Result<Capture, Refused> {
@@ -14,13 +15,16 @@ pub fn capture(raw: &[u8]) -> Result<Capture, Refused> {
         .parse(raw)
         .ok_or_else(|| Refused::Invalid("not an email".into()))?;
     let text = msg.subject().map(Into::into);
-    let body = msg.text_bodies().collect::<Vec<_>>().join("\n");
+    let body = (msg.text_bodies().collect::<Vec<_>>().join("\n")).replace("\r\n", "\n");
     let url = (msg.text_body())
         .filter(|p| matches!(p.kind(), PartKind::Html))
         .find_map(|p| first_href(&p.text()?));
     let images = (msg.root().parts())
         .filter(|p| matches!(p.kind(), PartKind::Binary | PartKind::InlineBinary))
-        .filter(|p| p.content_type().is_some_and(|t| t.ctype().eq_ignore_ascii_case("image")))
+        .filter(|p| {
+            p.content_type()
+                .is_some_and(|t| t.ctype().eq_ignore_ascii_case("image"))
+        })
         .map(|p| p.decoded().into_owned())
         .collect();
     Capture::new(url, text, Some(cut(body)), images, Some("email".into()))
@@ -56,11 +60,11 @@ mod tests {
     #[test]
     fn subject_is_the_note_and_body_the_shared_text() {
         let raw = b"From: a@example.com\r\nSubject: =?UTF-8?B?8J+TjCBuZWF0ICNtaXM=?=\r\n\r\n\
-                    look https://example.com/a\r\n";
+                    look\r\nhttps://example.com/a\r\n";
         let c = capture(raw).unwrap();
         assert_eq!(c.text.as_deref(), Some("\u{1F4CC} neat #mis"));
         assert_eq!(c.url.as_deref(), Some("https://example.com/a"));
-        assert_eq!(c.shared.as_deref(), Some("look https://example.com/a"));
+        assert_eq!(c.shared.as_deref(), Some("look\nhttps://example.com/a"));
         assert_eq!(c.via, "email");
     }
 
