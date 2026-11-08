@@ -51,6 +51,14 @@ struct Args {
     /// Application Audience (AUD) tag of the Access application.
     #[arg(long, env = "MIS_CF_ACCESS_AUD")]
     cf_access_aud: Option<String>,
+    /// Only these Access identities get in: emails, or service token client ids (repeatable,
+    /// or comma-separated `MIS_ACCESS_SUBJECTS`). Unset: anyone the Access application admits.
+    #[arg(
+        long = "access-subject",
+        env = "MIS_ACCESS_SUBJECTS",
+        value_delimiter = ','
+    )]
+    access_subjects: Vec<String>,
     /// Fetch Access keys from here instead of the team's certs URL (testing).
     #[arg(long, hide = true)]
     cf_access_certs_url: Option<String>,
@@ -238,6 +246,22 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("refusing to bind {addr} without --token / MIS_TOKEN");
     }
     let gate = access_gate(&args).await?;
+    // `MIS_ACCESS_SUBJECTS=` means unset; a list of only blanks (`,`) is a mistake, not "anyone".
+    let given =
+        args.access_subjects.iter().any(|s| !s.is_empty()) || args.access_subjects.len() > 1;
+    args.access_subjects = (args.access_subjects.iter().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if given && args.access_subjects.is_empty() {
+        anyhow::bail!("--access-subject / MIS_ACCESS_SUBJECTS lists no one");
+    }
+    match (&gate, args.access_subjects.is_empty()) {
+        (None, false) => anyhow::bail!("--access-subject / MIS_ACCESS_SUBJECTS needs Cloudflare Access"),
+        (Some(_), true) => tracing::warn!(
+            "Cloudflare Access: anyone its application admits gets full access; list who with --access-subject"
+        ),
+        _ => {}
+    }
     if gate.is_some() && args.token.is_none() {
         tracing::warn!("no --token: local requests without Cloudflare headers need nothing");
     }
@@ -281,6 +305,7 @@ async fn main() -> anyhow::Result<()> {
     let mut app = App::new(args.token)
         .with_channel(channel)
         .with_read_tokens(args.read_tokens)
+        .with_access_subjects(args.access_subjects)
         .with_allowed_origins(origins);
     if let Some(gate) = gate {
         app = app.with_access(gate);
