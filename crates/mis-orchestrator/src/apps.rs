@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use mis_types::{AppRelease, AppView};
@@ -60,24 +60,26 @@ pub struct Bundle {
 }
 
 /// `a/b.js` as a path inside a bundle or release: `/`-separated, relative, no empty, `.`,
-/// `..` or hidden (dot) segments, no `\` or NUL. None: not one.
+/// `..` or hidden (dot) segments, no `\`, `:` (a Windows drive or stream) or NUL. None: not one.
 pub fn clean_path(raw: &str) -> Option<&str> {
-    let seg_ok = |s: &str| !s.is_empty() && !s.starts_with('.') && !s.contains(['\\', '\0']);
+    let seg_ok = |s: &str| !s.is_empty() && !s.starts_with('.') && !s.contains(['\\', ':', '\0']);
     raw.split('/').all(seg_ok).then_some(raw)
 }
 
 /// A tar entry's path as a bundle path; `./` prefixes dropped. Ok(None): the top folder.
-fn entry_path(p: &Path) -> Result<Option<String>, String> {
-    let shown = p.display();
+/// Parsed from the archive's bytes, not as an OS path, so `a\b` is refused on Windows too.
+fn entry_path(raw: &[u8]) -> Result<Option<String>, String> {
+    let shown = String::from_utf8_lossy(raw);
+    let p = std::str::from_utf8(raw).map_err(|_| format!("{shown}: not UTF-8"))?;
+    if p.starts_with('/') {
+        return Err(format!("{shown}: absolute path"));
+    }
     let mut segs = vec![];
-    for c in p.components() {
-        match c {
-            Component::CurDir => {}
-            Component::Normal(s) => segs.push(s.to_str().ok_or(format!("{shown}: not UTF-8"))?),
-            Component::ParentDir => return Err(format!("{shown}: `..` in path")),
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(format!("{shown}: absolute path"))
-            }
+    for seg in p.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => return Err(format!("{shown}: `..` in path")),
+            s => segs.push(s),
         }
     }
     if segs.is_empty() {
@@ -102,7 +104,7 @@ pub fn unpack(tar_gz: &[u8]) -> Result<Bundle, String> {
     let mut size = 0u64;
     for entry in ar.entries().map_err(bad)? {
         let mut entry = entry.map_err(bad)?;
-        let path = entry_path(&entry.path().map_err(bad)?)?;
+        let path = entry_path(&entry.path_bytes())?;
         let kind = entry.header().entry_type();
         match kind {
             tar::EntryType::Directory | tar::EntryType::XGlobalHeader => continue,
@@ -551,6 +553,7 @@ mod tests {
         assert!(err(&[ok, ("index.html", page), ("/etc/evil", page)]).contains("absolute"));
         assert!(err(&[ok, ("index.html", page), (".env", page)]).contains("hidden"));
         assert!(err(&[ok, ("index.html", page), ("a\\b", page)]).contains("odd"));
+        assert!(err(&[ok, ("index.html", page), ("C:evil", page)]).contains("odd"));
     }
 
     #[test]
