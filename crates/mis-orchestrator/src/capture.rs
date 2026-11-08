@@ -31,8 +31,9 @@ pub struct Capture {
     /// page's text, or a link Shortcuts couldn't type as a URL.
     pub shared: Option<String>,
     pub images: Vec<(ImageKind, Vec<u8>)>,
-    /// Image parts that weren't JPEG, PNG, WebP or GIF, left out. A Shortcut can send a
-    /// placeholder there (e.g. `URL.txt` holding "URL"); the capture is kept without it.
+    /// Image parts left out: not JPEG, PNG, WebP or GIF, or past the first [`MAX_IMAGES`].
+    /// A Shortcut can send a placeholder (`URL.txt` holding "URL"), or a shared page's many
+    /// images; the capture is kept without them.
     pub skipped: usize,
     /// Each image's SHA-256, hex.
     hashes: Vec<String>,
@@ -86,9 +87,6 @@ impl Capture {
         // Kept only when it says more than the link taken from it.
         let shared = shared.filter(|s| Some(s) != url.as_ref());
         let images: Vec<_> = images.into_iter().filter(|b| !b.is_empty()).collect();
-        if images.len() > MAX_IMAGES {
-            return Err(Refused::Invalid(format!("at most {MAX_IMAGES} images")));
-        }
         if images.iter().any(|b| b.len() > MAX_IMAGE_BYTES) {
             let why = format!("images are limited to {} MB", MAX_IMAGE_BYTES >> 20);
             return Err(Refused::TooLarge(why));
@@ -96,6 +94,7 @@ impl Capture {
         let sent = images.len();
         let images: Vec<_> = (images.into_iter())
             .filter_map(|bytes| ImageKind::sniff(&bytes).map(|kind| (kind, bytes)))
+            .take(MAX_IMAGES)
             .collect();
         let skipped = sent - images.len();
         let via = trimmed(via).map_or_else(|| "shortcut".into(), |v| v.to_ascii_lowercase());
@@ -596,7 +595,8 @@ mod tests {
             invalid(new(None, None, vec![vec![]], Some(" "))),
             "empty image is absent"
         );
-        assert!(invalid(new(None, None, vec![JPEG.to_vec(); 5], None)));
+        let c = new(None, None, vec![JPEG.to_vec(); 6], None).unwrap();
+        assert_eq!((c.images.len(), c.skipped), (MAX_IMAGES, 2));
         // Non-images are left out, not refused; alone they leave nothing to keep.
         assert!(invalid(new(
             None,
