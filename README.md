@@ -267,8 +267,9 @@ never upgraded by an Access login.
 `workers/capture-email` is a Cloudflare Email Worker that posts each message sent to it to
 `/api/capture` unparsed. It takes mail only from listed envelope senders whose SPF passed at
 Cloudflare (Email Routing's `Authentication-Results`); anything else, and any refusal from MIS
-(`400: send a url, text or image`), bounces to the sender with the reason. To deploy (needs
-Node 22+):
+(`400: send a url, text or image`), redirect or outage, bounces to the sender with the reason; resend
+after fixing it. SPF vouches for the sending server, not the mailbox, so list only addresses whose
+provider stops its other users sending as them. To deploy (needs Node 22+):
 
 ```sh
 cd workers/capture-email && npm ci

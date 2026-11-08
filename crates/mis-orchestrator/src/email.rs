@@ -2,7 +2,7 @@
 //! text, image parts as images. Pure; the HTTP handler feeds it the request body.
 
 use mail_parser::{MessageParser, PartKind};
-use mis_types::{ImageKind, MAX_IMAGES, MAX_IMAGE_BYTES};
+use mis_types::{ImageKind, MAX_IMAGES};
 
 use crate::capture::{Capture, Refused, MAX_TEXT_BYTES};
 
@@ -72,6 +72,7 @@ fn first_href(html: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mis_types::MAX_IMAGE_BYTES;
 
     #[test]
     fn subject_is_the_note_and_body_the_shared_text() {
