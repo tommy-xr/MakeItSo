@@ -23,10 +23,13 @@ const SLUG_CHARS: usize = 60;
 /// One capture, checked: at least one of url, text, image.
 #[derive(Debug)]
 pub struct Capture {
-    /// `http(s)` URL as sent, trimmed.
+    /// `http(s)` URL as sent, trimmed, else the first link in `shared`.
     pub url: Option<String>,
     /// As sent, trimmed.
     pub text: Option<String>,
+    /// What the share sheet handed over, as text, when it adds to `url`: e.g. a shared
+    /// page's text, or a link Shortcuts couldn't type as a URL.
+    pub shared: Option<String>,
     pub images: Vec<(ImageKind, Vec<u8>)>,
     /// Each image's SHA-256, hex.
     hashes: Vec<String>,
@@ -46,9 +49,11 @@ impl Capture {
     /// Check form fields. A Shortcut sends every field, so blank ones and empty images
     /// count as absent. Of several URLs (one per line) the first is kept. Images are told
     /// apart by magic bytes (JPEG, PNG, WebP, GIF); `via` defaults to `shortcut`.
+    /// Without `url`, the first http(s) link in `shared` is taken as it.
     pub fn new(
         url: Option<String>,
         text: Option<String>,
+        shared: Option<String>,
         images: Vec<Vec<u8>>,
         via: Option<String>,
     ) -> Result<Self, Refused> {
@@ -61,18 +66,23 @@ impl Capture {
                     "url is limited to {MAX_URL_BYTES} bytes"
                 )));
             }
-            match reqwest::Url::parse(u) {
-                Ok(p) if matches!(p.scheme(), "http" | "https") => {}
-                _ => return Err(Refused::Invalid("url must be http(s)".into())),
+            if !web_url(u) {
+                return Err(Refused::Invalid("url must be http(s)".into()));
             }
         }
-        let text = trimmed(text);
-        if text.as_ref().is_some_and(|t| t.len() > MAX_TEXT_BYTES) {
+        let (text, shared) = (trimmed(text), trimmed(shared));
+        if [&text, &shared]
+            .iter()
+            .any(|t| t.as_ref().is_some_and(|t| t.len() > MAX_TEXT_BYTES))
+        {
             return Err(Refused::TooLarge(format!(
                 "text is limited to {} KB",
                 MAX_TEXT_BYTES >> 10
             )));
         }
+        let url = url.or_else(|| shared.as_deref().and_then(first_link));
+        // Kept only when it says more than the link taken from it.
+        let shared = shared.filter(|s| Some(s) != url.as_ref());
         let images: Vec<_> = images.into_iter().filter(|b| !b.is_empty()).collect();
         if images.len() > MAX_IMAGES {
             return Err(Refused::Invalid(format!("at most {MAX_IMAGES} images")));
@@ -99,22 +109,46 @@ impl Capture {
                 "via is 1-{MAX_VIA_CHARS} of a-z, 0-9, -"
             )));
         }
-        if url.is_none() && text.is_none() && images.is_empty() {
+        if url.is_none() && text.is_none() && shared.is_none() && images.is_empty() {
             return Err(Refused::Invalid("send a url, text or image".into()));
         }
         Ok(Self {
             url,
             text,
+            shared,
             hashes: images.iter().map(|(_, b)| sha256(b)).collect(),
             images,
             via,
         })
     }
 
-    /// Same url, text and images: the same capture.
+    /// Same url, text, shared text and images: the same capture.
     pub fn key(&self) -> String {
-        key(self.url.as_deref(), self.text.as_deref(), &self.hashes)
+        key(
+            self.url.as_deref(),
+            self.text.as_deref(),
+            self.shared.as_deref(),
+            &self.hashes,
+        )
     }
+}
+
+/// An http(s) URL of at most [`MAX_URL_BYTES`].
+fn web_url(s: &str) -> bool {
+    s.len() <= MAX_URL_BYTES
+        && reqwest::Url::parse(s).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
+}
+
+/// The first http(s) URL among `s`'s words, less wrapping punctuation:
+/// `see (https://a.b/c).` -> `https://a.b/c`.
+fn first_link(s: &str) -> Option<String> {
+    s.split_whitespace()
+        .map(|w| {
+            w.trim_start_matches(['(', '<', '[', '"', '\''])
+                .trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '>', ']', '"', '\''])
+        })
+        .find(|w| web_url(w))
+        .map(Into::into)
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -124,8 +158,8 @@ fn sha256(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn key(url: Option<&str>, text: Option<&str>, hashes: &[String]) -> String {
-    sha256(&serde_json::to_vec(&(url, text, hashes)).expect("serializes"))
+fn key(url: Option<&str>, text: Option<&str>, shared: Option<&str>, hashes: &[String]) -> String {
+    sha256(&serde_json::to_vec(&(url, text, shared, hashes)).expect("serializes"))
 }
 
 /// Lowercase ASCII words of `s`, apostrophes dropped: "Don't panic!" -> dont, panic.
@@ -236,7 +270,7 @@ pub fn plan(
     let base = format!(
         "{}-{}",
         date.format("%Y-%m-%d"),
-        slug(c.text.as_deref(), c.url.as_deref())
+        slug(c.text.as_deref().or(c.shared.as_deref()), c.url.as_deref())
     );
     let stem = free_stem(&base, existing);
     let assets: Vec<String> = (c.images.iter().enumerate())
@@ -251,6 +285,9 @@ pub fn plan(
     );
     if let Some(u) = &c.url {
         md += &format!("url: {}\n", q(u));
+    }
+    if let Some(s) = &c.shared {
+        md += &format!("shared: {}\n", q(s));
     }
     if let Some(p) = c.text.as_deref().and_then(project) {
         md += &format!("project: {}\n", q(&p));
@@ -286,7 +323,8 @@ pub fn parse(md: &str) -> Option<Kept> {
     let rest = md.strip_prefix("---\n")?;
     let end = rest.find("\n---\n")?;
     let (front, body) = (&rest[..end + 1], &rest[end + 5..]);
-    let (mut id, mut captured, mut url, mut hashes) = (None, None, None, Vec::new());
+    let (mut id, mut captured, mut url, mut shared) = (None, None, None, None);
+    let mut hashes = Vec::new();
     for line in front.lines() {
         if let Some(v) = line.strip_prefix("id: ") {
             id = v.parse().ok();
@@ -294,6 +332,8 @@ pub fn parse(md: &str) -> Option<Kept> {
             captured = DateTime::parse_from_rfc3339(v).ok();
         } else if let Some(v) = line.strip_prefix("url: ") {
             url = Some(serde_json::from_str::<String>(v).ok()?);
+        } else if let Some(v) = line.strip_prefix("shared: ") {
+            shared = Some(serde_json::from_str::<String>(v).ok()?);
         } else if let Some(v) = line.strip_prefix("    sha256: ") {
             hashes.push(v.to_string());
         }
@@ -302,7 +342,7 @@ pub fn parse(md: &str) -> Option<Kept> {
     Some(Kept {
         id: id?,
         captured: captured?.to_utc(),
-        key: key(url.as_deref(), text, &hashes),
+        key: key(url.as_deref(), text, shared.as_deref(), &hashes),
     })
 }
 
@@ -404,7 +444,14 @@ mod tests {
 
     fn cap(url: Option<&str>, text: Option<&str>, images: &[&[u8]]) -> Capture {
         let images = images.iter().map(|b| b.to_vec()).collect();
-        Capture::new(url.map(Into::into), text.map(Into::into), images, None).unwrap()
+        Capture::new(
+            url.map(Into::into),
+            text.map(Into::into),
+            None,
+            images,
+            None,
+        )
+        .unwrap()
     }
 
     fn now() -> DateTime<Utc> {
@@ -471,12 +518,63 @@ mod tests {
     }
 
     #[test]
+    fn takes_the_link_from_shared_text_and_keeps_the_rest() {
+        let new = |url: Option<&str>, shared: &str| {
+            Capture::new(url.map(Into::into), None, Some(shared.into()), vec![], None).unwrap()
+        };
+        // What iOS Shortcuts gives for a page shared from Chrome: the bare link.
+        let c = new(None, " https://www.example.com/news/a-b \n");
+        assert_eq!(c.url.as_deref(), Some("https://www.example.com/news/a-b"));
+        assert_eq!(c.shared, None);
+        for wrapped in [
+            "see (https://x.com/a).",
+            "<https://x.com/a>",
+            "\"https://x.com/a\",",
+        ] {
+            assert_eq!(
+                new(None, wrapped).url.as_deref(),
+                Some("https://x.com/a"),
+                "{wrapped}"
+            );
+        }
+        let c = new(None, "Read this: https://x.com/a and ftp://y.z");
+        assert_eq!(c.url.as_deref(), Some("https://x.com/a"));
+        assert_eq!(
+            c.shared.as_deref(),
+            Some("Read this: https://x.com/a and ftp://y.z")
+        );
+        // No link: kept as shared text alone. A url field wins over shared.
+        let c = new(None, "just words");
+        assert_eq!((c.url, c.shared.as_deref()), (None, Some("just words")));
+        let c = new(Some("https://a.com"), "https://b.com");
+        assert_eq!(c.url.as_deref(), Some("https://a.com"));
+        assert_ne!(new(None, "one").key(), new(None, "two").key());
+        let md = plan(
+            &new(None, "see https://x.com/a"),
+            Uuid::nil(),
+            now(),
+            date(),
+            &[],
+        )
+        .md;
+        assert!(
+            md.contains("url: \"https://x.com/a\"\nshared: \"see https://x.com/a\"\n"),
+            "{md}"
+        );
+        assert_eq!(
+            parse(&md).unwrap().key,
+            new(None, "see https://x.com/a").key()
+        );
+    }
+
+    #[test]
     fn checks_fields() {
         let new =
             |url: Option<&str>, text: Option<&str>, images: Vec<Vec<u8>>, via: Option<&str>| {
                 Capture::new(
                     url.map(Into::into),
                     text.map(Into::into),
+                    None,
                     images,
                     via.map(Into::into),
                 )

@@ -3805,6 +3805,20 @@ async fn capture_takes_the_url_encoded_form_shortcuts_send_without_a_file() {
     .unwrap();
     assert!(md.contains("url: \"https://example.com/page\"\n"), "{md}");
     assert!(md.ends_with("---\ndebug note #amf"), "{md}");
+    // A Chrome share: Shortcuts can't type the link, so it comes as the shared item's text.
+    let (status, body) =
+        post("shared=https%3A%2F%2Fexample.com%2Fnews%2Fa&text=&via=shortcut").await;
+    assert_eq!(status, 201, "{body}");
+    let saved: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let md = std::fs::read_to_string(
+        dir.join("captures/inbox")
+            .join(saved["file"].as_str().unwrap()),
+    )
+    .unwrap();
+    assert!(
+        md.contains("url: \"https://example.com/news/a\"\n") && !md.contains("shared:"),
+        "{md}"
+    );
     // An empty file field comes through as `image=`; a value there isn't a file.
     assert_eq!(post("text=two&image=").await.0, 201);
     assert_eq!(post("text=three&image=aGk%3D").await.0, 400);
