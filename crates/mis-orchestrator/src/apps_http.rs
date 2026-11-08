@@ -207,8 +207,8 @@ async fn me(
     Extension(m): Extension<Member>,
     Path(slug): Path<String>,
 ) -> Response {
-    if apps.live(&slug).is_none() {
-        return StatusCode::NOT_FOUND.into_response();
+    if let Some(r) = denied(&apps, &slug, &m, Action::Read) {
+        return r;
     }
     Json(AppMe {
         user: m.subject.name().into(),

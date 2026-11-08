@@ -379,6 +379,7 @@ revision is a conflict: 409 `{"current": record-or-null}`, for the app to merge 
 is exactly what it produced (same data and writer, `rev` + 1), the answer is 200 with it.
 Removing a missing record is 200 too. A removed record's id keeps its revision: created again,
 it continues from there, so a late write aimed at the old record conflicts instead of landing.
+That small row (key, revision, last writer) is kept and counts toward the cap.
 `export` reads everything visible at once (fine at household scale).
 
 `q` (all optional): `{"where": {"score": {"gte": 1, "lt": 5}, "done": {"eq": false}}, "order_by":

@@ -8,7 +8,7 @@ use serde_json::Value;
 
 /// Largest record `data`, as JSON text.
 pub const MAX_DATA: usize = 64 << 10;
-/// Largest app database: a put that would leave it larger is refused.
+/// Largest app database (removed ids' rows included): a put that would leave it larger is refused.
 pub const MAX_DB: u64 = 100 << 20;
 /// Most records a page holds, and the default.
 pub const MAX_PAGE: u32 = 100;

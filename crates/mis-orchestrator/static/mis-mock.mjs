@@ -15,7 +15,7 @@ export class MisError extends Error {
 
 const validId = (s) => typeof s === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(s) && s !== '.' && s !== '..';
 const validCollection = (s) => typeof s === 'string' && /^[a-z0-9_-]{1,64}$/.test(s);
-const validField = (s) => /^[A-Za-z0-9_]{1,64}$/.test(s);
+const validField = (s) => typeof s === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(s);
 const SPACES = ['shared', 'me'];
 
 // JSON with sorted keys, so equal data compares equal however it was built.
@@ -97,18 +97,22 @@ export function createMock({ role = 'owner', user = 'mock@example.com', app = 'm
     const limit = q.limit ?? MAX_PAGE;
     if (!Number.isInteger(limit) || limit < 1 || limit > MAX_PAGE) return fail(400, `limit must be 1-${MAX_PAGE}`);
     const unknown = Object.keys(q).find((k) => !['where', 'order_by', 'limit', 'cursor'].includes(k));
-    if (unknown) return fail(400, `q: unknown field \`${unknown}\``);
-    const [by, dir] = q.order_by || [];
-    const ordered = !q.order_by || (Array.isArray(q.order_by) && q.order_by.length === 2 && validField(by) && ['asc', 'desc'].includes(dir));
+    if (unknown !== undefined) return fail(400, `q: unknown field \`${unknown}\``);
+    const o = q.order_by ?? null;
+    const ordered = o === null || (Array.isArray(o) && o.length === 2 && validField(o[0]) && ['asc', 'desc'].includes(o[1]));
     if (!ordered) return fail(400, 'order_by: expected [field, "asc" | "desc"]');
+    const [by, dir] = o || [];
+    if (q.where !== undefined && (q.where === null || typeof q.where !== 'object' || Array.isArray(q.where))) return fail(400, 'where: expected an object');
     const conds = Object.entries(q.where || {});
     const ops = { eq: (c) => c === 0, gt: (c) => c > 0, gte: (c) => c >= 0, lt: (c) => c < 0, lte: (c) => c <= 0 };
     for (const [f, cond] of conds) {
       if (!validField(f)) return fail(400, `field ${JSON.stringify(f)}: expected [A-Za-z0-9_]{1,64}`);
-      const given = Object.entries(cond || {}).filter(([, v]) => v !== null);
+      const all = Object.entries(cond && typeof cond === 'object' ? cond : {});
+      const strange = all.find(([op]) => !Object.hasOwn(ops, op));
+      if (strange) return fail(400, `where.${f}: unknown ${strange[0]}`);
+      const given = all.filter(([, v]) => v !== null);
       if (!given.length) return fail(400, `where.${f}: give eq, gt, gte, lt or lte`);
-      for (const [op, v] of given) {
-        if (!Object.hasOwn(ops, op)) return fail(400, `where.${f}: unknown ${op}`);
+      for (const [, v] of given) {
         if (!['bool', 'number', 'text'].includes(jsonType(v))) return fail(400, `where.${f}: values are strings, numbers or booleans`);
       }
     }

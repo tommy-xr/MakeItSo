@@ -150,7 +150,7 @@ test('mock: a recreated id continues its revisions, so a late remove conflicts',
 
 test('mock: refuses what the server refuses, and any collection name works', async () => {
   const m = createMock();
-  for (const q of [{ order_by: ['score'] }, { order_by: ['score', 'asc', 'x'] }, { filter: {} }, { where: { a: { constructor: 1 } } }]) {
+  for (const q of [{ order_by: ['score'] }, { order_by: ['score', 'asc', 'x'] }, { order_by: {} }, { order_by: false }, { order_by: [123, 'asc'] }, { filter: {} }, { '': 1 }, { where: { a: { constructor: 1 } } }, { where: { a: { eq: 1, typo: null } } }, { where: null }, { order_by: '' }]) {
     await assert.rejects(m.records.list('shared', 'notes', q), (e) => e.status === 400, JSON.stringify(q));
   }
   for (const c of ['constructor', '__proto__']) await m.records.put('shared', c, 'a', 0, { constructor: 1 });
@@ -159,7 +159,7 @@ test('mock: refuses what the server refuses, and any collection name works', asy
   assert.deepEqual(await m.records.list('shared', 'constructor', { where: { toString: { eq: 1 } } }), { records: [], cursor: null });
 });
 
-test('mis.js in mock mode rejects with its own MisError class', async () => {
+test('mock: rejects with the error class it is given (mis.js passes mis.MisError)', async () => {
   class E extends Error {}
   const m = createMock({ role: 'viewer', Err: E });
   await assert.rejects(m.records.put('shared', 'notes', 'a', 0, {}), (e) => e instanceof E);
