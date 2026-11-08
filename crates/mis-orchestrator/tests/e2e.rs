@@ -4506,7 +4506,8 @@ async fn records_put_get_list_and_page() {
     )
     .await;
     assert_eq!(status, 405);
-    std::fs::remove_dir_all(dir).unwrap();
+    // Best effort: on Windows the still-running server holds data.sqlite open.
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
@@ -4558,7 +4559,8 @@ async fn records_conflict_once_and_retries_succeed() {
         app_post(&apps, MUTATIONS, "", &rm(2)).await,
         (200, r#"{"record":null}"#.into())
     );
-    std::fs::remove_dir_all(dir).unwrap();
+    // Best effort: on Windows the still-running server holds data.sqlite open.
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
@@ -4648,7 +4650,8 @@ async fn records_follow_roles_and_me_stays_private() {
         403
     );
     assert_eq!(app_post(&apps, MUTATIONS, &stranger, &note).await.0, 403);
-    std::fs::remove_dir_all(dir).unwrap();
+    // Best effort: on Windows the still-running server holds data.sqlite open.
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
@@ -4697,7 +4700,8 @@ async fn record_writes_need_json_from_the_apps_own_origin() {
             .0,
         200
     );
-    std::fs::remove_dir_all(dir).unwrap();
+    // Best effort: on Windows the still-running server holds data.sqlite open.
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
@@ -4729,7 +4733,8 @@ async fn records_survive_a_restart() {
             .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
-    std::fs::remove_dir_all(dir).unwrap();
+    // Best effort: on Windows the still-running server holds data.sqlite open.
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]

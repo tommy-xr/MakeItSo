@@ -336,6 +336,7 @@ mod tests {
                 assert_eq!(mode & 0o777, 0o600, "{f}");
             }
         }
+        drop(again); // Windows can't delete an open database
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -420,6 +421,7 @@ mod tests {
         let p = page(&r, json!({"limit": 4, "cursor": p.cursor.unwrap()}));
         assert_eq!(ids(&p), ["e", "f", "g"]);
         assert_eq!(p.cursor, None);
+        drop(r); // Windows can't delete an open database
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -461,6 +463,7 @@ mod tests {
         // The freed pages make room again.
         let op = put(Space::Shared, "again", 0, blob("x"));
         assert!(r.mutate("pool", &op, "me", 3).unwrap().is_ok());
+        drop(r); // Windows can't delete an open database
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -487,6 +490,7 @@ mod tests {
         assert_eq!(again.rev, 2);
         assert_eq!(w(&rm(1)), Err(Refusal::Conflict(Some(again.clone()))));
         assert_eq!(page(&r, json!({})).records, [again]);
+        drop(r); // Windows can't delete an open database
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
