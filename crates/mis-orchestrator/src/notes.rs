@@ -167,7 +167,6 @@ fn raced(stdout: &str) -> bool {
         "(fetch first)",
         "(non-fast-forward)",
         "(incorrect old value provided)",
-        "(stale info)",
     ];
     (stdout.lines())
         .filter(|l| l.starts_with("!\t"))
@@ -307,7 +306,9 @@ impl Notes {
         let mut s = self.status.lock().unwrap();
         // Captures kept mid-run may postdate the receipts it read. Counted before
         // reading them, so at worst one is counted twice until the next run.
-        s.pending = pending + (self.arrived.load(Ordering::SeqCst) - before);
+        if let Some(pending) = pending {
+            s.pending = pending + (self.arrived.load(Ordering::SeqCst) - before);
+        }
         s.state = state(s.pending, &run);
         match &run {
             Ok(pushed) => {
@@ -317,19 +318,19 @@ impl Notes {
                 s.last_error = None;
             }
             Err(f) => {
-                let why = f.why().replace(&self.remote, "<remote>");
-                tracing::warn!(state = ?s.state, "publishing captures: {why}");
-                s.last_error = Some(why);
+                tracing::warn!(state = ?s.state, "publishing captures: {}", f.why());
+                s.last_error = Some(f.why().to_string());
             }
         }
         s.clone()
     }
 
-    /// Captures still unpublished after the run, and whether it pushed.
-    fn publish(&self) -> (usize, Result<bool, Failure>) {
+    /// Captures still unpublished after the run (None: couldn't count them), and whether
+    /// it pushed.
+    fn publish(&self) -> (Option<usize>, Result<bool, Failure>) {
         let (receipts, mut map) = match self.read() {
             Ok(read) => read,
-            Err(f) => return (self.status().pending, Err(f)),
+            Err(f) => return (None, Err(f)),
         };
         let unpublished = |map: &Map| {
             (receipts.iter())
@@ -338,11 +339,11 @@ impl Notes {
         };
         let pending = unpublished(&map);
         if pending == 0 {
-            return (0, Ok(false));
+            return (Some(0), Ok(false));
         }
         match self.publish_new(&receipts, &mut map) {
-            Ok(pushed) => (unpublished(&map), Ok(pushed)),
-            Err(f) => (pending, Err(f)),
+            Ok(pushed) => (Some(unpublished(&map)), Ok(pushed)),
+            Err(f) => (Some(pending), Err(f)),
         }
     }
 
@@ -442,7 +443,16 @@ impl Notes {
             let tmp = self.clone.with_extension("tmp");
             let _ = std::fs::remove_dir_all(&tmp);
             std::fs::create_dir_all(&tmp)?;
-            let out = self.git_in(&tmp, &["clone", "--quiet", "--", &self.remote, "."])?;
+            let clone = [
+                "clone",
+                "--quiet",
+                "--branch",
+                BRANCH,
+                "--",
+                &self.remote,
+                ".",
+            ];
+            let out = self.git_in(&tmp, &clone)?;
             out.check("clone", Failure::Offline)?;
             std::fs::rename(&tmp, &self.clone)?;
         }
@@ -473,10 +483,13 @@ impl Notes {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             r => r?,
         };
-        let paths: Vec<&str> = paths.lines().collect();
-        for cmd in [["reset", "-q"].as_slice(), &["clean", "-fq"]] {
-            let args: Vec<&str> = [cmd, &["--"], &paths].concat();
-            self.git(&args)?.check(cmd[0], Failure::Other)?;
+        let paths: Vec<&str> = paths.lines().filter(|p| !p.is_empty()).collect();
+        // No paths would mean the whole tree to `reset` and `clean`.
+        if !paths.is_empty() {
+            for cmd in [["reset", "-q"].as_slice(), &["clean", "-fq"]] {
+                let args: Vec<&str> = [cmd, &["--"], &paths].concat();
+                self.git(&args)?.check(cmd[0], Failure::Other)?;
+            }
         }
         std::fs::remove_file(marker)?;
         Ok(())
@@ -513,15 +526,16 @@ impl Notes {
         Ok(published_in(&log.text()))
     }
 
-    /// HEAD's `inbox/` files, with their record ids. Read from the working tree: after a
-    /// clean rebase or commit, its tracked files are HEAD's.
+    /// HEAD's `inbox/` files, with their record ids, plus any other file there (no id), so
+    /// a new record never lands on a human's uncommitted one. Ids are read from the
+    /// working tree: after a clean rebase or commit, its tracked files are HEAD's.
     fn scan(&self) -> Result<BTreeMap<String, Option<Uuid>>, Failure> {
         let ls = self.git(&["ls-tree", "-z", "--name-only", "HEAD", &format!("{INBOX}/")])?;
         let ls = ls.check("ls-tree", Failure::Other)?;
         let paths = (ls.stdout.split(|b| *b == 0))
             .filter(|p| !p.is_empty())
             .map(|p| String::from_utf8_lossy(p).into_owned());
-        Ok(paths
+        let mut files: BTreeMap<String, Option<Uuid>> = paths
             .map(|p| {
                 let md = (p.ends_with(".md"))
                     .then(|| std::fs::read_to_string(self.clone.join(&p)).ok())
@@ -529,7 +543,16 @@ impl Notes {
                 let id = md.as_deref().and_then(crate::capture::parse).map(|k| k.id);
                 (p, id)
             })
-            .collect())
+            .collect();
+        let untracked = match std::fs::read_dir(self.clone.join(INBOX)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+            r => r?.flatten().collect(),
+        };
+        for e in untracked {
+            let name = e.file_name().to_string_lossy().into_owned();
+            files.entry(format!("{INBOX}/{name}")).or_insert(None);
+        }
+        Ok(files)
     }
 
     /// Write and commit the records `actions` says to write, if any.
@@ -556,13 +579,21 @@ impl Notes {
         let marker = self.clone.join(".git").join(WRITING);
         crate::push::write_private(&marker, paths.join("\n").as_bytes())?;
         std::fs::create_dir_all(self.clone.join(INBOX))?;
+        // New files only: a name taken since `scan` fails the run rather than lose a file.
+        let create = |to: &str| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(self.clone.join(to))
+        };
         for (to, from) in &files {
             if let Some(from) = from {
-                std::fs::copy(self.receipts.join(from), self.clone.join(to))?;
+                let mut src = std::fs::File::open(self.receipts.join(from))?;
+                std::io::copy(&mut src, &mut create(to)?)?;
             }
         }
         for (_, _, path, md) in &writes {
-            std::fs::write(self.clone.join(path), md)?;
+            std::io::Write::write_all(&mut create(path)?, md.as_bytes())?;
         }
         let add: Vec<&str> = [&["add", "--"], paths.as_slice()].concat();
         self.git(&add)?.check("add", Failure::Other)?;
@@ -604,7 +635,8 @@ fn run_git(dir: &Path, args: &[&str], deadline: Duration) -> std::io::Result<Out
             "-c",
             "core.hooksPath=/dev/null",
         ])
-        .args(["-c", "core.askPass="])
+        // Autostash would carry a human's uncommitted edits through the rebase.
+        .args(["-c", "core.askPass=", "-c", "rebase.autoStash=false"])
         // A stalled transfer (under 1 KB/s for a minute) fails sooner than the deadline.
         .args([
             "-c",
@@ -615,6 +647,8 @@ fn run_git(dir: &Path, args: &[&str], deadline: Duration) -> std::io::Result<Out
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
+        // Paths are file names, never globs.
+        .env("GIT_LITERAL_PATHSPECS", "1")
         .env_remove("GIT_ASKPASS")
         .env_remove("SSH_ASKPASS")
         .env("GIT_AUTHOR_NAME", "Make It So")
@@ -630,32 +664,48 @@ fn run_git(dir: &Path, args: &[&str], deadline: Duration) -> std::io::Result<Out
     let mut child = cmd.spawn()?;
     let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
     let start = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break Some(status);
+    // Done once git has exited and its output closed: a process it left holding the
+    // pipes (an ssh master) is waited for only until the deadline too.
+    let mut status = None;
+    while status.is_none() || !stdout.is_finished() || !stderr.is_finished() {
+        if status.is_none() {
+            status = child.try_wait()?;
         }
         if start.elapsed() >= deadline {
-            #[cfg(unix)]
-            // SAFETY: signals only the group spawned above, whose leader we haven't reaped.
-            unsafe {
-                libc::killpg(child.id() as i32, libc::SIGKILL);
-            }
+            // TERM first, so git removes its lock files; then KILL what's left.
+            signal_group(&child, libc::SIGTERM);
+            std::thread::sleep(Duration::from_millis(200));
+            signal_group(&child, libc::SIGKILL);
             let _ = child.kill();
             let _ = child.wait();
-            break None;
+            // Readers still blocked (on a pipe held outside the group) are left behind.
+            let why = format!("timed out after {}s", deadline.as_secs_f32());
+            return Ok(Out {
+                ok: false,
+                stdout: vec![],
+                stderr: why,
+            });
         }
         std::thread::sleep(Duration::from_millis(10));
-    };
+    }
     let stdout = stdout.join().expect("reader");
     let stderr = String::from_utf8_lossy(&stderr.join().expect("reader")).into_owned();
     Ok(Out {
         ok: status.is_some_and(|s| s.success()),
         stdout,
-        stderr: match status {
-            Some(_) => stderr,
-            None => format!("timed out after {}s", deadline.as_secs_f32()),
-        },
+        stderr,
     })
+}
+
+/// Signal the process group `child` leads (see `process_group(0)` above).
+fn signal_group(child: &std::process::Child, signal: i32) {
+    #[cfg(unix)]
+    // SAFETY: a plain syscall on the group spawned with this child; at worst it is gone.
+    unsafe {
+        libc::killpg(child.id() as i32, signal);
+    }
+    #[cfg(not(unix))]
+    let _ = (child, signal);
 }
 
 /// Read `pipe` to the end on a thread, so neither pipe fills while we wait.
@@ -850,6 +900,19 @@ mod tests {
         assert!(!out.ok);
         assert_eq!(out.stderr, "timed out after 0.3s");
         // The readers saw EOF, so `sleep` (git's grandchild) died too.
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+        // Git exits at once but leaves something holding its output open.
+        let start = Instant::now();
+        let linger = ["-c", "alias.linger=!sleep 30 & exit 0", "linger"];
+        let out = run_git(&dir, &linger, Duration::from_millis(300)).unwrap();
+        assert_eq!(
+            (out.ok, out.stderr.as_str()),
+            (false, "timed out after 0.3s")
+        );
         assert!(
             start.elapsed() < Duration::from_secs(5),
             "{:?}",

@@ -538,3 +538,60 @@ fn a_name_held_by_another_record_gets_a_number() {
     assert_eq!(String::from_utf8(w.show(&md)).unwrap(), want);
     assert_eq!(w.map()[&a.id].path, md);
 }
+
+#[test]
+fn a_humans_uncommitted_file_at_a_new_records_name_is_never_overwritten() {
+    let w = World::new();
+    w.capture("first", &[]);
+    w.notes().run();
+    let a = w.capture("same name as a draft", &[]);
+    let draft = w.state.join("notes/inbox").join(&a.file);
+    std::fs::write(&draft, "a draft, not committed").unwrap();
+    let s = w.notes().run();
+    assert_eq!((s.state, s.pending), (Idle, 0));
+    assert_eq!(
+        std::fs::read_to_string(&draft).unwrap(),
+        "a draft, not committed"
+    );
+    let renamed = format!("inbox/{}", a.file.replace(".md", "-2.md"));
+    assert_eq!(w.show(&renamed), w.receipt(&a.file));
+    assert!(
+        !w.files().contains(&format!("inbox/{}", a.file)),
+        "draft not published"
+    );
+}
+
+#[test]
+fn a_crash_after_committing_keeps_and_pushes_the_commit() {
+    let w = World::new();
+    w.capture("first", &[]);
+    w.notes().run();
+    let a = w.capture("committed, then crashed", &[]);
+    // A run that committed, then stopped before removing its marker and pushing.
+    let clone = w.state.join("notes");
+    let md = format!("inbox/{}", a.file);
+    let receipt = w.state.join("captures/inbox").join(&a.file);
+    std::fs::copy(receipt, clone.join(&md)).unwrap();
+    git(&clone, &["add", "--", &md]);
+    let msg = format!(
+        "capture: 1 item\n\nMIS-Writer: capture\nMIS-Capture: {} {md}\n",
+        a.id
+    );
+    let who = [
+        "-c",
+        "user.name=Make It So",
+        "-c",
+        "user.email=mis@localhost",
+    ];
+    git(
+        &clone,
+        &[&who[..], &["commit", "--quiet", "-m", &msg]].concat(),
+    );
+    std::fs::write(clone.join(".git/mis-writing"), &md).unwrap();
+    let s = w.notes().run();
+    assert_eq!((s.state, s.pending), (Idle, 0));
+    assert_eq!(w.show(&md), w.receipt(&a.file));
+    assert_eq!(w.log()[..2], ["capture: 1 item", "capture: 1 item"]);
+    assert_eq!(w.map()[&a.id].commit, w.head());
+    assert!(!clone.join(".git/mis-writing").exists());
+}
