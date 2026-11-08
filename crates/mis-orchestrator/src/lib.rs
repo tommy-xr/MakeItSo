@@ -1045,7 +1045,10 @@ pub fn router(app: App) -> Router {
         .route("/api/apps/{slug}/releases", post(publish_app))
         .route("/api/apps/{slug}/activate", post(activate_app))
         .route("/api/apps/{slug}/members", post(set_app_member))
-        .route("/api/apps/{slug}/backups", get(app_backups).post(back_up_app))
+        .route(
+            "/api/apps/{slug}/backups",
+            get(app_backups).post(back_up_app),
+        )
         .route("/api/apps/{slug}/restore", post(restore_app))
         .route("/api/sessions", get(live_sessions))
         .route("/api/workers/{id}/sessions", get(sessions))
@@ -1814,9 +1817,8 @@ async fn restore_app(
         return (StatusCode::NOT_FOUND, "no such app").into_response();
     }
     let at = unix_ms();
-    let restored = tokio::task::spawn_blocking(move || {
-        apps.restore(&slug, &req.backup, req.with_policy, at)
-    });
+    let restored =
+        tokio::task::spawn_blocking(move || apps.restore(&slug, &req.backup, req.with_policy, at));
     match restored.await.expect("restoring doesn't panic") {
         Ok(r) => Json(r).into_response(),
         Err(e) => backup_refused(e),

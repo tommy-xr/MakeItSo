@@ -849,7 +849,10 @@ mod tests {
         assert_eq!(apps.publish("pool", &bundle(b"2"), 6, true).unwrap(), 2);
         let live = apps.live("pool").unwrap();
         assert_eq!(read_file(&live.dir, "index.html").unwrap(), b"2");
-        assert_eq!(apps.activate("pool", 3, 1), Err(ActivateError::NoSuchRelease));
+        assert_eq!(
+            apps.activate("pool", 3, 1),
+            Err(ActivateError::NoSuchRelease)
+        );
         apps.activate("pool", 1, 1).unwrap();
         let view = &apps.list()[0];
         assert_eq!(

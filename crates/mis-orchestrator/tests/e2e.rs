@@ -4798,9 +4798,7 @@ async fn demo_notes(apps: &str) -> Vec<(String, serde_json::Value)> {
     let (status, _, body) = app_get(apps, "/a/demo/api/v1/records/shared/notes", "").await;
     assert_eq!(status, 200, "{body}");
     let page: Page = serde_json::from_str(&body).unwrap();
-    (page.records.into_iter())
-        .map(|e| (e.id, e.data))
-        .collect()
+    (page.records.into_iter()).map(|e| (e.id, e.data)).collect()
 }
 
 async fn restore_demo(mis: &str, backup: &str, with_policy: bool) -> Restored {
@@ -4821,7 +4819,10 @@ async fn app_backups_restore_and_the_pre_restore_one_undoes_it() {
         }
     };
     // No records yet: nothing to back up.
-    assert_eq!(post_json(&mis, "/api/apps/demo/backups", "s", "").await.0, 409);
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/backups", "s", "").await.0,
+        409
+    );
     write("a", 0, 1).await;
     let (status, body) = post_json(&mis, "/api/apps/demo/backups", "s", "").await;
     assert_eq!(status, 201, "{body}");
@@ -4854,14 +4855,26 @@ async fn restore_brings_back_members_only_when_asked() {
     let op = put_op("shared", "a", 0, 1.into());
     assert_eq!(app_post(&apps, MUTATIONS, "", &op).await.0, 200);
     let share = r#"{"email": "x@example.com", "role": "editor"}"#;
-    assert_eq!(post_json(&mis, "/api/apps/demo/members", "s", share).await.0, 200);
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/members", "s", share)
+            .await
+            .0,
+        200
+    );
     let (_, body) = post_json(&mis, "/api/apps/demo/backups", "s", "").await;
     let snap: AppBackup = serde_json::from_str(&body).unwrap();
     let unshare = r#"{"email": "x@example.com", "role": null}"#;
-    assert_eq!(post_json(&mis, "/api/apps/demo/members", "s", unshare).await.0, 200);
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/members", "s", unshare)
+            .await
+            .0,
+        200
+    );
     let members = |mis: String| async move {
         let (_, body) = get_json(&mis, "/api/apps", "s").await;
-        serde_json::from_str::<Vec<AppView>>(&body).unwrap()[0].members.len()
+        serde_json::from_str::<Vec<AppView>>(&body).unwrap()[0]
+            .members
+            .len()
     };
     restore_demo(&mis, &snap.name, false).await;
     assert_eq!(members(mis.clone()).await, 0);
@@ -4875,7 +4888,12 @@ async fn activating_a_release_backs_up_first() {
     let (mis, apps, dir) = live_demo(with_read_token(), Default::default()).await;
     let op = put_op("shared", "a", 0, 1.into());
     assert_eq!(app_post(&apps, MUTATIONS, "", &op).await.0, 200);
-    assert_eq!(publish(&mis, "/api/apps/demo/releases", "s", &demo("v2")).await.0, 201);
+    assert_eq!(
+        publish(&mis, "/api/apps/demo/releases", "s", &demo("v2"))
+            .await
+            .0,
+        201
+    );
     let (status, _) = post_json(&mis, "/api/apps/demo/activate", "s", r#"{"release": 2}"#).await;
     assert_eq!(status, 204);
     let page = "/api/apps/demo/releases?activate=true";
@@ -4896,9 +4914,17 @@ async fn read_token_lists_backups_but_cannot_take_or_restore_and_bad_names_are_r
     let (_, body) = post_json(&mis, "/api/apps/demo/backups", "s", "").await;
     let snap: AppBackup = serde_json::from_str(&body).unwrap();
     assert_eq!(get_json(&mis, "/api/apps/demo/backups", "r").await.0, 200);
-    assert_eq!(post_json(&mis, "/api/apps/demo/backups", "r", "").await.0, 403);
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/backups", "r", "").await.0,
+        403
+    );
     let body = serde_json::json!({"backup": snap.name}).to_string();
-    assert_eq!(post_json(&mis, "/api/apps/demo/restore", "r", &body).await.0, 403);
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/restore", "r", &body)
+            .await
+            .0,
+        403
+    );
     for bad in [
         "../data",
         "../../demo/data",
@@ -4911,9 +4937,17 @@ async fn read_token_lists_backups_but_cannot_take_or_restore_and_bad_names_are_r
         assert_eq!(status, 400, "{bad}");
     }
     let body = serde_json::json!({"backup": "daily-20200101T000000.000Z"}).to_string();
-    assert_eq!(post_json(&mis, "/api/apps/demo/restore", "s", &body).await.0, 404);
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/restore", "s", &body)
+            .await
+            .0,
+        404
+    );
     assert_eq!(get_json(&mis, "/api/apps/nope/backups", "s").await.0, 404);
-    assert_eq!(post_json(&mis, "/api/apps/nope/backups", "s", "").await.0, 404);
+    assert_eq!(
+        post_json(&mis, "/api/apps/nope/backups", "s", "").await.0,
+        404
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -4937,10 +4971,17 @@ async fn writes_during_a_restore_are_kept_or_backed_up_never_lost() {
     while demo_notes(&apps).await.len() < 10 {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
-    let pre = restore_demo(&mis, &snap.name, false).await.pre_restore.unwrap();
+    let pre = restore_demo(&mis, &snap.name, false)
+        .await
+        .pre_restore
+        .unwrap();
     writer.await.unwrap();
     let ids = |notes: Vec<(String, serde_json::Value)>| -> Vec<String> {
-        notes.into_iter().map(|(id, _)| id).filter(|id| id != "seed").collect()
+        notes
+            .into_iter()
+            .map(|(id, _)| id)
+            .filter(|id| id != "seed")
+            .collect()
     };
     let after = ids(demo_notes(&apps).await);
     restore_demo(&mis, &pre.name, false).await;

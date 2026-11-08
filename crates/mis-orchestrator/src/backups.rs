@@ -87,11 +87,7 @@ pub struct Daily<'a> {
 
 /// The apps owed a daily snapshot at `now`: changed, and none taken yet this local day in `tz`.
 pub fn due_backups<'a, Tz: TimeZone>(apps: &[Daily<'a>], now: u64, tz: &Tz) -> Vec<&'a str> {
-    let day = |ms: u64| -> NaiveDate {
-        tz.timestamp_millis_opt(ms as i64)
-            .unwrap()
-            .date_naive()
-    };
+    let day = |ms: u64| -> NaiveDate { tz.timestamp_millis_opt(ms as i64).unwrap().date_naive() };
     (apps.iter())
         .filter(|a| a.changed && a.last_daily.is_none_or(|at| day(at) < day(now)))
         .map(|a| a.slug)
@@ -608,9 +604,8 @@ mod tests {
         // snapshot, the rest after it.
         let k = before.len() - 1;
         assert!((20..300).contains(&k), "{k}");
-        let ids = |r: std::ops::Range<usize>| -> Vec<String> {
-            r.map(|i| format!("w{i:03}")).collect()
-        };
+        let ids =
+            |r: std::ops::Range<usize>| -> Vec<String> { r.map(|i| format!("w{i:03}")).collect() };
         assert_eq!(before, [vec!["seed".to_string()], ids(0..k)].concat());
         assert_eq!(after, [vec!["seed".to_string()], ids(k..300)].concat());
         drop(r);
