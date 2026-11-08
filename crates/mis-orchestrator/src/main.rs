@@ -1,5 +1,6 @@
 use clap::Parser;
 use mis_orchestrator::access_gate::AccessGate;
+use mis_orchestrator::capture::Inbox;
 use mis_orchestrator::evidence;
 use mis_orchestrator::images::Images;
 use mis_orchestrator::push::Push;
@@ -22,6 +23,15 @@ struct Args {
         hide_env_values = true
     )]
     read_tokens: Vec<String>,
+    /// Capture-only token (a phone's share sheet): may `POST /api/capture` and nothing else
+    /// (repeatable, or comma-separated `MIS_CAPTURE_TOKENS`, preferred). Needs --token.
+    #[arg(
+        long = "capture-token",
+        env = "MIS_CAPTURE_TOKENS",
+        value_delimiter = ',',
+        hide_env_values = true
+    )]
+    capture_tokens: Vec<String>,
     /// Externally reachable URL (e.g. a tunnel hostname), shown in connection hints.
     #[arg(long, env = "MIS_PUBLIC_URL")]
     public_url: Option<String>,
@@ -59,13 +69,17 @@ struct Args {
         value_delimiter = ','
     )]
     access_subjects: Vec<String>,
+    /// AUD tag of a second Access app on path `/api/capture` (Service Auth for the phone's
+    /// capture-only service token). Its JWT is accepted there only, and only to capture.
+    #[arg(long, env = "MIS_CF_ACCESS_CAPTURE_AUD")]
+    cf_access_capture_aud: Option<String>,
     /// Fetch Access keys from here instead of the team's certs URL (testing).
     #[arg(long, hide = true)]
     cf_access_certs_url: Option<String>,
     /// Holds task history (`ledger.json`, `transcripts/`; tasks are kept 30 days
     /// after they end), the push notification key and subscriptions, and uploaded
-    /// images (`images/`, deleted after a week) and evidence files agents attach
-    /// (`evidence/`, deleted after 30 days). Default: ~/.local/state/mis
+    /// images (`images/`, deleted after a week), evidence files agents attach
+    /// (`evidence/`, deleted after 30 days) and captures (`captures/inbox/`, kept). Default: ~/.local/state/mis
     /// (%LOCALAPPDATA%\mis on Windows).
     #[arg(long, env = "MIS_STATE_DIR")]
     state_dir: Option<std::path::PathBuf>,
@@ -156,20 +170,29 @@ fn one_shot_claude(model: &str, extra: &[&str]) -> std::sync::Arc<mis_agent::cla
 /// `--cf-access-team` / `--cf-access-aud`: both or neither; `MIS_..=` means unset.
 async fn access_gate(args: &Args) -> anyhow::Result<Option<AccessGate>> {
     let nonempty = |v: &Option<String>| v.clone().filter(|v| !v.is_empty());
+    let capture_aud = nonempty(&args.cf_access_capture_aud);
     let (team, aud) = match (
         nonempty(&args.cf_access_team),
         nonempty(&args.cf_access_aud),
     ) {
         (Some(team), Some(aud)) => (team, aud),
-        (None, None) => return Ok(None),
+        (None, None) if capture_aud.is_none() => return Ok(None),
+        (None, None) => anyhow::bail!("--cf-access-capture-aud needs --cf-access-team/-aud"),
         _ => anyhow::bail!("--cf-access-team and --cf-access-aud go together"),
     };
+    if capture_aud.as_ref() == Some(&aud) {
+        anyhow::bail!("--cf-access-capture-aud must be another Access app's AUD");
+    }
     if !team.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         anyhow::bail!("--cf-access-team is the <team> in <team>.cloudflareaccess.com");
     }
     let url = nonempty(&args.cf_access_certs_url).unwrap_or_else(|| access::certs_url(&team));
     tracing::info!(%team, "Cloudflare Access: non-local requests need its JWT");
-    let gate = AccessGate::remote(team, aud, url);
+    let mut gate = AccessGate::remote(team, aud, url);
+    if let Some(aud) = capture_aud {
+        tracing::info!("Cloudflare Access: capture app's JWT accepted on /api/capture");
+        gate = gate.with_capture_aud(aud);
+    }
     // Unreachable now is not fatal: the first request with a JWT refetches.
     if let Err(e) = gate.refresh().await {
         tracing::warn!("fetching Cloudflare Access keys: {e:#}; retrying on first request");
@@ -234,6 +257,16 @@ async fn main() -> anyhow::Result<()> {
         .collect();
     if !args.read_tokens.is_empty() && args.token.is_none() {
         anyhow::bail!("--read-token / MIS_READ_TOKENS needs --token / MIS_TOKEN");
+    }
+    args.capture_tokens = (args.capture_tokens.iter().map(|t| t.trim().to_string()))
+        .filter(|t| !t.is_empty())
+        .collect();
+    if !args.capture_tokens.is_empty() && args.token.is_none() {
+        anyhow::bail!("--capture-token / MIS_CAPTURE_TOKENS needs --token / MIS_TOKEN");
+    }
+    let shared = |t: &String| args.token.as_ref() == Some(t) || args.read_tokens.contains(t);
+    if args.capture_tokens.iter().any(shared) {
+        anyhow::bail!("capture tokens must differ from the full and read tokens");
     }
     let state_dir = args.state_dir.clone().or_else(default_state_dir);
     if args.self_test {
@@ -306,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
         .with_channel(channel)
         .with_read_tokens(args.read_tokens)
         .with_access_subjects(args.access_subjects)
+        .with_capture_tokens(args.capture_tokens)
         .with_allowed_origins(origins);
     if let Some(gate) = gate {
         app = app.with_access(gate);
@@ -332,10 +366,14 @@ async fn main() -> anyhow::Result<()> {
                 Ok(store) => app = app.with_evidence(store),
                 Err(e) => tracing::warn!("evidence files off: {e:#}"),
             }
+            match Inbox::open(dir.join("captures").join("inbox")) {
+                Ok(inbox) => app = app.with_captures(inbox),
+                Err(e) => tracing::warn!("captures off: {e:#}"),
+            }
         }
         None => tracing::warn!(
             "no --state-dir and no home dir: task history is lost on restart; \
-             push notifications, image attachments and evidence files off"
+             push notifications, image attachments, evidence files and captures off"
         ),
     }
     if args.no_planner {

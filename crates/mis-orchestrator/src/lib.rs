@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Path, Query as Params, State};
+use axum::extract::{ConnectInfo, FromRequest, Path, Query as Params, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -24,6 +24,7 @@ pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("MIS_GIT_
 
 pub mod access;
 pub mod access_gate;
+pub mod capture;
 pub mod evidence;
 pub mod images;
 pub mod ledger;
@@ -51,12 +52,14 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 pub const ROUTINE_EVERY: Duration = Duration::from_secs(30);
 /// Largest frame a worker may send: a compare's two images, base64, plus slack.
 const WORKER_FRAME: usize = 2 * mis_types::evidence::MAX_FILE_BYTES.div_ceil(3) * 4 + (1 << 20);
+/// Largest `/api/capture` body: its images plus room for the other fields.
+const CAPTURE_BODY: usize = MAX_IMAGES * MAX_IMAGE_BYTES + (1 << 20);
 
 use access::Identity;
 use access_gate::{AccessGate, JWT_HEADER};
 use ledger::{ConnId, Effect, Ledger, NotCancelled};
 use mis_agent::Agent;
-use scope::Scope;
+use scope::{Route, Scope};
 
 /// A query's connection, and who waits for its answer.
 type Waiting = (ConnId, oneshot::Sender<Answer>);
@@ -75,6 +78,8 @@ pub struct App {
     read_tokens: Vec<String>,
     /// Access identities let in (any case); empty: any the Access app admits.
     access_subjects: Vec<String>,
+    /// Tokens that may only `POST /api/capture`.
+    capture_tokens: Vec<String>,
     /// Browser `Origin`s permitted to connect; requests without `Origin` are always let through.
     allowed_origins: Vec<String>,
     /// How long a disconnected worker may be gone before its tasks are failed.
@@ -106,6 +111,8 @@ pub struct App {
     images: Option<Arc<images::Images>>,
     /// Files agents attach as evidence. None: they are refused.
     evidence: Option<Arc<evidence::Store>>,
+    /// Where captures are kept. None: they are refused.
+    captures: Option<Arc<capture::Inbox>>,
     /// Where the ledger is saved. None: task history is lost on restart.
     ledger_dir: Option<std::path::PathBuf>,
     /// Open once serving, until shut down.
@@ -133,6 +140,7 @@ impl App {
             token,
             read_tokens: Vec::new(),
             access_subjects: Vec::new(),
+            capture_tokens: Vec::new(),
             allowed_origins: Vec::new(),
             grace: Duration::from_secs(60),
             planner: None,
@@ -150,6 +158,7 @@ impl App {
             push: None,
             images: None,
             evidence: None,
+            captures: None,
             ledger_dir: None,
             store: Default::default(),
             channel: None,
@@ -194,6 +203,12 @@ impl App {
         self
     }
 
+    /// Also accept these tokens for `POST /api/capture` only. Only meaningful with a full token.
+    pub fn with_capture_tokens(mut self, tokens: Vec<String>) -> Self {
+        self.capture_tokens = tokens;
+        self
+    }
+
     /// Allow browser pages from these origins (already normalised, see [`normalize_origins`]).
     pub fn with_allowed_origins(mut self, origins: Vec<String>) -> Self {
         self.allowed_origins = origins;
@@ -234,6 +249,12 @@ impl App {
     /// Keep and serve the files agents attach as evidence.
     pub fn with_evidence(mut self, store: evidence::Store) -> Self {
         self.evidence = Some(Arc::new(store));
+        self
+    }
+
+    /// Keep captures in `inbox`.
+    pub fn with_captures(mut self, inbox: capture::Inbox) -> Self {
+        self.captures = Some(Arc::new(inbox));
         self
     }
 
@@ -715,36 +736,57 @@ impl App {
         }
     }
 
-    async fn access_check(&self, headers: &HeaderMap) -> Access {
+    async fn access_check(&self, headers: &HeaderMap, route: Route) -> Access {
         let Some(gate) = &self.access else {
             return Access::Off;
         };
         let Some(jwt) = headers.get(JWT_HEADER) else {
             return Access::Failed;
         };
-        match gate.verify(jwt.to_str().unwrap_or_default()).await {
-            Ok(id) if subject_listed(&self.access_subjects, &id.subject) => Access::Passed(id),
-            Ok(id) => {
+        let jwt = jwt.to_str().unwrap_or_default();
+        let main = gate.verify(jwt).await;
+        // Only `/api/capture` takes the capture app's JWT. Its identity is capped at
+        // capture scope, so the --access-subject list (who gets full) doesn't apply.
+        let capture = match (&main, route) {
+            (Err(_), Route::Capture) => gate.verify_capture(jwt).await,
+            _ => None,
+        };
+        match (main, capture) {
+            (Ok(id), _) if subject_listed(&self.access_subjects, &id.subject) => Access::Passed(id),
+            (Ok(id), _) => {
                 tracing::warn!(subject = %id.subject, "Cloudflare Access identity not in --access-subject");
                 Access::Failed
             }
-            Err(e) => {
-                tracing::warn!("rejected Cloudflare Access JWT: {e:?}");
+            (Err(_), Some(Ok(id))) => Access::Capture(id),
+            (Err(e), capture) => {
+                let capture = capture.and_then(Result::err);
+                tracing::warn!(?capture, "rejected Cloudflare Access JWT: {e:?}");
                 Access::Failed
             }
         }
     }
 
-    /// Auth for a request: None refuses it. Logs who Cloudflare Access let through.
+    /// Auth for a request to any route but `/api/capture`: None refuses it.
     async fn admit_scope(
         &self,
         headers: &HeaderMap,
         peer: SocketAddr,
         path: &str,
     ) -> Option<Scope> {
-        let access = self.access_check(headers).await;
-        let scope = self.authorized(headers, peer.ip(), &access);
-        if let (Some(_), Access::Passed(id)) = (scope, &access) {
+        self.admit_route(headers, peer, path, Route::Other).await
+    }
+
+    /// Auth for a request to `route`: None refuses it. Logs who Cloudflare Access let through.
+    async fn admit_route(
+        &self,
+        headers: &HeaderMap,
+        peer: SocketAddr,
+        path: &str,
+        route: Route,
+    ) -> Option<Scope> {
+        let access = self.access_check(headers, route).await;
+        let scope = self.authorized_on(headers, peer.ip(), &access, route);
+        if let (Some(_), Access::Passed(id) | Access::Capture(id)) = (scope, &access) {
             tracing::info!(subject = %id.subject, "{path}: Cloudflare Access");
         }
         scope
@@ -759,7 +801,7 @@ impl App {
     ) -> Result<(), (StatusCode, &'static str)> {
         match self.admit_scope(headers, peer, path).await {
             Some(Scope::Full) => Ok(()),
-            Some(Scope::Read) => Err((StatusCode::FORBIDDEN, "read-only token")),
+            Some(Scope::Read | Scope::Capture) => Err((StatusCode::FORBIDDEN, "read-only token")),
             None => Err((StatusCode::UNAUTHORIZED, "")),
         }
     }
@@ -769,8 +811,23 @@ impl App {
         self.admit_scope(headers, peer, path).await.is_some()
     }
 
-    /// `peer` is the TCP peer. None: refused.
+    /// [`Self::authorized_on`] any route but `/api/capture`.
     fn authorized(&self, headers: &HeaderMap, peer: IpAddr, access: &Access) -> Option<Scope> {
+        self.authorized_on(headers, peer, access, Route::Other)
+    }
+
+    /// `peer` is the TCP peer. None: refused.
+    fn authorized_on(
+        &self,
+        headers: &HeaderMap,
+        peer: IpAddr,
+        access: &Access,
+        route: Route,
+    ) -> Option<Scope> {
+        // The capture app's JWT opens only `/api/capture`.
+        if matches!(access, Access::Capture(_)) && route != Route::Capture {
+            return None;
+        }
         let passed = matches!(access, Access::Passed(_));
         // Behind Access only direct local connections may skip it: loopback, or a
         // private-network peer presenting the full token (a LAN worker). cloudflared also
@@ -801,14 +858,21 @@ impl App {
             return None;
         }
         let bearer = bearer_from(headers).filter(|b| !b.is_empty());
-        match &self.token {
-            None => Some(Scope::Full),
-            Some(t) if passed || bearer == Some(t.as_str()) => Some(Scope::Full),
-            Some(_) if bearer.is_some_and(|b| self.read_tokens.iter().any(|r| r == b)) => {
-                Some(Scope::Read)
-            }
-            Some(_) => None,
-        }
+        let listed = |tokens: &[String]| bearer.is_some_and(|b| tokens.iter().any(|t| t == b));
+        let scope = match &self.token {
+            None => Scope::Full,
+            // Before the Access login: that never upgrades a capture token.
+            Some(_) if listed(&self.capture_tokens) => Scope::Capture,
+            Some(t) if passed || bearer == Some(t.as_str()) => Scope::Full,
+            Some(_) if listed(&self.read_tokens) => Scope::Read,
+            Some(_) => return None,
+        };
+        // The capture app's JWT grants at most capturing, whatever token rides along.
+        let scope = match (access, scope) {
+            (Access::Capture(_), Scope::Full) => Scope::Capture,
+            _ => scope,
+        };
+        scope::reaches(scope, route).then_some(scope)
     }
 }
 
@@ -862,6 +926,8 @@ enum Access {
     /// Not configured.
     Off,
     Passed(Identity),
+    /// A valid JWT from the capture-only Access app; only `/api/capture` checks for one.
+    Capture(Identity),
     /// No valid Access JWT.
     Failed,
 }
@@ -948,6 +1014,10 @@ pub fn router(app: App) -> Router {
         .route("/ws/client", get(ws_client))
         .route("/mcp", post(mcp))
         .route("/api/upload", post(upload))
+        .route(
+            "/api/capture",
+            post(capture).layer(axum::extract::DefaultBodyLimit::max(CAPTURE_BODY)),
+        )
         .route("/api/images/{id}", get(image))
         .route("/api/evidence/{id}", get(evidence_file))
         .route("/api/update", get(update_status).post(set_update))
@@ -1079,7 +1149,7 @@ async fn info(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Json<serde_json::Value> {
-    let access = app.access_check(&headers).await;
+    let access = app.access_check(&headers, Route::Other).await;
     let scope = app.authorized(&headers, peer.ip(), &access);
     let access = matches!(access, Access::Passed(_));
     Json(serde_json::json!({
@@ -1163,10 +1233,8 @@ async fn routine_action(
     Path((name, action)): Path<(String, String)>,
     body: axum::body::Bytes,
 ) -> Response {
-    match app.admit_scope(&headers, peer, "/api/routines").await {
-        Some(Scope::Full) => {}
-        Some(Scope::Read) => return (StatusCode::FORBIDDEN, "read-only token").into_response(),
-        None => return StatusCode::UNAUTHORIZED.into_response(),
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/routines").await {
+        return refused.into_response();
     }
     // A valid routine first: a bad file named like it mustn't shadow it.
     let defs = app.routine_defs().await;
@@ -1236,10 +1304,8 @@ async fn upload(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Response {
-    match app.admit_scope(&headers, peer, "/api/upload").await {
-        Some(Scope::Full) => {}
-        Some(Scope::Read) => return (StatusCode::FORBIDDEN, "read-only token").into_response(),
-        None => return StatusCode::UNAUTHORIZED.into_response(),
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/upload").await {
+        return refused.into_response();
     }
     let Some(store) = &app.images else {
         let off = "image attachments are off";
@@ -1263,6 +1329,85 @@ async fn upload(
     }
 }
 
+/// Keep a link, text and/or images shared from a phone (multipart `url`, `text`, `via`,
+/// up to 4 `image` files) in the inbox before replying `{"id", "file"}`: 201, or 200
+/// for a resend of one already kept. Capture tokens and full access only.
+async fn capture(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: axum::extract::Request,
+) -> Response {
+    let path = "/api/capture";
+    match app
+        .admit_route(req.headers(), peer, path, Route::Capture)
+        .await
+    {
+        Some(Scope::Full | Scope::Capture) => {}
+        Some(Scope::Read) | None => return StatusCode::UNAUTHORIZED.into_response(),
+    }
+    let Some(inbox) = app.captures.clone() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "captures are off").into_response();
+    };
+    // Parsed only once admitted, so strangers learn nothing about the form.
+    let form = match axum::extract::Multipart::from_request(req, &()).await {
+        Ok(form) => form,
+        Err(e) => return e.into_response(),
+    };
+    let c = match capture_form(form).await {
+        Ok(c) => c,
+        Err(refused) => return refused.into_response(),
+    };
+    match tokio::task::spawn_blocking(move || inbox.store(&c)).await {
+        Ok(Ok(saved)) => {
+            let status = match saved.new {
+                true => StatusCode::CREATED,
+                false => StatusCode::OK,
+            };
+            let body = serde_json::json!({ "id": saved.id, "file": saved.file });
+            (status, Json(body)).into_response()
+        }
+        r => {
+            tracing::warn!("storing capture: {r:?}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// A capture form's fields, checked; else why not.
+async fn capture_form(
+    mut form: axum::extract::Multipart,
+) -> Result<capture::Capture, (StatusCode, String)> {
+    let refuse = |e: axum::extract::multipart::MultipartError| (e.status(), e.body_text());
+    let bad = |why: String| (StatusCode::BAD_REQUEST, why);
+    let (mut url, mut text, mut via, mut images) = (None, None, None, Vec::new());
+    while let Some(field) = form.next_field().await.map_err(refuse)? {
+        let name = field.name().unwrap_or_default().to_string();
+        let slot = match name.as_str() {
+            "url" => &mut url,
+            "text" => &mut text,
+            "via" => &mut via,
+            "image" => {
+                images.push(field.bytes().await.map_err(refuse)?.into());
+                continue;
+            }
+            _ => {
+                return Err(bad(format!(
+                    "unknown field {name:?}: send url, text, image, via"
+                )))
+            }
+        };
+        if slot.is_some() {
+            return Err(bad(format!("{name} sent twice")));
+        }
+        *slot = Some(field.text().await.map_err(refuse)?);
+    }
+    capture::Capture::new(url, text, images, via).map_err(|r| match r {
+        capture::Refused::Invalid(why) => (StatusCode::BAD_REQUEST, why),
+        capture::Refused::TooLarge(why) => (StatusCode::PAYLOAD_TOO_LARGE, why),
+        capture::Refused::NotAnImage(why) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, why),
+    })
+}
+
 /// For `scripts/mis-up --watch`: the update shown to clients, and how many
 /// tasks a restart would interrupt (it restarts at 0).
 async fn update_status(
@@ -1284,10 +1429,8 @@ async fn set_update(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    match app.admit_scope(&headers, peer, "/api/update").await {
-        Some(Scope::Full) => {}
-        Some(Scope::Read) => return (StatusCode::FORBIDDEN, "read-only token").into_response(),
-        None => return StatusCode::UNAUTHORIZED.into_response(),
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/update").await {
+        return refused.into_response();
     }
     let update = match serde_json::from_slice::<Update>(&body) {
         Ok(u) => u,
@@ -1480,13 +1623,11 @@ async fn message(
     Path((wid, harness, session)): Path<(WorkerId, String, uuid::Uuid)>,
     body: Bytes,
 ) -> Response {
-    match app
-        .admit_scope(&headers, peer, "/api/workers/sessions")
+    if let Err(refused) = app
+        .admit_full(&headers, peer, "/api/workers/sessions")
         .await
     {
-        Some(Scope::Full) => {}
-        Some(Scope::Read) => return (StatusCode::FORBIDDEN, "read-only token").into_response(),
-        None => return StatusCode::UNAUTHORIZED.into_response(),
+        return refused.into_response();
     }
     let m = match serde_json::from_slice::<SessionMessage>(&body) {
         Ok(m) if m.mode == SendMode::Fork => {
@@ -1531,10 +1672,8 @@ async fn cancel(
     headers: HeaderMap,
     Path(task): Path<TaskId>,
 ) -> Response {
-    match app.admit_scope(&headers, peer, "/api/tasks/cancel").await {
-        Some(Scope::Full) => {}
-        Some(Scope::Read) => return (StatusCode::FORBIDDEN, "read-only token").into_response(),
-        None => return StatusCode::UNAUTHORIZED.into_response(),
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/tasks/cancel").await {
+        return refused.into_response();
     }
     let done = app.transition(|l| match l.cancel(task) {
         Ok((status, effects)) => (Ok(status), effects),
@@ -2042,6 +2181,70 @@ mod tests {
         assert!(open
             .authorized(&headers(&[]), lan, &Access::Failed)
             .is_none());
+    }
+
+    #[test]
+    fn capture_credentials_reach_only_the_capture_route() {
+        let lo: IpAddr = "127.0.0.1".parse().unwrap();
+        let remote: IpAddr = "192.0.2.1".parse().unwrap();
+        let t = App::new(Some("s".into()))
+            .with_read_tokens(list(&["r"]))
+            .with_capture_tokens(list(&["c"]));
+        let scope = |bearer: Option<&str>, peer, access: &Access, route| {
+            let auth = bearer.map(|b| format!("Bearer {b}"));
+            let pairs: Vec<_> = auth.iter().map(|a| ("authorization", a.as_str())).collect();
+            t.authorized_on(&headers(&pairs), peer, access, route)
+        };
+        use Route::{Capture, Other};
+        // Without Access: none / read / capture / full on each route.
+        for (bearer, capture, other) in [
+            (None, None, None),
+            (Some("r"), None, Some(Scope::Read)),
+            (Some("c"), Some(Scope::Capture), None),
+            (Some("s"), Some(Scope::Full), Some(Scope::Full)),
+        ] {
+            assert_eq!(
+                scope(bearer, lo, &Access::Off, Capture),
+                capture,
+                "{bearer:?}"
+            );
+            assert_eq!(scope(bearer, lo, &Access::Off, Other), other, "{bearer:?}");
+        }
+        let id = || Identity {
+            subject: "phone".into(),
+        };
+        // The capture app's JWT: capture route only, at most capturing, plus a token.
+        let cap = Access::Capture(id());
+        assert_eq!(
+            scope(Some("c"), remote, &cap, Capture),
+            Some(Scope::Capture)
+        );
+        assert_eq!(
+            scope(Some("s"), remote, &cap, Capture),
+            Some(Scope::Capture)
+        );
+        assert_eq!(scope(Some("r"), remote, &cap, Capture), None);
+        assert_eq!(scope(None, remote, &cap, Capture), None);
+        for peer in [remote, lo] {
+            for b in [None, Some("c"), Some("s"), Some("r")] {
+                assert_eq!(scope(b, peer, &cap, Other), None, "{peer} {b:?}");
+            }
+        }
+        // A main-app login is full, but never upgrades a capture token.
+        let main = Access::Passed(id());
+        assert_eq!(scope(None, remote, &main, Other), Some(Scope::Full));
+        assert_eq!(scope(None, remote, &main, Capture), Some(Scope::Full));
+        assert_eq!(scope(Some("c"), remote, &main, Other), None);
+        assert_eq!(
+            scope(Some("c"), remote, &main, Capture),
+            Some(Scope::Capture)
+        );
+        // Its own hostname, no Origin (a Shortcut): admitted.
+        let phone = headers(&[("host", "capture.m6o.app"), ("authorization", "Bearer c")]);
+        let got = t.authorized_on(&phone, remote, &cap, Capture);
+        assert_eq!(got, Some(Scope::Capture));
+        // No valid JWT from afar: a capture token alone is not enough.
+        assert_eq!(scope(Some("c"), remote, &Access::Failed, Capture), None);
     }
 
     #[test]

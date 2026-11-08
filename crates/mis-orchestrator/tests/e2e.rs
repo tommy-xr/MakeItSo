@@ -3599,3 +3599,184 @@ async fn live_sessions_need_full_access_and_outlast_their_worker() {
         panic!("only status")
     };
 }
+
+/// Parts of a capture form: `(name, file name, bytes)`.
+type Parts<'a> = [(&'a str, Option<&'a str>, &'a [u8])];
+
+/// A `multipart/form-data` body and its content type.
+fn form(parts: &Parts) -> (String, Vec<u8>) {
+    let boundary = "mis-test-boundary";
+    let mut body = Vec::new();
+    for (name, file, bytes) in parts {
+        let file = file
+            .map(|f| format!("; filename=\"{f}\""))
+            .unwrap_or_default();
+        let head = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"{file}");
+        body.extend(format!("{head}\r\n\r\n").bytes());
+        body.extend_from_slice(bytes);
+        body.extend(b"\r\n");
+    }
+    body.extend(format!("--{boundary}--\r\n").bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+/// [`http`] with header pairs and an optional `(content type, body)`; status and body.
+async fn call(
+    base: &str,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<(String, Vec<u8>)>,
+) -> (u16, String) {
+    let mut head = format!("{method} {path} HTTP/1.1");
+    let (content_type, bytes) = body.unwrap_or_default();
+    let typed = (!content_type.is_empty()).then_some(("content-type", content_type.as_str()));
+    for (k, v) in headers.iter().copied().chain(typed) {
+        head += &format!("\r\n{k}: {v}");
+    }
+    let (status, _, body) = http(base, &head, &bytes).await;
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+async fn capture(base: &str, headers: &[(&str, &str)], parts: &Parts<'_>) -> (u16, String) {
+    call(base, "POST", "/api/capture", headers, Some(form(parts))).await
+}
+
+/// Full token `s`, read token `r`, capture token `c`, inbox under `dir`.
+fn capturing(dir: &std::path::Path) -> App {
+    let inbox = mis_orchestrator::capture::Inbox::open(dir.join("captures/inbox")).unwrap();
+    App::new(Some("s".into()))
+        .with_read_tokens(vec!["r".into()])
+        .with_capture_tokens(vec!["c".into()])
+        .with_captures(inbox)
+}
+
+/// Every authed route but `/api/capture` refuses these credentials: HTTP 401/403,
+/// `/api/info` reports no scope, and both WebSockets refuse to upgrade.
+async fn refused_everywhere_else(base: &str, headers: &[(&'static str, &str)]) {
+    let id = uuid::Uuid::new_v4();
+    let routes = [
+        ("POST", "/mcp".to_string()),
+        ("POST", "/api/upload".into()),
+        ("GET", format!("/api/images/{id}")),
+        ("GET", format!("/api/evidence/{id}")),
+        ("GET", "/api/update".into()),
+        ("POST", "/api/update".into()),
+        ("POST", format!("/api/tasks/{id}/cancel")),
+        ("GET", format!("/api/tasks/{id}/diff")),
+        ("GET", "/api/routines".into()),
+        ("POST", "/api/routines/r/run".into()),
+        ("GET", "/api/sessions".into()),
+        ("GET", format!("/api/workers/{id}/sessions")),
+        ("GET", format!("/api/workers/{id}/sessions/claude/{id}")),
+        (
+            "POST",
+            format!("/api/workers/{id}/sessions/claude/{id}/messages"),
+        ),
+    ];
+    for (method, path) in routes {
+        let (status, body) = call(base, method, &path, headers, None).await;
+        assert!(
+            matches!(status, 401 | 403),
+            "{method} {path}: {status} {body}"
+        );
+    }
+    let (_, info) = call(base, "GET", "/api/info", headers, None).await;
+    assert!(info.contains(r#""scope":null"#), "{info}");
+    assert_eq!(client_status(base, headers).await, 401);
+    let mut worker = format!("{base}/ws/worker").into_client_request().unwrap();
+    for (k, v) in headers {
+        worker.headers_mut().insert(*k, v.parse().unwrap());
+    }
+    let err = connect_async(worker).await.unwrap_err();
+    let tokio_tungstenite::tungstenite::Error::Http(resp) = err else {
+        panic!("{err}")
+    };
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn capture_is_kept_once_and_its_token_opens_nothing_else() {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-capture-{}", uuid::Uuid::new_v4()));
+    let base = start_app(capturing(&dir)).await;
+    let bearer = ("authorization", "Bearer c");
+    let jpeg: &[u8] = b"\xFF\xD8\xFF\xE0 photo";
+    let parts: [(&str, Option<&str>, &[u8]); 3] = [
+        ("url", None, b"https://example.com/liminal"),
+        ("text", None, b"liminal inspiration for amf #amf"),
+        ("image", Some("IMG_0001.jpg"), jpeg),
+    ];
+    let (status, body) = capture(&base, &[bearer], &parts).await;
+    assert_eq!(status, 201, "{body}");
+    let saved: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let file = saved["file"].as_str().unwrap();
+    assert!(file.ends_with("-liminal-inspiration-for-amf.md"), "{file}");
+    let inbox = dir.join("captures/inbox");
+    let md = std::fs::read_to_string(inbox.join(file)).unwrap();
+    assert!(md.contains("project: \"amf\"\n"), "{md}");
+    assert!(
+        md.ends_with("---\nliminal inspiration for amf #amf"),
+        "{md}"
+    );
+    let image = file.replace(".md", "-1.jpg");
+    assert_eq!(std::fs::read(inbox.join(&image)).unwrap(), jpeg);
+    // A resend, also after a restart, gets the first capture back.
+    let (status, again) = capture(&base, &[bearer], &parts).await;
+    assert_eq!((status, again.as_str()), (200, body.as_str()));
+    let restarted = start_app(capturing(&dir)).await;
+    let (status, again) = capture(&restarted, &[bearer], &parts).await;
+    assert_eq!((status, again.as_str()), (200, body.as_str()));
+    assert_eq!(std::fs::read_dir(&inbox).unwrap().count(), 2);
+    // Refused: SVG, no content, unknown fields, read or no token. Full access may capture.
+    let svg: [(&str, Option<&str>, &[u8]); 1] = [("image", Some("x.svg"), b"<svg xmlns=")];
+    assert_eq!(capture(&base, &[bearer], &svg).await.0, 415);
+    let via: [(&str, Option<&str>, &[u8]); 1] = [("via", None, b"shortcut")];
+    assert_eq!(capture(&base, &[bearer], &via).await.0, 400);
+    let prompt: [(&str, Option<&str>, &[u8]); 1] = [("prompt", None, b"rm -rf")];
+    assert_eq!(capture(&base, &[bearer], &prompt).await.0, 400);
+    let text: [(&str, Option<&str>, &[u8]); 1] = [("text", None, b"another")];
+    let read = ("authorization", "Bearer r");
+    assert_eq!(capture(&base, &[read], &text).await.0, 401);
+    assert_eq!(capture(&base, &[], &text).await.0, 401);
+    let full = ("authorization", "Bearer s");
+    assert_eq!(capture(&base, &[full], &text).await.0, 201);
+    refused_everywhere_else(&base, &[bearer]).await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn capture_app_jwt_opens_only_the_capture_route() {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-capture-{}", uuid::Uuid::new_v4()));
+    let jwks = serde_json::from_str(include_str!("fixtures/access-test-jwks.json")).unwrap();
+    let gate = mis_orchestrator::access_gate::AccessGate::with_keys(
+        "team".into(),
+        ACCESS_AUD.into(),
+        jwks,
+    )
+    .with_capture_aud("capture-aud".into());
+    let base = start_app(capturing(&dir).with_access(gate)).await;
+    let jwt = access_jwt("capture-aud");
+    let tunnel = [
+        ("cf-ray", "8f00-SJC"),
+        ("cf-access-jwt-assertion", jwt.as_str()),
+    ];
+    let with = |token| [tunnel[0], tunnel[1], ("authorization", token)];
+    let text: [(&str, Option<&str>, &[u8]); 1] = [("text", None, b"from the phone")];
+    assert_eq!(capture(&base, &with("Bearer c"), &text).await.0, 201);
+    // The JWT alone can't capture, and opens nothing else, whatever token rides along.
+    assert_eq!(capture(&base, &tunnel, &text).await.0, 401);
+    refused_everywhere_else(&base, &tunnel).await;
+    for token in ["Bearer c", "Bearer s", "Bearer r"] {
+        refused_everywhere_else(&base, &with(token)).await;
+    }
+    // A main-app login still opens everything, but not for a capture token.
+    let main = access_jwt(ACCESS_AUD);
+    let login = [
+        ("cf-ray", "8f00-SJC"),
+        ("cf-access-jwt-assertion", main.as_str()),
+    ];
+    assert_eq!(client_status(&base, &login).await, 101);
+    let login_with_capture = [login[0], login[1], ("authorization", "Bearer c")];
+    refused_everywhere_else(&base, &login_with_capture).await;
+    std::fs::remove_dir_all(dir).unwrap();
+}

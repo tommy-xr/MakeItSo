@@ -11,12 +11,31 @@ pub enum Scope {
     Full,
     /// A read-only token: may look, not act.
     Read,
+    /// A capture token: may only `POST /api/capture`.
+    Capture,
 }
 
-/// Whether `scope` may send `msg`. Exhaustive, so a new message must be classified.
+/// Where a request goes: capture credentials open only `POST /api/capture`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    Capture,
+    /// Every other HTTP route and WebSocket.
+    Other,
+}
+
+/// Whether `scope` may use `route` at all. Exhaustive, so a new scope must be classified.
+pub fn reaches(scope: Scope, route: Route) -> bool {
+    match (scope, route) {
+        (Scope::Full, _) | (Scope::Read, Route::Other) | (Scope::Capture, Route::Capture) => true,
+        // Capturing is acting, which read tokens may not; capture tokens may do nothing else.
+        (Scope::Read, Route::Capture) | (Scope::Capture, Route::Other) => false,
+    }
+}
+
+/// Whether `scope` may send `msg`. Exhaustive, so a new message and scope must be classified.
 pub fn allowed(scope: Scope, msg: &ClientMsg) -> bool {
-    match msg {
-        ClientMsg::Status | ClientMsg::Subscribe | ClientMsg::Show { .. } => true,
+    let acts = match msg {
+        ClientMsg::Status | ClientMsg::Subscribe | ClientMsg::Show { .. } => false,
         // Seen clears attention for everyone; RefreshEvidence sets a worker running `gh`;
         // a push subscription makes the orchestrator POST task prompts to its endpoint;
         // a purpose rewrites a worker's config and steers routing; a suggestion runs a model;
@@ -31,7 +50,12 @@ pub fn allowed(scope: Scope, msg: &ClientMsg) -> bool {
         | ClientMsg::SuggestPurpose { .. }
         | ClientMsg::Approve { .. }
         | ClientMsg::WatchSessions
-        | ClientMsg::SessionBell { .. } => scope == Scope::Full,
+        | ClientMsg::SessionBell { .. } => true,
+    };
+    match scope {
+        Scope::Full => true,
+        Scope::Read => !acts,
+        Scope::Capture => false,
     }
 }
 
@@ -59,6 +83,7 @@ mod tests {
         for m in &looks {
             assert!(allowed(Scope::Read, m), "{m:?}");
             assert!(allowed(Scope::Full, m), "{m:?}");
+            assert!(!allowed(Scope::Capture, m), "{m:?}");
         }
         let task = uuid::Uuid::nil();
         let acts = [
@@ -95,6 +120,15 @@ mod tests {
         for m in acts {
             assert!(!allowed(Scope::Read, &m), "{m:?}");
             assert!(allowed(Scope::Full, &m), "{m:?}");
+            assert!(!allowed(Scope::Capture, &m), "{m:?}");
         }
+    }
+
+    #[test]
+    fn capture_scope_reaches_only_the_capture_route() {
+        use Route::*;
+        assert!(reaches(Scope::Full, Capture) && reaches(Scope::Full, Other));
+        assert!(!reaches(Scope::Read, Capture) && reaches(Scope::Read, Other));
+        assert!(reaches(Scope::Capture, Capture) && !reaches(Scope::Capture, Other));
     }
 }
