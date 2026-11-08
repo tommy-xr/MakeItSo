@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use chrono::TimeZone;
 use mis_types::{
-    MergeApprove, MergeMethod, MergePolicy, MergeRule, RoutineMode, RoutineView, TaskId,
-    TaskStatus, MERGE_TOOL,
+    MergeApprove, MergeMethod, MergePolicy, MergeRule, NewRoutine, RoutineMode, RoutineView,
+    TaskId, TaskStatus, MERGE_TOOL,
 };
 use serde::{Deserialize, Serialize};
 
@@ -425,6 +425,28 @@ pub fn parse(file: &str, text: &str) -> Result<Routine, String> {
     })
 }
 
+/// A new routine's file name and text. It starts paused and report-only, so
+/// nothing runs until the user resumes it. Parsed back to check it.
+pub fn new_file(new: &NewRoutine) -> Result<(String, String), String> {
+    // Written in canonical form, on one line, so nothing in it can start another key.
+    let schedule = new.schedule.trim();
+    let trigger = match parse_every(schedule) {
+        Ok(ms) => format!("every: {}", fmt_every(ms)),
+        Err(_) if schedule.split_whitespace().count() == 5 => {
+            format!("cron: \"{}\"", schedule.parse::<Cron>()?.as_str())
+        }
+        Err(_) => {
+            return Err(format!(
+                "schedule `{schedule}`: want e.g. 30m, 6h, 1d or a cron line like `0 9 * * 1-5`"
+            ))
+        }
+    };
+    let file = format!("{}.md", new.name.trim());
+    let text = format!("---\n{trigger}\npaused: true\n---\n{}\n", new.prompt.trim());
+    parse(&file, &text)?;
+    Ok((file, text))
+}
+
 const MERGE_KEYS: [&str; 8] = [
     "repos",
     "max_files",
@@ -597,6 +619,38 @@ fn fmt_every(ms: u64) -> String {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[test]
+    fn new_file_starts_paused_and_checks_its_fields() {
+        let new = |name: &str, schedule: &str, prompt: &str| {
+            new_file(&NewRoutine {
+                name: name.into(),
+                schedule: schedule.into(),
+                prompt: prompt.into(),
+            })
+        };
+        let (file, text) = new("deps", " 90m ", " Check deps.\n").unwrap();
+        assert_eq!(file, "deps.md");
+        assert_eq!(text, "---\nevery: 90m\npaused: true\n---\nCheck deps.\n");
+        let r = parse(&file, &text).unwrap();
+        assert!(r.paused && !r.act && r.name == "deps");
+
+        // A schedule split over lines is joined into one, so it can't add a key.
+        let (_, text) = new("nightly", "0 9 * *\n1-5", "Sweep.").unwrap();
+        assert!(
+            text.starts_with("---\ncron: \"0 9 * * 1-5\"\npaused: true\n"),
+            "{text}"
+        );
+        assert!(new("nightly", "0 9 * *\nact: true", "Sweep.").is_err());
+        assert!(new("x", "soon", "Sweep.")
+            .unwrap_err()
+            .contains("schedule `soon`"));
+        assert!(new("x", "0 25 * * *", "Sweep.")
+            .unwrap_err()
+            .contains("hour `25`"));
+        assert!(new("../x", "1d", "Sweep.").unwrap_err().contains("name"));
+        assert!(new("x", "1d", "  ").unwrap_err().contains("no prompt"));
+    }
 
     const FILE: &str = "---\nname: pr-grooming\nevery: 6h\nharness: codex\nmodel: \"gpt-5\"\n\
                         worker: mac\ncwd: /srv/app\n---\n\nGroom the open PRs.\n";

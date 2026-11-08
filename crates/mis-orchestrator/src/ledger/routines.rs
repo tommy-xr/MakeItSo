@@ -200,6 +200,13 @@ impl Ledger {
         s.since = now;
     }
 
+    /// Forget what an earlier routine named `name` left (resumed, live, last
+    /// run), so a new file of that name starts as the file says.
+    pub fn reset_routine(&mut self, name: &str) {
+        self.routines
+            .insert(name.to_string(), State::new(self.now_ms));
+    }
+
     /// `defs` as listed, with their schedules and last runs.
     pub fn routine_views<Tz: TimeZone>(&self, defs: &[Def], tz: &Tz) -> Vec<RoutineView> {
         defs.iter()
