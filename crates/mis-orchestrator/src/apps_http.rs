@@ -13,7 +13,8 @@ use axum::Router;
 
 use crate::apps::{self, Apps};
 
-/// Apps load only their own files and reach only their own origin.
+/// Pages load scripts, styles and fonts only from, and connect only to, this origin. Every app
+/// shares it (and its storage): apps are not isolated from each other.
 pub const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
     img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; \
     base-uri 'none'; form-action 'self'";
@@ -85,14 +86,20 @@ async fn add_slash(Path(slug): Path<String>) -> Response {
 }
 
 async fn entry(State(apps): State<Arc<Apps>>, Path(slug): Path<String>) -> Response {
-    serve(&apps, &slug, "")
+    blocking(apps, slug, String::new()).await
 }
 
 async fn file(
     State(apps): State<Arc<Apps>>,
     Path((slug, path)): Path<(String, String)>,
 ) -> Response {
-    serve(&apps, &slug, &path)
+    blocking(apps, slug, path).await
+}
+
+/// [`serve`] off the async workers: reads may be large, and the orchestrator shares them.
+async fn blocking(apps: Arc<Apps>, slug: String, path: String) -> Response {
+    let served = tokio::task::spawn_blocking(move || serve(&apps, &slug, &path));
+    served.await.expect("serving doesn't panic")
 }
 
 /// `path` (empty: the entry) from `slug`'s live release; an extensionless miss gets the entry.

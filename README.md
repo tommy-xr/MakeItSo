@@ -269,7 +269,8 @@ A bundle has `app.json` at its top: `{"title": "Pool scores", "icon": "icon.png"
 {"web": "index.html"}}` (`icon` optional; `web` is the page browsers open). The server checks
 every upload and refuses links, devices, absolute or `..` paths, hidden files, more than 2000 files
 or 20 MiB, and an `app.json` naming files it doesn't hold. It never runs app code. `mis apps
-publish` leaves hidden files (`.DS_Store`, `.git`) out.
+publish` leaves hidden files (`.DS_Store`, `.git`) out; with macOS `tar`, set `COPYFILE_DISABLE=1`
+so it adds no `._*` files. `web` must be at the bundle's top.
 
 Each publish is a new numbered release, all kept, in `<state-dir>/apps/<name>/releases/<n>/`;
 `<state-dir>/apps/<name>/active` holds the live n. Names are `a-z`, `0-9` and `-`, up to 32.
@@ -280,9 +281,11 @@ before making a newer release live.
 
 The apps listener serves the live release at `/a/<name>/` (paths without an extension fall back to
 the entry page, for client-side routes) and a list of live apps at `/a/`. Every response sends
-`Cache-Control: no-cache` and a CSP that allows only the app's own scripts, styles, fonts and
-connections (bundle dependencies; no CDNs). Set `--apps-public-url` / `MIS_APPS_PUBLIC_URL` (e.g.
-`https://home.example.com`) so app links point there.
+`Cache-Control: no-cache` and a CSP that allows scripts, styles, fonts and connections only from
+this origin (bundle dependencies; no CDNs). All apps share the origin and its storage: they are not
+isolated from each other. An entry page at `/a/<name>/scores/2026` resolves relative URLs from
+`scores/`, so client-side routers should use absolute asset paths (`/a/<name>/...`) or hash routes. Set `--apps-public-url` / `MIS_APPS_PUBLIC_URL` (e.g.
+`https://home.example.com`) so app links point there (needed when it binds `0.0.0.0`).
 
 **Don't route a tunnel to the apps port yet.** It checks no identity: until it does, it refuses
 every request that came through Cloudflare, and anyone who can reach it directly (bind beyond

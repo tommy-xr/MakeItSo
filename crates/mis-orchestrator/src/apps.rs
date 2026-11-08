@@ -171,6 +171,10 @@ fn manifest(files: &BTreeMap<String, Vec<u8>>) -> Result<Manifest, String> {
         _ => Err(format!("app.json: {what} {p:?} isn't a file in the bundle")),
     };
     named("clients.web", &m.clients.web)?;
+    // Served at `/a/<slug>/`, so its relative URLs must resolve from the top.
+    if m.clients.web.contains('/') {
+        return Err("app.json: clients.web must be at the top of the bundle".into());
+    }
     if let Some(icon) = &m.icon {
         named("icon", icon)?;
     }
@@ -202,12 +206,13 @@ pub fn next_release(existing: impl IntoIterator<Item = u32>) -> u32 {
 }
 
 /// Where `/a/` is reached: `public` (e.g. `https://home.example.com`), else the apps
-/// listener's address. None: not served.
+/// listener's address. None: not served, or bound to `0.0.0.0` / `[::]` with no `public`.
 pub fn base_url(public: Option<&str>, bind: Option<std::net::SocketAddr>) -> Option<String> {
-    match (public, bind) {
-        (Some(p), _) => Some(p.trim_end_matches('/').to_string()),
-        (None, Some(addr)) => Some(format!("http://{addr}")),
-        (None, None) => None,
+    let bind = bind?;
+    match public {
+        Some(p) => Some(p.trim_end_matches('/').to_string()),
+        None if bind.ip().is_unspecified() => None,
+        None => Some(format!("http://{bind}")),
     }
 }
 
@@ -403,7 +408,7 @@ impl Apps {
         let shown = active.or(releases.last().map(|r| r.n))?;
         Some(AppView {
             slug: slug.into(),
-            title: self.release_manifest(slug, shown)?.title,
+            title: self.release_manifest(slug, shown)?.title.trim().into(),
             url: self.url(slug),
             active,
             releases,
@@ -615,6 +620,9 @@ mod tests {
         );
         assert!(m(r#"{"title":"P","clients":{"web":"main.html"}}"#).contains("clients.web"));
         assert!(m(r#"{"title":"P","clients":{"web":"../index.html"}}"#).contains("clients.web"));
+        let nested = br#"{"title":"P","clients":{"web":"web/index.html"}}"#;
+        let e = err(&[("app.json", nested), ("web/index.html", b"x")]);
+        assert!(e.contains("at the top"), "{e}");
         assert!(
             m(r#"{"title":"P","icon":"i.png","clients":{"web":"index.html"}}"#).contains("icon")
         );
@@ -660,6 +668,13 @@ mod tests {
         );
         assert_eq!(base_url(None, addr).unwrap(), "http://127.0.0.1:7475");
         assert_eq!(base_url(None, None), None);
+        assert_eq!(base_url(Some("https://h.example"), None), None);
+        assert_eq!(base_url(None, "0.0.0.0:7475".parse().ok()), None);
+        let any = "[::]:7475".parse().ok();
+        assert_eq!(
+            base_url(Some("https://h.example"), any).unwrap(),
+            "https://h.example"
+        );
         let apps = Apps::new("x".into(), Some("https://h.example".into()));
         assert_eq!(apps.url("pool").unwrap(), "https://h.example/a/pool/");
         assert_eq!(Apps::new("x".into(), None).url("pool"), None);

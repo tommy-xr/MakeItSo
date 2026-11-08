@@ -251,12 +251,13 @@ impl App {
         self
     }
 
-    /// Keep and serve the files agents attach as evidence.
+    /// Accept, list and activate published apps.
     pub fn with_apps(mut self, apps: Arc<apps::Apps>) -> Self {
         self.apps = Some(apps);
         self
     }
 
+    /// Keep and serve the files agents attach as evidence.
     pub fn with_evidence(mut self, store: evidence::Store) -> Self {
         self.evidence = Some(Arc::new(store));
         self
@@ -1661,7 +1662,9 @@ async fn activate_app(
     if !apps::valid_slug(&slug) {
         return (StatusCode::NOT_FOUND, "no such release").into_response();
     }
-    match apps.activate(&slug, n) {
+    let apps = apps.clone();
+    let activated = tokio::task::spawn_blocking(move || apps.activate(&slug, n));
+    match activated.await.expect("activating doesn't panic") {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(apps::ActivateError::NoSuchRelease) => {
             (StatusCode::NOT_FOUND, "no such release").into_response()

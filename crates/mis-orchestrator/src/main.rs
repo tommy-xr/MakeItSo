@@ -176,9 +176,13 @@ fn one_shot_claude(model: &str, extra: &[&str]) -> std::sync::Arc<mis_agent::cla
     })
 }
 
+/// `v`, unless unset or empty: `MIS_..=` means unset.
+fn nonempty(v: &Option<String>) -> Option<String> {
+    v.clone().filter(|v| !v.is_empty())
+}
+
 /// `--cf-access-team` / `--cf-access-aud`: both or neither; `MIS_..=` means unset.
 async fn access_gate(args: &Args) -> anyhow::Result<Option<AccessGate>> {
-    let nonempty = |v: &Option<String>| v.clone().filter(|v| !v.is_empty());
     let capture_aud = nonempty(&args.cf_access_capture_aud);
     let (team, aud) = match (
         nonempty(&args.cf_access_team),
@@ -307,7 +311,6 @@ async fn main() -> anyhow::Result<()> {
     if gate.is_some() && args.token.is_none() {
         tracing::warn!("no --token: local requests without Cloudflare headers need nothing");
     }
-    let nonempty = |v: &Option<String>| v.clone().filter(|v| !v.is_empty());
     let apps_listener = match nonempty(&args.apps_bind) {
         Some(_) if state_dir.is_none() => anyhow::bail!("--apps-bind needs a state dir"),
         Some(bind) => Some(tokio::net::TcpListener::bind(&bind).await?),
@@ -320,6 +323,9 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!(
                 "apps on {addr} are open to anyone who can reach it: no identity check yet"
             );
+        }
+        if addr.ip().is_unspecified() && nonempty(&args.apps_public_url).is_none() {
+            tracing::warn!("no --apps-public-url: app links are left out ({addr} names no host)");
         }
     }
     let apps = state_dir.as_ref().map(|dir| {
