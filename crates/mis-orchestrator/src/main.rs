@@ -35,6 +35,14 @@ struct Args {
     /// Externally reachable URL (e.g. a tunnel hostname), shown in connection hints.
     #[arg(long, env = "MIS_PUBLIC_URL")]
     public_url: Option<String>,
+    /// Serve published apps at `/a/<slug>/` on this address, e.g. `127.0.0.1:7475`. Unset: not
+    /// served. It checks no identity yet: requests through Cloudflare are refused.
+    #[arg(long, env = "MIS_APPS_BIND")]
+    apps_bind: Option<String>,
+    /// Where the apps listener is reached from outside, e.g. `https://home.example.com`; app
+    /// links point there. Default: the --apps-bind address.
+    #[arg(long, env = "MIS_APPS_PUBLIC_URL")]
+    apps_public_url: Option<String>,
     /// Browser origin allowed to connect, e.g. `https://mis.example.com` (repeatable).
     #[arg(
         long = "allowed-origin",
@@ -79,7 +87,8 @@ struct Args {
     /// Holds task history (`ledger.json`, `transcripts/`; tasks are kept 30 days
     /// after they end), the push notification key and subscriptions, and uploaded
     /// images (`images/`, deleted after a week), evidence files agents attach
-    /// (`evidence/`, deleted after 30 days) and captures (`captures/inbox/`, kept). Default: ~/.local/state/mis
+    /// (`evidence/`, deleted after 30 days), captures (`captures/inbox/`, kept) and published
+    /// apps (`apps/`, every release kept). Default: ~/.local/state/mis
     /// (%LOCALAPPDATA%\mis on Windows).
     #[arg(long, env = "MIS_STATE_DIR")]
     state_dir: Option<std::path::PathBuf>,
@@ -298,6 +307,26 @@ async fn main() -> anyhow::Result<()> {
     if gate.is_some() && args.token.is_none() {
         tracing::warn!("no --token: local requests without Cloudflare headers need nothing");
     }
+    let nonempty = |v: &Option<String>| v.clone().filter(|v| !v.is_empty());
+    let apps_listener = match nonempty(&args.apps_bind) {
+        Some(_) if state_dir.is_none() => anyhow::bail!("--apps-bind needs a state dir"),
+        Some(bind) => Some(tokio::net::TcpListener::bind(&bind).await?),
+        None => None,
+    };
+    let apps_addr = apps_listener.as_ref().map(|l| l.local_addr()).transpose()?;
+    if let Some(addr) = apps_addr {
+        tracing::info!("serving apps on http://{addr}/a/");
+        if !addr.ip().is_loopback() {
+            tracing::warn!(
+                "apps on {addr} are open to anyone who can reach it: no identity check yet"
+            );
+        }
+    }
+    let apps = state_dir.as_ref().map(|dir| {
+        let base =
+            mis_orchestrator::apps::base_url(nonempty(&args.apps_public_url).as_deref(), apps_addr);
+        std::sync::Arc::new(mis_orchestrator::apps::Apps::new(dir.join("apps"), base))
+    });
     let listener = tokio::net::TcpListener::bind(&args.bind).await?;
     let local = listener.local_addr()?;
     tracing::info!("listening on {local}");
@@ -343,6 +372,16 @@ async fn main() -> anyhow::Result<()> {
         .with_allowed_origins(origins);
     if let Some(gate) = gate {
         app = app.with_access(gate);
+    }
+    if let Some(apps) = &apps {
+        app = app.with_apps(apps.clone());
+    }
+    if let (Some(listener), Some(apps)) = (apps_listener, apps) {
+        tokio::spawn(async move {
+            if let Err(e) = mis_orchestrator::serve_apps(listener, apps).await {
+                tracing::error!("apps listener stopped: {e:#}");
+            }
+        });
     }
     match args.routines_dir.clone().or_else(default_routines_dir) {
         Some(dir) => app = app.with_routines(dir, mis_orchestrator::ROUTINE_EVERY),

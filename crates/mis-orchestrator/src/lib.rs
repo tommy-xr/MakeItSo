@@ -24,6 +24,8 @@ pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("MIS_GIT_
 
 pub mod access;
 pub mod access_gate;
+pub mod apps;
+pub mod apps_http;
 pub mod capture;
 pub mod evidence;
 pub mod images;
@@ -125,6 +127,8 @@ pub struct App {
     routine_every: Duration,
     /// Clients watching live sessions (`ClientMsg::WatchSessions`); none: no diffing.
     watchers: Arc<AtomicUsize>,
+    /// Published apps. None: publishing is off.
+    apps: Option<Arc<apps::Apps>>,
 }
 
 impl App {
@@ -165,6 +169,7 @@ impl App {
             routines_dir: None,
             routine_every: ROUTINE_EVERY,
             watchers: Default::default(),
+            apps: None,
         }
     }
 
@@ -247,6 +252,11 @@ impl App {
     }
 
     /// Keep and serve the files agents attach as evidence.
+    pub fn with_apps(mut self, apps: Arc<apps::Apps>) -> Self {
+        self.apps = Some(apps);
+        self
+    }
+
     pub fn with_evidence(mut self, store: evidence::Store) -> Self {
         self.evidence = Some(Arc::new(store));
         self
@@ -946,7 +956,7 @@ fn private_net(ip: IpAddr) -> bool {
 }
 
 /// Request came through Cloudflare's edge (e.g. via cloudflared).
-fn via_cloudflare(headers: &HeaderMap) -> bool {
+pub(crate) fn via_cloudflare(headers: &HeaderMap) -> bool {
     [JWT_HEADER, "cf-ray", "cf-connecting-ip"]
         .iter()
         .any(|h| headers.contains_key(*h))
@@ -1025,6 +1035,9 @@ pub fn router(app: App) -> Router {
         .route("/api/tasks/{id}/diff", get(task_diff))
         .route("/api/routines", get(routines).post(new_routine))
         .route("/api/routines/{name}/{action}", post(routine_action))
+        .route("/api/apps", get(list_apps))
+        .route("/api/apps/{slug}/releases", post(publish_app))
+        .route("/api/apps/{slug}/activate", post(activate_app))
         .route("/api/sessions", get(live_sessions))
         .route("/api/workers/{id}/sessions", get(sessions))
         .route(
@@ -1072,6 +1085,11 @@ pub async fn serve_until(
     }
     app.close_store();
     Ok(())
+}
+
+/// The apps listener; see [`apps_http`].
+pub async fn serve_apps(listener: TcpListener, apps: Arc<apps::Apps>) -> anyhow::Result<()> {
+    Ok(axum::serve(listener, apps_http::router(apps)).await?)
 }
 
 /// `--self-test`: this build can read the task history in `dir` (without taking its lock: the
@@ -1543,6 +1561,115 @@ async fn set_update(
     match set {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(why) => (StatusCode::BAD_REQUEST, why).into_response(),
+    }
+}
+
+/// Published apps and their releases. Read-only, like task status.
+async fn list_apps(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if !app.admit(&headers, peer, "/api/apps").await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let list = app.apps.as_ref().map(|a| a.list()).unwrap_or_default();
+    Json(list).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct PublishParams {
+    #[serde(default)]
+    activate: bool,
+}
+
+/// A `.tar.gz` bundle (raw body) as `slug`'s next release; `?activate=true` makes it live.
+/// Replies 201 `{"release": n}`. Full scope only.
+async fn publish_app(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Params(params): Params<PublishParams>,
+    body: axum::body::Body,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/apps").await {
+        return refused.into_response();
+    }
+    let Some(apps) = app.apps.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "apps are off: no state dir",
+        )
+            .into_response();
+    };
+    if !apps::valid_slug(&slug) {
+        let why = "app names are a-z, 0-9 and -, up to 32, starting with a letter or digit";
+        return (StatusCode::BAD_REQUEST, why).into_response();
+    }
+    let Ok(bytes) = axum::body::to_bytes(body, apps::MAX_ARCHIVE).await else {
+        let why = format!("bundles are limited to {} MiB", apps::MAX_BYTES >> 20);
+        return (StatusCode::PAYLOAD_TOO_LARGE, why).into_response();
+    };
+    let at = unix_ms();
+    let published = tokio::task::spawn_blocking(move || {
+        let bundle = apps::unpack(&bytes).map_err(|why| (StatusCode::BAD_REQUEST, why))?;
+        let n = apps.publish(&slug, &bundle, at, params.activate);
+        n.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))
+    });
+    match published.await.expect("publish doesn't panic") {
+        Ok(n) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "release": n })),
+        )
+            .into_response(),
+        Err((status, why)) => {
+            if status.is_server_error() {
+                tracing::warn!("publishing an app: {why}");
+            }
+            (status, why).into_response()
+        }
+    }
+}
+
+/// `{"release": n}` becomes `slug`'s live release; an earlier n reverts. Full scope only.
+async fn activate_app(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    body: Bytes,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/apps").await {
+        return refused.into_response();
+    }
+    let Some(apps) = &app.apps else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "apps are off: no state dir",
+        )
+            .into_response();
+    };
+    #[derive(serde::Deserialize)]
+    struct Activate {
+        release: u32,
+    }
+    let n = match serde_json::from_slice::<Activate>(&body) {
+        Ok(a) => a.release,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    if !apps::valid_slug(&slug) {
+        return (StatusCode::NOT_FOUND, "no such release").into_response();
+    }
+    match apps.activate(&slug, n) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(apps::ActivateError::NoSuchRelease) => {
+            (StatusCode::NOT_FOUND, "no such release").into_response()
+        }
+        Err(apps::ActivateError::Io(e)) => {
+            tracing::warn!("activating an app: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 
