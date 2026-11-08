@@ -101,23 +101,14 @@ fn serve(apps: &Apps, slug: &str, path: &str) -> Response {
     let Some(live) = live else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let read = |rel: &'_ str| Some((rel.to_string(), apps::read_file(&live.dir, rel)?));
     let web = live.manifest.clients.web.as_str();
-    let found = match path.trim_end_matches('/') {
-        "" => None,
-        rel => apps::clean_path(rel).and_then(|rel| Some((rel, apps::read_file(&live.dir, rel)?))),
-    };
-    let fallback = || {
-        let bytes = apps::read_file(&live.dir, web)?;
-        Some((web, bytes))
-    };
-    let found = found.or_else(|| {
-        (path.is_empty() || apps::wants_entry_fallback(path))
-            .then(fallback)
-            .flatten()
-    });
+    let found = apps::clean_path(path.trim_end_matches('/'))
+        .and_then(read)
+        .or_else(|| apps::wants_entry_fallback(path).then(|| read(web)).flatten());
     match found {
         Some((rel, bytes)) => {
-            ([(header::CONTENT_TYPE, apps::content_type(rel))], bytes).into_response()
+            ([(header::CONTENT_TYPE, apps::content_type(&rel))], bytes).into_response()
         }
         None => StatusCode::NOT_FOUND.into_response(),
     }

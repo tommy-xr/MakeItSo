@@ -3778,6 +3778,115 @@ async fn capture_is_kept_once_and_its_token_opens_nothing_else() {
     let full = ("authorization", "Bearer s");
     assert_eq!(capture(&base, &[full], &text).await.0, 201);
     refused_everywhere_else(&base, &[bearer]).await;
+
+/// The orchestrator with apps kept in a fresh temp dir, and its apps listener: their bases
+/// (`ws://` like the rest) and the dir.
+async fn start_with_apps(app: App) -> (String, String, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-apps-{}", uuid::Uuid::new_v4()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base = mis_orchestrator::apps::base_url(None, Some(addr));
+    let apps = std::sync::Arc::new(mis_orchestrator::apps::Apps::new(dir.clone(), base));
+    tokio::spawn(mis_orchestrator::serve_apps(listener, apps.clone()));
+    let mis = start_app(app.with_apps(apps)).await;
+    (mis, format!("ws://{addr}"), dir)
+}
+
+/// A `.tar.gz` of `(path, bytes)` files, paths written raw (so `../x` gets through).
+fn bundle(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut b = tar::Builder::new(Vec::new());
+    for (path, bytes) in files {
+        let mut h = tar::Header::new_old();
+        h.as_old_mut().name[..path.len()].copy_from_slice(path.as_bytes());
+        h.set_size(bytes.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append(&h, *bytes).unwrap();
+    }
+    gzip(&b.into_inner().unwrap())
+}
+
+fn gzip(tar: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    e.write_all(tar).unwrap();
+    e.finish().unwrap()
+}
+
+/// A demo app whose page says `page`.
+fn demo(page: &str) -> Vec<u8> {
+    bundle(&[
+        ("app.json", br#"{"title":"Demo","clients":{"web":"index.html"}}"#),
+        ("index.html", page.as_bytes()),
+        ("js/app.js", b"console.log(1)"),
+    ])
+}
+
+async fn publish(base: &str, path: &str, auth: &str, tar_gz: &[u8]) -> (u16, String) {
+    let head = format!("POST {path} HTTP/1.1\r\nAuthorization: Bearer {auth}");
+    let (status, _, body) = http(base, &head, tar_gz).await;
+    (status, String::from_utf8(body).unwrap())
+}
+
+/// GET `path` from the apps listener: status, head, body.
+async fn app_get(apps: &str, path: &str, extra: &str) -> (u16, String, String) {
+    let head = format!("GET {path} HTTP/1.1{extra}");
+    let (status, head, body) = http(apps, &head, b"").await;
+    (status, head, String::from_utf8(body).unwrap())
+}
+
+#[tokio::test]
+async fn apps_publish_activate_and_serve() {
+    let (mis, apps, dir) = start_with_apps(with_read_token()).await;
+    let (status, body) = publish(&mis, "/api/apps/demo/releases", "s", &demo("v1")).await;
+    assert_eq!((status, body.as_str()), (201, r#"{"release":1}"#));
+    // Staged, not live.
+    assert_eq!(app_get(&apps, "/a/demo/", "").await.0, 404);
+    let activate = |n: u32| format!(r#"{{"release":{n}}}"#);
+    let (status, _) = post_json(&mis, "/api/apps/demo/activate", "s", &activate(1)).await;
+    assert_eq!(status, 204);
+    let (status, head, body) = app_get(&apps, "/a/demo/", "").await;
+    assert_eq!((status, body.as_str()), (200, "v1"));
+    let head = head.to_ascii_lowercase();
+    assert!(head.contains("content-type: text/html; charset=utf-8"), "{head}");
+    let csp = format!("content-security-policy: {}", mis_orchestrator::apps_http::CSP);
+    assert!(head.contains(&csp), "{head}");
+    assert!(head.contains("x-content-type-options: nosniff"), "{head}");
+    assert!(head.contains("cache-control: no-cache"), "{head}");
+    let (status, head, body) = app_get(&apps, "/a/demo/js/app.js", "").await;
+    assert_eq!((status, body.as_str()), (200, "console.log(1)"));
+    assert!(head.contains("text/javascript"), "{head}");
+    // An SPA route gets the entry; a missing file doesn't.
+    assert_eq!(app_get(&apps, "/a/demo/scores/2026", "").await.2, "v1");
+    assert_eq!(app_get(&apps, "/a/demo/missing.png", "").await.0, 404);
+    assert_eq!(app_get(&apps, "/a/demo/.release.json", "").await.0, 404);
+    // `..` never leaves the release: an extensionless miss is just the entry.
+    assert_eq!(app_get(&apps, "/a/demo/%2e%2e/%2e%2e/active", "").await.2, "v1");
+    let up = "/a/demo/%2e%2e/1/.release.json";
+    assert_eq!(app_get(&apps, up, "").await.0, 404);
+    let (status, head, _) = app_get(&apps, "/a/demo", "").await;
+    assert_eq!(status, 308);
+    assert!(head.contains("location: /a/demo/"), "{head}");
+    // Published live at once, then reverted.
+    let (status, body) = publish(&mis, "/api/apps/demo/releases?activate=true", "s", &demo("v2")).await;
+    assert_eq!((status, body.as_str()), (201, r#"{"release":2}"#));
+    assert_eq!(app_get(&apps, "/a/demo/", "").await.2, "v2");
+    post_json(&mis, "/api/apps/demo/activate", "s", &activate(1)).await;
+    assert_eq!(app_get(&apps, "/a/demo/", "").await.2, "v1");
+    let (status, _) = post_json(&mis, "/api/apps/demo/activate", "s", &activate(9)).await;
+    assert_eq!(status, 404);
+    let (status, body) = get_json(&mis, "/api/apps", "s").await;
+    assert_eq!(status, 200);
+    let list: Vec<AppView> = serde_json::from_str(&body).unwrap();
+    let a = &list[0];
+    assert_eq!((a.slug.as_str(), a.title.as_str(), a.active), ("demo", "Demo", Some(1)));
+    assert_eq!(a.url.as_deref(), Some(format!("http://{}/a/demo/", &apps[5..]).as_str()));
+    let ns: Vec<u32> = a.releases.iter().map(|r| r.n).collect();
+    assert_eq!(ns, [1, 2]);
+    assert_ne!(a.releases[0].sha256, a.releases[1].sha256);
+    // The directory links live apps.
+    let (_, _, page) = app_get(&apps, "/a/", "").await;
+    assert!(page.contains(r#"<a href="/a/demo/">Demo</a>"#), "{page}");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -3826,6 +3935,66 @@ async fn capture_takes_the_url_encoded_form_shortcuts_send_without_a_file() {
 }
 
 #[tokio::test]
+async fn apps_refuse_traversal_and_link_archives() {
+    let (mis, _, dir) = start_with_apps(App::new(None)).await;
+    let app_json: &[u8] = br#"{"title":"Demo","clients":{"web":"index.html"}}"#;
+    let page = ("index.html", &b"x"[..]);
+    let escape = bundle(&[("app.json", app_json), page, ("../../escaped", b"x")]);
+    let (status, body) = publish(&mis, "/api/apps/demo/releases", "", &escape).await;
+    assert_eq!(status, 400);
+    assert!(body.contains("`..`"), "{body}");
+    let mut b = tar::Builder::new(Vec::new());
+    let mut h = tar::Header::new_gnu();
+    h.set_path("index.html").unwrap();
+    h.set_entry_type(tar::EntryType::Symlink);
+    h.set_link_name("/etc/passwd").unwrap();
+    h.set_size(0);
+    h.set_cksum();
+    b.append(&h, &[][..]).unwrap();
+    let link = gzip(&b.into_inner().unwrap());
+    let (status, body) = publish(&mis, "/api/apps/demo/releases", "", &link).await;
+    assert_eq!(status, 400);
+    assert!(body.contains("Symlink"), "{body}");
+    let (status, _) = publish(&mis, "/api/apps/Bad_Name/releases", "", &demo("x")).await;
+    assert_eq!(status, 400);
+    // Nothing was written, anywhere.
+    assert!(!dir.exists() || std::fs::read_dir(&dir).unwrap().count() == 0);
+    assert!(!dir.parent().unwrap().join("escaped").exists());
+}
+
+#[tokio::test]
+async fn apps_port_has_no_orchestrator_routes() {
+    let (mis, apps, dir) = start_with_apps(App::new(None)).await;
+    assert_eq!(get_json(&mis, "/api/info", "").await.0, 200);
+    for path in ["/", "/api/info", "/api/apps", "/ws/client", "/ws/worker"] {
+        assert_eq!(app_get(&apps, path, "").await.0, 404, "{path}");
+    }
+    let (status, _, _) = http(&apps, "POST /mcp HTTP/1.1", b"{}").await;
+    assert_eq!(status, 404);
+    let (status, _, _) = http(&apps, "POST /api/apps/demo/releases HTTP/1.1", &demo("x")).await;
+    assert_eq!(status, 404);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn read_token_lists_apps_but_cannot_publish_or_activate() {
+    let (mis, _, dir) = start_with_apps(with_read_token()).await;
+    assert_eq!(publish(&mis, "/api/apps/demo/releases", "s", &demo("v1")).await.0, 201);
+    let (status, body) = get_json(&mis, "/api/apps", "r").await;
+    assert_eq!(status, 200);
+    assert!(body.contains(r#""slug":"demo""#), "{body}");
+    assert_eq!(get_json(&mis, "/api/apps", "nope").await.0, 401);
+    let (status, body) = publish(&mis, "/api/apps/demo/releases", "r", &demo("v2")).await;
+    assert_eq!((status, body.as_str()), (403, "read-only token"));
+    let (status, _) = post_json(&mis, "/api/apps/demo/activate", "r", r#"{"release":1}"#).await;
+    assert_eq!(status, 403);
+    let (_, body) = get_json(&mis, "/api/apps", "r").await;
+    let list: Vec<AppView> = serde_json::from_str(&body).unwrap();
+    assert_eq!((list[0].active, list[0].releases.len()), (None, 1));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn capture_app_jwt_opens_only_the_capture_route() {
     let dir = std::env::temp_dir().join(format!("mis-e2e-capture-{}", uuid::Uuid::new_v4()));
     let jwks = serde_json::from_str(include_str!("fixtures/access-test-jwks.json")).unwrap();
@@ -3859,5 +4028,20 @@ async fn capture_app_jwt_opens_only_the_capture_route() {
     assert_eq!(client_status(&base, &login).await, 101);
     let login_with_capture = [login[0], login[1], ("authorization", "Bearer c")];
     refused_everywhere_else(&base, &login_with_capture).await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn apps_port_refuses_cloudflare_traffic() {
+    let (mis, apps, dir) = start_with_apps(App::new(None)).await;
+    publish(&mis, "/api/apps/demo/releases?activate=true", "", &demo("v1")).await;
+    assert_eq!(app_get(&apps, "/a/demo/", "").await.0, 200);
+    for h in ["Cf-Access-Jwt-Assertion: x", "CF-Ray: 1", "CF-Connecting-IP: 203.0.113.9"] {
+        for path in ["/a/demo/", "/a/", "/nope"] {
+            let (status, head, _) = app_get(&apps, path, &format!("\r\n{h}")).await;
+            assert_eq!(status, 403, "{h} {path}");
+            assert!(head.contains("nosniff"), "{head}");
+        }
+    }
     std::fs::remove_dir_all(dir).unwrap();
 }
