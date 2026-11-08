@@ -51,18 +51,24 @@ fn strip_boilerplate(body: &str) -> String {
         "get outlook for ios",
     ];
     let placeholder = |l: &str| {
-        let Some(name) = l.strip_prefix('[').and_then(|l| l.strip_suffix(']')) else {
+        let name = l.strip_prefix('[').and_then(|l| l.strip_suffix(']'));
+        let Some(name) = name.filter(|n| !n.contains(['[', ']'])) else {
             return false;
         };
         let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
         let media = ["png", "jpg", "jpeg", "heic", "gif", "webp", "mov", "mp4"];
         ext.is_some_and(|e| media.contains(&e.as_str()))
     };
+    // Outlook's signature carries one `<link>`: `Get Outlook for iOS<https://aka.ms/x>`.
+    let link = |rest: &str| {
+        let inner = rest.strip_prefix('<').and_then(|r| r.strip_suffix('>'));
+        inner.is_some_and(|i| !i.is_empty() && !i.contains(['<', '>', ' ']))
+    };
     let signature = |l: &str| {
         let l = l.to_ascii_lowercase();
         SIGNATURES
             .iter()
-            .any(|s| l == *s || l.starts_with(&format!("{s}<")))
+            .any(|s| l.strip_prefix(s).is_some_and(|r| r.is_empty() || link(r)))
     };
     body.lines()
         .filter(|l| !(placeholder(l.trim()) || signature(l.trim())))
@@ -122,8 +128,13 @@ mod tests {
         let outlook = "see this\r\n\r\nGet Outlook for iOS<https://aka.ms/o0ukef>";
         assert_eq!(strip_boilerplate(outlook), "see this");
         // Only whole lines: the same words inside a note stay.
-        let note = "[draft] sent from my iphone, oddly";
-        assert_eq!(strip_boilerplate(note), note);
+        for note in [
+            "[draft] sent from my iphone, oddly",
+            "[before.png] versus [after.png]",
+            "Sent from my iPhone<https://example.com> — please investigate",
+        ] {
+            assert_eq!(strip_boilerplate(note), note);
+        }
         let c = capture(b"Subject: \r\n\r\n[IMG_1.JPG]\r\n\r\nSent from my iPhone\r\n");
         assert!(
             matches!(c, Err(Refused::Invalid(_))),
