@@ -255,7 +255,7 @@ test('mis.js in mock mode loads mis-mock.js beside it, with no server', async ()
 
 // The members of `interface name` in mis.d.ts.
 function members(name) {
-  const dts = file('mis.d.ts');
+  const dts = file('mis.d.ts').replace(/\r\n/g, '\n'); // Windows checkouts use CRLF
   const body = new RegExp(`interface ${name}\\b[^{]*\\{\\n([\\s\\S]*?)\\n  \\}`).exec(dts);
   assert.ok(body, name);
   return [...body[1].matchAll(/^    (\w+)\??[(<:]/gm)].map((m) => m[1]).sort();
