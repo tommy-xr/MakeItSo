@@ -33,6 +33,9 @@ pub struct Records {
     cap: u64,
 }
 
+/// A batch's records after its ops, or the first op refused (its index).
+pub type Batched = Result<Vec<Option<Envelope>>, (usize, Refusal)>;
+
 /// Every record a member can see, by collection: `(shared, me)`.
 pub type Visible = (
     BTreeMap<String, Vec<Envelope>>,
@@ -125,26 +128,50 @@ impl Records {
         actor: &str,
         now: u64,
     ) -> anyhow::Result<Result<Option<Envelope>, Refusal>> {
-        let (Mutation::Put {
-            space,
-            collection,
-            id,
-            ..
-        }
-        | Mutation::Remove {
-            space,
-            collection,
-            id,
-            ..
-        }) = op;
-        let owner = records::owner(*space, actor);
+        let done = self.mutate_all(slug, std::slice::from_ref(op), actor, now)?;
+        Ok(done
+            .map(|mut records| records.remove(0))
+            .map_err(|(_, r)| r))
+    }
+
+    /// [`Self::mutate`] for each of `ops` in order, all in one transaction: every record after
+    /// its op, or the first op refused (its index) and nothing written.
+    pub fn mutate_all(
+        &self,
+        slug: &str,
+        ops: &[Mutation],
+        actor: &str,
+        now: u64,
+    ) -> anyhow::Result<Batched> {
         let db = self.db(slug)?;
         let mut conn = db.lock().unwrap();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current = read(&tx, *space, owner, collection, id)?;
-        let reply = match records::apply(&current, op, actor, now) {
+        let mut records = Vec::with_capacity(ops.len());
+        for (i, op) in ops.iter().enumerate() {
+            match self.write(&tx, op, actor, now)? {
+                Ok(e) => records.push(e),
+                // Returning drops `tx`, rolling back the ops before this one too.
+                Err(refused) => return Ok(Err((i, refused))),
+            }
+        }
+        tx.commit()?;
+        Ok(Ok(records))
+    }
+
+    /// One op inside `tx`, which sees the batch's earlier writes.
+    fn write(
+        &self,
+        tx: &Connection,
+        op: &Mutation,
+        actor: &str,
+        now: u64,
+    ) -> anyhow::Result<Result<Option<Envelope>, Refusal>> {
+        let (space, collection, id) = op.key();
+        let owner = records::owner(space, actor);
+        let current = read(tx, space, owner, collection, id)?;
+        Ok(Ok(match records::apply(&current, op, actor, now) {
             Err(refused) => return Ok(Err(refused)),
-            Ok(Change::Unchanged(e)) => return Ok(Ok(e)),
+            Ok(Change::Unchanged(e)) => e,
             Ok(Change::Remove) => {
                 tx.execute(
                     "UPDATE records SET data = NULL \
@@ -168,9 +195,8 @@ impl Records {
                         base
                     ],
                 )?;
-                // Measured after the write, so a replacement is charged only what it adds;
-                // returning drops `tx`, rolling it back.
-                if used(&tx)? > self.cap {
+                // Measured after the write, so a replacement is charged only what it adds.
+                if used(tx)? > self.cap {
                     return Ok(Err(Refusal::TooLarge(format!(
                         "this app's records are at their {} MiB cap",
                         self.cap >> 20
@@ -178,9 +204,7 @@ impl Records {
                 }
                 Some(e)
             }
-        };
-        tx.commit()?;
-        Ok(Ok(reply))
+        }))
     }
 
     /// Every `shared` record, and `subject`'s own `me` ones.
@@ -469,6 +493,58 @@ mod tests {
         // The freed pages make room again.
         let op = put(Space::Shared, "again", 0, blob("x"));
         assert!(r.mutate("pool", &op, "me", 3).unwrap().is_ok());
+        drop(r); // Windows can't delete an open database
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_batch_lands_whole_or_not_at_all() {
+        let (mut r, dir) = temp();
+        let get = |r: &Records, id: &str| r.get("pool", Space::Shared, "", "notes", id).unwrap();
+        let a = r
+            .mutate("pool", &put(Space::Shared, "a", 0, json!(1)), "me", 1)
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        // A conflict mid-batch: the op before it isn't kept either; the index names it.
+        let ops = [
+            put(Space::Shared, "b", 0, json!(2)),
+            put(Space::Shared, "a", 0, json!(9)),
+            put(Space::Shared, "c", 0, json!(3)),
+        ];
+        assert_eq!(
+            r.mutate_all("pool", &ops, "me", 2).unwrap(),
+            Err((1, Refusal::Conflict(Some(a.clone()))))
+        );
+        assert_eq!((get(&r, "b"), get(&r, "c")), (None, None));
+        // At the stored rev it lands, in order: each op's record back.
+        let ops = [
+            put(Space::Shared, "b", 0, json!(2)),
+            put(Space::Shared, "a", 1, json!(9)),
+            Mutation::Remove {
+                space: Space::Shared,
+                collection: "notes".into(),
+                id: "gone".into(),
+                rev: 4,
+            },
+        ];
+        let done = r.mutate_all("pool", &ops, "me", 3).unwrap().unwrap();
+        let revs: Vec<_> = done.iter().map(|e| e.as_ref().map(|e| e.rev)).collect();
+        assert_eq!(revs, [Some(1), Some(2), None]);
+        assert_eq!(get(&r, "a").unwrap().data, json!(9));
+        // Sent again after its answer was lost: the same answer, nothing new.
+        assert_eq!(r.mutate_all("pool", &ops, "me", 4).unwrap(), Ok(done));
+        // Over the database cap mid-batch: refused at that op, nothing kept.
+        r.cap = 256 << 10;
+        let big = |id: &str| put(Space::Shared, id, 0, json!("x".repeat(60 << 10)));
+        let ops: Vec<_> = (0..8).map(|i| big(&format!("big{i}"))).collect();
+        let (at, why) = r.mutate_all("pool", &ops, "me", 5).unwrap().unwrap_err();
+        assert!(
+            matches!(why, Refusal::TooLarge(_)) && (1..8).contains(&at),
+            "{at} {why:?}"
+        );
+        assert_eq!(get(&r, "big0"), None);
+        assert_eq!(page(&r, json!({})).records.len(), 2);
         drop(r); // Windows can't delete an open database
         std::fs::remove_dir_all(dir).unwrap();
     }

@@ -4337,6 +4337,7 @@ fn apps_auth() -> mis_orchestrator::apps_http::Auth {
     mis_orchestrator::apps_http::Auth {
         gate: Some(gate),
         public_host: Some(HOME.into()),
+        dev: false,
     }
 }
 
@@ -4755,6 +4756,146 @@ async fn records_follow_roles_and_me_stays_private() {
         403
     );
     assert_eq!(app_post(&apps, MUTATIONS, &stranger, &note).await.0, 403);
+    // Best effort: on Windows the still-running server holds data.sqlite open.
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn batch(ops: &[String]) -> String {
+    format!(r#"{{"ops":[{}]}}"#, ops.join(","))
+}
+
+#[tokio::test]
+async fn record_batches_land_whole_or_not_at_all() {
+    let (mis, apps, dir) = live_demo(behind_access(), apps_auth()).await;
+    let get = |id: &str| format!("/a/demo/api/v1/records/shared/notes/{id}?missing=null");
+    let first = put_op("shared", "a", 0, serde_json::json!({"n": 1}));
+    assert_eq!(app_post(&apps, MUTATIONS, "", &first).await.0, 200);
+    // A conflict at ops[1]: 409 naming it, with the stored record; ops[0] isn't kept.
+    let stale = batch(&[
+        put_op("shared", "b", 0, 2.into()),
+        put_op("shared", "a", 0, 9.into()),
+    ]);
+    let (status, body) = app_post(&apps, MUTATIONS, "", &stale).await;
+    assert_eq!(status, 409, "{body}");
+    let c: Conflict = serde_json::from_str(&body).unwrap();
+    assert_eq!((c.index, c.current.map(|e| e.rev)), (Some(1), Some(1)));
+    assert_eq!(app_get(&apps, &get("b"), "").await.2, "null");
+    // At the stored revs: every record back, in order.
+    let ok = batch(&[
+        put_op("shared", "b", 0, 2.into()),
+        put_op("shared", "a", 1, 9.into()),
+        put_op("me", "a", 0, 3.into()),
+    ]);
+    let (status, body) = app_post(&apps, MUTATIONS, "", &ok).await;
+    assert_eq!(status, 200, "{body}");
+    let w: BatchWritten = serde_json::from_str(&body).unwrap();
+    let revs: Vec<_> = w.records.iter().map(|e| e.as_ref().unwrap().rev).collect();
+    assert_eq!(revs, [1, 2, 1]);
+    // Sent again after a lost answer: the same 200.
+    assert_eq!(app_post(&apps, MUTATIONS, "", &ok).await, (200, body));
+    // Caps: a record too big, too many ops, one id twice: refused by index, nothing kept.
+    let big = put_op("shared", "big", 0, serde_json::json!("x".repeat(70_000)));
+    let (status, why) = app_post(
+        &apps,
+        MUTATIONS,
+        "",
+        &batch(&[put_op("shared", "c", 0, 1.into()), big]),
+    )
+    .await;
+    assert_eq!(status, 413);
+    assert!(why.starts_with("ops[1]: data is"), "{why}");
+    let many: Vec<_> = (0..=100)
+        .map(|i| put_op("shared", &format!("m{i}"), 0, 1.into()))
+        .collect();
+    assert_eq!(app_post(&apps, MUTATIONS, "", &batch(&many)).await.0, 400);
+    // A full batch of near-cap records fits the body limit.
+    let fat: Vec<_> = (0..100)
+        .map(|i| put_op("shared", &format!("f{i}"), 0, "x".repeat(60_000).into()))
+        .collect();
+    assert_eq!(app_post(&apps, MUTATIONS, "", &batch(&fat)).await.0, 200);
+    let twice = batch(&[
+        put_op("shared", "d", 0, 1.into()),
+        put_op("shared", "d", 1, 2.into()),
+    ]);
+    let (status, why) = app_post(&apps, MUTATIONS, "", &twice).await;
+    assert_eq!(
+        (status, why.as_str()),
+        (400, "ops[1]: shared/notes/d is already in this batch")
+    );
+    for id in ["c", "m0", "d"] {
+        assert_eq!(app_get(&apps, &get(id), "").await.2, "null", "{id}");
+    }
+    // Roles: a viewer's batch is refused whole.
+    let share = r#"{"email":"vi@example.com","role":"viewer"}"#;
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/members", "s", share)
+            .await
+            .0,
+        200
+    );
+    let vi = format!(
+        "{}\r\nOrigin: https://{HOME}",
+        via_home(&access_jwt_for(APPS_AUD, "vi@example.com"))
+    );
+    let mine = batch(&[put_op("me", "v", 0, 1.into())]);
+    assert_eq!(app_post(&apps, MUTATIONS, &vi, &mine).await.0, 403);
+    // Best effort: on Windows the still-running server holds data.sqlite open.
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn a_missing_record_can_answer_null_and_sdk_types_are_served() {
+    let (_, apps, dir) = live_demo(with_read_token(), Default::default()).await;
+    let path = "/a/demo/api/v1/records/shared/notes/zz";
+    assert_eq!(app_get(&apps, path, "").await.0, 404);
+    let (status, _, body) = app_get(&apps, &format!("{path}?missing=null"), "").await;
+    assert_eq!((status, body.as_str()), (200, "null"));
+    assert_eq!(
+        app_get(&apps, &format!("{path}?missing=nope"), "").await.0,
+        400
+    );
+    // Still 404 for an app that isn't live.
+    let gone = "/a/nope/api/v1/records/shared/notes/zz?missing=null";
+    assert_eq!(app_get(&apps, gone, "").await.0, 404);
+    let (status, _, body) = app_get(&apps, "/a/_/mis.d.ts", "").await;
+    assert_eq!(status, 200);
+    assert!(body.contains("interface Mis"), "{body}");
+    // Best effort: on Windows the still-running server holds data.sqlite open.
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn dev_role_header_only_under_apps_dev_and_only_for_local() {
+    let me = "/a/demo/api/v1/me";
+    let as_viewer = "\r\nX-Mis-Dev-Role: viewer";
+    // Without --apps-dev the header is ignored: loopback stays owner.
+    let (_, apps, dir) = live_demo(with_read_token(), Default::default()).await;
+    let (_, _, body) = app_get(&apps, me, as_viewer).await;
+    assert!(body.contains(r#""role":"owner""#), "{body}");
+    let _ = std::fs::remove_dir_all(dir);
+    let dev = mis_orchestrator::apps_http::Auth {
+        dev: true,
+        ..apps_auth()
+    };
+    let (mis, apps, dir) = live_demo(behind_access(), dev).await;
+    let (_, _, body) = app_get(&apps, me, as_viewer).await;
+    assert!(body.contains(r#""role":"viewer""#), "{body}");
+    let op = put_op("shared", "a", 0, 1.into());
+    assert_eq!(app_post(&apps, MUTATIONS, as_viewer, &op).await.0, 403);
+    let as_editor = "\r\nX-Mis-Dev-Role: editor";
+    assert_eq!(app_post(&apps, MUTATIONS, as_editor, &op).await.0, 200);
+    assert_eq!(app_get(&apps, me, "\r\nX-Mis-Dev-Role: owner").await.0, 400);
+    // A signed-in member can't raise themselves with it.
+    let share = r#"{"email":"vi@example.com","role":"viewer"}"#;
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/members", "s", share)
+            .await
+            .0,
+        200
+    );
+    let vi = via_home(&access_jwt_for(APPS_AUD, "vi@example.com"));
+    let (_, _, body) = app_get(&apps, me, &format!("{vi}{as_editor}")).await;
+    assert!(body.contains(r#""role":"viewer""#), "{body}");
     // Best effort: on Windows the still-running server holds data.sqlite open.
     let _ = std::fs::remove_dir_all(dir);
 }

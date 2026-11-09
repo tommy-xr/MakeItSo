@@ -11,12 +11,12 @@ use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
-use mis_types::{AppMe, Conflict, Export, Mutation, RecordQuery, Space, Written};
+use mis_types::{AppMe, BatchWritten, Conflict, Export, RecordQuery, Space, Written};
 
 use crate::access_gate::{AccessGate, JWT_HEADER};
 use crate::app_access::{self, Action, Member, Subject};
 use crate::apps::{self, Apps};
-use crate::records::{self, Refusal};
+use crate::records::{self, Refusal, Writes};
 use crate::records_db::Records;
 
 /// How the apps listener checks who is asking.
@@ -28,6 +28,8 @@ pub struct Auth {
     /// [`app_access::public_authority`] of `--apps-public-url`: the one non-loopback Host
     /// answered.
     pub public_host: Option<String>,
+    /// `--apps-dev`: `local` requests may take a lesser role ([`app_access::DEV_ROLE`]).
+    pub dev: bool,
 }
 
 /// Pages load scripts, styles and fonts only from, and connect only to, this origin. Every app
@@ -39,6 +41,11 @@ pub const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' '
 /// The SDK every app may load from `/a/_/mis.js` (`_` is no app's slug), and its in-memory twin.
 const SDK: &str = include_str!("../static/mis.js");
 const SDK_MOCK: &str = include_str!("../static/mis-mock.mjs");
+/// TypeScript types for both.
+const SDK_TYPES: &str = include_str!("../static/mis.d.ts");
+
+/// A full batch of the largest records, with room for keys and whitespace.
+const MUTATIONS_BODY: usize = 8 << 20;
 
 /// Needs [`ConnectInfo`]: serve with `into_make_service_with_connect_info::<SocketAddr>()`.
 /// Each app's records are kept beside its releases ([`Records`]).
@@ -49,17 +56,20 @@ pub fn router(apps: Arc<Apps>, auth: Arc<Auth>) -> Router {
         .route("/", get(|| async { Redirect::temporary("/a/") }))
         .route("/a", get(|| async { Redirect::temporary("/a/") }))
         .route("/a/", get(directory))
-        .route("/a/_/mis.js", get(|| async { js(SDK) }))
-        .route("/a/_/mis-mock.js", get(|| async { js(SDK_MOCK) }))
+        .route("/a/_/mis.js", get(|| async { sdk_file(JS, SDK) }))
+        .route("/a/_/mis-mock.js", get(|| async { sdk_file(JS, SDK_MOCK) }))
+        .route("/a/_/mis.d.ts", get(|| async { sdk_file(TEXT, SDK_TYPES) }))
         .route("/a/{slug}", get(add_slash))
         .route("/a/{slug}/", get(entry))
         .route("/a/{slug}/api/v1/me", get(me))
         .route(
             "/a/{slug}/api/v1/mutations",
-            post(mutate).layer(axum::middleware::from_fn_with_state(
-                auth.clone(),
-                from_own_page,
-            )),
+            post(mutate)
+                .layer(axum::extract::DefaultBodyLimit::max(MUTATIONS_BODY))
+                .layer(axum::middleware::from_fn_with_state(
+                    auth.clone(),
+                    from_own_page,
+                )),
         )
         .route("/a/{slug}/api/v1/records/{space}/{collection}", get(list))
         .route(
@@ -76,8 +86,10 @@ pub fn router(apps: Arc<Apps>, auth: Arc<Auth>) -> Router {
         .with_state(apps)
 }
 
-fn js(body: &'static str) -> Response {
-    let ct = "text/javascript; charset=utf-8";
+const JS: &str = "text/javascript; charset=utf-8";
+const TEXT: &str = "text/plain; charset=utf-8";
+
+fn sdk_file(ct: &'static str, body: &'static str) -> Response {
     ([(header::CONTENT_TYPE, ct)], body).into_response()
 }
 
@@ -151,8 +163,20 @@ async fn admit(
         StatusCode::UNAUTHORIZED,
         "sign in through Cloudflare Access",
     ))?;
+    let dev_role = match headers.get(app_access::DEV_ROLE) {
+        Some(v) if auth.dev && subject == Subject::Local => Some(
+            v.to_str()
+                .ok()
+                .and_then(app_access::dev_role)
+                .ok_or((StatusCode::BAD_REQUEST, "x-mis-dev-role: viewer or editor"))?,
+        ),
+        _ => None,
+    };
     // The SDK is for anyone signed in.
-    let sdk = matches!(req.uri().path(), "/a/_/mis.js" | "/a/_/mis-mock.js");
+    let sdk = matches!(
+        req.uri().path(),
+        "/a/_/mis.js" | "/a/_/mis-mock.js" | "/a/_/mis.d.ts"
+    );
     let Some(slug) = app_access::app_of(req.uri().path()).filter(|_| !sdk) else {
         req.extensions_mut().insert(subject);
         return Ok(());
@@ -161,6 +185,7 @@ async fn admit(
     let policy = apps::valid_slug(slug).then(|| apps.policy(slug));
     let role = app_access::role_of(&policy.unwrap_or_default(), &subject)
         .ok_or((StatusCode::FORBIDDEN, "this app isn't shared with you"))?;
+    let role = dev_role.unwrap_or(role);
     req.extensions_mut().insert(Member { subject, role });
     Ok(())
 }
@@ -245,13 +270,18 @@ fn denied(apps: &Apps, slug: &str, m: &Member, action: Action) -> Option<Respons
     None
 }
 
-fn refused(r: Refusal) -> Response {
+/// `index`: the refused op of a batch; other refusals say it as `ops[2]: …`.
+fn refused(r: Refusal, index: Option<usize>) -> Response {
+    let at = |why: String| match index {
+        Some(i) => format!("ops[{i}]: {why}"),
+        None => why,
+    };
     match r {
         Refusal::Conflict(current) => {
-            (StatusCode::CONFLICT, Json(Conflict { current })).into_response()
+            (StatusCode::CONFLICT, Json(Conflict { current, index })).into_response()
         }
-        Refusal::TooLarge(why) => (StatusCode::PAYLOAD_TOO_LARGE, why).into_response(),
-        Refusal::Invalid(why) => (StatusCode::BAD_REQUEST, why).into_response(),
+        Refusal::TooLarge(why) => (StatusCode::PAYLOAD_TOO_LARGE, at(why)).into_response(),
+        Refusal::Invalid(why) => (StatusCode::BAD_REQUEST, at(why)).into_response(),
     }
 }
 
@@ -260,7 +290,8 @@ fn failed(slug: &str, e: anyhow::Error) -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, "records unavailable").into_response()
 }
 
-/// `POST /a/{slug}/api/v1/mutations`: a [`Mutation`]; 200 [`Written`], 409 [`Conflict`].
+/// `POST /a/{slug}/api/v1/mutations`: a [`mis_types::Mutation`] (200 [`Written`]) or a
+/// [`mis_types::Batch`] (200 [`BatchWritten`]); 409 [`Conflict`].
 async fn mutate(
     State(apps): State<Arc<Apps>>,
     Extension(records): Extension<Arc<Records>>,
@@ -272,16 +303,19 @@ async fn mutate(
         if let Some(r) = denied(&apps, &slug, &m, Action::Write) {
             return r;
         }
-        let op: Mutation = match serde_json::from_slice(&body) {
-            Ok(op) => op,
-            Err(e) => {
-                return (StatusCode::BAD_REQUEST, format!("bad mutation: {e}")).into_response()
-            }
-        };
-        match records.mutate(&slug, &op, m.subject.name(), crate::unix_ms()) {
-            Ok(Ok(record)) => Json(Written { record }).into_response(),
-            Ok(Err(r)) => refused(r),
-            Err(e) => failed(&slug, e),
+        let (who, now) = (m.subject.name(), crate::unix_ms());
+        match records::parse_writes(&body) {
+            Err(why) => (StatusCode::BAD_REQUEST, why).into_response(),
+            Ok(Writes::One(op)) => match records.mutate(&slug, &op, who, now) {
+                Ok(Ok(record)) => Json(Written { record }).into_response(),
+                Ok(Err(r)) => refused(r, None),
+                Err(e) => failed(&slug, e),
+            },
+            Ok(Writes::Batch(ops)) => match records.mutate_all(&slug, &ops, who, now) {
+                Ok(Ok(records)) => Json(BatchWritten { records }).into_response(),
+                Ok(Err((i, r))) => refused(r, Some(i)),
+                Err(e) => failed(&slug, e),
+            },
         }
     })
     .await
@@ -322,12 +356,26 @@ async fn list(
     .await
 }
 
-/// `GET /a/{slug}/api/v1/records/{space}/{collection}/{id}`: an [`mis_types::Envelope`].
+#[derive(serde::Deserialize)]
+struct GetParams {
+    missing: Option<Missing>,
+}
+
+/// `?missing=null`: answer a missing record with 200 `null`, not 404 (which browsers log).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Missing {
+    Null,
+}
+
+/// `GET /a/{slug}/api/v1/records/{space}/{collection}/{id}[?missing=null]`: an
+/// [`mis_types::Envelope`].
 async fn get_record(
     State(apps): State<Arc<Apps>>,
     Extension(records): Extension<Arc<Records>>,
     Extension(m): Extension<Member>,
     Path((slug, space, collection, id)): Path<(String, Space, String, String)>,
+    Query(params): Query<GetParams>,
 ) -> Response {
     off_thread(move || {
         if let Some(r) = denied(&apps, &slug, &m, Action::Read) {
@@ -339,6 +387,7 @@ async fn get_record(
         let owner = records::owner(space, m.subject.name());
         match records.get(&slug, space, owner, &collection, &id) {
             Ok(Some(e)) => Json(e).into_response(),
+            Ok(None) if params.missing.is_some() => Json(serde_json::Value::Null).into_response(),
             Ok(None) => (StatusCode::NOT_FOUND, "no such record").into_response(),
             Err(e) => failed(&slug, e),
         }

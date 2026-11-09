@@ -2,7 +2,9 @@
 //! ([`compile`]), and the caps. [`crate::records_db`] is the SQLite shell around it.
 
 use base64ct::{Base64UrlUnpadded, Encoding};
-use mis_types::{Direction, Envelope, Mutation, RecordQuery, Space};
+use std::collections::BTreeSet;
+
+use mis_types::{Direction, Envelope, Mutation, RecordQuery, Space, MAX_BATCH};
 use rusqlite::types::Value as Sql;
 use serde_json::Value;
 
@@ -73,7 +75,7 @@ pub enum Refusal {
 
 /// `op` against what its id holds (`current`), by `actor` at Unix millis `now`.
 pub fn apply(current: &Current, op: &Mutation, actor: &str, now: u64) -> Result<Change, Refusal> {
-    let (Mutation::Put { collection, id, .. } | Mutation::Remove { collection, id, .. }) = op;
+    let (_, collection, id) = op.key();
     check_key(collection, id)?;
     match (op, current) {
         (Mutation::Remove { .. }, Current::Gone(_)) => Ok(Change::Unchanged(None)),
@@ -119,6 +121,48 @@ pub fn apply(current: &Current, op: &Mutation, actor: &str, now: u64) -> Result<
             }
         }
     }
+}
+
+/// What a `POST mutations` body asks for.
+#[derive(Debug, PartialEq)]
+pub enum Writes {
+    One(Mutation),
+    /// A [`mis_types::Batch`]'s ops.
+    Batch(Vec<Mutation>),
+}
+
+/// A mutations body: a [`Mutation`], or `{"ops": [...]}` ([`mis_types::Batch`]). Err: why
+/// it's refused (400), naming the op (`ops[2]: …`) when one is to blame.
+pub fn parse_writes(body: &[u8]) -> Result<Writes, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Ops {
+        ops: Vec<Value>,
+    }
+    let v: Value = serde_json::from_slice(body).map_err(|e| format!("bad mutation: {e}"))?;
+    if v.get("ops").is_none() {
+        let op = serde_json::from_value(v).map_err(|e| format!("bad mutation: {e}"))?;
+        return Ok(Writes::One(op));
+    }
+    let Ops { ops } = serde_json::from_value(v).map_err(|e| format!("bad batch: {e}"))?;
+    if ops.len() > MAX_BATCH {
+        return Err(format!("a batch holds at most {MAX_BATCH} ops"));
+    }
+    let ops = (ops.into_iter().enumerate())
+        .map(|(i, op)| {
+            serde_json::from_value(op).map_err(|e| format!("ops[{i}]: bad mutation: {e}"))
+        })
+        .collect::<Result<Vec<Mutation>, _>>()?;
+    // Each id once, so a batch sent again after its answer was lost lands or conflicts whole.
+    let mut seen = BTreeSet::new();
+    for (i, op) in ops.iter().enumerate() {
+        if !seen.insert(op.key()) {
+            let (space, collection, id) = op.key();
+            let at = format!("{}/{collection}/{id}", space.as_str());
+            return Err(format!("ops[{i}]: {at} is already in this batch"));
+        }
+    }
+    Ok(Writes::Batch(ops))
 }
 
 fn check_key(collection: &str, id: &str) -> Result<(), Refusal> {
@@ -546,6 +590,57 @@ mod tests {
             apply(&NEVER, &keyed("notes", "a/b"), "me", 9),
             Err(Refusal::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn bodies_are_one_mutation_or_a_batch() {
+        let one = br#"{"op":"remove","space":"me","collection":"notes","id":"a","rev":1}"#;
+        assert!(matches!(
+            parse_writes(one),
+            Ok(Writes::One(Mutation::Remove { .. }))
+        ));
+        let ops = |ops: Value| json!({ "ops": ops }).to_string().into_bytes();
+        let a = json!({"op": "put", "space": "shared", "collection": "notes", "id": "a", "rev": 0, "data": 1});
+        let b =
+            json!({"op": "remove", "space": "shared", "collection": "notes", "id": "b", "rev": 2});
+        // The same id in the other space is another record.
+        let a_me =
+            json!({"op": "remove", "space": "me", "collection": "notes", "id": "a", "rev": 0});
+        match parse_writes(&ops(json!([a, b, a_me]))) {
+            Ok(Writes::Batch(v)) => assert_eq!(v.len(), 3),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(parse_writes(&ops(json!([]))), Ok(Writes::Batch(vec![])));
+        let full: Vec<Value> = (0..=MAX_BATCH)
+            .map(|i| json!({"op": "remove", "space": "shared", "collection": "c", "id": i.to_string(), "rev": 1}))
+            .collect();
+        assert!(parse_writes(&ops(json!(full[..MAX_BATCH]))).is_ok());
+        for (body, why) in [
+            (ops(json!(full)), "at most 100"),
+            (
+                ops(json!([a, b, a])),
+                "ops[2]: shared/notes/a is already in this batch",
+            ),
+            (
+                ops(json!([a, {"op": "put"}])),
+                "ops[1]: bad mutation: missing field",
+            ),
+            (
+                ops(json!([a, b, {"op": "put", "space": "all"}])),
+                "ops[2]: bad mutation",
+            ),
+            (ops(json!({})), "bad batch"),
+            (
+                json!({"ops": [], "x": 1}).to_string().into_bytes(),
+                "bad batch",
+            ),
+            (br#"{"op":"put","space":"shared"}"#.to_vec(), "bad mutation"),
+            (b"[]".to_vec(), "bad mutation"),
+            (b"nope".to_vec(), "bad mutation"),
+        ] {
+            let e = parse_writes(&body).unwrap_err();
+            assert!(e.contains(why), "{e}");
+        }
     }
 
     #[test]

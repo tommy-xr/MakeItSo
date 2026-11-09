@@ -8,6 +8,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
+mod scaffold;
+
 #[derive(Parser)]
 #[command(name = "mis", about = "Make It So CLI")]
 struct Args {
@@ -145,6 +147,19 @@ enum AppsCmd {
     Backups { slug: String },
     /// Snapshot the app's records now.
     Backup { slug: String },
+    /// Write the SDK this CLI was built with (mis.js, mis-mock.js, mis.d.ts) into `dir`, for an
+    /// app's dev server to serve at `/a/_/` and its type-checks.
+    Sdk { dir: std::path::PathBuf },
+    /// Start app `slug` in `./apps/<slug>` from a template folder, filling `{{slug}}` and
+    /// `{{title}}` in its text files, with the SDK in `sdk/`. Never over an existing folder.
+    New {
+        slug: String,
+        #[arg(long, default_value = "apps/_template")]
+        template: std::path::PathBuf,
+        /// Default: from the slug (`budget-tracker` -> `Budget tracker`).
+        #[arg(long)]
+        title: Option<String>,
+    },
     /// Replace the app's records with snapshot `name` (one taken first undoes it).
     Restore {
         slug: String,
@@ -177,6 +192,26 @@ async fn apps(args: &Args, cmd: &AppsCmd) -> Result<()> {
     let base = http_url(&args.url);
     let client = reqwest::Client::new();
     match cmd {
+        AppsCmd::Sdk { dir } => {
+            scaffold::write_sdk(dir)?;
+            let names: Vec<_> = scaffold::SDK.iter().map(|(n, _)| *n).collect();
+            println!("{}: {}", dir.display(), names.join(", "));
+        }
+        AppsCmd::New {
+            slug,
+            template,
+            title,
+        } => {
+            let dest = std::path::Path::new("apps").join(slug);
+            let title = title.clone().unwrap_or_else(|| scaffold::title_of(slug));
+            scaffold::new_app(template, &dest, slug, &title)?;
+            println!(
+                "{}: \"{title}\" from {}",
+                dest.display(),
+                template.display()
+            );
+            println!("next: cd {} && npm install && npm run dev", dest.display());
+        }
         AppsCmd::List => {
             let body = call(args, client.get(format!("{base}/api/apps"))).await?;
             let list: Vec<AppView> = serde_json::from_str(&body)?;

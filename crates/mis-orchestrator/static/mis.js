@@ -1,16 +1,18 @@
 // Make It So apps SDK: who is asking and the app's records, for a page served at /a/<slug>/.
 // <script src="/a/_/mis.js"></script> defines `mis`; every method returns a promise and rejects
-// with a MisError ({status, message}, plus `current` on a 409). With `?mock=1` in the page's URL
-// it talks to an in-memory twin (mis-mock.js) instead; `&role=viewer` sets the mock's role.
+// with a MisError ({status, message}, plus `current` on a 409 and `index` for a batch's op).
+// Types: /a/_/mis.d.ts. With `?mock=1` in the page's URL it talks to an in-memory twin
+// (mis-mock.js) instead, and `mis.mock` seeds it; `&role=viewer` sets the mock's role.
 (() => {
   'use strict';
 
   class MisError extends Error {
-    constructor(status, message, current) {
+    constructor(status, message, current, index) {
       super(message);
       this.name = 'MisError';
       this.status = status;
       if (current !== undefined) this.current = current;
+      if (index !== undefined) this.index = index;
     }
   }
 
@@ -19,29 +21,30 @@
     const call = async (path, init) => {
       const res = await fetch(base + path, init);
       if (res.ok) return res.json();
-      if (res.status === 409) throw new MisError(409, 'conflict', (await res.json()).current);
-      throw new MisError(res.status, (await res.text()) || res.statusText);
+      if (res.status === 409) {
+        const { current, index } = await res.json();
+        throw new MisError(409, 'conflict', current, index);
+      }
+      const text = (await res.text()) || res.statusText;
+      // A batch names its refused op: `ops[2]: data is …`.
+      const op = /^ops\[(\d+)\]: /.exec(text);
+      throw new MisError(res.status, text, undefined, op ? Number(op[1]) : undefined);
     };
     const at = (space, collection, id) =>
       ['records', space, collection, id].filter((s) => s !== undefined).map(encodeURIComponent).join('/');
-    const mutate = (op) =>
-      call('mutations', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(op),
-      }).then((r) => r.record);
+    const post = (body) =>
+      call('mutations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const mutate = (op) => post(op).then((r) => r.record);
     return {
       me: () => call('me'),
       records: {
         list: (space, collection, q) =>
           call(at(space, collection) + (q ? `?q=${encodeURIComponent(JSON.stringify(q))}` : '')),
-        get: (space, collection, id) =>
-          call(at(space, collection, id)).catch((e) => {
-            if (e.status === 404) return null;
-            throw e;
-          }),
+        // 200 null rather than a 404, which browsers log as an error.
+        get: (space, collection, id) => call(`${at(space, collection, id)}?missing=null`),
         put: (space, collection, id, rev, data) => mutate({ op: 'put', space, collection, id, rev, data }),
         remove: (space, collection, id, rev) => mutate({ op: 'remove', space, collection, id, rev }),
+        batch: (ops) => post({ ops }).then((r) => r.records),
       },
       export: () => call('export'),
     };
@@ -58,6 +61,7 @@
         get: via((m) => m.records.get),
         put: via((m) => m.records.put),
         remove: via((m) => m.records.remove),
+        batch: via((m) => m.records.batch),
       },
       export: via((m) => m.export),
     };
@@ -66,8 +70,9 @@
   const params = new URLSearchParams(location.search);
   if (params.get('mock') === '1') {
     const src = new URL('mis-mock.js', document.currentScript.src);
-    const mock = import(src).then((m) => m.createMock({ role: params.get('role') || 'owner', Err: MisError }));
-    globalThis.mis = { ...front(mock), mock };
+    const ready = import(src).then((m) => m.createMock({ role: params.get('role') || 'owner', Err: MisError }));
+    const via = (name) => async (...args) => (await ready)[name](...args);
+    globalThis.mis = { ...front(ready), mock: { seed: via('seed'), setRole: via('setRole') } };
   } else {
     const slug = location.pathname.split('/')[2];
     globalThis.mis = front(Promise.resolve(client(`/a/${slug}/api/v1/`)));

@@ -58,16 +58,56 @@ pub enum Mutation {
     },
 }
 
+/// Most ops in a [`Batch`].
+pub const MAX_BATCH: usize = 100;
+
+/// `POST /a/{slug}/api/v1/mutations` with several writes: applied in order in one
+/// transaction, all or none. Each id at most once, so a whole batch can be retried.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Batch {
+    /// At most [`MAX_BATCH`].
+    pub ops: Vec<Mutation>,
+}
+
+impl Mutation {
+    /// Which record it writes: `(space, collection, id)`.
+    pub fn key(&self) -> (Space, &str, &str) {
+        let (Self::Put {
+            space,
+            collection,
+            id,
+            ..
+        }
+        | Self::Remove {
+            space,
+            collection,
+            id,
+            ..
+        }) = self;
+        (*space, collection, id)
+    }
+}
+
 /// 200 to a mutation: the stored record; None after a remove.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Written {
     pub record: Option<Envelope>,
 }
 
+/// 200 to a [`Batch`]: each op's [`Written::record`], in order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BatchWritten {
+    pub records: Vec<Option<Envelope>>,
+}
+
 /// 409 to a mutation: what is stored now (None: nothing).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Conflict {
     pub current: Option<Envelope>,
+    /// In a [`Batch`]: which op conflicted (nothing was written).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
 }
 
 /// `?q=<json>` on `GET /a/{slug}/api/v1/records/{space}/{collection}`. Fields are top-level

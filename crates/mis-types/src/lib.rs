@@ -13,8 +13,8 @@ mod access;
 pub use access::access_headers;
 mod apps;
 pub use apps::{
-    AppBackup, AppMe, AppMember, AppRelease, AppRole, AppView, BackupKind, RestoreBackup, Restored,
-    SetMember,
+    valid_slug, AppBackup, AppMe, AppMember, AppRelease, AppRole, AppView, BackupKind,
+    RestoreBackup, Restored, SetMember, MAX_APP_TITLE_CHARS,
 };
 pub mod diff;
 pub use diff::{DiffBase, DiffStat, TaskDiff};
@@ -40,7 +40,8 @@ mod records;
 pub use permissions::{Approval, Decision, PermissionMode, Permissions, MAX_APPROVAL_DETAIL};
 pub use plan::{bound_plan, PlanItem, PlanStatus, MAX_PLAN_ITEMS, MAX_PLAN_ITEM_CHARS};
 pub use records::{
-    Condition, Conflict, Direction, Envelope, Export, Mutation, Page, RecordQuery, Space, Written,
+    Batch, BatchWritten, Condition, Conflict, Direction, Envelope, Export, Mutation, Page,
+    RecordQuery, Space, Written, MAX_BATCH,
 };
 mod sessions;
 pub use sessions::{

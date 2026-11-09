@@ -1,15 +1,18 @@
 // In-memory twin of the apps records API (see mis.js), for screenshots and tests without a
-// server: same envelopes, revisions, conflicts (409), create-only, identical retries, caps,
-// queries and role checks (viewers get 403 on writes). Nothing persists across reloads.
+// server: same envelopes, revisions, conflicts (409), create-only, identical retries, batches,
+// caps, queries and role checks (viewers get 403 on writes). `seed` preloads records; nothing
+// persists across reloads. Needs no orchestrator: an app's dev server can serve this file.
 export const MAX_DATA = 64 << 10;
 export const MAX_PAGE = 100;
+export const MAX_BATCH = 100;
 
 export class MisError extends Error {
-  constructor(status, message, current) {
+  constructor(status, message, current, index) {
     super(message);
     this.name = 'MisError';
     this.status = status;
     if (current !== undefined) this.current = current;
+    if (index !== undefined) this.index = index;
   }
 }
 
@@ -45,11 +48,14 @@ export function createMock({ role = 'owner', user = 'mock@example.com', app = 'm
   // `${space}\0${owner}\0${collection}\0${id}` -> {e: envelope, base}, base being the
   // revisions the id reached before e was created; `gone`: the same keys -> a removed
   // record's last rev, which a new record continues from (so late writes conflict).
-  const rows = new Map();
-  const gone = new Map();
+  let rows = new Map();
+  let gone = new Map();
   const owner = (space) => (space === 'me' ? user : '');
   const rowKey = (space, collection, id) => [space, owner(space), collection, id].join('\0');
-  const fail = (status, message, current) => Promise.reject(new Err(status, message, current));
+  // Methods run synchronously and throw; `async` turns that into the API's promises.
+  const fail = (status, message, current) => {
+    throw new Err(status, message, current);
+  };
   const check = (space, collection, id) => {
     if (!SPACES.includes(space)) return 'bad space';
     if (!validCollection(collection)) return `collection ${JSON.stringify(collection)}: expected [a-z0-9_-]{1,64}`;
@@ -57,28 +63,34 @@ export function createMock({ role = 'owner', user = 'mock@example.com', app = 'm
     return null;
   };
 
+  // What the server's JSON parsing refuses (400 `bad mutation: …`), before any op is applied.
+  const shape = (op) =>
+    op?.op !== 'put' && op?.op !== 'remove' ? 'op is put or remove'
+      : !SPACES.includes(op.space) ? 'bad space'
+      : typeof op.collection !== 'string' || typeof op.id !== 'string' ? 'collection and id are strings'
+      : !Number.isInteger(op.rev) || op.rev < 0 ? 'rev must be a whole number'
+      : op.op === 'put' && op.data === undefined ? 'missing field `data`'
+      : null;
+
   function mutate(op) {
-    if (role === 'viewer') return fail(403, `a viewer can't do that here`);
-    const bad = check(op.space, op.collection, op.id);
+    const bad = shape(op) ? `bad mutation: ${shape(op)}` : check(op.space, op.collection, op.id);
     if (bad) return fail(400, bad);
-    if (!Number.isInteger(op.rev) || op.rev < 0) return fail(400, 'rev must be a whole number');
     const k = rowKey(op.space, op.collection, op.id);
     const { e: cur, base = 0 } = rows.get(k) || {};
     if (op.op === 'remove') {
-      if (!cur) return Promise.resolve(null);
+      if (!cur) return null;
       if (cur.rev !== op.rev) return fail(409, 'conflict', copy(cur));
       rows.delete(k);
       gone.set(k, cur.rev);
-      return Promise.resolve(null);
+      return null;
     }
-    if (op.data === undefined) return fail(400, 'bad mutation: missing field `data`');
     const len = new TextEncoder().encode(JSON.stringify(op.data)).length;
     if (len > MAX_DATA) return fail(413, `data is ${len} bytes; the most is ${MAX_DATA}`);
     const put = (rev, base) => {
       const e = { id: op.id, rev, by: user, at: Date.now(), data: copy(op.data) };
       rows.set(k, { e, base });
       gone.delete(k);
-      return Promise.resolve(copy(e));
+      return copy(e);
     };
     if (!cur) {
       const last = gone.get(k) || 0;
@@ -87,8 +99,56 @@ export function createMock({ role = 'owner', user = 'mock@example.com', app = 'm
     if (cur.rev === op.rev) return put(op.rev + 1, base);
     // The response to this very write was lost: it landed, so it succeeded.
     const landed = op.rev === 0 ? cur.rev === base + 1 : op.rev > base && cur.rev === op.rev + 1;
-    if (landed && cur.by === user && canon(cur.data) === canon(op.data)) return Promise.resolve(copy(cur));
+    if (landed && cur.by === user && canon(cur.data) === canon(op.data)) return copy(cur);
     return fail(409, 'conflict', copy(cur));
+  }
+
+  const writer = () => role === 'viewer' && fail(403, `a viewer can't do that here`);
+
+  // All or nothing, in order; each id once. Checked as the server does: every op's shape, then
+  // repeated ids, then each op in turn. A refusal names its op (`index`, `ops[i]: …`).
+  function batch(ops) {
+    writer();
+    if (!Array.isArray(ops)) fail(400, 'bad batch: ops must be a list');
+    if (ops.length > MAX_BATCH) fail(400, `a batch holds at most ${MAX_BATCH} ops`);
+    const at = (i, status, message, current) => {
+      throw new Err(status, status === 409 ? message : `ops[${i}]: ${message}`, current, i);
+    };
+    ops.forEach((op, i) => shape(op) && at(i, 400, `bad mutation: ${shape(op)}`));
+    const keys = new Set();
+    ops.forEach((op, i) => {
+      const k = [op.space, op.collection, op.id].join('/');
+      if (keys.has(k)) at(i, 400, `${k} is already in this batch`);
+      keys.add(k);
+    });
+    const before = [new Map(rows), new Map(gone)];
+    return ops.map((op, i) => {
+      try {
+        return mutate(op);
+      } catch (e) {
+        [rows, gone] = before;
+        return at(i, e.status, e.message, e.current);
+      }
+    });
+  }
+
+  // Records by space and collection, as export() returns them; rev, by and at default to 1,
+  // this user and now. Replaces those ids whatever the role; all or nothing.
+  function seed(records) {
+    const all = SPACES.flatMap((space) =>
+      Object.entries(records?.[space] ?? {}).flatMap(([collection, list]) => list.map((r) => ({ space, collection, r }))));
+    for (const { space, collection, r } of all) {
+      const bad = check(space, collection, r?.id ?? '');
+      if (bad) fail(400, `seed: ${bad}`);
+      if (r.data === undefined) fail(400, `seed: ${r.id} has no data`);
+      if (new TextEncoder().encode(JSON.stringify(r.data)).length > MAX_DATA) fail(413, `seed: ${r.id} is over ${MAX_DATA} bytes`);
+      if (r.rev !== undefined && !(Number.isInteger(r.rev) && r.rev >= 1)) fail(400, `seed: ${r.id}: rev must be 1 or more`);
+    }
+    for (const { space, collection, r } of all) {
+      const k = rowKey(space, collection, r.id);
+      rows.set(k, { e: { id: r.id, rev: r.rev ?? 1, by: r.by ?? user, at: r.at ?? Date.now(), data: copy(r.data) }, base: 0 });
+      gone.delete(k);
+    }
   }
 
   function list(space, collection, q = {}) {
@@ -144,7 +204,7 @@ export function createMock({ role = 'owner', user = 'mock@example.com', app = 'm
     const page = found.slice(0, limit);
     const last = page[page.length - 1];
     const cursor = found.length > limit ? JSON.stringify({ order: q.order_by || null, ...place(last) }) : null;
-    return Promise.resolve({ records: copy(page), cursor });
+    return { records: copy(page), cursor };
   }
 
   function grouped(space) {
@@ -154,22 +214,24 @@ export function createMock({ role = 'owner', user = 'mock@example.com', app = 'm
     return out;
   }
 
+  const write = (op) => (writer(), mutate(op));
   return {
-    me: () => Promise.resolve({ user, role, app }),
+    me: async () => ({ user, role, app }),
     records: {
-      list,
-      get: (space, collection, id) => {
+      list: async (...a) => list(...a),
+      get: async (space, collection, id) => {
         const bad = check(space, collection, id);
         if (bad) return fail(400, bad);
-        return Promise.resolve(copy(rows.get(rowKey(space, collection, id))?.e) ?? null);
+        return copy(rows.get(rowKey(space, collection, id))?.e) ?? null;
       },
-      put: (space, collection, id, rev, data) => mutate({ op: 'put', space, collection, id, rev, data }),
-      remove: (space, collection, id, rev) => mutate({ op: 'remove', space, collection, id, rev }),
+      put: async (space, collection, id, rev, data) => write({ op: 'put', space, collection, id, rev, data }),
+      remove: async (space, collection, id, rev) => write({ op: 'remove', space, collection, id, rev }),
+      batch: async (ops) => batch(ops),
     },
-    export: () =>
-      Promise.resolve({ version: 1, app, user, at: Date.now(), shared: grouped('shared'), me: grouped('me') }),
-    /** For tests: act as another role from now on. */
-    setRole: (r) => {
+    export: async () => ({ version: 1, app, user, at: Date.now(), shared: grouped('shared'), me: grouped('me') }),
+    seed: async (records) => seed(records),
+    /** Act as another role from now on. */
+    setRole: async (r) => {
       role = r;
     },
   };
