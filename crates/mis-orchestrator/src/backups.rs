@@ -669,9 +669,10 @@ mod tests {
         restore(&app, &r, "pool", &pre.name, false, 3).unwrap();
         let before: Vec<String> = notes(&r).into_iter().map(|(id, _)| id).collect();
         // Every write is in exactly one: those before the restore in its pre-restore
-        // snapshot, the rest after it.
+        // snapshot, the rest after it. The wait above saw the seed plus at least 19
+        // writes; the writer may also have finished all 300 first.
         let k = before.len() - 1;
-        assert!((20..300).contains(&k), "{k}");
+        assert!((19..=300).contains(&k), "{k}");
         let ids =
             |r: std::ops::Range<usize>| -> Vec<String> { r.map(|i| format!("w{i:03}")).collect() };
         assert_eq!(before, [vec!["seed".to_string()], ids(0..k)].concat());
