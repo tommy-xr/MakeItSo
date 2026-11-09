@@ -268,6 +268,11 @@ impl Notes {
         self
     }
 
+    /// The clone, `<state>/notes`: absent until the first run clones it.
+    pub fn clone_dir(&self) -> &Path {
+        &self.clone
+    }
+
     pub fn status(&self) -> NotesSync {
         self.status.lock().unwrap().clone()
     }
@@ -339,7 +344,8 @@ impl Notes {
         };
         let pending = unpublished(&map);
         if pending == 0 {
-            return (Some(0), Ok(false));
+            // Nothing to publish; still catch the clone up, which the Notes view reads.
+            return (Some(0), self.sync().map(|()| false));
         }
         match self.publish_new(&receipts, &mut map) {
             Ok(pushed) => (Some(unpublished(&map)), Ok(pushed)),

@@ -36,6 +36,7 @@ pub mod images;
 pub mod ledger;
 pub mod note;
 pub mod notes;
+pub mod notes_view;
 pub mod plan;
 pub mod push;
 pub mod records;
@@ -1055,6 +1056,8 @@ pub fn router(app: App) -> Router {
             post(capture).layer(axum::extract::DefaultBodyLimit::max(CAPTURE_BODY)),
         )
         .route("/api/notes/sync", get(notes_sync))
+        .route("/api/notes/tree", get(notes_tree))
+        .route("/api/notes/file", get(notes_file))
         .route("/api/images/{id}", get(image))
         .route("/api/evidence/{id}", get(evidence_file))
         .route("/api/update", get(update_status).post(set_update))
@@ -1534,6 +1537,65 @@ async fn notes_sync(
     }
     let sync = app.notes.as_ref().map_or(NotesSync::OFF, |n| n.status());
     Json(sync).into_response()
+}
+
+/// The notes clone's shown folders, for the Notes view. Full scope only: notes are the
+/// user's own writing, more than a read token should see.
+async fn notes_tree(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/notes/tree").await {
+        return refused.into_response();
+    }
+    let Some(notes) = app.notes.clone() else {
+        let off = NotesTree {
+            state: SyncState::Off,
+            entries: vec![],
+        };
+        return Json(off).into_response();
+    };
+    let state = notes.status().state;
+    let walk = tokio::task::spawn_blocking(move || notes_view::tree(notes.clone_dir()));
+    let entries = walk.await.expect("walks");
+    Json(NotesTree { state, entries }).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct NotePath {
+    #[serde(default)]
+    path: String,
+}
+
+/// One file of the notes clone: Markdown as text, an image as its format; 415 for anything
+/// else. Auth as for the tree.
+async fn notes_file(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Params(q): Params<NotePath>,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/notes/file").await {
+        return refused.into_response();
+    }
+    let Some(notes) = app.notes.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let read = tokio::task::spawn_blocking(move || notes_view::read(notes.clone_dir(), &q.path));
+    match read.await.expect("reads") {
+        Ok((ty, bytes)) => (
+            [
+                (header::CONTENT_TYPE, ty),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                (header::CONTENT_SECURITY_POLICY, "default-src 'none'"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(notes_view::Refused::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(notes_view::Refused::Unsupported) => StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response(),
+    }
 }
 
 /// A capture form's fields, checked; else why not.
