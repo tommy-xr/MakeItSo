@@ -2,6 +2,15 @@
 resolver = "2"
 members = ["crates/*"]
 
+# Smaller dev builds: line tables keep file:line in panics, deps carry no debug info, and no
+# incremental cache. Debugger session: CARGO_PROFILE_DEV_DEBUG=true.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.dev.package."*"]
+debug = false
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
