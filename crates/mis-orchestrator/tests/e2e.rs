@@ -4212,7 +4212,8 @@ async fn the_notes_view_reads_the_clone_for_full_scope_only() {
     assert_eq!(serde_json::from_str::<NotesTree>(&body).unwrap(), want);
     let head = "GET /api/notes/file?path=inbox/a.md HTTP/1.1\r\nAuthorization: Bearer s";
     assert_eq!(http(&off, head, b"").await.0, 404);
-    std::fs::remove_dir_all(dir).unwrap();
+    // The running app may still hold files in it (Windows refuses to delete them).
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
@@ -4328,7 +4329,8 @@ async fn projects_are_read_from_the_notes_clone_for_full_scope_only() {
         errors: vec![],
     };
     assert_eq!(serde_json::from_str::<Projects>(&body).unwrap(), want);
-    std::fs::remove_dir_all(dir).unwrap();
+    // The running app may still hold files in it (Windows refuses to delete them).
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
