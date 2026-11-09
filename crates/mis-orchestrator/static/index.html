@@ -181,11 +181,13 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   #menu .nsub a { gap: .625rem; min-height: 2.5rem; padding-left: 1.5rem; font-size: .875rem; }
   .nsub .sd { background: var(--s, var(--faint)); } /* never run: faint, as on Routines */
   /* New routine: name, schedule and prompt atop Routines. 16px fields: iOS zooms into smaller ones. */
-  #routine-new { display: grid; gap: .5rem; margin: 0 0 1rem; padding: .875rem; border-radius: 1rem; background: var(--card); }
-  #routine-new :is(input, textarea) { width: 100%; font-size: 1rem; }
-  #routine-new input { min-height: 2.75rem; padding: 0 .75rem; }
-  #routine-new p { margin: 0; font-size: .8125rem; overflow-wrap: anywhere; }
-  #routine-new .row { margin: 0; }
+  #routine-new, #settings-form { display: grid; gap: .5rem; margin: 0 0 1rem; padding: .875rem; border-radius: 1rem; background: var(--card); }
+  :is(#routine-new, #settings-form) :is(input, textarea, select) { width: 100%; font-size: 1rem; }
+  :is(#routine-new, #settings-form) input { min-height: 2.75rem; padding: 0 .75rem; }
+  :is(#routine-new, #settings-form) p { margin: 0; font-size: .8125rem; overflow-wrap: anywhere; }
+  :is(#routine-new, #settings-form) .row { margin: 0; }
+  #settings-form h3 { margin: 0; font-size: 1rem; }
+  #settings-form label { margin-top: .25rem; font-size: .8125rem; color: var(--dim); }
   .nsub .dim { padding: .5rem 1.5rem; font-size: .8125rem; }
   #menu fieldset { margin: 1.25rem 0 0; padding: 0; border: 0; }
   #menu legend { padding: 0 .5rem .5rem; color: var(--dim); font: 600 .75rem var(--sans); }
@@ -730,6 +732,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
       <ul id="nav-apps" class="nsub" hidden></ul>
       <div class="ngrp"><a href="#workers" data-view="workers">Workers</a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-workers" aria-label="Show workers"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
       <ul id="nav-workers" class="nsub" hidden></ul>
+      <a href="#settings" data-view="settings" id="nav-settings">Settings</a>
     </nav>
     <fieldset><legend>Theme</legend><div class="seg">
       <label><input type="radio" name="theme" value="">System</label>
@@ -795,6 +798,18 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
 
 <main id="apps" hidden>
   <ul id="app-list"></ul>
+</main>
+
+<main id="settings" hidden>
+  <form id="settings-form">
+    <h3>Apps</h3>
+    <p class="dim">Tasks that build or change apps run with these.</p>
+    <label for="st-harness">Harness</label><select id="st-harness"></select>
+    <label for="st-model">Model</label><input id="st-model" placeholder="e.g. opus" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+    <label for="st-repo">Apps repo on the worker</label><input id="st-repo" placeholder="e.g. ~/code/mis-notes" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+    <p id="st-msg" hidden></p>
+    <div class="row"><button>Save</button></div>
+  </form>
 </main>
 
 <main id="workers" hidden>
@@ -1672,20 +1687,20 @@ $('upd').onclick = (e) => {
   renderUpdate();
 };
 
-// `#` tasks, `#task/<id>`, `#routines`, `#apps`, `#workers`, `#worker/<id>`, `#session/<worker>/<harness>/<id>`.
+// `#` tasks, `#task/<id>`, `#routines`, `#apps`, `#settings`, `#workers`, `#worker/<id>`, `#session/<worker>/<harness>/<id>`.
 // `#new` (see takeNew) is Tasks with the composer focused.
 function route() {
   const m = location.hash.match(/^#(task|worker)\/([0-9a-f-]{36})$/);
   if (m) return { view: m[1] === 'task' ? 'detail' : 'machine', id: m[2] };
   const s = location.hash.match(/^#session\/([0-9a-f-]{36}\/(?:claude|codex)\/[0-9a-f-]{36})$/);
   if (s) return { view: 'session', id: s[1] };
-  return { view: { '#workers': 'workers', '#routines': 'routines', '#apps': 'apps' }[location.hash] || 'list' };
+  return { view: { '#workers': 'workers', '#routines': 'routines', '#apps': 'apps', '#settings': 'settings' }[location.hash] || 'list' };
 }
 
 function render() {
   const r = route();
   const live = ws && ws.readyState === WebSocket.OPEN;
-  const views = { list: renderList, detail: renderDetail, routines: renderRoutines, apps: renderApps, workers: renderWorkers, machine: renderMachine, session: renderSession };
+  const views = { list: renderList, detail: renderDetail, routines: renderRoutines, apps: renderApps, settings: renderSettings, workers: renderWorkers, machine: renderMachine, session: renderSession };
   $('auth').hidden = live || !authNeeded || !!store.get();
   // Placeholder rows until the first socket opens, unless that is stuck (a token, no server).
   $('skel').hidden = everOpen || !$('auth').hidden || offline || connMsg !== 'connecting…';
@@ -1708,7 +1723,7 @@ function render() {
   if (r.view !== 'detail' && r.view !== 'session') { follow.key = null; $('latest').hidden = true; if (detail) detail.sig = null; }
   if (r.view !== 'session') closeSession();
   const onWorkers = r.view === 'workers' || r.view === 'machine' || r.view === 'session';
-  const area = onWorkers ? 'workers' : ['routines', 'apps'].includes(r.view) ? r.view : 'list';
+  const area = onWorkers ? 'workers' : ['routines', 'apps', 'settings'].includes(r.view) ? r.view : 'list';
   for (const a of $('menu').querySelectorAll('nav a')) {
     if (a.dataset.view === area) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
@@ -3297,7 +3312,7 @@ function renderRoutines() {
 // The menu's unfolded lists: one link per routine (to its row on Routines), app (live: out to it) and worker, with its status dot.
 let routineFocus = null; // routine to scroll to when Routines next renders
 function renderNav() {
-  $('routine-add').hidden = readOnly;
+  $('routine-add').hidden = $('nav-settings').hidden = readOnly;
   if (!$('menu').open) return;
   // Rows as [href, dot class, name], or [text] for a note; a list is rebuilt only when they change, so focus stays.
   const rs = routines && routines.list;
@@ -3427,6 +3442,53 @@ function renderApps() {
   $('app-list').dataset.key = key;
   if (!hosted.list.length) $('app-list').append(el('li', { className: 'dim' }, 'No apps yet: publish one with mis apps publish <name> <folder>'));
 }
+
+// Settings (full access only), fetched each time the page opens. The form is filled per fetch,
+// so typing survives re-renders.
+let settings = null; // { s } | { error } | null while reading
+let settingsAsked = null;
+async function loadSettings() {
+  const ask = {};
+  settingsAsked = ask;
+  let got;
+  try {
+    const r = await fetch('/api/settings', { headers: authHeaders() });
+    got = r.ok ? { s: await r.json() } : { error: (await r.text()) || `error ${r.status}` };
+  } catch { got = { error: 'couldn’t reach the orchestrator' }; }
+  if (settingsAsked !== ask) return;
+  settings = got;
+  if (got.s) { $('st-model').value = got.s.apps.model; $('st-repo').value = got.s.apps.repo; fillHarness(got.s.apps.harness); }
+  settingsMsg(got.error || '', true);
+  renderSettings();
+}
+// The fleet's harnesses, plus `pick` even while no worker runs it.
+function fillHarness(pick) {
+  const sel = $('st-harness'), hs = [...new Set([...workers.flatMap((w) => w.info.harnesses), pick])].filter(Boolean).sort();
+  if (sel.dataset.key !== hs.join()) { sel.replaceChildren(...hs.map((h) => el('option', { value: h }, h))); sel.dataset.key = hs.join(); }
+  sel.value = pick;
+}
+function settingsMsg(text, bad) { $('st-msg').textContent = text; $('st-msg').hidden = !text; $('st-msg').className = bad ? 'bad' : 'dim'; }
+function renderSettings() {
+  if (!everOpen) return; // fetch once connected, with the token in place
+  if (!settingsAsked) loadSettings();
+  if (settings && settings.s) fillHarness($('st-harness').value);
+  $('settings-form').querySelector('button').disabled = !(settings && settings.s);
+}
+$('settings-form').onsubmit = async (e) => {
+  e.preventDefault();
+  const btn = $('settings-form').querySelector('button');
+  const body = { apps: { harness: $('st-harness').value, model: $('st-model').value, repo: $('st-repo').value } };
+  btn.disabled = true;
+  let why = '';
+  try {
+    const r = await fetch('/api/settings', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) why = (await r.text()) || `error ${r.status}`;
+  } catch { why = 'couldn’t reach the orchestrator'; }
+  btn.disabled = false;
+  if (why) { settingsMsg(why, true); return; }
+  await loadSettings();
+  if (settings.s) settingsMsg('Saved', false);
+};
 
 function renderWorkers() {
   renderNotify();
@@ -3830,7 +3892,7 @@ for (const f of [$('prompt'), $('reply-text')]) f.addEventListener('input', () =
 $('prompt').value = drafts.get('draft:new');
 // Leaving a view stops dictation into it and any readback.
 // A press's click has landed once the view changes: nothing left to hold for.
-window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (route().view === 'apps' && hosted) loadApps(); render(); };
+window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (route().view === 'apps' && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; render(); };
 setInterval(tick, 1000);
 
 // `#new`, a link into the page for a new task, is Tasks with the composer focused; the hash becomes `#` so back links don't refocus.

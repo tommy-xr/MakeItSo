@@ -45,11 +45,13 @@ pub use records::{
     RecordQuery, Space, Written, MAX_BATCH,
 };
 mod sessions;
+mod settings;
 pub use sessions::{
     Answer, Delivered, LiveSession, LiveState, Query, Role, SendMode, SendTo, Session,
     SessionMessage, SessionRow, Turn, LIVE_WINDOW_MS, MAX_DELIVERED, MAX_LIVE, MAX_TURNS,
     PEER_NAME, STALL_MS, WATCH_MS,
 };
+pub use settings::{AppSettings, Settings};
 
 pub type WorkerId = Uuid;
 pub type TaskId = Uuid;

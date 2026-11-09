@@ -3377,6 +3377,39 @@ async fn new_routine_is_written_paused() {
 }
 
 #[tokio::test]
+async fn settings_take_defaults_save_and_need_full_access() {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-settings-{}", uuid::Uuid::new_v4()));
+    let base = start_app(with_read_token().with_ledger_dir(dir.clone())).await;
+    let (status, body) = get_json(&base, "/api/settings", "s").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Settings>(&body).unwrap(),
+        Settings::default()
+    );
+
+    let mut s = Settings::default();
+    s.apps.model = " sonnet ".into();
+    let new = serde_json::to_string(&s).unwrap();
+    assert_eq!(post_json(&base, "/api/settings", "s", &new).await.0, 204);
+    let (_, body) = get_json(&base, "/api/settings", "s").await;
+    let got: Settings = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        (got.apps.model.as_str(), got.apps.harness.as_str()),
+        ("sonnet", "claude")
+    );
+    assert!(dir.join("settings.json").exists());
+
+    // Read-only tokens neither see nor change them; a blank value is refused, nothing saved.
+    assert_eq!(get_json(&base, "/api/settings", "r").await.0, 403);
+    assert_eq!(post_json(&base, "/api/settings", "r", &new).await.0, 403);
+    let (status, why) = post_json(&base, "/api/settings", "s", r#"{"apps":{"repo":" "}}"#).await;
+    assert!(status == 400 && why.contains("apps repo"), "{status} {why}");
+    let (_, body) = get_json(&base, "/api/settings", "s").await;
+    assert_eq!(serde_json::from_str::<Settings>(&body).unwrap(), got);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn acting_routine_runs_dry_until_switched_live() {
     let dir = std::env::temp_dir().join(format!("mis-e2e-act-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
