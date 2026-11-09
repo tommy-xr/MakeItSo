@@ -804,9 +804,11 @@ impl Ledger {
         }
         let by_planner = p.task.harness == "planner" || p.task.harness.is_empty();
         // An app task's thread stays one: its replies never merge either (the user approves the PR).
-        let (app, merge) = match p.app {
-            true => (true, MergeRule::Never),
-            false => (false, MergeRule::Any),
+        let app = p.app;
+        let merge = if app {
+            MergeRule::Never
+        } else {
+            MergeRule::Any
         };
         let (id, effects) = match (&p.session, p.worker) {
             (Some(session), Some(wid)) if !by_planner => {
@@ -826,19 +828,41 @@ impl Ledger {
                 self.enqueue_pinned(wid, task, images)
                     .map_err(|why| format!("{why}; task {short}'s session lives there"))?
             }
-            // No session to resume: a fresh app task carrying the exchange, on the same harness.
+            // No session to resume: a fresh app task on the same harness and machine. It carries the
+            // whole request (with the guide) of the nearest task in the thread that started fresh,
+            // then the latest follow-up if that was a resumed reply, which alone lacks them.
             _ if app => {
+                let mut start = p;
+                while start.task.resume.is_some() {
+                    let up = (start.parent)
+                        .and_then(|id| self.tasks.iter().find(|t| t.task.id == id && t.app));
+                    let Some(up) = up else { break };
+                    start = up;
+                }
+                let earlier = match start.task.id == p.task.id {
+                    true => p.task.prompt.clone(),
+                    false => format!(
+                        "{}\n\nLatest follow-up:\n{}",
+                        start.task.prompt, p.task.prompt
+                    ),
+                };
                 let task = Task {
                     id: Uuid::new_v4(),
-                    prompt: reply_context(&p.task.prompt, p.summary.as_deref(), &text, true),
+                    prompt: reply_context(&earlier, p.summary.as_deref(), &text, true),
                     resume: None,
                     send_to: None,
                     diff_base: None,
+                    merge,
                     ..p.task.clone()
                 };
-                let mut entry = TaskEntry::new(task, self.now_ms);
-                entry.images = images;
-                self.enqueue(entry)
+                match p.pin {
+                    Some(wid) => self.enqueue_pinned(wid, task, images)?,
+                    None => {
+                        let mut entry = TaskEntry::new(task, self.now_ms);
+                        entry.images = images;
+                        self.enqueue(entry)
+                    }
+                }
             }
             _ => {
                 let prompt = reply_context(&p.task.prompt, p.summary.as_deref(), &text, false);
@@ -1885,20 +1909,43 @@ mod tests {
         let (fresh, _) = l
             .reply(resumed, "merge it now".into(), vec![], false)
             .unwrap();
+        let carried = &l
+            .tasks
+            .iter()
+            .find(|t| t.task.id == fresh)
+            .unwrap()
+            .task
+            .prompt;
+        assert!(carried.contains(prompt.trim()) && carried.contains("now merge it"));
         for id in [resumed, fresh] {
             let t = &l.tasks.iter().find(|t| t.task.id == id).unwrap();
             assert!(t.app && t.task.merge == MergeRule::Never, "{id}");
             let (cwd, harness) = (t.task.cwd.as_deref(), t.task.harness.as_str());
             assert_eq!((cwd, harness), (Some("~/apps"), "claude"));
         }
-        // A fresh reply carries the app task's whole request, guide included.
-        let (other, _) =
-            (l.submit_app_task(prompt.clone(), "~/apps".into(), "claude".into(), None, None))
-                .unwrap();
+        // A fresh reply carries the whole request, guide included, once however deep, and
+        // stays on the machine the app task was pinned to.
+        let (other, _) = l
+            .submit_app_task(
+                prompt.clone(),
+                "~/apps".into(),
+                "claude".into(),
+                None,
+                Some(wid),
+            )
+            .unwrap();
         finish(&mut l, other, None);
         let (fresh, _) = l.reply(other, "add a chart".into(), vec![], false).unwrap();
-        let fresh = &l.tasks.iter().find(|t| t.task.id == fresh).unwrap().task;
-        assert!(fresh.prompt.starts_with("add a chart") && fresh.prompt.contains(prompt.trim()));
+        finish(&mut l, fresh, None);
+        let (again, _) = l
+            .reply(fresh, "and a legend".into(), vec![], false)
+            .unwrap();
+        for (id, said) in [(fresh, "add a chart"), (again, "and a legend")] {
+            let t = l.tasks.iter().find(|t| t.task.id == id).unwrap();
+            assert!(t.task.prompt.starts_with(said), "{id}");
+            assert_eq!(t.task.prompt.matches(prompt.trim()).count(), 1, "{id}");
+            assert_eq!(t.pin, Some(wid), "{id}");
+        }
         // Other tasks' replies are the user's as before.
         let (plain, _) = l.submit("hi".into(), None, Some("claude".into()), None, vec![]);
         finish(&mut l, plain, Some("s2"));
