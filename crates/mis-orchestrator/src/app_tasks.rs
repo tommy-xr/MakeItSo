@@ -10,7 +10,7 @@ pub fn prompt(t: &AppTask) -> Result<String, String> {
     if request.is_empty() {
         return Err("say what the app should do".into());
     }
-    let slug = t.slug.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let slug = slug(t);
     if let Some(s) = slug.filter(|s| !valid_slug(s)) {
         return Err(format!("{s:?}: {SLUG_RULE}"));
     }
@@ -30,13 +30,17 @@ pub fn prompt(t: &AppTask) -> Result<String, String> {
 /// The app `t`'s token may stage releases of (`t` passed [`prompt`]): a change, its app;
 /// `+ App`, one new app (the slug named, else any), owned by `requester`.
 pub fn binding(t: &AppTask, requester: Option<String>) -> Binding {
-    let slug = t.slug.as_deref().map(str::trim).filter(|s| !s.is_empty());
     Binding {
         thread: uuid::Uuid::nil(),
-        slug: slug.map(Into::into),
+        slug: slug(t).map(Into::into),
         create: !t.change,
         requester,
     }
+}
+
+/// The app `t` names, if any.
+fn slug(t: &AppTask) -> Option<&str> {
+    t.slug.as_deref().map(str::trim).filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]

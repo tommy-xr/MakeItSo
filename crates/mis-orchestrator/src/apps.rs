@@ -290,9 +290,11 @@ pub enum Target {
     Any,
     /// An app that has a release already.
     Existing,
-    /// An app that has none yet, shared with only `owner` (an email) as owner.
+    /// An app that has none yet, shared with only `owner` (an email) as owner, or one
+    /// app task thread `thread` created already.
     New {
         owner: Option<String>,
+        thread: uuid::Uuid,
     },
 }
 
@@ -384,8 +386,23 @@ impl Apps {
             let ns = self.release_ns(slug);
             match (&target, ns.is_empty()) {
                 (Target::Existing, true) => return Err(PublishError::NoSuchApp),
-                (Target::New { .. }, false) => return Err(PublishError::Exists),
-                (Target::New { owner }, true) => self.new_policy(slug, owner.as_deref())?,
+                (Target::New { thread, .. }, false) => {
+                    // Its own app, created before a restart lost that it had been.
+                    let ours = self.read_policy(slug).ok().and_then(|p| p.created_by);
+                    if ours != Some(*thread) {
+                        return Err(PublishError::Exists);
+                    }
+                }
+                (Target::New { owner, thread }, true) => {
+                    let mut policy = Policy::default();
+                    if let Some(o) = owner {
+                        policy = app_access::set_member(policy, o, Some(AppRole::Owner))
+                            .map_err(|e| PublishError::Io(anyhow::anyhow!(e)))?;
+                    }
+                    policy.created_by = Some(*thread);
+                    // Whatever an earlier policy.json there said.
+                    (self.write_policy(slug, &policy)).map_err(|e| PublishError::Io(e.into()))?;
+                }
                 _ => {}
             }
             self.release(slug, &tmp, next_release(ns), at, activate)
@@ -397,16 +414,10 @@ impl Apps {
         n
     }
 
-    /// A new app's `policy.json`: `owner` alone, or no one; whatever an earlier one said.
-    fn new_policy(&self, slug: &str, owner: Option<&str>) -> Result<(), PublishError> {
-        let policy = match owner {
-            Some(o) => app_access::set_member(Policy::default(), o, Some(AppRole::Owner))
-                .map_err(|e| PublishError::Io(anyhow::anyhow!(e)))?,
-            None => Policy::default(),
-        };
-        let json = serde_json::to_vec_pretty(&policy).expect("policy serializes");
+    /// Write `slug`'s `policy.json` (the lock held).
+    fn write_policy(&self, slug: &str, policy: &Policy) -> std::io::Result<()> {
+        let json = serde_json::to_vec_pretty(policy).expect("policy serializes");
         crate::push::write_private(&self.dir.join(slug).join(POLICY), &json)
-            .map_err(|e| PublishError::Io(e.into()))
     }
 
     /// Rename `tmp` into place as release `n` (lock held), making it live if `activate`.
@@ -570,9 +581,7 @@ impl Apps {
         // A policy that doesn't parse is left for a person to fix, not overwritten.
         let policy = self.read_policy(slug).map_err(MemberError::Io)?;
         let policy = app_access::set_member(policy, email, role).map_err(MemberError::Invalid)?;
-        let json = serde_json::to_vec_pretty(&policy).expect("policy serializes");
-        crate::push::write_private(&self.dir.join(slug).join(POLICY), &json)
-            .map_err(|e| MemberError::Io(e.to_string()))?;
+        (self.write_policy(slug, &policy)).map_err(|e| MemberError::Io(e.to_string()))?;
         Ok(policy.list())
     }
 
@@ -937,6 +946,42 @@ mod tests {
             .unwrap()
             .count();
         assert_eq!(left, 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_app_task_creates_only_a_new_app_and_goes_on_with_its_own() {
+        let dir = temp();
+        let apps = Apps::new(dir.clone(), None);
+        let b = unpack(&tar_gz(&[("app.json", APP_JSON), ("index.html", b"")])).unwrap();
+        let (thread, other) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let new = |thread| Target::New {
+            owner: Some("Me@Example.com".into()),
+            thread,
+        };
+        let publish = |slug, t| apps.publish_to(slug, &b, 0, false, t);
+        assert!(matches!(
+            publish("pool", Target::Existing),
+            Err(PublishError::NoSuchApp)
+        ));
+        assert_eq!(publish("pool", new(thread)).unwrap(), 1);
+        let owner = AppMember {
+            email: "me@example.com".into(),
+            role: AppRole::Owner,
+        };
+        assert_eq!(apps.list()[0].members, vec![owner]);
+        // Its thread again (a restart lost that it created it): its next release. Others: no.
+        assert_eq!(publish("pool", new(thread)).unwrap(), 2);
+        assert!(matches!(
+            publish("pool", new(other)),
+            Err(PublishError::Exists)
+        ));
+        assert_eq!(publish("pool", Target::Existing).unwrap(), 3);
+        // Sharing keeps who created it.
+        apps.set_member("pool", "you@example.com", Some(AppRole::Viewer))
+            .unwrap();
+        assert_eq!(publish("pool", new(thread)).unwrap(), 4);
+        assert_eq!(apps.list()[0].active, None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -789,15 +789,11 @@ impl Ledger {
         t.bound.clone().filter(|_| !t.status.finished())
     }
 
-    /// `task`'s thread created app `slug`: every task in it is bound to that app now.
-    pub fn app_created(&mut self, task: TaskId, slug: &str) {
-        let thread = self.tasks.iter().find(|t| t.task.id == task);
-        let Some(thread) = thread.and_then(|t| t.bound.as_ref()).map(|b| b.thread) else {
-            return;
-        };
+    /// Bind every task in `bound.thread` to `bound` (a create reserving or binding its slug).
+    pub fn rebind(&mut self, bound: &app_grant::Binding) {
         for b in (self.tasks.iter_mut()).filter_map(|t| t.bound.as_mut()) {
-            if b.thread == thread {
-                *b = app_grant::created(b.clone(), slug);
+            if b.thread == bound.thread {
+                *b = bound.clone();
             }
         }
     }
@@ -1990,7 +1986,10 @@ mod tests {
         assert_eq!((id, bound.thread, bound.create), (app, app, true));
         assert_eq!(l.app_token("mis-app-nope"), None);
 
-        l.app_created(app, "chores");
+        l.rebind(&app_grant::created(
+            l.app_token(&first).unwrap().1,
+            "chores",
+        ));
         let bound = l.app_token(&first).unwrap().1;
         assert_eq!(
             (bound.slug.as_deref(), bound.create),

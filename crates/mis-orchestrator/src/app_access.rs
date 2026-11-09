@@ -47,6 +47,9 @@ pub struct Policy {
     /// Email -> role.
     #[serde(default)]
     pub members: BTreeMap<String, AppRole>,
+    /// The app task thread that created the app, which may go on staging its releases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<uuid::Uuid>,
 }
 
 impl Policy {
@@ -94,21 +97,27 @@ pub fn allows(role: AppRole, action: Action) -> bool {
     }
 }
 
+/// `raw` as a member's email: trimmed, lower-case. None: not an email address.
+pub fn email(raw: &str) -> Option<String> {
+    let email = raw.trim().to_ascii_lowercase();
+    let ok = (3..=254).contains(&email.len())
+        && email.split('@').count() == 2
+        && !email.starts_with('@')
+        && !email.ends_with('@')
+        && !email.contains(|c: char| c.is_whitespace() || c.is_control() || c == ',');
+    ok.then_some(email)
+}
+
 /// `policy` with `email` given `role`, or removed for None. Err: not an email.
 pub fn set_member(
     mut policy: Policy,
     email: &str,
     role: Option<AppRole>,
 ) -> Result<Policy, String> {
-    let email = email.trim().to_ascii_lowercase();
-    let ok = (3..=254).contains(&email.len())
-        && email.split('@').count() == 2
-        && !email.starts_with('@')
-        && !email.ends_with('@')
-        && !email.contains(|c: char| c.is_whitespace() || c.is_control() || c == ',');
-    if !ok {
+    let Some(email) = self::email(email) else {
+        let email = email.trim().to_ascii_lowercase();
         return Err(format!("{email:?} is not an email address"));
-    }
+    };
     policy
         .members
         .retain(|e, _| !e.eq_ignore_ascii_case(&email));
@@ -200,7 +209,10 @@ mod tests {
 
     fn policy(members: &[(&str, AppRole)]) -> Policy {
         let members = members.iter().map(|(e, r)| (e.to_string(), *r)).collect();
-        Policy { members }
+        Policy {
+            members,
+            ..Default::default()
+        }
     }
 
     #[test]

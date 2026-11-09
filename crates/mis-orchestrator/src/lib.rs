@@ -921,7 +921,10 @@ impl App {
             None => Scope::Full,
             // Before the Access login: that never upgrades a capture or app task token.
             Some(_) if listed(&self.capture_tokens) => Scope::Capture,
-            Some(_) if app_task.is_some() => Scope::AppTask(app_task.expect("checked")),
+            // An app task token that has ended opens nothing, not even with a login.
+            Some(_) if bearer.is_some_and(|b| b.starts_with(app_grant::TOKEN_PREFIX)) => {
+                Scope::AppTask(app_task?)
+            }
             Some(t) if passed || bearer == Some(t.as_str()) => Scope::Full,
             Some(_) if listed(&self.read_tokens) => Scope::Read,
             Some(_) => return None,
@@ -1701,8 +1704,7 @@ async fn new_app_task(
         Access::Passed(id) => Some(id.subject),
         _ => None,
     };
-    let requester = requester
-        .filter(|e| app_access::set_member(Default::default(), e, Some(AppRole::Owner)).is_ok());
+    let requester = requester.and_then(|e| app_access::email(&e));
     let bound = app_tasks::binding(&t, requester);
     let model = t.model.filter(|m| !m.trim().is_empty());
     app.transition(
@@ -1807,16 +1809,29 @@ async fn publish_app(
         Some(_) => Some(app.creating.clone().lock_owned().await),
         None => None,
     };
-    let target = match task.map(|t| app.ledger().app_binding(t)) {
-        None => apps::Target::Any,
+    let bound = match task.map(|t| app.ledger().app_binding(t)) {
+        None => None,
         Some(None) => return StatusCode::UNAUTHORIZED.into_response(),
-        Some(Some(b)) => match app_grant::publish(&b, &slug, params.activate) {
+        Some(b) => b,
+    };
+    let target = match &bound {
+        None => apps::Target::Any,
+        Some(b) => match app_grant::publish(b, &slug, params.activate) {
             Ok(app_grant::Publish::Existing) => apps::Target::Existing,
-            Ok(app_grant::Publish::Create { owner }) => apps::Target::New { owner },
+            Ok(app_grant::Publish::Create { owner }) => apps::Target::New {
+                owner,
+                thread: b.thread,
+            },
             Err(why) => return (StatusCode::FORBIDDEN, why).into_response(),
         },
     };
-    let creates = matches!(target, apps::Target::New { .. });
+    // A create reserves its slug, saved before the app is written: after a crash between the
+    // two, the thread can go on only with that app (its `created_by` lets it), never make another.
+    let creating = bound.filter(|_| matches!(target, apps::Target::New { .. }));
+    if let Some(b) = creating.as_ref().filter(|b| b.slug.is_none()) {
+        app.ledger().rebind(&app_grant::reserve(b.clone(), &slug));
+        app.save();
+    }
     let at = unix_ms();
     let (to, activate) = (slug.clone(), params.activate);
     let published = tokio::task::spawn_blocking(move || {
@@ -1832,8 +1847,14 @@ async fn publish_app(
         })
     });
     let published = published.await.expect("publish doesn't panic");
-    if let (Ok(_), Some(task), true) = (&published, task, creates) {
-        app.ledger().app_created(task, &slug);
+    if let Some(b) = creating {
+        // Created: bound to it. Not: the reservation is undone, as nothing was written.
+        let b = match &published {
+            Ok(_) => app_grant::created(b, &slug),
+            Err(_) => b,
+        };
+        app.ledger().rebind(&b);
+        app.save();
     }
     match published {
         Ok(n) => (

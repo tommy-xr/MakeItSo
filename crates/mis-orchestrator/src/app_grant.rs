@@ -43,6 +43,14 @@ pub fn publish(b: &Binding, slug: &str, activate: bool) -> Result<Publish, Strin
     }
 }
 
+/// `b` about to create `slug`: only that one, from now on.
+pub fn reserve(b: Binding, slug: &str) -> Binding {
+    Binding {
+        slug: Some(slug.into()),
+        ..b
+    }
+}
+
 /// `b` once its app `slug` exists: bound to it, creating nothing more.
 pub fn created(b: Binding, slug: &str) -> Binding {
     Binding {
@@ -95,6 +103,10 @@ mod tests {
         assert_eq!(publish(&b, "chores", false), create);
         assert_eq!(publish(&b, "pool", false), create);
         assert!(publish(&b, "chores", true).is_err());
+        // About to create one: only that slug, still creating.
+        let r = reserve(b.clone(), "chores");
+        assert_eq!(publish(&r, "chores", false), create);
+        assert!(publish(&r, "pool", false).is_err());
         let b = created(b, "chores");
         assert_eq!(publish(&b, "chores", false), Ok(Publish::Existing));
         assert!(publish(&b, "pool", false).is_err());
