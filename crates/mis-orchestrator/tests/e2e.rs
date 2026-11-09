@@ -5950,11 +5950,11 @@ async fn answer_merge(worker: &mut Ws, result: Result<String, String>) -> Query 
     query
 }
 
-/// Publish or discard pool's draft `n` as Access login `jwt`.
-async fn decide(mis: &str, action: &str, n: u32, jwt: &str) -> (u16, String) {
+/// Publish or discard pool's draft `id` as Access login `jwt`.
+async fn decide(mis: &str, action: &str, id: uuid::Uuid, jwt: &str) -> (u16, String) {
     let body = Some((
         "application/json".into(),
-        format!(r#"{{"release":{n}}}"#).into_bytes(),
+        format!(r#"{{"id":"{id}"}}"#).into_bytes(),
     ));
     let path = format!("/api/apps/pool/draft/{action}");
     call(
@@ -6037,13 +6037,20 @@ async fn an_app_task_proposes_a_draft_that_only_the_owner_publishes_or_discards(
     let as_me = [("cf-access-jwt-assertion", me.as_str())];
     assert_eq!(pool_view(&mis, &as_jen).await.role, Some(AppRole::Editor));
     assert_eq!(pool_view(&mis, &as_me).await.role, Some(AppRole::Owner));
-    let (status, why) = decide(&mis, "publish", 2, &jen).await;
+    let id = draft.id;
+    let (status, why) = decide(&mis, "publish", id, &jen).await;
     assert!(status == 403 && why.contains("owner"), "{status} {why}");
-    assert_eq!(decide(&mis, "publish", 3, &me).await.0, 409);
+    assert_eq!(
+        decide(&mis, "publish", uuid::Uuid::new_v4(), &me).await.0,
+        409
+    );
+    // A screenshot is served for its own draft only.
+    let stale = format!("/api/apps/pool/draft/after?id={}", uuid::Uuid::new_v4());
+    assert_eq!(call(&mis, "GET", &stale, &auth, None).await.0, 404);
 
     // A PR that won't merge leaves nothing live, and says why on the draft.
     let (got, query) = tokio::join!(
-        decide(&mis, "publish", 2, &me),
+        decide(&mis, "publish", id, &me),
         answer_merge(&mut worker, Err("checks failed: build".into()))
     );
     assert!(got.0 == 409 && got.1.contains("checks failed"), "{got:?}");
@@ -6060,7 +6067,7 @@ async fn an_app_task_proposes_a_draft_that_only_the_owner_publishes_or_discards(
         (cwd.as_str(), repo.as_str(), number),
         ("~/code/mis-notes", "tommy-xr/mis-notes", 7)
     );
-    assert_eq!(h.as_deref(), Some(head));
+    assert_eq!(h, head);
     let pool = pool_view(&mis, &as_me).await;
     assert_eq!(pool.active, Some(1));
     assert_eq!(
@@ -6069,7 +6076,7 @@ async fn an_app_task_proposes_a_draft_that_only_the_owner_publishes_or_discards(
     );
     // Merged: live, and the draft is done.
     let (got, _) = tokio::join!(
-        decide(&mis, "publish", 2, &me),
+        decide(&mis, "publish", id, &me),
         answer_merge(&mut worker, Ok("merged".into()))
     );
     assert_eq!(got.0, 204, "{got:?}");
@@ -6087,8 +6094,9 @@ async fn an_app_task_proposes_a_draft_that_only_the_owner_publishes_or_discards(
         post_json(&mis, path, &token, &propose(3, &PNG)).await.0,
         201
     );
-    assert_eq!(decide(&mis, "discard", 3, &jen).await.0, 403);
-    assert_eq!(decide(&mis, "discard", 3, &me).await.0, 204);
+    let id = pool_view(&mis, &auth).await.draft.unwrap().id;
+    assert_eq!(decide(&mis, "discard", id, &jen).await.0, 403);
+    assert_eq!(decide(&mis, "discard", id, &me).await.0, 204);
     let pool = pool_view(&mis, &as_me).await;
     assert_eq!((pool.active, pool.draft), (Some(2), None));
     assert_eq!(

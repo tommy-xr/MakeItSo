@@ -63,12 +63,13 @@ pub struct AppView {
 /// per app; a newer proposal replaces it. Publishing merges the PR, then makes it live.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppDraft {
+    /// This proposal: a decision names it, so it never lands on one proposed since.
+    pub id: uuid::Uuid,
     pub release: u32,
     /// `https://github.com/<owner>/<repo>/pull/<n>`.
     pub pr: String,
     /// The commit the release was built from: the PR merges only while that is its head.
-    #[serde(default)]
-    pub head: Option<String>,
+    pub head: String,
     #[serde(default)]
     pub note: Option<String>,
     /// Screenshots kept with it (`GET /api/apps/{slug}/draft/before|after`).
@@ -91,8 +92,8 @@ pub struct AppDraft {
 pub struct ProposeDraft {
     pub release: u32,
     pub pr: String,
-    #[serde(default)]
-    pub head: Option<String>,
+    /// The full sha of the commit the release was built from.
+    pub head: String,
     #[serde(default)]
     pub note: Option<String>,
     /// Base64 PNG, JPEG or GIF, up to [`MAX_DRAFT_IMAGE_BYTES`].

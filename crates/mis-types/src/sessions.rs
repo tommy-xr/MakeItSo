@@ -26,7 +26,7 @@ pub enum Query {
         cwd: String,
         repo: String,
         number: u64,
-        head: Option<String>,
+        head: String,
     },
 }
 

@@ -147,6 +147,9 @@ pub struct App {
     apps: Option<Arc<apps::Apps>>,
     /// Held while an app task's token creates its app, so a thread creates only one.
     creating: Arc<tokio::sync::Mutex<()>>,
+    /// Held by each draft proposal and decision: a publish's merge-then-activate isn't
+    /// overtaken by a replacement or a discard.
+    drafting: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl App {
@@ -190,6 +193,7 @@ impl App {
             watchers: Default::default(),
             apps: None,
             creating: Default::default(),
+            drafting: Default::default(),
         }
     }
 
@@ -852,7 +856,7 @@ impl App {
 
     /// Merge `draft`'s PR on a worker, which checks it in code first. Err: why it didn't.
     async fn merge_draft(&self, draft: &AppDraft) -> Result<(), (StatusCode, String)> {
-        let (repo, number) =
+        let (_, repo, number) =
             drafts::parse_pr(&draft.pr).map_err(|why| (StatusCode::BAD_REQUEST, why))?;
         let cwd = self
             .settings()
@@ -1839,6 +1843,21 @@ async fn list_apps(
     Json(list).into_response()
 }
 
+/// Auth for a staging route (publish a release, propose a draft): None for the full token,
+/// the task for an app task's token. Err: the refusal.
+async fn admit_staging(
+    app: &App,
+    headers: &HeaderMap,
+    peer: SocketAddr,
+) -> Result<Option<TaskId>, (StatusCode, &'static str)> {
+    match (app.admit_route(headers, peer, "/api/apps", Route::AppPublish)).await {
+        Some(Scope::Full) => Ok(None),
+        Some(Scope::AppTask(task)) => Ok(Some(task)),
+        Some(Scope::Read | Scope::Capture) => Err((StatusCode::FORBIDDEN, "read-only token")),
+        None => Err((StatusCode::UNAUTHORIZED, "")),
+    }
+}
+
 /// Make a staged release `slug`'s draft ([`mis_types::ProposeDraft`]), replacing any: 201 with
 /// the `AppDraft`. Full scope, or the token of the app task working on `slug`.
 async fn propose_draft(
@@ -1848,13 +1867,9 @@ async fn propose_draft(
     Path(slug): Path<String>,
     body: Bytes,
 ) -> Response {
-    let task = match (app.admit_route(&headers, peer, "/api/apps", Route::AppPublish)).await {
-        Some(Scope::Full) => None,
-        Some(Scope::AppTask(task)) => Some(task),
-        Some(Scope::Read | Scope::Capture) => {
-            return (StatusCode::FORBIDDEN, "read-only token").into_response()
-        }
-        None => return StatusCode::UNAUTHORIZED.into_response(),
+    let task = match admit_staging(&app, &headers, peer).await {
+        Ok(t) => t,
+        Err(refused) => return refused.into_response(),
     };
     let Some(apps) = app.apps.clone() else {
         return (
@@ -1881,6 +1896,8 @@ async fn propose_draft(
     // An app task proposes for its own thread; the full token names one, if any.
     let task = task.or(p.task);
     let at = unix_ms();
+    // Not while a publish of the draft it replaces is under way.
+    let _deciding = app.drafting.lock().await;
     let made = tokio::task::spawn_blocking(move || apps.propose(&slug, &p, task, at));
     match made.await.expect("proposing doesn't panic") {
         Ok(d) => (StatusCode::CREATED, Json(d)).into_response(),
@@ -1893,12 +1910,20 @@ async fn propose_draft(
     }
 }
 
-/// The draft's `before` or `after` screenshot, as stored. Read-only, like the apps list.
+#[derive(serde::Deserialize)]
+struct ShotParams {
+    /// The draft it is of: a newer one's shots aren't served under an older one.
+    id: Option<uuid::Uuid>,
+}
+
+/// The draft's `before` or `after` screenshot, as stored, never run as a page. Read-only,
+/// like the apps list.
 async fn draft_shot(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path((slug, which)): Path<(String, String)>,
+    Params(params): Params<ShotParams>,
 ) -> Response {
     if !app.admit(&headers, peer, "/api/apps").await {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -1911,14 +1936,19 @@ async fn draft_shot(
     let (Some(apps), true) = (app.apps.clone(), apps::valid_slug(&slug)) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let shot = tokio::task::spawn_blocking(move || apps.draft_shot(&slug, after));
+    let shot = tokio::task::spawn_blocking(move || {
+        let current = apps.draft(&slug).map(|d| d.id);
+        (params.id.is_none_or(|id| current == Some(id)))
+            .then(|| apps.draft_shot(&slug, after))
+            .flatten()
+    });
     let shot = shot.await.expect("reading a screenshot doesn't panic");
     match shot.and_then(|b| Some((ImageKind::sniff(&b)?, b))) {
         Some((kind, bytes)) => (
             [
                 (header::CONTENT_TYPE, kind.mime()),
                 (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-                (header::CACHE_CONTROL, "no-cache"),
+                (header::CONTENT_SECURITY_POLICY, "default-src 'none'"),
             ],
             bytes,
         )
@@ -1930,9 +1960,9 @@ async fn draft_shot(
 /// How long publishing a draft waits for its worker's `gh` to check and merge the PR.
 const MERGE_WAIT: Duration = Duration::from_secs(150);
 
-/// `{"release": n}`: publish `slug`'s draft n (merge its PR on a worker through the
-/// code-checked path, then make n live; a PR that doesn't merge leaves nothing live) or
-/// discard it (the PR stays). Full scope, and the app's owner only.
+/// `{"id": draft}`: publish `slug`'s draft (merge its PR on a worker through the code-checked
+/// path, then make its release live; a PR that doesn't merge leaves nothing live) or discard
+/// it (the PR stays). Full scope, and the app's owner only. One decision or proposal at a time.
 async fn decide_draft(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -1953,12 +1983,13 @@ async fn decide_draft(
     };
     #[derive(serde::Deserialize)]
     struct Decide {
-        release: u32,
+        id: uuid::Uuid,
     }
-    let n = match serde_json::from_slice::<Decide>(&body) {
-        Ok(d) => d.release,
+    let id = match serde_json::from_slice::<Decide>(&body) {
+        Ok(d) => d.id,
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
+    let _deciding = app.drafting.lock().await;
     let (a, s) = (apps.clone(), slug.clone());
     let read = tokio::task::spawn_blocking(move || (a.policy(&s), a.draft(&s)));
     let (policy, draft) = read.await.expect("reading a draft doesn't panic");
@@ -1970,27 +2001,31 @@ async fn decide_draft(
         )
             .into_response();
     }
-    let Some(draft) = draft.filter(|d| d.release == n) else {
-        return (StatusCode::CONFLICT, format!("v{n} isn't {slug}'s draft")).into_response();
+    let Some(draft) = draft.filter(|d| d.id == id) else {
+        return (StatusCode::CONFLICT, "that draft was replaced or decided").into_response();
+    };
+    let note_failure = |why: String| {
+        let (a, s) = (apps.clone(), slug.clone());
+        async move {
+            let w = why.clone();
+            let _ = tokio::task::spawn_blocking(move || a.draft_failed(&s, id, &w)).await;
+            why
+        }
     };
     if publish {
         if let Err((status, why)) = app.merge_draft(&draft).await {
-            let (a, s, w) = (apps.clone(), slug.clone(), why.clone());
-            let _ = tokio::task::spawn_blocking(move || a.draft_failed(&s, n, &w)).await;
-            return (status, why).into_response();
+            return (status, note_failure(why).await).into_response();
         }
-        let (a, s, at) = (apps.clone(), slug.clone(), unix_ms());
+        let (a, s, n, at) = (apps.clone(), slug.clone(), draft.release, unix_ms());
         let live = tokio::task::spawn_blocking(move || a.activate(&s, n, at)).await;
-        if let Ok(Err(e)) = live {
+        if !matches!(live, Ok(Ok(()))) {
             // Merged but not live: publishing again finds it merged and retries this.
-            let why = format!("merged, but making v{n} live failed: {e:?}");
+            let why = format!("merged, but making v{n} live failed: {live:?}");
             tracing::warn!("apps/{slug}: {why}");
-            let (a, s, w) = (apps.clone(), slug.clone(), why.clone());
-            let _ = tokio::task::spawn_blocking(move || a.draft_failed(&s, n, &w)).await;
-            return (StatusCode::INTERNAL_SERVER_ERROR, why).into_response();
+            return (StatusCode::INTERNAL_SERVER_ERROR, note_failure(why).await).into_response();
         }
     }
-    let _ = tokio::task::spawn_blocking(move || apps.end_draft(&slug, n)).await;
+    let _ = tokio::task::spawn_blocking(move || apps.end_draft(&slug, id)).await;
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -2105,13 +2140,9 @@ async fn publish_app(
     Params(params): Params<PublishParams>,
     body: axum::body::Body,
 ) -> Response {
-    let task = match (app.admit_route(&headers, peer, "/api/apps", Route::AppPublish)).await {
-        Some(Scope::Full) => None,
-        Some(Scope::AppTask(task)) => Some(task),
-        Some(Scope::Read | Scope::Capture) => {
-            return (StatusCode::FORBIDDEN, "read-only token").into_response()
-        }
-        None => return StatusCode::UNAUTHORIZED.into_response(),
+    let task = match admit_staging(&app, &headers, peer).await {
+        Ok(t) => t,
+        Err(refused) => return refused.into_response(),
     };
     let Some(apps) = app.apps.clone() else {
         return (

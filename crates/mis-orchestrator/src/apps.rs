@@ -628,18 +628,14 @@ impl Apps {
         if ns.is_empty() {
             return Err(DraftError::NoSuchApp);
         }
-        crate::drafts::check(p, &ns, self.active_n(slug)).map_err(DraftError::Invalid)?;
-        let trimmed = |s: &Option<String>| {
-            s.as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-        };
+        let pr = crate::drafts::check(p, &ns, self.active_n(slug)).map_err(DraftError::Invalid)?;
+        let note = p.note.as_deref().map(str::trim).filter(|s| !s.is_empty());
         let draft = AppDraft {
+            id: uuid::Uuid::new_v4(),
             release: p.release,
-            pr: p.pr.trim().into(),
-            head: trimmed(&p.head),
-            note: trimmed(&p.note),
+            pr,
+            head: p.head.trim().to_ascii_lowercase(),
+            note: note.map(String::from),
             before: before.is_some(),
             after: after.is_some(),
             task,
@@ -685,19 +681,19 @@ impl Apps {
         std::fs::read(self.dir.join(slug).join(DRAFT).join(name)).ok()
     }
 
-    /// Drop `slug`'s draft if it is still release `n`: whether it was.
-    pub fn end_draft(&self, slug: &str, n: u32) -> bool {
+    /// Drop `slug`'s draft if it is still proposal `id`: whether it was.
+    pub fn end_draft(&self, slug: &str, id: uuid::Uuid) -> bool {
         let _held = self.lock.lock().unwrap();
-        if self.draft(slug).is_none_or(|d| d.release != n) {
+        if self.draft(slug).is_none_or(|d| d.id != id) {
             return false;
         }
         std::fs::remove_dir_all(self.dir.join(slug).join(DRAFT)).is_ok()
     }
 
-    /// Note on `slug`'s draft, if still release `n`, why publishing it didn't happen.
-    pub fn draft_failed(&self, slug: &str, n: u32, why: &str) {
+    /// Note on `slug`'s draft, if still proposal `id`, why publishing it didn't happen.
+    pub fn draft_failed(&self, slug: &str, id: uuid::Uuid, why: &str) {
         let _held = self.lock.lock().unwrap();
-        let Some(mut d) = self.draft(slug).filter(|d| d.release == n) else {
+        let Some(mut d) = self.draft(slug).filter(|d| d.id == id) else {
             return;
         };
         d.error = Some(why.into());

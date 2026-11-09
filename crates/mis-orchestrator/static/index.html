@@ -390,11 +390,12 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .draft .what, .appr.draft .what { margin: .25rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .875rem/1.45 var(--sans); }
   .draft .ba { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; margin: .5rem 0 0; }
   .draft figure { margin: 0; }
-  .draft figure img { display: block; width: 100%; max-height: 18rem; object-fit: contain; object-position: top; border-radius: .5rem; background: var(--raised); }
+  .draft figure img { display: block; width: 100%; max-height: 14rem; object-fit: cover; object-position: top; border-radius: .5rem; background: var(--raised); box-shadow: 0 0 0 1px var(--raised); }
   .draft figcaption { margin-bottom: .25rem; font-size: .75rem; color: var(--dim); }
   .draft .pr { display: inline-block; margin-top: .5rem; font-size: .875rem; color: var(--accent); overflow-wrap: anywhere; }
-  .draft .row button { min-height: 2.25rem; padding: 0 .875rem; border-radius: .625rem; font-size: .8125rem; }
-  .draft .row button.quiet { background: none; color: var(--dim); }
+  .draft .row { gap: .375rem; }
+  .draft .row button { min-height: 2.25rem; padding: 0 .75rem; border-radius: .625rem; font-size: .8125rem; }
+  .draft .row button.quiet { padding: 0 .5rem; background: none; color: var(--dim); }
   .draftrow .r1 strong { font-weight: 600; }
   /* A merge approval: the PR's facts as a small grid. */
   .appr dl { display: grid; grid-template-columns: auto 1fr; gap: .125rem .75rem; margin: .25rem 0 .5rem; font-size: .8125rem; }
@@ -1716,7 +1717,9 @@ function tick() {
   renderStrip();
   if (++ticks % 30 === 0 && everOpen && route().view === 'workers') renderWorkers();
   if (ticks % 10 === 0 && everOpen && route().view === 'routines' && !document.hidden) loadRoutines();
-  if (ticks % 10 === 0 && everOpen && ['apps', 'list', 'detail'].includes(route().view) && !document.hidden) loadApps();
+  // Apps while shown; less often on Home and task pages, for their drafts.
+  const appsEvery = route().view === 'apps' ? 10 : ['list', 'detail'].includes(route().view) ? 30 : 0;
+  if (appsEvery && ticks % appsEvery === 0 && everOpen && !document.hidden) loadApps();
   for (const s of document.querySelectorAll('[data-asof]')) s.textContent = asOf(Number(s.dataset.asof));
 }
 // Known parts joined with ` · ` (or `sep`).
@@ -3621,24 +3624,26 @@ function appRow(a, now) {
 }
 // An app's draft: an agent's staged release, its PR and before/after shots. The owner publishes
 // (merge the PR, then live) or discards it, or asks its task for changes; others just see it.
-let draftAsk = null, draftBusy = null; // [slug, 'publish' | 'discard'] being confirmed; slug deciding
+let draftAsk = null, draftBusy = null; // [slug, 'publish' | 'discard'] being confirmed, or under way
 const draftErr = new Map(); // slug -> why its last decision failed
-const draftShots = new Map(); // `slug/n/at/which` -> object URL
+const draftShots = new Map(); // `slug/which` -> { id, url }: the shown draft's, freed when replaced
 function draftShot(a, which) {
-  const d = a.draft, key = `${a.slug}/${d.release}/${d.at}/${which}`;
+  const d = a.draft, key = `${a.slug}/${which}`, had = draftShots.get(key);
   const img = el('img', { alt: `${which} v${d.release}`, loading: 'lazy' });
-  if (draftShots.has(key)) img.src = draftShots.get(key);
-  else fetch(`/api/apps/${encodeURIComponent(a.slug)}/draft/${which}`, { headers: authHeaders() }).then(async (r) => {
+  if (had && had.id === d.id) img.src = had.url;
+  else fetch(`/api/apps/${encodeURIComponent(a.slug)}/draft/${which}?id=${d.id}`, { headers: authHeaders() }).then(async (r) => {
     if (!r.ok) { img.alt = 'screenshot gone'; return; }
-    draftShots.set(key, img.src = URL.createObjectURL(await r.blob()));
+    const old = draftShots.get(key);
+    if (old) URL.revokeObjectURL(old.url);
+    draftShots.set(key, { id: d.id, url: img.src = URL.createObjectURL(await r.blob()) });
   }).catch(() => {});
   return el('figure', {}, el('figcaption', {}, which === 'before' ? 'Before' : `After · v${d.release}`), img);
 }
 async function decideDraft(a, action) {
-  draftAsk = null; draftBusy = a.slug;
+  draftAsk = null; draftBusy = [a.slug, action];
   render();
   try {
-    const r = await fetch(`/api/apps/${encodeURIComponent(a.slug)}/draft/${action}`, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ release: a.draft.release }) });
+    const r = await fetch(`/api/apps/${encodeURIComponent(a.slug)}/draft/${action}`, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ id: a.draft.id }) });
     if (r.ok) draftErr.delete(a.slug); else draftErr.set(a.slug, (await r.text()) || `error ${r.status}`);
   } catch { draftErr.set(a.slug, 'couldn’t reach the orchestrator'); }
   draftBusy = null;
@@ -3647,12 +3652,14 @@ async function decideDraft(a, action) {
 }
 // Back to the task that made it, a reply started there.
 function askChanges(a) {
-  drafts.set(replyDraft(a.draft.task), `Changes to draft v${a.draft.release}: `);
+  const text = `Changes to draft v${a.draft.release}: `;
+  drafts.set(replyDraft(a.draft.task), text);
+  if (replyFor === a.draft.task) $('reply-text').value = text; // its page loaded the old draft already
   location.hash = `#task/${a.draft.task}`;
   setTimeout(() => { const t = $('reply-text'); t.focus(); t.setSelectionRange(t.value.length, t.value.length); }, 0);
 }
 function draftCard(a, inTask) {
-  const d = a.draft, busy = draftBusy === a.slug, err = draftErr.get(a.slug) || d.error;
+  const d = a.draft, doing = draftBusy && draftBusy[0] === a.slug && draftBusy[1], busy = !!doing, err = draftErr.get(a.slug) || d.error;
   const asking = draftAsk && draftAsk[0] === a.slug ? draftAsk[1] : null;
   const ask = (action) => { draftAsk = action && [a.slug, action]; render(); };
   const owner = !readOnly && a.role === 'owner';
@@ -3664,9 +3671,9 @@ function draftCard(a, inTask) {
         el('button', { disabled: busy, onclick: () => decideDraft(a, asking) }, asking === 'publish' ? 'Yes, publish' : 'Yes, discard'),
         el('button', { type: 'button', onclick: () => ask(null) }, 'Not yet')))
     : el('div', { className: 'row' },
-      el('button', { type: 'button', disabled: busy, onclick: () => ask('publish') }, busy ? 'Publishing…' : 'Publish'),
+      el('button', { type: 'button', disabled: busy, onclick: () => ask('publish') }, doing === 'publish' ? 'Publishing…' : 'Publish'),
       d.task && !inTask ? el('button', { type: 'button', onclick: () => askChanges(a) }, 'Request changes') : '',
-      el('button', { type: 'button', className: 'quiet', disabled: busy, onclick: () => ask('discard') }, 'Discard'));
+      el('button', { type: 'button', className: 'quiet', disabled: busy, onclick: () => ask('discard') }, doing === 'discard' ? 'Discarding…' : 'Discard'));
   return el('div', { className: inTask ? 'appr draft' : 'draft' },
     el('div', { className: 'dim' }, `Draft v${d.release}${inTask ? ` of ${a.title}` : ''} · proposed `, appAge(d.at, Date.now() + skew)),
     d.note ? el('p', { className: 'what' }, d.note) : '',
@@ -3681,7 +3688,7 @@ const draftNodes = new Map();
 function taskDrafts(id) {
   const apps = ((hosted && hosted.list) || []).filter((a) => a.draft && a.draft.task === id);
   return apps.map((a) => {
-    const key = JSON.stringify([a.draft, a.role, readOnly, draftAsk, draftBusy === a.slug, draftErr.get(a.slug)]);
+    const key = JSON.stringify([a.draft, a.role, readOnly, draftAsk, draftBusy, draftErr.get(a.slug)]);
     const had = draftNodes.get(a.slug);
     if (had && had.key === key) return had.node;
     const node = draftCard(a, true);

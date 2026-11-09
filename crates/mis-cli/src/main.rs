@@ -291,7 +291,9 @@ async fn apps(args: &Args, cmd: &AppsCmd) -> Result<()> {
                 let bytes = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
                 Ok(Some(Base64::encode_string(&bytes)))
             };
-            let head = head.clone().or_else(git_head);
+            let head = (head.clone().or_else(git_head)).context(
+                "no commit to merge at: run it in the app's git worktree, or pass --head",
+            )?;
             let body = ProposeDraft {
                 release: *release,
                 pr: pr.clone(),
@@ -1649,9 +1651,10 @@ mod tests {
             .starts_with("demo · Demo · not live · v2 ready\n    shared with no one\n"));
         let drafted = AppView {
             draft: Some(AppDraft {
+                id: Default::default(),
                 release: 2,
                 pr: "https://github.com/o/r/pull/7".into(),
-                head: None,
+                head: "ab".repeat(20),
                 note: None,
                 before: false,
                 after: true,

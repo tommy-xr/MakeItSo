@@ -662,7 +662,7 @@ fn handle_incoming(
                     let result = match roots::resolve_cwd(&roots, Some(&cwd)) {
                         Ok(dir) => {
                             let dir = dir.display().to_string();
-                            merge::merge_draft("gh".as_ref(), &dir, &w, head.as_deref()).await
+                            merge::merge_draft("gh".as_ref(), &dir, &w, &head).await
                         }
                         Err(why) => Err(format!("the apps repo: {why}")),
                     };
