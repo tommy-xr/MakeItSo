@@ -4228,9 +4228,28 @@ async fn apps_publish_activate_and_serve() {
     let ns: Vec<u32> = a.releases.iter().map(|r| r.n).collect();
     assert_eq!(ns, [1, 2]);
     assert_ne!(a.releases[0].sha256, a.releases[1].sha256);
-    // The directory links live apps.
+    // The directory links live apps, each with its live release's icon or a letter.
+    let pics = bundle(&[
+        (
+            "app.json",
+            br#"{"title":"Pics","icon":"img/my icon.png","clients":{"web":"index.html"}}"#,
+        ),
+        ("index.html", b"pics"),
+        ("img/my icon.png", b"png"),
+    ]);
+    let live = "/api/apps/pics/releases?activate=true";
+    assert_eq!(publish(&mis, live, "s", &pics).await.0, 201);
+    let staged = "/api/apps/draft/releases";
+    assert_eq!(publish(&mis, staged, "s", &demo("draft")).await.0, 201);
     let (_, _, page) = app_get(&apps, "/a/", "").await;
-    assert!(page.contains(r#"<a href="/a/demo/">Demo</a>"#), "{page}");
+    assert!(page.contains(r#"<a href="/a/demo/"><span class="icon" aria-hidden="true">D</span><span class="name">Demo</span></a>"#), "{page}");
+    let icon = "/a/pics/img/my%20icon.png";
+    assert!(
+        page.contains(&format!(r#"<img class="icon" src="{icon}" alt="">"#)),
+        "{page}"
+    );
+    assert!(!page.contains("/a/draft/"), "{page}");
+    assert_eq!(app_get(&apps, icon, "").await.2, "png");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -4384,6 +4403,16 @@ async fn apps_open_to_members_only_through_their_own_access_app() {
     assert_eq!(status, 200);
     assert!(!list.contains("demo"), "{list}");
     assert!(list.contains("No apps are shared with you yet."), "{list}");
+    // The directory's own manifest and icons are for anyone signed in.
+    for (path, ct) in [
+        ("/a/_/apps.webmanifest", "application/manifest+json"),
+        ("/a/_/apps-icon.svg", "image/svg+xml"),
+        ("/a/_/apps-touch-icon.png", "image/png"),
+    ] {
+        let (status, head, _) = http(&apps, &format!("GET {path} HTTP/1.1{other}"), b"").await;
+        assert_eq!(status, 200, "{path}");
+        assert!(head.contains(ct), "{head}");
+    }
     // The bare hostname lands on the directory.
     for path in ["/", "/a"] {
         let (status, head, _) = app_get(&apps, path, &other).await;
