@@ -31,6 +31,7 @@ pub mod apps;
 pub mod apps_http;
 pub mod backups;
 pub mod capture;
+pub mod drafts;
 pub mod email;
 pub mod evidence;
 pub mod images;
@@ -65,6 +66,8 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 pub const ROUTINE_EVERY: Duration = Duration::from_secs(30);
 /// Largest frame a worker may send: a compare's two images, base64, plus slack.
 const WORKER_FRAME: usize = 2 * mis_types::evidence::MAX_FILE_BYTES.div_ceil(3) * 4 + (1 << 20);
+/// Largest draft proposal: two screenshots, base64, plus room for the other fields.
+const DRAFT_BODY: usize = 2 * MAX_DRAFT_IMAGE_BYTES.div_ceil(3) * 4 + (1 << 20);
 /// Largest `/api/capture` body: its images plus room for the other fields.
 const CAPTURE_BODY: usize = MAX_IMAGES * MAX_IMAGE_BYTES + (1 << 20);
 
@@ -756,6 +759,16 @@ impl App {
 
     /// Ask worker `wid` and wait for its answer. Err: the HTTP status and why.
     async fn ask(&self, wid: WorkerId, query: Query) -> Result<Answer, (StatusCode, &'static str)> {
+        self.ask_within(wid, query, self.query_timeout).await
+    }
+
+    /// [`Self::ask`], waiting up to `wait`.
+    async fn ask_within(
+        &self,
+        wid: WorkerId,
+        query: Query,
+        wait: Duration,
+    ) -> Result<Answer, (StatusCode, &'static str)> {
         let conn = match self.ledger().worker_conn(wid) {
             None => return Err((StatusCode::NOT_FOUND, "unknown worker")),
             Some(None) => return Err((StatusCode::SERVICE_UNAVAILABLE, "worker offline")),
@@ -772,7 +785,7 @@ impl App {
             // Dropping the sender makes `rx` fail at once.
             self.queries.lock().unwrap().remove(&req);
         }
-        match tokio::time::timeout(self.query_timeout, rx).await {
+        match tokio::time::timeout(wait, rx).await {
             Ok(Ok(answer)) => Ok(answer),
             Ok(Err(_)) => Err((StatusCode::SERVICE_UNAVAILABLE, "worker disconnected")),
             Err(_) => Err((StatusCode::GATEWAY_TIMEOUT, "worker didn't answer in time")),
@@ -818,6 +831,15 @@ impl App {
         }
     }
 
+    /// Who asks, as apps know members: an Access login, else (the full token, a direct local
+    /// request) `local`, every app's owner, as on the apps listener.
+    async fn app_subject(&self, headers: &HeaderMap) -> app_access::Subject {
+        match self.access_check(headers, Route::Other).await {
+            Access::Passed(id) => app_access::Subject::User(id.subject.to_ascii_lowercase()),
+            _ => app_access::Subject::Local,
+        }
+    }
+
     /// Auth for a request to any route but `/api/capture`: None refuses it.
     async fn admit_scope(
         &self,
@@ -826,6 +848,34 @@ impl App {
         path: &str,
     ) -> Option<Scope> {
         self.admit_route(headers, peer, path, Route::Other).await
+    }
+
+    /// Merge `draft`'s PR on a worker, which checks it in code first. Err: why it didn't.
+    async fn merge_draft(&self, draft: &AppDraft) -> Result<(), (StatusCode, String)> {
+        let (repo, number) =
+            drafts::parse_pr(&draft.pr).map_err(|why| (StatusCode::BAD_REQUEST, why))?;
+        let cwd = self
+            .settings()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        let Some(wid) = self.ledger().merge_worker(draft.task) else {
+            let why = "no worker is online to merge its PR";
+            return Err((StatusCode::SERVICE_UNAVAILABLE, why.into()));
+        };
+        let query = Query::MergeDraft {
+            cwd: cwd.apps.repo,
+            repo,
+            number,
+            head: draft.head.clone(),
+        };
+        match self.ask_within(wid, query, MERGE_WAIT).await {
+            Ok(Answer::Merged { result: Ok(_) }) => Ok(()),
+            Ok(Answer::Merged { result: Err(why) }) => Err((StatusCode::CONFLICT, why)),
+            Ok(_) => Err((
+                StatusCode::BAD_GATEWAY,
+                "unexpected answer from the worker".into(),
+            )),
+            Err((status, why)) => Err((status, why.into())),
+        }
     }
 
     /// Auth for a request to `route`: None refuses it. Logs who Cloudflare Access let through.
@@ -1104,6 +1154,14 @@ pub fn router(app: App) -> Router {
             get(app_backups).post(back_up_app),
         )
         .route("/api/apps/{slug}/restore", post(restore_app))
+        .route(
+            "/api/apps/{slug}/draft",
+            post(propose_draft).layer(axum::extract::DefaultBodyLimit::max(DRAFT_BODY)),
+        )
+        .route(
+            "/api/apps/{slug}/draft/{which}",
+            get(draft_shot).post(decide_draft),
+        )
         .route("/api/settings", get(get_settings).post(set_settings))
         .route("/api/sessions", get(live_sessions))
         .route("/api/workers/{id}/sessions", get(sessions))
@@ -1765,8 +1823,175 @@ async fn list_apps(
     if !app.admit(&headers, peer, "/api/apps").await {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let list = app.apps.as_ref().map(|a| a.list()).unwrap_or_default();
+    let mut list = app.apps.as_ref().map(|a| a.list()).unwrap_or_default();
+    let who = app.app_subject(&headers).await;
+    for a in &mut list {
+        let policy = app_access::Policy {
+            members: a
+                .members
+                .iter()
+                .map(|m| (m.email.clone(), m.role))
+                .collect(),
+            ..Default::default()
+        };
+        a.role = app_access::role_of(&policy, &who);
+    }
     Json(list).into_response()
+}
+
+/// Make a staged release `slug`'s draft ([`mis_types::ProposeDraft`]), replacing any: 201 with
+/// the `AppDraft`. Full scope, or the token of the app task working on `slug`.
+async fn propose_draft(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    body: Bytes,
+) -> Response {
+    let task = match (app.admit_route(&headers, peer, "/api/apps", Route::AppPublish)).await {
+        Some(Scope::Full) => None,
+        Some(Scope::AppTask(task)) => Some(task),
+        Some(Scope::Read | Scope::Capture) => {
+            return (StatusCode::FORBIDDEN, "read-only token").into_response()
+        }
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let Some(apps) = app.apps.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "apps are off: no state dir",
+        )
+            .into_response();
+    };
+    let p = match serde_json::from_slice::<mis_types::ProposeDraft>(&body) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    if !apps::valid_slug(&slug) {
+        return (StatusCode::NOT_FOUND, "no such app").into_response();
+    }
+    if let Some(t) = task {
+        let Some(b) = app.ledger().app_binding(t) else {
+            return StatusCode::UNAUTHORIZED.into_response();
+        };
+        if let Err(why) = app_grant::propose(&b, &slug) {
+            return (StatusCode::FORBIDDEN, why).into_response();
+        }
+    }
+    // An app task proposes for its own thread; the full token names one, if any.
+    let task = task.or(p.task);
+    let at = unix_ms();
+    let made = tokio::task::spawn_blocking(move || apps.propose(&slug, &p, task, at));
+    match made.await.expect("proposing doesn't panic") {
+        Ok(d) => (StatusCode::CREATED, Json(d)).into_response(),
+        Err(apps::DraftError::NoSuchApp) => (StatusCode::NOT_FOUND, "no such app").into_response(),
+        Err(apps::DraftError::Invalid(why)) => (StatusCode::BAD_REQUEST, why).into_response(),
+        Err(apps::DraftError::Io(e)) => {
+            tracing::warn!("proposing a draft: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
+        }
+    }
+}
+
+/// The draft's `before` or `after` screenshot, as stored. Read-only, like the apps list.
+async fn draft_shot(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path((slug, which)): Path<(String, String)>,
+) -> Response {
+    if !app.admit(&headers, peer, "/api/apps").await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let after = match which.as_str() {
+        "before" => false,
+        "after" => true,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let (Some(apps), true) = (app.apps.clone(), apps::valid_slug(&slug)) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let shot = tokio::task::spawn_blocking(move || apps.draft_shot(&slug, after));
+    let shot = shot.await.expect("reading a screenshot doesn't panic");
+    match shot.and_then(|b| Some((ImageKind::sniff(&b)?, b))) {
+        Some((kind, bytes)) => (
+            [
+                (header::CONTENT_TYPE, kind.mime()),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// How long publishing a draft waits for its worker's `gh` to check and merge the PR.
+const MERGE_WAIT: Duration = Duration::from_secs(150);
+
+/// `{"release": n}`: publish `slug`'s draft n (merge its PR on a worker through the
+/// code-checked path, then make n live; a PR that doesn't merge leaves nothing live) or
+/// discard it (the PR stays). Full scope, and the app's owner only.
+async fn decide_draft(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path((slug, action)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/apps").await {
+        return refused.into_response();
+    }
+    let publish = match action.as_str() {
+        "publish" => true,
+        "discard" => false,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let (Some(apps), true) = (app.apps.clone(), apps::valid_slug(&slug)) else {
+        return (StatusCode::NOT_FOUND, "no such app").into_response();
+    };
+    #[derive(serde::Deserialize)]
+    struct Decide {
+        release: u32,
+    }
+    let n = match serde_json::from_slice::<Decide>(&body) {
+        Ok(d) => d.release,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let (a, s) = (apps.clone(), slug.clone());
+    let read = tokio::task::spawn_blocking(move || (a.policy(&s), a.draft(&s)));
+    let (policy, draft) = read.await.expect("reading a draft doesn't panic");
+    let who = app.app_subject(&headers).await;
+    if app_access::role_of(&policy, &who) != Some(AppRole::Owner) {
+        return (
+            StatusCode::FORBIDDEN,
+            "only the app's owner decides its draft",
+        )
+            .into_response();
+    }
+    let Some(draft) = draft.filter(|d| d.release == n) else {
+        return (StatusCode::CONFLICT, format!("v{n} isn't {slug}'s draft")).into_response();
+    };
+    if publish {
+        if let Err((status, why)) = app.merge_draft(&draft).await {
+            let (a, s, w) = (apps.clone(), slug.clone(), why.clone());
+            let _ = tokio::task::spawn_blocking(move || a.draft_failed(&s, n, &w)).await;
+            return (status, why).into_response();
+        }
+        let (a, s, at) = (apps.clone(), slug.clone(), unix_ms());
+        let live = tokio::task::spawn_blocking(move || a.activate(&s, n, at)).await;
+        if let Ok(Err(e)) = live {
+            // Merged but not live: publishing again finds it merged and retries this.
+            let why = format!("merged, but making v{n} live failed: {e:?}");
+            tracing::warn!("apps/{slug}: {why}");
+            let (a, s, w) = (apps.clone(), slug.clone(), why.clone());
+            let _ = tokio::task::spawn_blocking(move || a.draft_failed(&s, n, &w)).await;
+            return (StatusCode::INTERNAL_SERVER_ERROR, why).into_response();
+        }
+    }
+    let _ = tokio::task::spawn_blocking(move || apps.end_draft(&slug, n)).await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// Start a task that builds or changes an app ([`mis_types::AppTask`]), in the settings' apps

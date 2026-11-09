@@ -48,6 +48,16 @@ pub fn startable(b: &Binding, exists: bool) -> Result<(), String> {
     }
 }
 
+/// Whether `b`'s token may propose a draft of `slug`: its app, once it exists.
+pub fn propose(b: &Binding, slug: &str) -> Result<(), String> {
+    match (&b.slug, b.create) {
+        (Some(s), false) if s == slug => Ok(()),
+        (Some(s), true) if s == slug => Err(format!("publish {s} first")),
+        (None, _) => Err("publish the app first".into()),
+        (Some(s), _) => Err(format!("this task's app is {s}")),
+    }
+}
+
 /// `b` about to create `slug`: only that one, from now on.
 pub fn reserve(b: Binding, slug: &str) -> Binding {
     Binding {
@@ -125,6 +135,18 @@ mod tests {
             Ok(Target::Existing)
         );
         assert!(publish(&binding(None, false), "x", false).is_err());
+    }
+
+    #[test]
+    fn drafts_are_proposed_only_for_the_tasks_app_once_it_exists() {
+        assert_eq!(propose(&binding(Some("pool"), false), "pool"), Ok(()));
+        assert!(propose(&binding(Some("pool"), false), "budget").is_err());
+        assert!(propose(&binding(Some("pool"), true), "pool")
+            .unwrap_err()
+            .contains("first"));
+        assert!(propose(&binding(None, true), "pool").is_err());
+        let made = created(binding(None, true), "chores");
+        assert_eq!(propose(&made, "chores"), Ok(()));
     }
 
     #[test]

@@ -19,6 +19,15 @@ pub enum Query {
         id: Uuid,
         limit: usize,
     },
+    /// Merge app draft PR `repo#number` if it passes the draft checks (see the worker's
+    /// `merge::check_draft`), only while its head is `head`; `cwd` is the apps repo, whose
+    /// GitHub repo it must be. Answered with `Answer::Merged`.
+    MergeDraft {
+        cwd: String,
+        repo: String,
+        number: u64,
+        head: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -39,6 +48,10 @@ pub enum Answer {
         open: bool,
     },
     NotFound,
+    /// Err: why it wasn't merged (nothing changed).
+    Merged {
+        result: Result<String, String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

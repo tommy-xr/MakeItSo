@@ -305,6 +305,12 @@ fn is_commit(s: &str) -> bool {
 }
 
 /// `git -C dir <args>`: its stdout, and whether it was cut at `MAX_OUTPUT`.
+/// `dir`'s `origin` remote URL.
+pub async fn origin(dir: &str) -> Option<String> {
+    let (out, ok) = git(dir, &["remote", "get-url", "origin"]).await.ok()?;
+    ok.then(|| String::from_utf8_lossy(&out).trim().to_string())
+}
+
 async fn git(dir: &str, args: &[&str]) -> Result<(Vec<u8>, bool), String> {
     let mut cmd = tokio::process::Command::new("git");
     cmd.arg("-C").arg(dir);
