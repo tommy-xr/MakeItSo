@@ -640,13 +640,14 @@ impl App {
 
     /// Snapshot the ledger under its lock, then write it. The store's lock is
     /// held throughout, so an older snapshot can't overwrite a newer one.
-    fn save(&self) {
+    /// Save the ledger now. False: it failed (true with nowhere to save it).
+    fn save(&self) -> bool {
         let mut store = self.store.lock().unwrap();
         let Some(store) = store.as_mut() else {
-            return;
+            return true;
         };
         let snap = self.ledger.lock().unwrap().snapshot(store.written());
-        store.save(snap);
+        store.save(snap)
     }
 
     fn forget_old_tasks(&self) {
@@ -1832,8 +1833,20 @@ async fn publish_app(
     // two, the thread can go on only with that app (its `created_by` lets it), never make another.
     let creating = bound.filter(|_| matches!(target, apps::Target::New { .. }));
     if let Some(b) = creating.as_ref().filter(|b| b.slug.is_none()) {
+        // Not a name in use (a full-token publish racing in is undone below).
+        let (a, s, thread) = (apps.clone(), slug.clone(), b.thread);
+        let taken = tokio::task::spawn_blocking(move || a.exists(&s) && !a.created_by(&s, thread));
+        if taken.await.expect("listing releases doesn't panic") {
+            let why =
+                format!("{slug} exists: this task makes a new app, which needs a name of its own");
+            return (StatusCode::CONFLICT, why).into_response();
+        }
         app.ledger().rebind(&app_grant::reserve(b.clone(), &slug));
-        app.save();
+        if !app.save() {
+            app.ledger().rebind(b);
+            let why = "couldn't save the task history; nothing was published";
+            return (StatusCode::INTERNAL_SERVER_ERROR, why).into_response();
+        }
     }
     let at = unix_ms();
     let (to, activate) = (slug.clone(), params.activate);

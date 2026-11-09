@@ -388,8 +388,7 @@ impl Apps {
                 (Target::Existing, true) => return Err(PublishError::NoSuchApp),
                 (Target::New { thread, .. }, false) => {
                     // Its own app, created before a restart lost that it had been.
-                    let ours = self.read_policy(slug).ok().and_then(|p| p.created_by);
-                    if ours != Some(*thread) {
+                    if !self.created_by(slug, *thread) {
                         return Err(PublishError::Exists);
                     }
                 }
@@ -518,6 +517,12 @@ impl Apps {
             &self.dir.join(slug).join("active"),
             format!("{n}\n").as_bytes(),
         )
+    }
+
+    /// App task thread `thread` created `slug`.
+    pub fn created_by(&self, slug: &str, thread: uuid::Uuid) -> bool {
+        self.read_policy(slug)
+            .is_ok_and(|p| p.created_by == Some(thread))
     }
 
     /// `slug` has a release.
