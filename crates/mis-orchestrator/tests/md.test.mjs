@@ -12,7 +12,7 @@ const ev = new Function(`${evBlock}; return { ansi, better, change, fmtChange, t
 const diffBlock = page.slice(page.indexOf('// diff:begin'), page.indexOf('// diff:end'));
 const df = new Function(`${diffBlock}; return { patchRows, pathParts, diffOffer, prPrompt, pushPrompt };`)();
 const notesBlock = page.slice(page.indexOf('// notes:begin'), page.indexOf('// notes:end'));
-const nt = { ...new Function(`${notesBlock}; return { noteFront, noteAuthor, noteRows };`)(), notePath: new Function(`${block}; return notePath;`)() };
+const nt = { ...new Function(`${notesBlock}; return { noteFront, noteAuthor, noteRows, projectDir, projectActive, projectFiles, projectFind, repoHref };`)(), notePath: new Function(`${block}; return notePath;`)() };
 
 // Every tag in the output, e.g. ['p', 'a', 'code'].
 const tags = (html) => [...html.matchAll(/<([a-z0-9]+)/g)].map((m) => m[1]);
@@ -373,4 +373,27 @@ test('a note’s frontmatter, author and folder order', () => {
     e('inbox/z', 'dir'), e('inbox/old', 'dir'), e('inbox/old/2026-01-01.md'), e('inboxes/x.md')];
   assert.deepEqual(nt.noteRows(entries, 'inbox').map((x) => x.path),
     ['inbox/old', 'inbox/z', 'inbox/2026-11-08-b.md', 'inbox/2026-11-08-b-1.jpg', 'inbox/2026-11-06-a.md']);
+});
+
+test('a project’s folder, files, name and repo links', () => {
+  const mis = { id: 'make-it-so', aliases: ['MIS'], archived: false, status: 'active' }, old = { id: 'old', aliases: [], archived: true, status: 'done' };
+  assert.equal(nt.projectDir(mis), 'projects/make-it-so');
+  assert.equal(nt.projectDir(old), 'archive/old');
+  assert.deepEqual([mis, old, { ...mis, status: 'paused' }].map(nt.projectActive), [true, false, false]);
+  assert.equal(nt.projectFind([old, mis], 'mis'), mis);
+  assert.equal(nt.projectFind([old, mis], 'Make-It-So'), mis);
+  assert.equal(nt.projectFind([old, mis], 'OLD'), old);
+  assert.equal(nt.projectFind([old, mis], 'nope'), null);
+  const e = (path, kind = 'md') => ({ path, kind, size: 1 });
+  const entries = [e('projects/make-it-so', 'dir'), e('projects/make-it-so/README.md'), e('projects/make-it-so/plan.md'),
+    e('projects/make-it-so/docs', 'dir'), e('projects/make-it-so/docs/a.md'), e('projects/make-it-sooner/x.md'),
+    e('ai/projects/make-it-so', 'dir'), e('ai/projects/make-it-so/2026-11-09-review.md'), e('archive/old/README.md')];
+  const files = nt.projectFiles(entries, mis);
+  assert.deepEqual(files.own.map((x) => x.path), ['projects/make-it-so/docs', 'projects/make-it-so/plan.md']);
+  assert.deepEqual(files.ai.map((x) => x.path), ['ai/projects/make-it-so/2026-11-09-review.md']);
+  assert.deepEqual(nt.projectFiles(entries, old), { own: [], ai: [] });
+  assert.equal(nt.repoHref('tommy-xr/MakeItSo'), 'https://github.com/tommy-xr/MakeItSo');
+  for (const bad of ['MakeItSo', 'a/b/c', '../x', 'a/..', 'javascript:alert(1)', 'a/b?x', ' a/b', 'https://x.co/a']) {
+    assert.equal(nt.repoHref(bad), null, bad);
+  }
 });
