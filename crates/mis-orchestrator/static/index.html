@@ -2121,10 +2121,11 @@ function renderList() {
   const body = keys.map((k) => [secHead(label(k)), el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []), ...groups.get(k).flatMap((th) => threadRows(th, now)))]);
   const liveAt = keys.filter((k) => secRank(k) < 2).length;
   if (sessions.length) body.splice(liveAt, 0, [secHead('Live sessions', el('a', { href: '#workers' }, 'All sessions')), el('ul', { className: 'rows' }, ...sessions.map((s) => liveRow(s, now)))]);
+  const focused = $('list').contains(document.activeElement) && document.activeElement.getAttribute('href');
   $('list').replaceChildren(...(inSplit() ? [el('a', { href: '#new', className: 'newtask', title: 'New task (c)' }, '+ New task')] : []), ...body.flat());
   // The open task's links (its row, or its message under a live session), beside the list when wide.
   if (route().view === 'detail') for (const a of $('list').querySelectorAll(`a[href="${location.hash}"]`)) a.setAttribute('aria-current', 'page');
-  if (reveal) { reveal = false; $('list').querySelector('a[aria-current]')?.scrollIntoView({ block: 'nearest' }); }
+  if (focused) $('list').querySelector(`a[href="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true }); // a redraw keeps j/k's (or Tab's) place
   if (!body.length) $('list').append(el('p', { className: 'dim', style: 'padding: 1rem .375rem' }, inSplit() ? 'No tasks yet.' : 'No tasks yet. Start one below.'));
 }
 
@@ -4313,25 +4314,28 @@ $('opt').onclick = () => { const on = $('opts').hidden; showOpts(on); if (on) $(
 $('harness').addEventListener('change', optLabel);
 $('model').addEventListener('input', optLabel);
 document.addEventListener('pointerdown', (e) => { if (!$('opts').hidden && !e.target.closest('#opts, #opt')) showOpts(false); });
-$('new').addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('opts').hidden) { showOpts(false); $('opt').focus(); } });
+$('new').addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('opts').hidden) { e.preventDefault(); showOpts(false); $('opt').focus(); } });
 
 // Keyboard shortcuts: c a new task, j/k the next/previous task, Esc back (or out of a field), Cmd/Ctrl+B the menu.
-let reveal = false; // a j/k step opened a task: renderList scrolls its row into view
+const mac = /Mac|iPhone|iPad/.test(navigator.platform); // Cmd+B there; Ctrl+B moves the cursor in a field
 // The next (d = 1) or previous task in Home's list: beside the list it opens it, on Home it focuses its row.
+// A task under a live session as well as in Needs you counts once, at its row.
 function step(d) {
   const split = inSplit();
   if (!split && route().view !== 'list') return;
-  const links = [...new Map([...$('list').querySelectorAll('a[href^="#task/"]')].map((a) => [a.getAttribute('href'), a])).values()];
-  const at = links.findIndex((a) => (split ? a.hasAttribute('aria-current') : a === document.activeElement));
+  const seen = new Set(), links = [...$('list').querySelectorAll('a[href^="#task/"]')].filter((a) => !seen.has(a.getAttribute('href')) && seen.add(a.getAttribute('href')));
+  const here = split ? location.hash : document.activeElement?.getAttribute('href');
+  const at = links.findIndex((a) => a.getAttribute('href') === here);
   const a = links[at < 0 ? 0 : Math.max(0, Math.min(links.length - 1, at + d))];
-  if (!a) return;
+  if (!a || (at >= 0 && a === links[at])) return; // an end of the list
   settle(); // like a tap, a step holds the rows' order a moment, so stepping back finds the row just left
-  if (split) { reveal = true; location.hash = a.getAttribute('href'); } else a.focus();
+  a.scrollIntoView({ block: 'nearest' });
+  if (split) location.hash = a.getAttribute('href'); else a.focus();
 }
 document.addEventListener('keydown', (e) => {
   const modal = document.querySelector('dialog:modal');
   if (e.isComposing || e.defaultPrevented || (modal && modal !== $('menu'))) return;
-  if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'b') {
+  if ((mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'b') {
     e.preventDefault();
     if ($('menu').open) $('menu').close(); else $('menu-btn').click();
     return;
@@ -4339,13 +4343,13 @@ document.addEventListener('keydown', (e) => {
   if (modal) return; // the menu sheet: its own Esc closes it
   const field = e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable]');
   if (e.key === 'Escape') {
-    if (field) { if (!$('opts').contains(field)) field.blur(); return; }
+    if (field) { field.blur(); return; }
     const back = $(route().view).querySelector('.back');
     if (back) { e.preventDefault(); location.hash = back.getAttribute('href'); }
     return;
   }
   if (field || e.metaKey || e.ctrlKey || e.altKey) return;
-  if (e.key === 'c') { e.preventDefault(); location.hash = '#new'; }
+  if (e.key === 'c') { e.preventDefault(); if (route().view === 'list') { wantNew = true; render(); } else location.hash = '#new'; } // Home: no extra history entry
   else if (e.key === 'j' || e.key === 'k') { e.preventDefault(); step(e.key === 'j' ? 1 : -1); }
 });
 
