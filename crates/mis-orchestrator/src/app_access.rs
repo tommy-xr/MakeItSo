@@ -84,7 +84,12 @@ pub fn draft_cookie_name(slug: &str) -> String {
 
 /// The draft a request tries: its `Cookie` header names `current` (the app's draft now) and
 /// it comes from the owner. Anything else (a stale cookie, an editor) gets the live app.
-pub fn draft_of(cookies: Option<&str>, slug: &str, role: AppRole, current: Option<u32>) -> Option<u32> {
+pub fn draft_of(
+    cookies: Option<&str>,
+    slug: &str,
+    role: AppRole,
+    current: Option<u32>,
+) -> Option<u32> {
     let name = draft_cookie_name(slug);
     let asked: u32 = (cookies?.split(';'))
         .filter_map(|c| c.trim().split_once('='))
@@ -248,7 +253,10 @@ mod tests {
         assert_eq!(draft_of(c, "pool", Owner, None), None);
         assert_eq!(draft_of(c, "chores", Owner, Some(3)), None);
         assert_eq!(draft_of(None, "pool", Owner, Some(3)), None);
-        assert_eq!(draft_of(Some("mis-draft-pool=x"), "pool", Owner, Some(3)), None);
+        assert_eq!(
+            draft_of(Some("mis-draft-pool=x"), "pool", Owner, Some(3)),
+            None
+        );
         assert_eq!(
             draft_cookie("pool", Some(3), true),
             "mis-draft-pool=3; Path=/a/pool/; SameSite=Lax; Secure"

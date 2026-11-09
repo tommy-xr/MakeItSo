@@ -567,7 +567,7 @@ impl Apps {
 
     /// `slug`'s live release, if it has one.
     pub fn live(&self, slug: &str) -> Option<Live> {
-        self.release(slug, self.active_n(slug)?)
+        self.release_at(slug, self.active_n(slug)?)
     }
 
     /// `slug`'s members. Missing: shared with no one. Unreadable: also no one (fail closed).
@@ -693,7 +693,7 @@ impl Apps {
     }
 
     /// Release `n` of `slug`: its folder and manifest.
-    pub fn release(&self, slug: &str, n: u32) -> Option<Live> {
+    pub fn release_at(&self, slug: &str, n: u32) -> Option<Live> {
         Some(Live {
             dir: self.releases_dir(slug).join(n.to_string()),
             manifest: self.release_manifest(slug, n)?,

@@ -134,18 +134,7 @@ async fn guard(
     let mut stale = None;
     let mut resp = match admit(&apps, &auth, peer, &mut req).await {
         Ok(()) => {
-            // A draft cookie that no longer applies (replaced, decided, not the owner) is dropped.
-            let has = |slug: &str| {
-                let name = app_access::draft_cookie_name(slug);
-                let cookies = req.headers().get(header::COOKIE).and_then(|v| v.to_str().ok());
-                cookies.is_some_and(|c| c.split(';').any(|c| c.trim().starts_with(&format!("{name}="))))
-            };
-            if let Some(m) = req.extensions().get::<Member>() {
-                let slug = app_access::app_of(req.uri().path()).unwrap_or_default().to_string();
-                if m.draft.is_none() && has(&slug) {
-                    stale = Some(app_access::draft_cookie(&slug, None, crate::via_cloudflare(req.headers())));
-                }
-            }
+            stale = stale_draft_cookie(&req);
             next.run(req).await
         }
         Err(refused) => refused.into_response(),
@@ -169,6 +158,17 @@ async fn guard(
         HeaderValue::from_static("same-origin"),
     );
     resp
+}
+
+/// A `Set-Cookie` dropping the draft cookie `req` carries if it no longer applies (the draft
+/// was replaced or decided, or the asker isn't its owner).
+fn stale_draft_cookie(req: &Request) -> Option<String> {
+    req.extensions().get::<Member>().filter(|m| m.draft.is_none())?;
+    let slug = app_access::app_of(req.uri().path())?;
+    let name = format!("{}=", app_access::draft_cookie_name(slug));
+    let cookies = req.headers().get(header::COOKIE)?.to_str().ok()?;
+    (cookies.split(';').any(|c| c.trim().starts_with(&name)))
+        .then(|| app_access::draft_cookie(slug, None, crate::via_cloudflare(req.headers())))
 }
 
 /// Host check, then who is asking; under `/a/<slug>` also their role there. Puts a
@@ -226,7 +226,10 @@ async fn admit(
         .ok_or((StatusCode::FORBIDDEN, "this app isn't shared with you"))?;
     let role = dev_role.unwrap_or(role);
     // Read only when a draft cookie rides along.
-    let cookies = req.headers().get(header::COOKIE).and_then(|v| v.to_str().ok());
+    let cookies = req
+        .headers()
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok());
     let current = cookies.and_then(|_| apps.draft(slug)).map(|d| d.release);
     let draft = app_access::draft_of(cookies, slug, role, current);
     req.extensions_mut().insert(Member {
@@ -388,7 +391,7 @@ async fn off_thread(f: impl FnOnce() -> Response + Send + 'static) -> Response {
 /// The release `m` is served: the draft they try, else the live one.
 fn serving(apps: &Apps, slug: &str, m: &Member) -> Option<apps::Live> {
     match m.draft {
-        Some(n) => apps.release(slug, n),
+        Some(n) => apps.release_at(slug, n),
         None => apps.live(slug),
     }
 }
@@ -607,7 +610,9 @@ async fn entry(
             "off" => None,
             n => match n.parse::<u32>() {
                 Ok(n) => Some(n),
-                Err(_) => return (StatusCode::BAD_REQUEST, "draft=<n> or draft=off").into_response(),
+                Err(_) => {
+                    return (StatusCode::BAD_REQUEST, "draft=<n> or draft=off").into_response()
+                }
             },
         };
         if let Some(n) = n {
@@ -621,7 +626,11 @@ async fn entry(
         }
         let cookie = app_access::draft_cookie(&slug, n, secure);
         let back = format!("/a/{slug}/");
-        (StatusCode::SEE_OTHER, [(header::SET_COOKIE, cookie), (header::LOCATION, back)]).into_response()
+        (
+            StatusCode::SEE_OTHER,
+            [(header::SET_COOKIE, cookie), (header::LOCATION, back)],
+        )
+            .into_response()
     })
     .await
 }
@@ -641,7 +650,9 @@ async fn blocking(apps: Arc<Apps>, slug: String, path: String, m: Member) -> Res
 
 /// `path` (empty: the entry) from the release `m` is served; an extensionless miss gets the entry.
 fn serve(apps: &Apps, slug: &str, path: &str, m: &Member) -> Response {
-    let live = apps::valid_slug(slug).then(|| serving(apps, slug, m)).flatten();
+    let live = apps::valid_slug(slug)
+        .then(|| serving(apps, slug, m))
+        .flatten();
     // `api/…` is the server's: unknown API paths 404 rather than get the entry page.
     let Some(live) = live.filter(|_| !apps::reserved(path)) else {
         return StatusCode::NOT_FOUND.into_response();
