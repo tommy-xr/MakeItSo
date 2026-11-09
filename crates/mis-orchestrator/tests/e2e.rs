@@ -3471,6 +3471,11 @@ async fn new_app_task_runs_the_apps_guide_in_the_settings_repo_and_its_replies_n
         .await
         .unwrap();
     send(&mut client, &ClientMsg::Subscribe).await;
+    // Subscribed once Status answers: the worker's events come on another socket.
+    send(&mut client, &ClientMsg::Status).await;
+    let ServerMsg::Status { .. } = recv(&mut client).await else {
+        panic!("status")
+    };
     for event in [
         AgentEvent::Started {
             session: Some("sess-1".into()),
