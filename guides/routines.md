@@ -15,11 +15,11 @@ with why a file is bad (a bad file never runs).
 ```markdown
 ---
 every: 6h                 # or cron: "0 9 * * 1-5"; exactly one of the two
-harness: codex            # optional; default claude
-model: sonnet             # optional; default the harness's
+harness: claude           # optional; default claude (or codex)
+model: sonnet             # optional, passed as is; default the harness's
 worker: build-mac         # optional: only this worker runs it (its name or hostname)
-cwd: code/make-it-so      # optional: folder on the worker, absolute or under its root
-paused: true              # optional
+cwd: code/make-it-so      # optional: folder on the worker (see below)
+paused: true              # optional; start new files paused
 act: true                 # optional: may act once switched live (see Modes)
 merge:                    # optional, needs act: true (see Merging)
   repos: [owner/name]
@@ -35,8 +35,11 @@ The prompt each run gets.
 - One `key: value` per line; quotes optional; ` #` starts a comment; lists are `[a, b]` (no
   `- item` lines, no commas inside quotes). Only `merge:` takes indented keys. Unknown or
   repeated keys, or an empty prompt, make the file bad.
+- `cwd`: absolute or relative to the worker's first root, either way under one of its roots;
+  no `~`. A bad one fails each run.
+- `paused`: Pause or Resume in the Routines view overrides the file's value from then on.
 - `every`: `<n>m`, `<n>h` or `<n>d`, at least 1m, counted from the last run; the first run is
-  as soon as MIS sees the file.
+  as soon as MIS sees the file, so write new files with `paused: true` and let the owner resume.
 - `cron`: `minute hour day month weekday`, each `*`, `n`, `a-b`, optional `/step`,
   comma-separated; no names; weekday 0-7 (0 and 7 are Sunday); with both day fields set, either
   matches. Orchestrator's local time. Quote it.
@@ -51,10 +54,10 @@ Every run's prompt starts with MIS's rules for its mode; write the file's prompt
   changes, deploys or other remote state.
 - Dry run (`act: true`, not yet live): lists every action it would take, with full text, and
   takes none.
-- Live: the user switches it on (Routines view "Go live", or `mis routines live <name>`). Runs
-  act as the prompt says, and only that far, and report each action. Live approves this exact
-  version: editing the prompt, `merge`, `harness`, `model`, `worker` or `cwd` drops it back to
-  dry run. `mis routines dry-run <name>` does that by hand.
+- Live: only the owner switches it on (Routines view "Go live"); never run `mis routines live`
+  yourself. Runs act as the prompt says, and only that far, and report each action. Live
+  approves this exact version: editing the prompt, `merge`, `harness`, `model`, `worker` or
+  `cwd` drops it back to dry run. `mis routines dry-run <name>` does that by hand.
 - No run may push tags, create releases, or read or print secrets; none merges but through
   `merge_pr`.
 
@@ -68,8 +71,9 @@ Without `merge:`, runs never merge. With it, live runs merge only by calling the
 - Optional: `forbid_paths` (globs: `*` within a segment, `**` across; no `[]` or `{}`),
   `require_labels` (all of them), `method` (`squash`, `merge` or `rebase`; default squash),
   `approve` (`phone`: the user approves each merge on the phone, the default; `none`).
-- `merge_pr` also refuses drafts, PRs whose checks failed, are pending or never ran, and ones
-  not cleanly mergeable. Claude runs are blocked from merging any other way; codex is only told.
+- `merge_pr` also refuses drafts, PRs whose checks failed, are pending or never ran, ones not
+  cleanly mergeable and, with `forbid_paths` set, any that renames or copies a file. Claude runs
+  are blocked from merging any other way; codex is only told.
 
 ## Writing the prompt
 
