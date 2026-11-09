@@ -42,6 +42,7 @@ pub mod records_db;
 pub mod routine;
 pub mod scope;
 pub mod self_update;
+pub mod settings;
 pub mod store;
 pub mod summary;
 pub mod tools;
@@ -123,7 +124,7 @@ pub struct App {
     captures: Option<Arc<capture::Inbox>>,
     /// Publishes captures to the notes repo. None: off.
     notes: Option<Arc<notes::Notes>>,
-    /// Where the ledger is saved. None: task history is lost on restart.
+    /// Where the ledger and settings are saved. None: task history is lost on restart.
     ledger_dir: Option<std::path::PathBuf>,
     /// Open once serving, until shut down.
     store: Arc<Mutex<Option<store::Store>>>,
@@ -310,6 +311,14 @@ impl App {
     pub fn with_drafter(mut self, drafter: Arc<dyn Agent>) -> Self {
         self.drafter = Some(drafter);
         self
+    }
+
+    /// Saved settings (beside the ledger); the defaults without a state dir. Err: unreadable.
+    fn settings(&self) -> Result<mis_types::Settings, String> {
+        match &self.ledger_dir {
+            Some(dir) => settings::load(dir).map_err(|e| format!("{}: {e}", settings::FILE)),
+            None => Ok(Default::default()),
+        }
     }
 
     /// The locked ledger, told the wall-clock time for whatever happens next.
@@ -1061,6 +1070,7 @@ pub fn router(app: App) -> Router {
             get(app_backups).post(back_up_app),
         )
         .route("/api/apps/{slug}/restore", post(restore_app))
+        .route("/api/settings", get(get_settings).post(set_settings))
         .route("/api/sessions", get(live_sessions))
         .route("/api/workers/{id}/sessions", get(sessions))
         .route(
@@ -1640,6 +1650,47 @@ async fn list_apps(
 struct PublishParams {
     #[serde(default)]
     activate: bool,
+}
+
+/// The orchestrator's [`mis_types::Settings`]; defaults where none are saved. Full scope only.
+async fn get_settings(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/settings").await {
+        return refused.into_response();
+    }
+    match app.settings() {
+        Ok(s) => Json(s).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+/// Replace all the settings with the body's (a key left out takes its default): 204, or 400
+/// with why not. Full scope only; 404 without a state dir to keep them in.
+async fn set_settings(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/settings").await {
+        return refused.into_response();
+    }
+    let Some(dir) = app.ledger_dir.clone() else {
+        return (StatusCode::NOT_FOUND, "settings need a state dir").into_response();
+    };
+    let new = serde_json::from_slice(&body).map_err(|e| e.to_string());
+    let new = match new.and_then(settings::clean) {
+        Ok(s) => s,
+        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
+    };
+    match tokio::task::spawn_blocking(move || settings::save(&dir, &new)).await {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 /// A `.tar.gz` bundle (raw body) as `slug`'s next release; `?activate=true` makes it live.
