@@ -4101,7 +4101,10 @@ async fn the_notes_view_reads_the_clone_for_full_scope_only() {
     };
     git(&["init", "--quiet", "--bare", "-b", "main", "remote.git"]);
     git(&["clone", "--quiet", "remote.git", "human"]);
-    let files: [(&str, &[u8]); 7] = [
+    // No line-ending conversion on checkout (Windows runners set core.autocrlf), so sizes
+    // and bytes are as written here.
+    let files: [(&str, &[u8]); 8] = [
+        (".gitattributes", b"* -text\n"),
         ("README.md", b"# notes\n"),
         (
             "inbox/2026-11-08-a.md",
@@ -4169,11 +4172,11 @@ async fn the_notes_view_reads_the_clone_for_full_scope_only() {
         "{head}"
     );
     assert!(head.contains("x-content-type-options: nosniff"), "{head}");
-    assert_eq!(body, files[1].1);
+    assert_eq!(body, files[2].1);
     let (status, head, body) = file("inbox/2026-11-08-a-1.jpg", "s").await;
     assert_eq!(status, 200, "{head}");
     assert!(head.contains("content-type: image/jpeg"), "{head}");
-    assert_eq!(body, files[2].1);
+    assert_eq!(body, files[3].1);
     // HTML named .png, and SVG, are never served.
     assert_eq!(file("inbox/fake.png", "s").await.0, 415);
     assert_eq!(file("inbox/logo.svg", "s").await.0, 415);
