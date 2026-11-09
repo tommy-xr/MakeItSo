@@ -1821,10 +1821,11 @@ function route() {
 
 // Wide desktop (75rem+, not Quest): Home's list stays up beside the open task (or `#pick` when none is).
 const wide = matchMedia('(min-width: 75rem)');
-const isSplit = (view) => wide.matches && !document.documentElement.classList.contains('vr') && (view === 'list' || view === 'detail');
+const isSplit = (view) => wide.matches && isDesk() && (view === 'list' || view === 'detail');
+const inSplit = () => document.documentElement.classList.contains('split'); // as render() last laid out
 
 function render() {
-  const r = route(), split = isSplit(r.view);
+  const r = route(), split = everOpen && isSplit(r.view);
   document.documentElement.classList.toggle('split', split);
   const live = ws && ws.readyState === WebSocket.OPEN;
   const views = { list: renderList, detail: renderDetail, routines: renderRoutines, apps: renderApps, settings: renderSettings, notes: renderNotes, projects: renderProjects, workers: renderWorkers, machine: renderMachine, session: renderSession };
@@ -1914,7 +1915,7 @@ const SETTLE_MS = 1500, CLICK_MS = 500;
 const presses = new Set(), shown = new Map(); // pointers down on a list; each list's ids as last shown
 let clickTimer = 0, settleTimer = 0;
 const frozen = () => presses.size > 0 || clickTimer !== 0;
-const onList = () => ['list', 'machine'].includes(route().view) || isSplit(route().view);
+const onList = () => ['list', 'machine'].includes(route().view) || inSplit();
 function relist() { if (!frozen() && onList()) render(); }
 function settle() {
   if (!onList()) return; // a scroll elsewhere doesn't hold the list met on return
@@ -1937,7 +1938,7 @@ window.addEventListener('pointercancel', lift, true);
 const liftAll = () => { if (presses.size) { presses.clear(); relist(); } };
 for (const type of ['contextmenu', 'dragstart', 'blur']) window.addEventListener(type, liftAll);
 document.addEventListener('visibilitychange', liftAll);
-window.addEventListener('scroll', settle);
+window.addEventListener('scroll', () => { if (!inSplit()) settle(); }); // split: the window scrolls the task, not the list
 // `threaded(list)`, kept in its last shown order (under `key`) while the lists settle.
 function heldRows(key, list) {
   let rows = threaded(list);
@@ -2036,18 +2037,17 @@ function taskLine(t) {
   return said ? el('div', { className: 'r3 one' }, said) : '';
 }
 function taskRow(t, now, reply) {
-  const a = el('a', { href: `#task/${t.id}` },
-    el('div', { className: 'r1' }, statusDot(t), el('span', { className: 'one' }, reply ? '↳ ' : '', sentTo(t), ...routineHead(t))),
-    el('div', { className: 'r2 one' }, ...dots([t.worker && shortHost(hostOf(t.worker)), t.model, t.status === 'running' ? clock(t) : span(now - changedAt(t))]), diffChip(t)),
-    taskLine(t), evHint(t));
-  if (location.hash === a.getAttribute('href')) a.setAttribute('aria-current', 'page'); // the open task, beside the list when wide
-  return el('li', { className: [reply && 'reply', t.status === 'cancelled' && 'cancelled'].filter(Boolean).join(' ') }, a);
+  return el('li', { className: [reply && 'reply', t.status === 'cancelled' && 'cancelled'].filter(Boolean).join(' ') },
+    el('a', { href: `#task/${t.id}` },
+      el('div', { className: 'r1' }, statusDot(t), el('span', { className: 'one' }, reply ? '↳ ' : '', sentTo(t), ...routineHead(t))),
+      el('div', { className: 'r2 one' }, ...dots([t.worker && shortHost(hostOf(t.worker)), t.model, t.status === 'running' ? clock(t) : span(now - changedAt(t))]), diffChip(t)),
+      taskLine(t), evHint(t)));
 }
 // A thread: its first task, then its replies folded into one line (the most urgent, else the latest); a tap shows them.
 function threadRows(th, now) {
   const first = taskRow(th.root, now);
   if (!th.replies.length) return [first];
-  const open = repliesOpen.has(th.root.id), n = th.replies.length;
+  const open = repliesOpen.has(th.root.id) || (inSplit() && th.replies.some((r) => location.hash === `#task/${r.id}`)), n = th.replies.length;
   const lead = th.replies.reduce((a, t) => (rank(t) <= rank(a) ? t : a));
   const said = (lead.result && lead.result.headline) || snippet(lead.summary) || (isFinished(lead) ? lead.status : lead.activity || lead.status);
   const more = el('button', { type: 'button', className: 'more' }, statusDot(lead), el('span', { className: 'one' }, `↳ ${n} repl${n === 1 ? 'y' : 'ies'} · ${said}`));
@@ -2109,8 +2109,10 @@ function renderList() {
   const body = keys.map((k) => [secHead(label(k)), el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []), ...groups.get(k).flatMap((th) => threadRows(th, now)))]);
   const liveAt = keys.filter((k) => secRank(k) < 2).length;
   if (sessions.length) body.splice(liveAt, 0, [secHead('Live sessions', el('a', { href: '#workers' }, 'All sessions')), el('ul', { className: 'rows' }, ...sessions.map((s) => liveRow(s, now)))]);
-  $('list').replaceChildren(...(isSplit(route().view) ? [el('a', { href: '#new', className: 'newtask' }, '+ New task')] : []), ...body.flat());
-  if (!body.length) $('list').append(el('p', { className: 'dim', style: 'padding: 1rem .375rem' }, 'No tasks yet. Start one below.'));
+  $('list').replaceChildren(...(inSplit() ? [el('a', { href: '#new', className: 'newtask' }, '+ New task')] : []), ...body.flat());
+  // The open task's links (its row, or its message under a live session), beside the list when wide.
+  if (route().view === 'detail') for (const a of $('list').querySelectorAll(`a[href="${location.hash}"]`)) a.setAttribute('aria-current', 'page');
+  if (!body.length) $('list').append(el('p', { className: 'dim', style: 'padding: 1rem .375rem' }, inSplit() ? 'No tasks yet.' : 'No tasks yet. Start one below.'));
 }
 
 const KIND = { pr: 'PR', commit: 'commit', ci_run: 'CI', issue: 'issue', url: 'link', test: 'test', note: 'note' };
@@ -2839,7 +2841,7 @@ function paint() {
     if (!text) continue;
     const rows = document.querySelectorAll(`[data-live="${id}"]`);
     for (const n of rows) n.textContent = lastLine(text);
-    if ((view === 'list' || isSplit(view)) && !rows.length && fresh.has(id)) redraw = true;
+    if ((view === 'list' || inSplit()) && !rows.length && fresh.has(id)) redraw = true;
     if (view !== 'detail' || !detail || !detail.ready || detail.id !== id) continue;
     const body = $('task-convo').querySelector(':scope > .msg.streaming > .body');
     if (!body) { redraw = redraw || fresh.has(id); continue; }
