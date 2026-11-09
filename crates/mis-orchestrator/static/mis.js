@@ -19,8 +19,8 @@
   // The HTTP API under `base` (`/a/<slug>/api/v1/`). GET and POST only. A page loaded as a
   // draft names it on every call, so it never reads or writes live data once the draft is gone.
   function client(base, draft) {
-    const call = async (path, init = {}) => {
-      if (draft) init = { ...init, headers: { ...init.headers, 'X-Mis-Draft': draft } };
+    const call = async (path, init) => {
+      if (draft) init = { ...init, headers: { ...init?.headers, 'X-Mis-Draft': draft } };
       const res = await fetch(base + path, init);
       if (res.ok) return res.json();
       if (res.status === 409) {
@@ -94,6 +94,6 @@
         textDecoration: 'none', boxShadow: '0 1px 4px rgba(0,0,0,.3)' });
       document.body.append(a);
     };
-    if (document.body) show(); else addEventListener('DOMContentLoaded', show);
+    if (document.body) show(); else document.addEventListener('DOMContentLoaded', show);
   }
 })();

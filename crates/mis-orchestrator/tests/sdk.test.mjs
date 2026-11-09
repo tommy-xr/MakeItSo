@@ -13,11 +13,11 @@ const file = (name) => readFileSync(new URL(`../static/${name}`, import.meta.url
 const src = file('mis.js');
 
 // mis.js loaded on /a/demo/<path> from `script`, its fetches answered by `reply(url, init)`; the calls seen.
-function load(reply, search = '', script = 'http://x/a/_/mis.js') {
+function load(reply, search = '', script = 'http://x/a/_/mis.js', cookie = '') {
   const calls = [];
   const g = {
     location: { pathname: '/a/demo/list', search },
-    document: { currentScript: { src: script } },
+    document: { currentScript: { src: script }, cookie, body: null, addEventListener() {} },
     fetch: async (url, init) => {
       calls.push({ url, init });
       return reply(url, init);
@@ -48,6 +48,17 @@ test('mis.js speaks the HTTP API under /a/<slug>/api/v1/', async () => {
   assert.deepEqual(JSON.parse(put.init.body), { op: 'put', space: 'shared', collection: 'notes', id: 'a', rev: 0, data: { t: 1 } });
   assert.equal(list.url, `/a/demo/api/v1/records/me/notes?q=${encodeURIComponent(JSON.stringify(q))}`);
   assert.deepEqual(JSON.parse(remove.init.body), { op: 'remove', space: 'shared', collection: 'notes', id: 'a', rev: 1 });
+});
+
+test('a page loaded as a draft names it on every API call', async () => {
+  const { mis, calls } = load((url) => json(200, url.includes('mutations') ? { record: env } : null), '', undefined, 'a=1; mis-draft-demo=3; mis-draft-other=9');
+  await mis.records.get('shared', 'notes', 'a');
+  await mis.records.put('shared', 'notes', 'a', 0, {});
+  assert.deepEqual(calls.map((c) => c.init.headers['X-Mis-Draft']), ['3', '3']);
+  assert.equal(calls[1].init.headers['Content-Type'], 'application/json');
+  const live = load(() => json(200, null));
+  await live.mis.records.get('shared', 'notes', 'a');
+  assert.equal(live.calls[0].init, undefined);
 });
 
 test('mis.js turns refusals into MisErrors and asks for a missing record as null', async () => {
