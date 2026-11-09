@@ -917,14 +917,14 @@ impl App {
         }
         let bearer = bearer_from(headers).filter(|b| !b.is_empty());
         let listed = |tokens: &[String]| bearer.is_some_and(|b| tokens.iter().any(|t| t == b));
+        let app_bearer = bearer.is_some_and(|b| b.starts_with(app_grant::TOKEN_PREFIX));
         let scope = match &self.token {
+            // First: an app task token is held to its task's app even with no full token set,
+            // and one that has ended opens nothing, not even with a login.
+            _ if app_bearer => Scope::AppTask(app_task?),
             None => Scope::Full,
-            // Before the Access login: that never upgrades a capture or app task token.
+            // Before the Access login: that never upgrades a capture token.
             Some(_) if listed(&self.capture_tokens) => Scope::Capture,
-            // An app task token that has ended opens nothing, not even with a login.
-            Some(_) if bearer.is_some_and(|b| b.starts_with(app_grant::TOKEN_PREFIX)) => {
-                Scope::AppTask(app_task?)
-            }
             Some(t) if passed || bearer == Some(t.as_str()) => Scope::Full,
             Some(_) if listed(&self.read_tokens) => Scope::Read,
             Some(_) => return None,
@@ -1706,6 +1706,13 @@ async fn new_app_task(
     };
     let requester = requester.and_then(|e| app_access::email(&e));
     let bound = app_tasks::binding(&t, requester);
+    if let (Some(apps), Some(slug)) = (app.apps.clone(), bound.slug.clone()) {
+        let exists = tokio::task::spawn_blocking(move || apps.exists(&slug));
+        let exists = exists.await.expect("listing releases doesn't panic");
+        if let Err(why) = app_grant::startable(&bound, exists) {
+            return (StatusCode::BAD_REQUEST, why).into_response();
+        }
+    }
     let model = t.model.filter(|m| !m.trim().is_empty());
     app.transition(
         |l| match l.submit_app_task(prompt, repo, t.harness, model, t.worker, bound) {
@@ -1817,11 +1824,7 @@ async fn publish_app(
     let target = match &bound {
         None => apps::Target::Any,
         Some(b) => match app_grant::publish(b, &slug, params.activate) {
-            Ok(app_grant::Publish::Existing) => apps::Target::Existing,
-            Ok(app_grant::Publish::Create { owner }) => apps::Target::New {
-                owner,
-                thread: b.thread,
-            },
+            Ok(target) => target,
             Err(why) => return (StatusCode::FORBIDDEN, why).into_response(),
         },
     };
@@ -1841,7 +1844,7 @@ async fn publish_app(
             apps::PublishError::NoSuchApp => (StatusCode::NOT_FOUND, "no such app".into()),
             apps::PublishError::Exists => (
                 StatusCode::CONFLICT,
-                format!("{to} exists: this task makes a new app; pick another name"),
+                format!("{to} exists: this task makes a new app, which needs a name of its own"),
             ),
             apps::PublishError::Io(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
         })

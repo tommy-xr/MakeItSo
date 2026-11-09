@@ -16,17 +16,20 @@ live. Nothing you do goes live.
    only there (others use the checkout; never the orchestrator's `<state-dir>/notes` clone):
    `git fetch origin && git worktree add -b <slug>-<what> ../mis-notes-<slug>-<what> origin/main`.
    Never commit to `main`, never force-push.
-2. New app: from the worktree's root, `mis apps new <slug>` (copies `apps/_template`, puts the
-   SDK in `sdk/`; slug: `a-z 0-9 -`, up to 32), then `cd apps/<slug> && npm install`. Read its
-   README. A change: work in `apps/<slug>/`; `npm run sdk` refreshes `sdk/`.
+2. New app: from the worktree's root, `mis apps new <slug>` (copies `apps/_template`; slug:
+   `a-z 0-9 -`, up to 32), then `cd apps/<slug> && npm install`. Read its README. A change:
+   work in `apps/<slug>/`. Every app shares `apps/_sdk/` (SDK, `records.ts` helpers, the vite
+   plugin, the Playwright harness); `npm run sdk` refreshes its SDK files.
 3. Replace the template's sample `items` with the app's own model and screens (see Layout).
    Update the app's README (data model, commands).
 4. `npm run verify` until it passes (see Verify), looking at every shot it writes.
 5. `mis apps publish <slug> dist`: a new staged release on the live orchestrator, the one write
-   to it you may make. Your env holds `MIS_URL` and a `MIS_TOKEN` for this task only: it stages
-   releases of this task's app (a new app: it creates exactly one, under the slug you
-   publish first, owned by whoever asked) and nothing else, and stops working when the task
-   ends. Never `--activate`. If it is refused, say why and leave publishing to the owner.
+   to it you may make. Your env holds `MIS_URL` and this task's own token (`MIS_APP_TOKEN`,
+   which `mis` uses): it stages releases of this task's app (a new app: it creates exactly one,
+   under the slug you publish first, owned by whoever asked), nothing else, and stops working
+   when the task ends. Never `--activate`, `activate`, `share`, `unshare` or `restore`, and
+   never use any other credential on the machine. If it is refused, say why and leave
+   publishing to the owner.
 6. Commit (`feat: …`/`fix: …`), push the branch, open a PR in mis-notes (see PR).
 7. Report the PR URL, the release number and what the owner should try before making it live.
 
@@ -39,10 +42,12 @@ live. Nothing you do goes live.
   what domain functions return and call the store. Keep both thin: logic in either moves to
   `src/domain/`.
 - `src/mock-seed.ts`: invented sample data for mock mode and shots.
+- Generic helpers (listing every page, batched creates, conflict checks) are in
+  `apps/_sdk/records.ts`; use them, and add new generic ones there, not per app.
 
 ## SDK
 
-`mis` (types in `sdk/mis.d.ts`), loaded by `index.html` from `/a/_/mis.js`; never put it in the
+`mis` (types in `apps/_sdk/mis.d.ts`), loaded by `index.html` from `/a/_/mis.js`; never put it in the
 bundle. Use it for every call: the API is GET and POST only, and writes must come from the app's
 own page.
 
@@ -85,7 +90,8 @@ on console errors, CSP violations and HTTP errors. It needs Chrome or
 
 - Playwright is your eyes: open the shots and look at them after every change, as the owner
   would on a phone; fix what looks wrong even when verify passes.
-- Extend the smoke for each new screen and flow, including the viewer UI (`&role=viewer`).
+- Extend the app's `scripts/shots.mjs` (on the `apps/_sdk/shots.mjs` harness) for each new
+  screen and flow, including the viewer UI (`&role=viewer`).
 - Against a real orchestrator only on a throwaway one: clean env, temp state dir AND temp
   routines dir (the default routines dir is the owner's real one), ports of its own, no updates:
 

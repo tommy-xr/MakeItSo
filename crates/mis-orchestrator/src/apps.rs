@@ -520,6 +520,11 @@ impl Apps {
         )
     }
 
+    /// `slug` has a release.
+    pub fn exists(&self, slug: &str) -> bool {
+        !self.release_ns(slug).is_empty()
+    }
+
     /// `slug`'s release numbers, ascending.
     fn release_ns(&self, slug: &str) -> Vec<u32> {
         let Ok(entries) = std::fs::read_dir(self.releases_dir(slug)) else {

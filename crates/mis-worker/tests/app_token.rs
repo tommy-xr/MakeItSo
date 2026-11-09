@@ -11,6 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// Stands in for claude: writes what it was given to `env-<task>` in its folder, then waits.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 echo '{"type":"system","subtype":"init","session_id":"s1","model":"fake"}'
+[ "$MIS_APP_TOKEN" = "$MIS_TOKEN" ] || exit 1
 printf '%s\n%s\n' "$MIS_URL" "$MIS_TOKEN" > "$PWD/env-$MIS_TASK"
 exec sleep 300
 "#;

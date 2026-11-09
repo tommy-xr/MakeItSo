@@ -1,5 +1,5 @@
-//! `mis apps sdk` and `mis apps new`: an app's dev copy of the SDK, and a new app from a
-//! template folder. Local files only; no orchestrator.
+//! `mis apps sdk` and `mis apps new`: the apps repo's dev copy of the SDK, and a new app from
+//! a template folder. Local files only; no orchestrator.
 
 use std::path::{Path, PathBuf};
 
@@ -20,9 +20,6 @@ pub const SDK: [(&str, &str); 3] = [
         include_str!("../../mis-orchestrator/static/mis.d.ts"),
     ),
 ];
-
-/// Where `mis apps new` puts an app's SDK copy, for its dev server and type-checks.
-pub const SDK_DIR: &str = "sdk";
 
 /// Template folders that are build output, not template.
 const SKIP: [&str; 3] = ["node_modules", "dist", ".git"];
@@ -61,7 +58,7 @@ pub fn fill(text: &str, slug: &str, title: &str) -> String {
 }
 
 /// Copies `template` to `dest` (which must not exist), filling placeholders in UTF-8 files and
-/// leaving others as they are, then writes the SDK into `dest/sdk`. Built beside `dest` and
+/// leaving others as they are; apps share the repo's `apps/_sdk/`. Built beside `dest` and
 /// renamed into place, so a failure leaves nothing behind.
 pub fn new_app(template: &Path, dest: &Path, slug: &str, title: &str) -> Result<()> {
     if !mis_types::valid_slug(slug) {
@@ -92,7 +89,7 @@ pub fn new_app(template: &Path, dest: &Path, slug: &str, title: &str) -> Result<
     ));
     // Not create_dir_all: a leftover from a crashed run must not be merged in.
     std::fs::create_dir(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-    let built = copy(template, &tmp, slug, title).and_then(|()| write_sdk(&tmp.join(SDK_DIR)));
+    let built = copy(template, &tmp, slug, title);
     let done = built.and_then(|()| {
         // Checked again: another `new` may have made it meanwhile (rename would replace an empty one).
         if dest.exists() {
@@ -165,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn new_copies_a_template_fills_it_and_adds_the_sdk() {
+    fn new_copies_a_template_and_fills_it() {
         let root = std::env::temp_dir().join(format!("mis-new-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let t = root.join("apps/_template");
@@ -188,9 +185,7 @@ mod tests {
         assert_eq!(read(".gitignore"), "node_modules\n");
         assert_eq!(std::fs::read(dest.join("icon.png")).unwrap(), png);
         assert!(!dest.join("node_modules").exists() && !dest.join("dist").exists());
-        for (name, body) in SDK {
-            assert_eq!(read(&format!("sdk/{name}")), body);
-        }
+        assert!(!dest.join("sdk").exists());
         // Never over an existing app; nothing left behind by a refusal.
         std::fs::write(dest.join("app.json"), "mine").unwrap();
         assert!(new_app(&t, &dest, "demo", "Demo").is_err());

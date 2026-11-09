@@ -5565,6 +5565,20 @@ async fn a_new_app_task_token_creates_one_app_owned_by_whoever_asked() {
         201
     );
     let (_, mut worker) = join_as(&mis).await;
+    // Never started: a new app named like one that exists, a change to one that doesn't.
+    for (body, why) in [
+        (
+            r#"{"request":"x","slug":"pool","harness":"claude"}"#,
+            "exists",
+        ),
+        (
+            r#"{"request":"x","slug":"nope","change":true,"harness":"claude"}"#,
+            "no app",
+        ),
+    ] {
+        let (status, got) = post_json(&mis, "/api/apps/tasks", "s", body).await;
+        assert!(status == 400 && got.contains(why), "{status} {got}");
+    }
     let jwt = access_jwt_for(ACCESS_AUD, "Me@Example.com");
     let new = serde_json::json!({"request": "Chores.", "harness": "claude"});
     let (_, token) = app_task(
@@ -5625,5 +5639,36 @@ async fn a_new_app_task_token_creates_one_app_owned_by_whoever_asked() {
         .unwrap()
         .members
         .is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn with_no_full_token_set_an_app_task_token_is_still_held_to_its_app() {
+    let (mis, _, dir) = start_with_apps(App::new(None)).await;
+    assert_eq!(
+        publish(&mis, "/api/apps/pool/releases", "", &demo("v1"))
+            .await
+            .0,
+        201
+    );
+    let (_, mut worker) = join_as(&mis).await;
+    let change = serde_json::json!({"request": "x", "slug": "pool", "change": true,
+        "harness": "claude"});
+    let (_, token) = app_task(&mis, &mut worker, &[], change).await;
+    let live = "/api/apps/pool/releases?activate=true";
+    assert_eq!(publish(&mis, live, &token, &demo("v2")).await.0, 403);
+    let (status, _) = post_json(&mis, "/api/apps/pool/activate", &token, r#"{"release":1}"#).await;
+    assert_eq!(status, 401);
+    assert_eq!(
+        publish(
+            &mis,
+            "/api/apps/pool/releases",
+            "mis-app-ended",
+            &demo("v2")
+        )
+        .await
+        .0,
+        401
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }

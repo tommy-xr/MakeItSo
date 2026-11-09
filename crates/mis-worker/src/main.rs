@@ -985,9 +985,14 @@ async fn run(
         *base.lock().unwrap() =
             git::base(&cwd, &ctx.roots, task.diff_base.clone().map(|b| *b)).await;
     }
-    // An app task's agent reaches the orchestrator with its own token, never the worker's.
+    // An app task's agent reaches the orchestrator with its own token, never the worker's;
+    // `mis` prefers MIS_APP_TOKEN, which a shell profile exporting MIS_TOKEN leaves alone.
     let env: Vec<(&str, &str)> = match &token {
-        Some(t) => vec![("MIS_URL", ctx.url.as_str()), ("MIS_TOKEN", t.as_str())],
+        Some(t) => vec![
+            ("MIS_URL", ctx.url.as_str()),
+            ("MIS_TOKEN", t.as_str()),
+            ("MIS_APP_TOKEN", t.as_str()),
+        ],
         None => vec![],
     };
     let (atx, mut arx) = mpsc::channel(64);

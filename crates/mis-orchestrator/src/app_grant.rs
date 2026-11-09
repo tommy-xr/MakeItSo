@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::apps::Target;
+
 /// The app an app task's thread works on; replies in the thread share it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Binding {
@@ -19,27 +21,30 @@ pub struct Binding {
     pub requester: Option<String>,
 }
 
-/// What a publish with the token does.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Publish {
-    /// A staged release of an app that exists.
-    Existing,
-    /// The thread's new app, with its first staged release, owned by `owner`.
-    Create { owner: Option<String> },
-}
-
-/// Whether `b`'s token may publish `slug` (`activate`: live at once). Err: why not.
-pub fn publish(b: &Binding, slug: &str, activate: bool) -> Result<Publish, String> {
+/// Which apps `b`'s token may publish `slug` into (`activate`: live at once): the app it is
+/// bound to, or the thread's new one, owned by its requester. Err: why not.
+pub fn publish(b: &Binding, slug: &str, activate: bool) -> Result<Target, String> {
     if activate {
         return Err("an app task stages releases; the owner makes them live".into());
     }
     match (&b.slug, b.create) {
         (Some(s), _) if s != slug => Err(format!("this task's app is {s}")),
-        (_, true) => Ok(Publish::Create {
+        (_, true) => Ok(Target::New {
             owner: b.requester.clone(),
+            thread: b.thread,
         }),
-        (Some(_), false) => Ok(Publish::Existing),
+        (Some(_), false) => Ok(Target::Existing),
         (None, false) => Err("this task has no app".into()),
+    }
+}
+
+/// Whether a task bound as `b` is worth starting, `exists` saying if its named app has a
+/// release: a new app can't take a name in use, a change needs its app. Err: why not.
+pub fn startable(b: &Binding, exists: bool) -> Result<(), String> {
+    match (&b.slug, b.create, exists) {
+        (Some(s), true, true) => Err(format!("{s} exists already: ask for a change to it")),
+        (Some(s), false, false) => Err(format!("there is no app {s} to change")),
+        _ => Ok(()),
     }
 }
 
@@ -87,7 +92,7 @@ mod tests {
     #[test]
     fn a_change_stages_only_its_own_app_and_never_activates() {
         let b = binding(Some("pool"), false);
-        assert_eq!(publish(&b, "pool", false), Ok(Publish::Existing));
+        assert_eq!(publish(&b, "pool", false), Ok(Target::Existing));
         assert!(publish(&b, "budget", false).unwrap_err().contains("pool"));
         assert!(publish(&b, "pool", true).unwrap_err().contains("owner"));
     }
@@ -97,8 +102,9 @@ mod tests {
         let owner = Some("me@example.com".to_string());
         // The agent picks the slug: any, until one exists.
         let b = binding(None, true);
-        let create = Ok(Publish::Create {
+        let create = Ok(Target::New {
             owner: owner.clone(),
+            thread: Uuid::nil(),
         });
         assert_eq!(publish(&b, "chores", false), create);
         assert_eq!(publish(&b, "pool", false), create);
@@ -108,7 +114,7 @@ mod tests {
         assert_eq!(publish(&r, "chores", false), create);
         assert!(publish(&r, "pool", false).is_err());
         let b = created(b, "chores");
-        assert_eq!(publish(&b, "chores", false), Ok(Publish::Existing));
+        assert_eq!(publish(&b, "chores", false), Ok(Target::Existing));
         assert!(publish(&b, "pool", false).is_err());
         // The user named it: only that one.
         let b = binding(Some("chores"), true);
@@ -116,9 +122,20 @@ mod tests {
         assert!(publish(&b, "pool", false).is_err());
         assert_eq!(
             publish(&created(b, "chores"), "chores", false),
-            Ok(Publish::Existing)
+            Ok(Target::Existing)
         );
         assert!(publish(&binding(None, false), "x", false).is_err());
+    }
+
+    #[test]
+    fn a_new_app_needs_a_free_name_and_a_change_its_app() {
+        assert!(startable(&binding(Some("pool"), true), true)
+            .unwrap_err()
+            .contains("change"));
+        assert!(startable(&binding(Some("pool"), false), false).is_err());
+        assert!(startable(&binding(Some("pool"), true), false).is_ok());
+        assert!(startable(&binding(Some("pool"), false), true).is_ok());
+        assert!(startable(&binding(None, true), true).is_ok());
     }
 
     #[test]

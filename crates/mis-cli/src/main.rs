@@ -17,6 +17,10 @@ struct Args {
     url: String,
     #[arg(long, env = "MIS_TOKEN")]
     token: Option<String>,
+    /// An app task's own token, used instead of --token: set by the worker beside MIS_TOKEN,
+    /// as shells that source a profile exporting MIS_TOKEN would replace that one.
+    #[arg(long, env = "MIS_APP_TOKEN", hide = true, hide_env_values = true)]
+    app_token: Option<String>,
     /// Cloudflare Access service-token id; needs --cf-access-client-secret.
     #[arg(long, env = "CF_ACCESS_CLIENT_ID")]
     cf_access_client_id: Option<String>,
@@ -149,11 +153,11 @@ enum AppsCmd {
     Backups { slug: String },
     /// Snapshot the app's records now.
     Backup { slug: String },
-    /// Write the SDK this CLI was built with (mis.js, mis-mock.js, mis.d.ts) into `dir`, for an
-    /// app's dev server to serve at `/a/_/` and its type-checks.
+    /// Write the SDK this CLI was built with (mis.js, mis-mock.js, mis.d.ts) into `dir` (the
+    /// repo's `apps/_sdk`), for the apps' dev servers to serve at `/a/_/` and their type-checks.
     Sdk { dir: std::path::PathBuf },
     /// Start app `slug` in `./apps/<slug>` from a template folder, filling `{{slug}}` and
-    /// `{{title}}` in its text files, with the SDK in `sdk/`. Never over an existing folder.
+    /// `{{title}}` in its text files; it uses the repo's `apps/_sdk/`. Never over an existing folder.
     New {
         slug: String,
         #[arg(long, default_value = "apps/_template")]
@@ -1048,7 +1052,10 @@ fn unix_ms() -> u64 {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    let args = Args::parse();
+    let mut args = Args::parse();
+    if args.app_token.is_some() {
+        args.token = args.app_token.take();
+    }
     let waits = matches!(
         args.cmd,
         Cmd::Task { wait: true, .. } | Cmd::Reply { wait: true, .. }
