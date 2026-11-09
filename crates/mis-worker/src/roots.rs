@@ -1,6 +1,6 @@
 //! Roots: the directories this worker may run tasks in.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// `MIS_ROOTS` / `--root` / prompt value -> paths. Splits on `,` and the
 /// platform path separator (`:` on unix), e.g. "/a, /b:/c" -> [/a, /b, /c].
@@ -25,18 +25,19 @@ pub fn canonical_roots(roots: &[PathBuf]) -> anyhow::Result<Vec<PathBuf>> {
 }
 
 /// Task cwd -> directory to run in. `roots` must be canonical and non-empty.
-/// None -> first root; relative -> joined to the first root; either way the
-/// canonical result must sit under some root (so `../..` escapes, or a root
-/// swapped for a symlink, are refused).
+/// None -> first root; `~/x` -> under this user's home; relative -> joined to
+/// the first root; either way the canonical result must sit under some root
+/// (so `../..` escapes, or a root swapped for a symlink, are refused).
 pub fn resolve_cwd(roots: &[PathBuf], requested: Option<&str>) -> Result<PathBuf, String> {
     let Some(first) = roots.first() else {
         return Err("worker has no roots".into());
     };
     let first_str = first.to_string_lossy();
     let req = requested.unwrap_or(&first_str);
-    let path = Path::new(req);
+    // The orchestrator can't know this machine's home.
+    let path = crate::permissions::expand(req, std::env::home_dir().as_deref());
     let joined = if path.is_absolute() {
-        path.to_path_buf()
+        path
     } else {
         first.join(path)
     };
@@ -115,6 +116,15 @@ mod tests {
         assert!(e.contains("outside"), "{e}");
         let e = resolve_cwd(&roots, Some("../sub/../..")).unwrap_err();
         assert!(e.contains("outside"), "{e}");
+    }
+
+    #[test]
+    fn tilde_is_the_home_dir() {
+        let Some(home) = std::env::home_dir().and_then(|h| h.canonicalize().ok()) else {
+            return;
+        };
+        let got = resolve_cwd(std::slice::from_ref(&home), Some("~/"));
+        assert_eq!(got.unwrap(), home);
     }
 
     #[test]

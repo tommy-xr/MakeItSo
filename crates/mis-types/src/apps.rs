@@ -5,10 +5,34 @@ use serde::{Deserialize, Serialize};
 /// Most characters in an app's title.
 pub const MAX_APP_TITLE_CHARS: usize = 80;
 
+/// What [`valid_slug`] wants, for error messages.
+pub const SLUG_RULE: &str =
+    "an app's name is a-z, 0-9 and -, up to 32, starting with a letter or digit";
+
 /// An app's name and path segment: `[a-z0-9][a-z0-9-]{0,31}`, e.g. `pool`, `chores-2`.
 pub fn valid_slug(s: &str) -> bool {
     let ok = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
     (1..=32).contains(&s.len()) && s.starts_with(ok) && s.chars().all(|c| ok(c) || c == '-')
+}
+
+/// `POST /api/apps/tasks`: a task that builds a new app, or changes one. It runs in the
+/// settings' apps repo with the apps guide (`guides/apps.md`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AppTask {
+    /// What the user wants, in their words.
+    pub request: String,
+    /// The app; a new one's may be left to the agent.
+    #[serde(default)]
+    pub slug: Option<String>,
+    /// Change app `slug` rather than build one.
+    #[serde(default)]
+    pub change: bool,
+    pub harness: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Only this worker runs it; None: any running `harness`.
+    #[serde(default)]
+    pub worker: Option<uuid::Uuid>,
 }
 
 /// An app as `GET /api/apps` lists it.

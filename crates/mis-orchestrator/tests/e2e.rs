@@ -3410,6 +3410,155 @@ async fn settings_take_defaults_save_and_need_full_access() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A worker running claude, joined with the full token `s`.
+async fn join_as(base: &str) -> (WorkerId, Ws) {
+    let mut req = format!("{base}/ws/worker").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("authorization", "Bearer s".parse().unwrap());
+    let (mut ws, _) = connect_async(req).await.unwrap();
+    let id = WorkerId::new_v4();
+    let hello = WorkerMsg::Hello {
+        id,
+        info: info("claude"),
+        running: vec![],
+    };
+    send(&mut ws, &hello).await;
+    let OrchMsg::Welcome { .. } = recv(&mut ws).await else {
+        panic!("welcome")
+    };
+    (id, ws)
+}
+
+#[tokio::test]
+async fn new_app_task_runs_the_apps_guide_in_the_settings_repo_and_its_replies_never_merge() {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-app-task-{}", uuid::Uuid::new_v4()));
+    let base = start_app(with_read_token().with_ledger_dir(dir.clone())).await;
+    let mut s = Settings::default();
+    s.apps.repo = "~/code/household".into();
+    let s = serde_json::to_string(&s).unwrap();
+    assert_eq!(post_json(&base, "/api/settings", "s", &s).await.0, 204);
+    let (_, mut worker) = join_as(&base).await;
+
+    let body =
+        r#"{"request":"Track pool chlorine.","slug":"pool","harness":"claude","model":"opus"}"#;
+    assert_eq!(post_json(&base, "/api/apps/tasks", "r", body).await.0, 403);
+    let (status, created) = post_json(&base, "/api/apps/tasks", "s", body).await;
+    assert_eq!(status, 201, "{created}");
+    let id: TaskId = serde_json::from_value(
+        serde_json::from_str::<serde_json::Value>(&created).unwrap()["task"].clone(),
+    )
+    .unwrap();
+    let OrchMsg::Assign { task, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    assert_eq!(task.id, id);
+    assert!(task
+        .prompt
+        .starts_with("Build a new Make It So app, slug `pool`."));
+    assert!(task.prompt.contains("Request:\nTrack pool chlorine.\n"));
+    assert!(task
+        .prompt
+        .ends_with(mis_types::guides::guide("apps").unwrap()));
+    assert_eq!(task.cwd.as_deref(), Some("~/code/household"));
+    assert_eq!(
+        (task.harness.as_str(), task.model.as_deref()),
+        ("claude", Some("opus"))
+    );
+    assert_eq!(task.merge, MergeRule::Never);
+
+    // A reply in its thread resumes the session, and can't merge either.
+    let (mut client, _) = connect_async(client_req(&base, &[("authorization", "Bearer s")]))
+        .await
+        .unwrap();
+    send(&mut client, &ClientMsg::Subscribe).await;
+    for event in [
+        AgentEvent::Started {
+            session: Some("sess-1".into()),
+            model: None,
+        },
+        AgentEvent::Finished {
+            ok: true,
+            summary: Some("PR opened".into()),
+        },
+    ] {
+        send(&mut worker, &WorkerMsg::Event { task: id, event }).await;
+        let _: ServerMsg = recv(&mut client).await;
+    }
+    let again = reply(&mut client, id, "Looks good, merge it.").await;
+    let OrchMsg::Assign { task, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    assert_eq!((task.id, task.resume.as_deref()), (again, Some("sess-1")));
+    assert_eq!(task.merge, MergeRule::Never);
+
+    // A blank request or an unknown harness starts nothing.
+    for bad in [
+        r#"{"request":" ","harness":"claude"}"#,
+        r#"{"request":"x","harness":"gpt"}"#,
+    ] {
+        assert_eq!(
+            post_json(&base, "/api/apps/tasks", "s", bad).await.0,
+            400,
+            "{bad}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn change_app_task_runs_only_on_the_picked_worker() {
+    let base = start_app(with_read_token()).await;
+    let (_, mut first) = join_as(&base).await;
+    let (picked, mut second) = join_as(&base).await;
+    let body = serde_json::json!({
+        "request": "Add a pH chart.", "slug": "pool", "change": true,
+        "harness": "claude", "worker": picked,
+    });
+    let (status, reply) = post_json(&base, "/api/apps/tasks", "s", &body.to_string()).await;
+    assert_eq!(status, 201, "{reply}");
+    let OrchMsg::Assign { task, .. } = recv(&mut second).await else {
+        panic!("assign")
+    };
+    assert!(task
+        .prompt
+        .starts_with("Change the Make It So app `pool` (`apps/pool/`)."));
+    // No state dir: the default repo; no model: the harness's.
+    assert_eq!(
+        (task.cwd.as_deref(), task.model),
+        (Some("~/code/mis-notes"), None)
+    );
+
+    // Another for the busy picked worker waits for it, though the other one is idle.
+    let (status, reply) = post_json(&base, "/api/apps/tasks", "s", &body.to_string()).await;
+    assert_eq!(status, 201, "{reply}");
+    let other = tokio::time::timeout(std::time::Duration::from_millis(200), recv(&mut first));
+    if let Ok(OrchMsg::Assign { .. }) = other.await {
+        panic!("the other worker got it");
+    }
+    let done = AgentEvent::Finished {
+        ok: true,
+        summary: None,
+    };
+    send(
+        &mut second,
+        &WorkerMsg::Event {
+            task: task.id,
+            event: done,
+        },
+    )
+    .await;
+    let OrchMsg::Assign { task: next, .. } = recv(&mut second).await else {
+        panic!("assign")
+    };
+    assert_ne!(next.id, task.id);
+
+    // A worker that isn't connected can't be picked.
+    let gone = serde_json::json!({ "request": "x", "slug": "pool", "change": true,
+        "harness": "claude", "worker": WorkerId::new_v4() });
+    let (status, why) = post_json(&base, "/api/apps/tasks", "s", &gone.to_string()).await;
+    assert!(status == 400 && why.contains("offline"), "{status} {why}");
+}
+
 #[tokio::test]
 async fn acting_routine_runs_dry_until_switched_live() {
     let dir = std::env::temp_dir().join(format!("mis-e2e-act-{}", uuid::Uuid::new_v4()));

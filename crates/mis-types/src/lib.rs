@@ -13,8 +13,8 @@ mod access;
 pub use access::access_headers;
 mod apps;
 pub use apps::{
-    valid_slug, AppBackup, AppMe, AppMember, AppRelease, AppRole, AppView, BackupKind,
-    RestoreBackup, Restored, SetMember, MAX_APP_TITLE_CHARS,
+    valid_slug, AppBackup, AppMe, AppMember, AppRelease, AppRole, AppTask, AppView, BackupKind,
+    RestoreBackup, Restored, SetMember, MAX_APP_TITLE_CHARS, SLUG_RULE,
 };
 pub mod diff;
 pub use diff::{DiffBase, DiffStat, TaskDiff};

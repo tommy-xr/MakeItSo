@@ -65,9 +65,7 @@ pub fn fill(text: &str, slug: &str, title: &str) -> String {
 /// renamed into place, so a failure leaves nothing behind.
 pub fn new_app(template: &Path, dest: &Path, slug: &str, title: &str) -> Result<()> {
     if !mis_types::valid_slug(slug) {
-        bail!(
-            "{slug:?}: an app's name is a-z, 0-9 and -, up to 32, starting with a letter or digit"
-        );
+        bail!("{slug:?}: {}", mis_types::SLUG_RULE);
     }
     check_title(title)?;
     if !template.is_dir() {
