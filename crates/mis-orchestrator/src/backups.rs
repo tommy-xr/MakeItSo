@@ -297,12 +297,8 @@ fn snapshot(app: &Path, conn: &Connection, take: Take, mut at: u64) -> anyhow::R
     };
     let side = file(app, &name, SIDECAR);
     crate::push::write_private(&side, &policy)?;
-    // Copied to a temp name, so a half-written snapshot is never listed.
-    let tmp = app.join(DIR).join(format!(".tmp-{}", uuid::Uuid::new_v4()));
     let dst = file(app, &name, DB);
-    let copied = copy_to(conn, &tmp).and_then(|()| Ok(std::fs::rename(&tmp, &dst)?));
-    if let Err(e) = copied {
-        let _ = std::fs::remove_file(&tmp);
+    if let Err(e) = copy_whole(conn, &dst) {
         let _ = std::fs::remove_file(&side);
         return Err(e);
     }
@@ -325,7 +321,20 @@ fn prune_kind(app: &Path, kind: BackupKind) {
 }
 
 /// `conn`'s database into new file `to` (`0600`), in rollback-journal mode so it is one file.
-pub(crate) fn copy_to(conn: &Connection, to: &Path) -> anyhow::Result<()> {
+/// [`copy_to`] a temp name beside `to`, then renamed: a half-written copy is never seen.
+pub(crate) fn copy_whole(conn: &Connection, to: &Path) -> anyhow::Result<()> {
+    let dir = to
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{} has no folder", to.display()))?;
+    let tmp = dir.join(format!(".tmp-{}", uuid::Uuid::new_v4()));
+    let copied = copy_to(conn, &tmp).and_then(|()| Ok(std::fs::rename(&tmp, to)?));
+    if copied.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    copied
+}
+
+fn copy_to(conn: &Connection, to: &Path) -> anyhow::Result<()> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]

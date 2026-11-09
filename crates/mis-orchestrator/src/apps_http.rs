@@ -11,10 +11,10 @@ use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
-use mis_types::{AppMe, AppRole, BatchWritten, Conflict, Export, RecordQuery, Space, Written};
+use mis_types::{AppMe, BatchWritten, Conflict, Export, RecordQuery, Space, Written};
 
 use crate::access_gate::{AccessGate, JWT_HEADER};
-use crate::app_access::{self, Action, Member, Subject};
+use crate::app_access::{self, Action, Member, Serve, Subject};
 use crate::apps::{self, Apps};
 use crate::records::{self, Refusal, Writes};
 use crate::records_db::Records;
@@ -140,7 +140,12 @@ async fn guard(
         Err(refused) => refused.into_response(),
     };
     let h = resp.headers_mut();
-    if let Some(clear) = stale.and_then(|c| HeaderValue::from_str(&c).ok()) {
+    // Not over one the handler set (`?draft=<n>` entering the current draft).
+    let set = h.contains_key(header::SET_COOKIE);
+    if let Some(clear) = stale
+        .filter(|_| !set)
+        .and_then(|c| HeaderValue::from_str(&c).ok())
+    {
         h.append(header::SET_COOKIE, clear);
     }
     h.insert(
@@ -160,17 +165,23 @@ async fn guard(
     resp
 }
 
-/// A `Set-Cookie` dropping the draft cookie `req` carries if it no longer applies (the draft
-/// was replaced or decided, or the asker isn't its owner).
+/// A `Set-Cookie` dropping the draft cookie a page or file request carries if it no longer
+/// applies (the draft was replaced or decided, or the asker isn't its owner).
 fn stale_draft_cookie(req: &Request) -> Option<String> {
     req.extensions()
         .get::<Member>()
         .filter(|m| m.draft.is_none())?;
     let slug = app_access::app_of(req.uri().path())?;
-    let name = format!("{}=", app_access::draft_cookie_name(slug));
-    let cookies = req.headers().get(header::COOKIE)?.to_str().ok()?;
-    (cookies.split(';').any(|c| c.trim().starts_with(&name)))
-        .then(|| app_access::draft_cookie(slug, None, crate::via_cloudflare(req.headers())))
+    let cookies = req
+        .headers()
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok());
+    app_access::cookie_draft(cookies, slug)?;
+    Some(app_access::draft_cookie(
+        slug,
+        None,
+        crate::via_cloudflare(req.headers()),
+    ))
 }
 
 /// Host check, then who is asking; under `/a/<slug>` also their role there. Puts a
@@ -227,13 +238,23 @@ async fn admit(
     let role = app_access::role_of(&policy.unwrap_or_default(), &subject)
         .ok_or((StatusCode::FORBIDDEN, "this app isn't shared with you"))?;
     let role = dev_role.unwrap_or(role);
-    // Read only when a draft cookie rides along.
-    let cookies = req
-        .headers()
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok());
-    let current = cookies.and_then(|_| apps.draft(slug)).map(|d| d.release);
-    let draft = app_access::draft_of(cookies, slug, role, current);
+    // A page goes by its cookie, an API call by the header its page's `mis.js` sends.
+    let h = |name| req.headers().get(name).and_then(|v| v.to_str().ok());
+    let api = apps::reserved(req.uri().path().splitn(4, '/').nth(3).unwrap_or(""));
+    let asked = match api {
+        true => h(app_access::DRAFT_HEADER).map(|v| v.parse().unwrap_or(0)),
+        false => app_access::cookie_draft(h(header::COOKIE.as_str()), slug),
+    };
+    // Read only when a draft is asked for.
+    let current = asked.and_then(|_| apps.draft(slug)).map(|d| d.release);
+    let draft = match app_access::draft_of(asked, api, role, current) {
+        Serve::Live => None,
+        Serve::Draft(n) => Some(n),
+        Serve::Gone => {
+            let why = "this draft was published, discarded or replaced: reload the page";
+            return Err((StatusCode::CONFLICT, why));
+        }
+    };
     req.extensions_mut().insert(Member {
         subject,
         role,
@@ -398,11 +419,17 @@ fn serving(apps: &Apps, slug: &str, m: &Member) -> Option<apps::Live> {
     }
 }
 
-/// Where `m`'s records reads and writes go: the draft's copy while trying it, else the app's.
-fn store(apps: &Apps, slug: &str, m: &Member) -> anyhow::Result<String> {
+/// `f` on the records `m` reads and writes: the draft's copy while trying it (held so the
+/// draft can't end mid-call), else the app's.
+fn with_store<T>(
+    apps: &Apps,
+    slug: &str,
+    m: &Member,
+    f: impl FnOnce(&str) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
     match m.draft {
-        Some(_) => apps.sandbox(slug),
-        None => Ok(slug.to_string()),
+        Some(n) => apps.in_draft(slug, n, f),
+        None => f(slug),
     }
 }
 
@@ -452,19 +479,19 @@ async fn mutate(
         if let Some(r) = denied(&apps, &slug, &m, Action::Write) {
             return r;
         }
-        let key = match store(&apps, &slug, &m) {
-            Ok(k) => k,
-            Err(e) => return failed(&slug, e),
-        };
         let (who, now) = (m.subject.name(), crate::unix_ms());
         match records::parse_writes(&body) {
             Err(why) => (StatusCode::BAD_REQUEST, why).into_response(),
-            Ok(Writes::One(op)) => match records.mutate(&key, &op, who, now) {
-                Ok(Ok(record)) => Json(Written { record }).into_response(),
-                Ok(Err(r)) => refused(r, None),
-                Err(e) => failed(&slug, e),
-            },
-            Ok(Writes::Batch(ops)) => match records.mutate_all(&key, &ops, who, now) {
+            Ok(Writes::One(op)) => {
+                match with_store(&apps, &slug, &m, |key| records.mutate(key, &op, who, now)) {
+                    Ok(Ok(record)) => Json(Written { record }).into_response(),
+                    Ok(Err(r)) => refused(r, None),
+                    Err(e) => failed(&slug, e),
+                }
+            }
+            Ok(Writes::Batch(ops)) => match with_store(&apps, &slug, &m, |key| {
+                records.mutate_all(key, &ops, who, now)
+            }) {
                 Ok(Ok(records)) => Json(BatchWritten { records }).into_response(),
                 Ok(Err((i, r))) => refused(r, Some(i)),
                 Err(e) => failed(&slug, e),
@@ -501,11 +528,7 @@ async fn list(
             Ok(c) => c,
             Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
         };
-        let key = match store(&apps, &slug, &m) {
-            Ok(k) => k,
-            Err(e) => return failed(&slug, e),
-        };
-        match records.list(&key, &q, &c) {
+        match with_store(&apps, &slug, &m, |key| records.list(key, &q, &c)) {
             Ok(page) => Json(page).into_response(),
             Err(e) => failed(&slug, e),
         }
@@ -541,12 +564,10 @@ async fn get_record(
         if !records::valid_collection(&collection) || !records::valid_id(&id) {
             return (StatusCode::BAD_REQUEST, "bad collection or id").into_response();
         }
-        let key = match store(&apps, &slug, &m) {
-            Ok(k) => k,
-            Err(e) => return failed(&slug, e),
-        };
         let owner = records::owner(space, m.subject.name());
-        match records.get(&key, space, owner, &collection, &id) {
+        match with_store(&apps, &slug, &m, |key| {
+            records.get(key, space, owner, &collection, &id)
+        }) {
             Ok(Some(e)) => Json(e).into_response(),
             Ok(None) if params.missing.is_some() => Json(serde_json::Value::Null).into_response(),
             Ok(None) => (StatusCode::NOT_FOUND, "no such record").into_response(),
@@ -567,12 +588,8 @@ async fn export(
         if let Some(r) = denied(&apps, &slug, &m, Action::Read) {
             return r;
         }
-        let key = match store(&apps, &slug, &m) {
-            Ok(k) => k,
-            Err(e) => return failed(&slug, e),
-        };
         let user = m.subject.name();
-        match records.visible(&key, user) {
+        match with_store(&apps, &slug, &m, |key| records.visible(key, user)) {
             Ok((shared, me)) => Json(Export {
                 version: 1,
                 app: slug,
@@ -619,10 +636,12 @@ async fn entry(
         };
         if let Some(n) = n {
             let current = apps::valid_slug(&slug).then(|| apps.draft(&slug)).flatten();
-            if m.role != AppRole::Owner || current.is_none_or(|d| d.release != n) {
+            let current = current.map(|d| d.release);
+            if app_access::draft_of(Some(n), true, m.role, current) != Serve::Draft(n) {
                 return (StatusCode::NOT_FOUND, "no such draft").into_response();
             }
-            if let Err(e) = apps.sandbox(&slug) {
+            // Its copy of the records is taken now, from the app's as they are.
+            if let Err(e) = apps.in_draft(&slug, n, |_| Ok(())) {
                 return failed(&slug, e);
             }
         }

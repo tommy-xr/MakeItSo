@@ -82,22 +82,41 @@ pub fn draft_cookie_name(slug: &str) -> String {
     format!("mis-draft-{slug}")
 }
 
-/// The draft a request tries: its `Cookie` header names `current` (the app's draft now) and
-/// it comes from the owner. Anything else (a stale cookie, an editor) gets the live app.
-pub fn draft_of(
-    cookies: Option<&str>,
-    slug: &str,
-    role: AppRole,
-    current: Option<u32>,
-) -> Option<u32> {
+/// Header `mis.js` sends on each API call from a page loaded as a draft: its release. The
+/// API goes by it, not the cookie, so a page left open after the draft ends (or after another
+/// tab left it) can't write to the live records.
+pub const DRAFT_HEADER: &str = "x-mis-draft";
+
+/// The draft release `Cookie` header `cookies` names for `slug`, if any.
+pub fn cookie_draft(cookies: Option<&str>, slug: &str) -> Option<u32> {
     let name = draft_cookie_name(slug);
-    let asked: u32 = (cookies?.split(';'))
+    (cookies?.split(';'))
         .filter_map(|c| c.trim().split_once('='))
         .find(|(k, _)| *k == name)?
         .1
         .parse()
-        .ok()?;
-    (role == AppRole::Owner && current == Some(asked)).then_some(asked)
+        .ok()
+}
+
+/// What a request gets of an app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Serve {
+    Live,
+    /// Its owner trying draft release n.
+    Draft(u32),
+    /// An API call for a draft that no longer applies (replaced, decided, not the owner): it
+    /// must not fall back to live data.
+    Gone,
+}
+
+/// What a request asking for draft `asked` (cookie or header) gets, `current` being the app's
+/// draft now.
+pub fn draft_of(asked: Option<u32>, api: bool, role: AppRole, current: Option<u32>) -> Serve {
+    match asked {
+        Some(n) if role == AppRole::Owner && current == Some(n) => Serve::Draft(n),
+        Some(_) if api => Serve::Gone,
+        _ => Serve::Live,
+    }
 }
 
 /// `Set-Cookie` entering draft `n` of `slug`, or (None) leaving it. `secure` over HTTPS.
@@ -247,16 +266,19 @@ mod tests {
     fn only_the_owner_tries_the_current_draft_named_by_its_cookie() {
         use AppRole::*;
         let c = Some("a=1; mis-draft-pool=3; mis-draft-budget=7");
-        assert_eq!(draft_of(c, "pool", Owner, Some(3)), Some(3));
-        assert_eq!(draft_of(c, "pool", Editor, Some(3)), None);
-        assert_eq!(draft_of(c, "pool", Owner, Some(4)), None, "replaced since");
-        assert_eq!(draft_of(c, "pool", Owner, None), None);
-        assert_eq!(draft_of(c, "chores", Owner, Some(3)), None);
-        assert_eq!(draft_of(None, "pool", Owner, Some(3)), None);
-        assert_eq!(
-            draft_of(Some("mis-draft-pool=x"), "pool", Owner, Some(3)),
-            None
-        );
+        assert_eq!(cookie_draft(c, "pool"), Some(3));
+        assert_eq!(cookie_draft(c, "chores"), None);
+        assert_eq!(cookie_draft(Some("mis-draft-pool=x"), "pool"), None);
+        assert_eq!(cookie_draft(None, "pool"), None);
+        // Pages fall back to live; the API refuses rather than touch live data.
+        for api in [false, true] {
+            assert_eq!(draft_of(Some(3), api, Owner, Some(3)), Serve::Draft(3));
+            assert_eq!(draft_of(None, api, Owner, Some(3)), Serve::Live);
+        }
+        for (role, current) in [(Editor, Some(3)), (Owner, Some(4)), (Owner, None)] {
+            assert_eq!(draft_of(Some(3), false, role, current), Serve::Live);
+            assert_eq!(draft_of(Some(3), true, role, current), Serve::Gone);
+        }
         assert_eq!(
             draft_cookie("pool", Some(3), true),
             "mis-draft-pool=3; Path=/a/pool/; SameSite=Lax; Secure"

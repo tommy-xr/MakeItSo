@@ -672,22 +672,29 @@ impl Apps {
         format!("{slug}/{DRAFT}")
     }
 
-    /// The draft's records, copied from `slug`'s own (a fresh snapshot) on first use; a new
-    /// app's start empty. Err: no draft.
-    pub fn sandbox(&self, slug: &str) -> anyhow::Result<String> {
-        let key = Self::draft_store(slug);
+    /// `f` on draft `n`'s records ([`Records`] key), copied from `slug`'s own (a fresh snapshot)
+    /// on first use; a new app's start empty. The lock is held throughout, so the draft can't
+    /// be replaced or dropped mid-call. Err: `n` isn't the draft any more.
+    pub fn in_draft<T>(
+        &self,
+        slug: &str,
+        n: u32,
+        f: impl FnOnce(&str) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
         let _held = self.lock.lock().unwrap();
-        anyhow::ensure!(self.draft(slug).is_some(), "{slug} has no draft");
+        anyhow::ensure!(
+            self.draft(slug).is_some_and(|d| d.release == n),
+            "v{n} of {slug} is no longer its draft"
+        );
+        f(&self.fork_draft(slug)?)
+    }
+
+    /// The draft's records key, forked from `slug`'s first if need be (lock held).
+    fn fork_draft(&self, slug: &str) -> anyhow::Result<String> {
+        let key = Self::draft_store(slug);
         if !self.records.has(&key) && self.records.has(slug) {
-            let to = self.dir.join(&key);
-            let tmp = to.join(format!(".tmp-{}", uuid::Uuid::new_v4()));
             let db = self.records.db(slug)?;
-            let copied = backups::copy_to(&db.lock().unwrap(), &tmp)
-                .and_then(|()| Ok(std::fs::rename(&tmp, to.join("data.sqlite"))?));
-            if copied.is_err() {
-                let _ = std::fs::remove_file(&tmp);
-            }
-            copied?;
+            backups::copy_whole(&db.lock().unwrap(), &self.records.file(&key))?;
         }
         Ok(key)
     }

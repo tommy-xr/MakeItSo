@@ -6131,49 +6131,50 @@ async fn the_owner_tries_a_draft_on_a_copy_of_the_records_that_goes_with_it() {
         201
     );
 
-    // Only the owner gets in, for the current draft.
+    // Only the owner gets in, for the current draft; an old cookie doesn't undo entering.
     let editor = "\r\nX-Mis-Dev-Role: editor";
     assert_eq!(app_get(&apps, "/a/demo/?draft=2", editor).await.0, 404);
     assert_eq!(app_get(&apps, "/a/demo/?draft=3", "").await.0, 404);
-    let (status, head, _) = app_get(&apps, "/a/demo/?draft=2", "").await;
+    let (status, head, _) =
+        app_get(&apps, "/a/demo/?draft=2", "\r\nCookie: mis-draft-demo=1").await;
     assert_eq!(status, 303, "{head}");
     assert!(
         head.contains("set-cookie: mis-draft-demo=2; Path=/a/demo/"),
         "{head}"
     );
-    let cookie = "\r\nCookie: mis-draft-demo=2";
+    assert!(!head.contains("Max-Age=0"), "{head}");
+    // Pages go by the cookie, the API by the header the page's mis.js sends.
+    let (page, api) = ("\r\nCookie: mis-draft-demo=2", "\r\nX-Mis-Draft: 2");
 
     // In it: the draft's page and a copy of the records; writes stay in the copy.
-    assert_eq!(app_get(&apps, "/a/demo/", cookie).await.2, "v2");
+    assert_eq!(app_get(&apps, "/a/demo/", page).await.2, "v2");
     assert_eq!(app_get(&apps, "/a/demo/", "").await.2, "v1");
     let me = "/a/demo/api/v1/me";
-    assert!(app_get(&apps, me, cookie).await.2.contains(r#""draft":2"#));
+    assert!(app_get(&apps, me, api).await.2.contains(r#""draft":2"#));
     let one = "/a/demo/api/v1/records/shared/notes/real";
     assert_eq!(
-        app_get(&apps, one, cookie).await.0,
+        app_get(&apps, one, api).await.0,
         200,
         "the copy has the real record"
     );
-    assert_eq!(
-        app_post(&apps, MUTATIONS, cookie, &op("trial")).await.0,
-        200
-    );
+    assert_eq!(app_post(&apps, MUTATIONS, api, &op("trial")).await.0, 200);
     let trial = "/a/demo/api/v1/records/shared/notes/trial";
-    assert_eq!(app_get(&apps, trial, cookie).await.0, 200);
+    assert_eq!(app_get(&apps, trial, api).await.0, 200);
     assert_eq!(
         app_get(&apps, trial, "").await.0,
         404,
         "never in the real records"
     );
-    // An editor with the cookie gets the live app.
+    // Not the owner: the live page; the API refuses rather than serve live data.
     assert_eq!(
-        app_get(&apps, "/a/demo/", &format!("{cookie}{editor}"))
+        app_get(&apps, "/a/demo/", &format!("{page}{editor}"))
             .await
             .2,
         "v1"
     );
+    assert_eq!(app_get(&apps, me, &format!("{api}{editor}")).await.0, 409);
 
-    // Discarded: the cookie is stale (dropped), the copy gone; a new draft starts afresh.
+    // Discarded: a page left open can't write anywhere; its cookie is dropped on reload.
     let (_, list) = get_json(&mis, "/api/apps", "s").await;
     let list: Vec<AppView> = serde_json::from_str(&list).unwrap();
     let discard = format!(r#"{{"id":"{}"}}"#, list[0].draft.as_ref().unwrap().id);
@@ -6183,10 +6184,15 @@ async fn the_owner_tries_a_draft_on_a_copy_of_the_records_that_goes_with_it() {
             .0,
         204
     );
-    let (_, head, body) = app_get(&apps, "/a/demo/", cookie).await;
+    let (status, why) = app_post(&apps, MUTATIONS, api, &op("late")).await;
+    assert!(status == 409 && why.contains("reload"), "{status} {why}");
+    let late = "/a/demo/api/v1/records/shared/notes/late";
+    assert_eq!(app_get(&apps, late, "").await.0, 404);
+    let (_, head, body) = app_get(&apps, "/a/demo/", page).await;
     assert_eq!(body, "v1");
     assert!(head.contains("set-cookie: mis-draft-demo=;"), "{head}");
     assert!(!dir.join("demo/draft").exists());
+    // A new draft starts from a fresh copy.
     assert_eq!(
         post_json(&mis, "/api/apps/demo/draft", "s", propose)
             .await
@@ -6194,8 +6200,8 @@ async fn the_owner_tries_a_draft_on_a_copy_of_the_records_that_goes_with_it() {
         201
     );
     assert_eq!(app_get(&apps, "/a/demo/?draft=2", "").await.0, 303);
-    assert_eq!(app_get(&apps, trial, cookie).await.0, 404);
-    let (status, head, _) = app_get(&apps, "/a/demo/?draft=off", cookie).await;
+    assert_eq!(app_get(&apps, trial, api).await.0, 404);
+    let (status, head, _) = app_get(&apps, "/a/demo/?draft=off", page).await;
     assert!(status == 303 && head.contains("Max-Age=0"), "{head}");
     std::fs::remove_dir_all(dir).unwrap();
 }
