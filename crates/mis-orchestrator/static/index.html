@@ -384,6 +384,18 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .share { display: flex; gap: .5rem; margin: .5rem 0 0; }
   .share input { flex: 1; min-width: 0; min-height: 2.5rem; padding: 0 .75rem; font-size: 1rem; }
   .share select { min-height: 2.5rem; font-size: 1rem; }
+  /* A draft: an agent's staged change, its before and after side by side, then the owner's call. */
+  .draft { margin: .75rem 0 0; padding: .75rem; border-radius: .75rem; background: var(--bg); box-shadow: inset 3px 0 0 var(--accent); }
+  .appr.draft { margin: 1rem 0; background: var(--card); }
+  .draft .what { margin: .25rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .875rem; }
+  .draft .ba { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; margin: .5rem 0 0; }
+  .draft figure { margin: 0; }
+  .draft figure img { display: block; width: 100%; max-height: 18rem; object-fit: contain; object-position: top; border-radius: .5rem; background: var(--raised); }
+  .draft figcaption { margin-top: .25rem; font-size: .75rem; color: var(--dim); }
+  .draft .pr { display: inline-block; margin-top: .5rem; font-size: .875rem; color: var(--accent); overflow-wrap: anywhere; }
+  .draft .row button { min-height: 2.25rem; padding: 0 .875rem; border-radius: .625rem; font-size: .8125rem; }
+  .draft .row button.quiet { background: none; color: var(--dim); }
+  .draftrow .r1 strong { font-weight: 600; }
   /* A merge approval: the PR's facts as a small grid. */
   .appr dl { display: grid; grid-template-columns: auto 1fr; gap: .125rem .75rem; margin: .25rem 0 .5rem; font-size: .8125rem; }
   .appr dt { color: var(--dim); }
@@ -1704,7 +1716,7 @@ function tick() {
   renderStrip();
   if (++ticks % 30 === 0 && everOpen && route().view === 'workers') renderWorkers();
   if (ticks % 10 === 0 && everOpen && route().view === 'routines' && !document.hidden) loadRoutines();
-  if (ticks % 10 === 0 && everOpen && route().view === 'apps' && !document.hidden) loadApps();
+  if (ticks % 10 === 0 && everOpen && ['apps', 'list', 'detail'].includes(route().view) && !document.hidden) loadApps();
   for (const s of document.querySelectorAll('[data-asof]')) s.textContent = asOf(Number(s.dataset.asof));
 }
 // Known parts joined with ` · ` (or `sep`).
@@ -2116,9 +2128,16 @@ function renderList() {
   const sending = pending && pending.key === 'draft:new' && el('li', {}, el('a', {},
     el('div', { className: 'r1' }, el('span', { className: 'sd queued' }), el('span', { className: 'one' }, pending.text)), el('div', { className: 'r2' }, 'Sending…')));
   if (sending && !groups.has('flight')) groups.set('flight', []);
+  // Drafts waiting on a decision need you too, first.
+  if (!hosted && !hostedAsked && everOpen) loadApps();
+  const drafted = ((hosted && hosted.list) || []).filter((a) => a.draft).map((a) => el('li', { className: 'draftrow' },
+    el('a', { href: a.draft.task ? `#task/${a.draft.task}` : '#apps' },
+      el('div', { className: 'r1' }, el('span', { className: 'sd done att-unread' }), el('strong', { className: 'one' }, `Draft v${a.draft.release} of ${a.title}`)),
+      el('div', { className: 'r2 one' }, a.role === 'owner' && !readOnly ? 'Try it, then publish or ask for changes' : 'Waiting for its owner'))));
+  if (drafted.length && !groups.has('need')) groups.set('need', []);
   // Sections in Home's order; live sessions after the work in hand.
   const keys = [...groups.keys()].sort((a, b) => secRank(a) - secRank(b) || b.localeCompare(a));
-  const body = keys.map((k) => [secHead(label(k)), el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []), ...groups.get(k).flatMap((th) => threadRows(th, now)))]);
+  const body = keys.map((k) => [secHead(label(k)), el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []), ...(k === 'need' ? drafted : []), ...groups.get(k).flatMap((th) => threadRows(th, now)))]);
   const liveAt = keys.filter((k) => secRank(k) < 2).length;
   if (sessions.length) body.splice(liveAt, 0, [secHead('Live sessions', el('a', { href: '#workers' }, 'All sessions')), el('ul', { className: 'rows' }, ...sessions.map((s) => liveRow(s, now)))]);
   const focused = $('list').contains(document.activeElement) && document.activeElement.getAttribute('href');
@@ -2994,7 +3013,7 @@ function renderDetail(id) {
     const wait = inSplit() ? detail.since + 2000 - Date.now() : 0;
     if (wait > 0) seenLater = setTimeout(render, wait); else send({ type: 'seen', task: id });
   }
-  const cards = approvalCards(t);
+  const cards = [...approvalCards(t), ...taskDrafts(id)];
   $('approvals').replaceChildren(...cards);
   $('approvals').hidden = !cards.length;
   speakText = (t && t.summary) || '';
@@ -3522,7 +3541,8 @@ async function loadApps() {
   } catch { got = { error: 'couldn’t reach the orchestrator' }; }
   if (hostedAsked !== ask) return;
   hosted = got;
-  if (route().view === 'apps') renderApps();
+  // Drafts also show on Home and their task's page.
+  if (['apps', 'list', 'detail'].includes(route().view)) render();
   renderNav();
 }
 async function activateApp(slug, n) {
@@ -3578,7 +3598,8 @@ function appAge(at, now) {
 }
 function appRow(a, now) {
   const newest = a.releases[a.releases.length - 1];
-  const ready = newest && newest.n > (a.active || 0) ? newest : null;
+  // A draft's release is published through the draft, not made live bare.
+  const ready = newest && newest.n > (a.active || 0) && !(a.draft && a.draft.release === newest.n) ? newest : null;
   const busy = appBusy === a.slug, asking = appAsk === a.slug && ready, err = appErr.get(a.slug);
   const ask = (slug) => { appAsk = slug; renderApps(); };
   const actions = readOnly ? '' : el('div', { className: 'row' },
@@ -3595,14 +3616,85 @@ function appRow(a, now) {
     el('div', { className: 'sub dim' }, ...dots([a.slug, a.active ? `v${a.active} live` : 'not live', plural(a.releases.length, 'release')])),
     ready ? el('div', { className: 'sub dim' }, `v${ready.n} ready · published `, appAge(ready.at, now)) : '',
     err ? el('div', { className: 'err bad' }, err) : '',
+    a.draft ? draftCard(a, false) : '',
     actions, confirm, appMembers(a, busy));
+}
+// An app's draft: an agent's staged release, its PR and before/after shots. The owner publishes
+// (merge the PR, then live) or discards it, or asks its task for changes; others just see it.
+let draftAsk = null, draftBusy = null; // [slug, 'publish' | 'discard'] being confirmed; slug deciding
+const draftErr = new Map(); // slug -> why its last decision failed
+const draftShots = new Map(); // `slug/n/at/which` -> object URL
+function draftShot(a, which) {
+  const d = a.draft, key = `${a.slug}/${d.release}/${d.at}/${which}`;
+  const img = el('img', { alt: `${which} v${d.release}`, loading: 'lazy' });
+  if (draftShots.has(key)) img.src = draftShots.get(key);
+  else fetch(`/api/apps/${encodeURIComponent(a.slug)}/draft/${which}`, { headers: authHeaders() }).then(async (r) => {
+    if (!r.ok) { img.alt = 'screenshot gone'; return; }
+    draftShots.set(key, img.src = URL.createObjectURL(await r.blob()));
+  }).catch(() => {});
+  return el('figure', {}, img, el('figcaption', {}, which === 'before' ? 'Before' : `After · v${d.release}`));
+}
+async function decideDraft(a, action) {
+  draftAsk = null; draftBusy = a.slug;
+  render();
+  try {
+    const r = await fetch(`/api/apps/${encodeURIComponent(a.slug)}/draft/${action}`, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ release: a.draft.release }) });
+    if (r.ok) draftErr.delete(a.slug); else draftErr.set(a.slug, (await r.text()) || `error ${r.status}`);
+  } catch { draftErr.set(a.slug, 'couldn’t reach the orchestrator'); }
+  draftBusy = null;
+  await loadApps();
+  render();
+}
+// Back to the task that made it, a reply started there.
+function askChanges(a) {
+  drafts.set(replyDraft(a.draft.task), `Changes to draft v${a.draft.release}: `);
+  location.hash = `#task/${a.draft.task}`;
+  setTimeout(() => { const t = $('reply-text'); t.focus(); t.setSelectionRange(t.value.length, t.value.length); }, 0);
+}
+function draftCard(a, inTask) {
+  const d = a.draft, busy = draftBusy === a.slug, err = draftErr.get(a.slug) || d.error;
+  const asking = draftAsk && draftAsk[0] === a.slug ? draftAsk[1] : null;
+  const ask = (action) => { draftAsk = action && [a.slug, action]; render(); };
+  const owner = !readOnly && a.role === 'owner';
+  const actions = !owner ? el('p', { className: 'dim' }, 'Only its owner can publish it.')
+    : asking ? el('div', { className: 'golive' },
+      el('p', {}, asking === 'publish' ? `Publish v${d.release} of ${a.title}? Its PR merges first; if it can’t, nothing changes.`
+        : `Discard draft v${d.release}? The PR stays open for you to close.`),
+      el('div', { className: 'row' },
+        el('button', { disabled: busy, onclick: () => decideDraft(a, asking) }, asking === 'publish' ? 'Yes, publish' : 'Yes, discard'),
+        el('button', { type: 'button', onclick: () => ask(null) }, 'Not yet')))
+    : el('div', { className: 'row' },
+      el('button', { type: 'button', disabled: busy, onclick: () => ask('publish') }, busy ? 'Publishing…' : 'Publish'),
+      d.task && !inTask ? el('button', { type: 'button', onclick: () => askChanges(a) }, 'Request changes') : '',
+      el('button', { type: 'button', className: 'quiet', disabled: busy, onclick: () => ask('discard') }, 'Discard'));
+  return el('div', { className: inTask ? 'appr draft' : 'draft' },
+    el('div', { className: 'dim' }, `Draft v${d.release}${inTask ? ` of ${a.title}` : ''} · proposed `, appAge(d.at, Date.now() + skew)),
+    d.note ? el('p', { className: 'what' }, d.note) : '',
+    d.before || d.after ? el('div', { className: 'ba' }, d.before ? draftShot(a, 'before') : el('div'), d.after ? draftShot(a, 'after') : '') : '',
+    el('a', { className: 'pr', href: d.pr, target: '_blank', rel: 'noopener' }, d.pr.replace('https://github.com/', '').replace('/pull/', '#')),
+    err ? el('div', { className: 'err bad' }, err) : '',
+    actions);
+}
+// The drafts proposed by task `id`, as cards for its page.
+// Kept while nothing they show changes, so a render doesn't redraw their screenshots.
+const draftNodes = new Map();
+function taskDrafts(id) {
+  const apps = ((hosted && hosted.list) || []).filter((a) => a.draft && a.draft.task === id);
+  return apps.map((a) => {
+    const key = JSON.stringify([a.draft, a.role, readOnly, draftAsk, draftBusy === a.slug, draftErr.get(a.slug)]);
+    const had = draftNodes.get(a.slug);
+    if (had && had.key === key) return had.node;
+    const node = draftCard(a, true);
+    draftNodes.set(a.slug, { key, node });
+    return node;
+  });
 }
 function renderApps() {
   if (!everOpen) return; // fetch once connected, with the token in place
   if (!hosted) { delete $('app-list').dataset.key; if (!$('app-list').querySelector('.skel')) $('app-list').replaceChildren(el('li', {}, skel())); if (!hostedAsked) loadApps(); return; }
   if (hosted.error) { delete $('app-list').dataset.key; $('app-list').replaceChildren(el('li', { className: 'bad' }, hosted.error)); return; }
   // Rebuilt only when something shown changes, so a share form being typed into survives other updates.
-  const key = JSON.stringify([hosted.list, appAsk, appBusy, memberAsk, [...appErr], readOnly]);
+  const key = JSON.stringify([hosted.list, appAsk, appBusy, memberAsk, [...appErr], readOnly, draftAsk, draftBusy, [...draftErr]]);
   const now = Date.now() + skew;
   if ($('app-list').dataset.key === key) {
     for (const s of $('app-list').querySelectorAll('[data-at]')) s.textContent = ago(now - Number(s.dataset.at));
