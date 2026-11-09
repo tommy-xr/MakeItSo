@@ -433,6 +433,7 @@ impl Agent for CodexAgent {
                 cmd.current_dir(d);
             }
             cmd.env(TASK_ENV, task.to_string());
+            cmd.envs(opts.env.iter().copied());
             cmd.stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::inherit())

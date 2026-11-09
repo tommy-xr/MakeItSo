@@ -408,6 +408,10 @@ pub enum OrchMsg {
         /// The task's attached images, in the order the user attached them.
         #[serde(default)]
         images: Vec<ImageFile>,
+        /// An app task's own credential, for its agent as `MIS_TOKEN`: it only stages
+        /// releases of that app, and stops working when the task ends.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
     },
     /// Read these PR links of a task this worker ran now, then again while
     /// their checks are pending. Replaces any earlier watch of that task.

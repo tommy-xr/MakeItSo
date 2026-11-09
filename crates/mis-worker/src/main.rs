@@ -199,6 +199,7 @@ async fn main() -> Result<()> {
         roots: Arc::new(roots),
         pr_tx,
         limits: Default::default(),
+        url: cfg.url.clone(),
     };
     // Events from in-flight tasks queue here while disconnected. Delivery is best
     // effort: an event already written to a socket that then dies is not resent.
@@ -335,6 +336,8 @@ struct Ctx {
     /// Latest limit windows per harness, from runs and polling.
     limits: Arc<Mutex<BTreeMap<String, Vec<LimitWindow>>>>,
     pr_tx: mpsc::Sender<WorkerMsg>,
+    /// The orchestrator's URL, as `MIS_URL` for an agent that holds an app task's token.
+    url: String,
 }
 
 impl Ctx {
@@ -569,7 +572,11 @@ fn handle_incoming(
                 c.update.welcome(version, channel);
                 check_update(c);
             }
-            Ok(OrchMsg::Assign { task, images }) => {
+            Ok(OrchMsg::Assign {
+                task,
+                images,
+                token,
+            }) => {
                 if !c.running.insert(task.id) {
                     tracing::warn!(id = %task.id, "already running; ignoring duplicate assign");
                     return Ok(());
@@ -579,7 +586,9 @@ fn handle_incoming(
                 c.cancels.insert(task.id, cancel);
                 let ctx = ctx.clone();
                 let tx = ev_tx.clone();
-                tokio::spawn(async move { run_task(&ctx, task, images, tx, cancelled).await });
+                tokio::spawn(
+                    async move { run_task(&ctx, task, images, token, tx, cancelled).await },
+                );
             }
             Ok(OrchMsg::Cancel { task }) => match c.cancels.remove(&task) {
                 Some(cancel) => {
@@ -830,6 +839,7 @@ async fn run_task(
     ctx: &Ctx,
     task: Task,
     images: Vec<ImageFile>,
+    token: Option<String>,
     tx: mpsc::Sender<(TaskId, AgentEvent)>,
     cancelled: oneshot::Receiver<()>,
 ) {
@@ -838,7 +848,7 @@ async fn run_task(
     // Where it started in its repo, until its diff is sent.
     let base = Mutex::new(None);
     let cancelled = tokio::select! {
-        () = run(ctx, task, images, &tx, &base) => false,
+        () = run(ctx, task, images, token, &tx, &base) => false,
         // Err: the sender is gone, so no cancel can come; let the run finish.
         Ok(()) = cancelled => true,
     };
@@ -883,6 +893,7 @@ async fn run(
     ctx: &Ctx,
     task: Task,
     images: Vec<ImageFile>,
+    token: Option<String>,
     tx: &mpsc::Sender<(TaskId, AgentEvent)>,
     base: &Mutex<Option<DiffBase>>,
 ) {
@@ -974,6 +985,16 @@ async fn run(
         *base.lock().unwrap() =
             git::base(&cwd, &ctx.roots, task.diff_base.clone().map(|b| *b)).await;
     }
+    // An app task's agent reaches the orchestrator with its own token, never the worker's;
+    // `mis` prefers MIS_APP_TOKEN, which a shell profile exporting MIS_TOKEN leaves alone.
+    let env: Vec<(&str, &str)> = match &token {
+        Some(t) => vec![
+            ("MIS_URL", ctx.url.as_str()),
+            ("MIS_TOKEN", t.as_str()),
+            ("MIS_APP_TOKEN", t.as_str()),
+        ],
+        None => vec![],
+    };
     let (atx, mut arx) = mpsc::channel(64);
     let fwd = async {
         let mut deltas = coalesce::Coalescer::default();
@@ -1018,6 +1039,7 @@ async fn run(
             read_only: task.read_only,
             // A routine run that may act: other ways to merge are denied.
             no_merge: task.merge != MergeRule::Any && !task.read_only,
+            env: &env,
         },
         atx,
     );

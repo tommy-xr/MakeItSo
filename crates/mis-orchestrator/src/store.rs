@@ -120,8 +120,8 @@ impl Store {
     }
 
     /// Write the files in `snap` that changed. Transcripts go first, so a
-    /// finished task in the ledger file always has its final transcript.
-    pub fn save(&mut self, snap: Snapshot) {
+    /// finished task in the ledger file always has its final transcript. False: it failed.
+    pub fn save(&mut self, snap: Snapshot) -> bool {
         let result = (snap.transcripts.into_iter())
             .try_for_each(|t| {
                 self.put(Some(t.task), &t.json)?;
@@ -132,12 +132,14 @@ impl Store {
                 Ok(())
             })
             .and_then(|()| self.put(None, &snap.ledger));
+        let saved = result.is_ok();
         match (result, self.failing) {
             (Err(e), false) => tracing::warn!("saving task history: {e}"),
             (Ok(()), true) => tracing::info!("saving task history again"),
-            _ => return,
+            _ => return saved,
         }
         self.failing = !self.failing;
+        saved
     }
 
     /// Delete the transcripts of tasks the ledger forgot.

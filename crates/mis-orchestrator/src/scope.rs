@@ -13,22 +13,33 @@ pub enum Scope {
     Read,
     /// A capture token: may only `POST /api/capture`.
     Capture,
+    /// A running app task's token: may only stage releases of its app (`Route::AppPublish`).
+    AppTask(mis_types::TaskId),
 }
 
-/// Where a request goes: capture credentials open only `POST /api/capture`.
+/// Where a request goes: capture credentials open only `POST /api/capture`, app task
+/// tokens only `POST /api/apps/<slug>/releases`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Route {
     Capture,
+    /// `POST /api/apps/<slug>/releases`; its handler checks an app task's binding.
+    AppPublish,
     /// Every other HTTP route and WebSocket.
     Other,
 }
 
-/// Whether `scope` may use `route` at all. Exhaustive, so a new scope must be classified.
+/// Whether `scope` may use `route` at all. Exhaustive, so a new scope or route must be classified.
 pub fn reaches(scope: Scope, route: Route) -> bool {
     match (scope, route) {
-        (Scope::Full, _) | (Scope::Read, Route::Other) | (Scope::Capture, Route::Capture) => true,
-        // Capturing is acting, which read tokens may not; capture tokens may do nothing else.
-        (Scope::Read, Route::Capture) | (Scope::Capture, Route::Other) => false,
+        (Scope::Full, _)
+        | (Scope::Read, Route::Other | Route::AppPublish)
+        | (Scope::Capture, Route::Capture)
+        | (Scope::AppTask(_), Route::AppPublish) => true,
+        // Capturing is acting, which read tokens may not (publishing they reach, to be told
+        // 403 by its handler); capture and app task tokens may do nothing else.
+        (Scope::Read, Route::Capture)
+        | (Scope::Capture, Route::Other | Route::AppPublish)
+        | (Scope::AppTask(_), Route::Capture | Route::Other) => false,
     }
 }
 
@@ -55,7 +66,7 @@ pub fn allowed(scope: Scope, msg: &ClientMsg) -> bool {
     match scope {
         Scope::Full => true,
         Scope::Read => !acts,
-        Scope::Capture => false,
+        Scope::Capture | Scope::AppTask(_) => false,
     }
 }
 
@@ -84,6 +95,7 @@ mod tests {
             assert!(allowed(Scope::Read, m), "{m:?}");
             assert!(allowed(Scope::Full, m), "{m:?}");
             assert!(!allowed(Scope::Capture, m), "{m:?}");
+            assert!(!allowed(Scope::AppTask(uuid::Uuid::nil()), m), "{m:?}");
         }
         let task = uuid::Uuid::nil();
         let acts = [
@@ -121,6 +133,7 @@ mod tests {
             assert!(!allowed(Scope::Read, &m), "{m:?}");
             assert!(allowed(Scope::Full, &m), "{m:?}");
             assert!(!allowed(Scope::Capture, &m), "{m:?}");
+            assert!(!allowed(Scope::AppTask(task), &m), "{m:?}");
         }
     }
 
@@ -130,5 +143,16 @@ mod tests {
         assert!(reaches(Scope::Full, Capture) && reaches(Scope::Full, Other));
         assert!(!reaches(Scope::Read, Capture) && reaches(Scope::Read, Other));
         assert!(reaches(Scope::Capture, Capture) && !reaches(Scope::Capture, Other));
+        assert!(!reaches(Scope::Capture, AppPublish));
+    }
+
+    #[test]
+    fn app_task_scope_reaches_only_publishing() {
+        use Route::*;
+        let app = Scope::AppTask(uuid::Uuid::nil());
+        assert!(reaches(app, AppPublish));
+        assert!(!reaches(app, Capture) && !reaches(app, Other));
+        // Full publishes; read reaches the route only to be refused by its handler.
+        assert!(reaches(Scope::Full, AppPublish) && reaches(Scope::Read, AppPublish));
     }
 }

@@ -283,6 +283,28 @@ pub enum ActivateError {
     Io(String),
 }
 
+/// Which apps a publish may write: any (the full token), or an app task's (see
+/// [`crate::app_grant`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Target {
+    Any,
+    /// An app that has a release already.
+    Existing,
+    /// An app that has none yet, shared with only `owner` (an email) as owner, or one
+    /// app task thread `thread` created already.
+    New {
+        owner: Option<String>,
+        thread: uuid::Uuid,
+    },
+}
+
+#[derive(Debug)]
+pub enum PublishError {
+    NoSuchApp,
+    Exists,
+    Io(anyhow::Error),
+}
+
 #[derive(Debug, PartialEq)]
 pub enum MemberError {
     NoSuchApp,
@@ -340,26 +362,80 @@ impl Apps {
         at: u64,
         activate: bool,
     ) -> anyhow::Result<u32> {
+        (self.publish_to(slug, bundle, at, activate, Target::Any)).map_err(|e| match e {
+            PublishError::Io(e) => e,
+            other => anyhow::anyhow!("{other:?}"),
+        })
+    }
+
+    /// [`Self::publish`] into `target` only; a new app's policy is written first.
+    pub fn publish_to(
+        &self,
+        slug: &str,
+        bundle: &Bundle,
+        at: u64,
+        activate: bool,
+        target: Target,
+    ) -> Result<u32, PublishError> {
         let releases = self.releases_dir(slug);
-        crate::images::private_dir(&releases)?;
+        crate::images::private_dir(&releases).map_err(PublishError::Io)?;
         let tmp = releases.join(format!(".tmp-{}", uuid::Uuid::new_v4()));
-        let written = write_release(&tmp, bundle, at);
+        let written = write_release(&tmp, bundle, at).map_err(PublishError::Io);
         let n = written.and_then(|()| {
             let _held = self.lock.lock().unwrap();
-            let n = next_release(self.release_ns(slug));
-            if activate {
-                self.pre_activation(slug, n, at)?;
+            let ns = self.release_ns(slug);
+            match (&target, ns.is_empty()) {
+                (Target::Existing, true) => return Err(PublishError::NoSuchApp),
+                (Target::New { thread, .. }, false) => {
+                    // Its own app, created before a restart lost that it had been.
+                    if !self.created_by(slug, *thread) {
+                        return Err(PublishError::Exists);
+                    }
+                }
+                (Target::New { owner, thread }, true) => {
+                    let mut policy = Policy::default();
+                    if let Some(o) = owner {
+                        policy = app_access::set_member(policy, o, Some(AppRole::Owner))
+                            .map_err(|e| PublishError::Io(anyhow::anyhow!(e)))?;
+                    }
+                    policy.created_by = Some(*thread);
+                    // Whatever an earlier policy.json there said.
+                    (self.write_policy(slug, &policy)).map_err(|e| PublishError::Io(e.into()))?;
+                }
+                _ => {}
             }
-            std::fs::rename(&tmp, releases.join(n.to_string()))?;
-            if activate {
-                self.write_active(slug, n)?;
-            }
-            Ok(n)
+            self.release(slug, &tmp, next_release(ns), at, activate)
+                .map_err(PublishError::Io)
         });
         if n.is_err() {
             let _ = std::fs::remove_dir_all(&tmp);
         }
         n
+    }
+
+    /// Write `slug`'s `policy.json` (the lock held).
+    fn write_policy(&self, slug: &str, policy: &Policy) -> std::io::Result<()> {
+        let json = serde_json::to_vec_pretty(policy).expect("policy serializes");
+        crate::push::write_private(&self.dir.join(slug).join(POLICY), &json)
+    }
+
+    /// Rename `tmp` into place as release `n` (lock held), making it live if `activate`.
+    fn release(
+        &self,
+        slug: &str,
+        tmp: &Path,
+        n: u32,
+        at: u64,
+        activate: bool,
+    ) -> anyhow::Result<u32> {
+        if activate {
+            self.pre_activation(slug, n, at)?;
+        }
+        std::fs::rename(tmp, self.releases_dir(slug).join(n.to_string()))?;
+        if activate {
+            self.write_active(slug, n)?;
+        }
+        Ok(n)
     }
 
     /// Make release `n` of `slug` the live one, at Unix millis `at`.
@@ -443,6 +519,17 @@ impl Apps {
         )
     }
 
+    /// App task thread `thread` created `slug`.
+    pub fn created_by(&self, slug: &str, thread: uuid::Uuid) -> bool {
+        self.read_policy(slug)
+            .is_ok_and(|p| p.created_by == Some(thread))
+    }
+
+    /// `slug` has a release.
+    pub fn exists(&self, slug: &str) -> bool {
+        !self.release_ns(slug).is_empty()
+    }
+
     /// `slug`'s release numbers, ascending.
     fn release_ns(&self, slug: &str) -> Vec<u32> {
         let Ok(entries) = std::fs::read_dir(self.releases_dir(slug)) else {
@@ -504,9 +591,7 @@ impl Apps {
         // A policy that doesn't parse is left for a person to fix, not overwritten.
         let policy = self.read_policy(slug).map_err(MemberError::Io)?;
         let policy = app_access::set_member(policy, email, role).map_err(MemberError::Invalid)?;
-        let json = serde_json::to_vec_pretty(&policy).expect("policy serializes");
-        crate::push::write_private(&self.dir.join(slug).join(POLICY), &json)
-            .map_err(|e| MemberError::Io(e.to_string()))?;
+        (self.write_policy(slug, &policy)).map_err(|e| MemberError::Io(e.to_string()))?;
         Ok(policy.list())
     }
 
@@ -871,6 +956,42 @@ mod tests {
             .unwrap()
             .count();
         assert_eq!(left, 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_app_task_creates_only_a_new_app_and_goes_on_with_its_own() {
+        let dir = temp();
+        let apps = Apps::new(dir.clone(), None);
+        let b = unpack(&tar_gz(&[("app.json", APP_JSON), ("index.html", b"")])).unwrap();
+        let (thread, other) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let new = |thread| Target::New {
+            owner: Some("Me@Example.com".into()),
+            thread,
+        };
+        let publish = |slug, t| apps.publish_to(slug, &b, 0, false, t);
+        assert!(matches!(
+            publish("pool", Target::Existing),
+            Err(PublishError::NoSuchApp)
+        ));
+        assert_eq!(publish("pool", new(thread)).unwrap(), 1);
+        let owner = AppMember {
+            email: "me@example.com".into(),
+            role: AppRole::Owner,
+        };
+        assert_eq!(apps.list()[0].members, vec![owner]);
+        // Its thread again (a restart lost that it created it): its next release. Others: no.
+        assert_eq!(publish("pool", new(thread)).unwrap(), 2);
+        assert!(matches!(
+            publish("pool", new(other)),
+            Err(PublishError::Exists)
+        ));
+        assert_eq!(publish("pool", Target::Existing).unwrap(), 3);
+        // Sharing keeps who created it.
+        apps.set_member("pool", "you@example.com", Some(AppRole::Viewer))
+            .unwrap();
+        assert_eq!(publish("pool", new(thread)).unwrap(), 4);
+        assert_eq!(apps.list()[0].active, None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

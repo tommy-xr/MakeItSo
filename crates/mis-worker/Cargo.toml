@@ -30,3 +30,5 @@ libc = "0.2"
 [dev-dependencies]
 mis-update = { workspace = true, features = ["testing"] }
 mis-orchestrator = { path = "../mis-orchestrator" }
+flate2 = "1.1"
+tar = "0.4"
