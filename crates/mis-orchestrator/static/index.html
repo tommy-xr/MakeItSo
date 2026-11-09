@@ -1823,15 +1823,18 @@ function route() {
 const wide = matchMedia('(min-width: 75rem)');
 const isSplit = (view) => wide.matches && isDesk() && (view === 'list' || view === 'detail');
 const inSplit = () => document.documentElement.classList.contains('split'); // as render() last laid out
-// The task open beside the list, and the attention it had (or gained) while open: its row keeps its place until
-// another is opened, rather than leaving Needs you the moment opening it marks it seen. { id, attention } or null.
+// The finished task last opened beside the list, and the attention it had: its row keeps its place until another is
+// opened or Home is left, rather than leaving Needs you the moment opening it marks it seen. { id, attention } or null.
 let kept = null;
+// A task's attention for placing its row: its own, else the kept one's.
+const att = (t) => (ATTENTION[t.attention] || kept?.id !== t.id ? t.attention : kept.attention);
 
 function render() {
   const r = route(), split = everOpen && isSplit(r.view);
   document.documentElement.classList.toggle('split', split);
   const open = split && r.view === 'detail' && tasks.find((t) => t.id === r.id);
-  kept = open ? { id: open.id, attention: ATTENTION[open.attention] ? open.attention : kept && kept.id === open.id ? kept.attention : null } : null;
+  if (open) kept = { id: open.id, attention: ATTENTION[open.attention] ? open.attention : kept?.id === open.id && isFinished(open) ? kept.attention : null };
+  else if (!split || r.view !== 'list') kept = null;
   const live = ws && ws.readyState === WebSocket.OPEN;
   const views = { list: renderList, detail: renderDetail, routines: renderRoutines, apps: renderApps, settings: renderSettings, notes: renderNotes, projects: renderProjects, workers: renderWorkers, machine: renderMachine, session: renderSession };
   $('auth').hidden = live || !authNeeded || !!store.get();
@@ -1875,7 +1878,7 @@ const placement = (t) => [t.harness, t.model, t.worker && hostOf(t.worker)].filt
 // Why a task needs the user, most urgent first: [rank, label].
 const ATTENTION = { approval: [-1, 'needs you: approval'], failed: [0, 'needs you'], limited: [1, 'needs you: usage limit'], unread: [2, 'needs you: unread'] };
 // Needs you, then working, then the rest.
-const rank = (t) => (ATTENTION[t.attention] || (kept && kept.id === t.id && ATTENTION[kept.attention]))?.[0] ?? (['planning', 'queued', 'running'].includes(t.status) || awaited(t) ? 3 : 4);
+const rank = (t) => ATTENTION[att(t)]?.[0] ?? (['planning', 'queued', 'running'].includes(t.status) || awaited(t) ? 3 : 4);
 // Delivered into a session and followed there for its answer (a day).
 const awaited = (t) => t.status === 'delivered' && Date.now() + skew - (t.finished_at || 0) < 864e5;
 // Threads, each followed by its replies (oldest first), nested: [depth, task]. A thread ranks as its
@@ -1998,7 +2001,7 @@ const STUCK = new Set(['approval', 'failed', 'limited']);
 const secRank = (s) => (s === 'need' ? 0 : s === 'flight' ? 1 : 2);
 // Threads ({ root, replies }) with their section: `need`, `flight`, or `day:<y-m-d>` for finished ones; Home's order.
 function homeThreads(list, listed) {
-  const visible = list.filter((t) => !(listed.has(t.id) && !STUCK.has(t.attention)));
+  const visible = list.filter((t) => !(listed.has(t.id) && !STUCK.has(att(t))));
   const ids = new Set(visible.map((t) => t.id)), at = new Map(visible.map((t, i) => [t.id, i]));
   const all = (t) => visible.filter((r) => r.parent === t.id).flatMap((r) => [r, ...all(r)]);
   return visible.filter((t) => !t.parent || !ids.has(t.parent)).map((root) => {
