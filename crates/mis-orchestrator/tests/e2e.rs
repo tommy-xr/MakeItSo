@@ -3894,6 +3894,7 @@ async fn refused_everywhere_else(base: &str, headers: &[(&'static str, &str)]) {
         ("GET", "/api/notes/sync".into()),
         ("GET", "/api/notes/tree".into()),
         ("GET", "/api/notes/file?path=inbox/a.md".into()),
+        ("GET", "/api/projects".into()),
         ("GET", "/api/apps".into()),
         ("POST", "/api/apps/a/releases".into()),
         ("POST", "/api/apps/a/activate".into()),
@@ -4211,6 +4212,122 @@ async fn the_notes_view_reads_the_clone_for_full_scope_only() {
     assert_eq!(serde_json::from_str::<NotesTree>(&body).unwrap(), want);
     let head = "GET /api/notes/file?path=inbox/a.md HTTP/1.1\r\nAuthorization: Bearer s";
     assert_eq!(http(&off, head, b"").await.0, 404);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn projects_are_read_from_the_notes_clone_for_full_scope_only() {
+    use std::time::Duration;
+    let dir = std::env::temp_dir().join(format!("mis-e2e-projects-{}", uuid::Uuid::new_v4()));
+    let human = dir.join("human");
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["-c", "user.name=Human", "-c", "user.email=h@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "git {args:?}: {err}");
+    };
+    git(&["init", "--quiet", "--bare", "-b", "main", "remote.git"]);
+    git(&["clone", "--quiet", "remote.git", "human"]);
+    let files = [
+        (".gitattributes", "* -text\n"),
+        (
+            "projects/make-it-so/README.md",
+            "---\nschema: 1\nid: make-it-so\ntitle: Make It So\naliases: [mis]\nstatus: active\n\
+             repos: [tommy-xr/MakeItSo]\nnotes: [~/notes/projects/make-it-so/]\n---\nShort.\n",
+        ),
+        ("projects/make-it-so/plan.md", "# plan\n"),
+        (
+            "projects/amf/README.md",
+            "---\ntitle: All Must Fall\naliases: [Make-It-So, amf2]\n---\n",
+        ),
+        ("projects/broken/README.md", "no frontmatter\n"),
+        (
+            "archive/old/README.md",
+            "---\ntitle: Old\nstatus: done\n---\nDone.\n",
+        ),
+    ];
+    for (path, text) in files {
+        let at = human.join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, text).unwrap();
+    }
+    git(&["-C", "human", "add", "-A"]);
+    git(&["-C", "human", "commit", "--quiet", "-m", "init"]);
+    git(&["-C", "human", "push", "--quiet", "origin", "HEAD:main"]);
+    let state = dir.join("state");
+    let notes =
+        mis_orchestrator::notes::Notes::new(dir.join("remote.git").display().to_string(), &state)
+            .with_timing(Duration::from_secs(3600), Duration::from_secs(3600));
+    let base = start_app(capturing(&state).with_notes(notes)).await;
+    // The first run, at start, clones it.
+    let mut got = None;
+    for _ in 0..100 {
+        let (status, body) = get_json(&base, "/api/projects", "s").await;
+        assert_eq!(status, 200, "{body}");
+        let p: Projects = serde_json::from_str(&body).unwrap();
+        if !p.projects.is_empty() {
+            got = Some(p);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let got = got.expect("cloned");
+    assert_eq!(got.state, SyncState::Idle);
+    let names: Vec<(&str, &str, &[String], bool)> = (got.projects.iter())
+        .map(|p| (p.id.as_str(), p.title.as_str(), &p.aliases[..], p.archived))
+        .collect();
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let (mis, amf2) = (s(&["mis"]), s(&["amf2"]));
+    assert_eq!(
+        names,
+        [
+            ("amf", "All Must Fall", &amf2[..], false),
+            ("make-it-so", "Make It So", &mis[..], false),
+            ("old", "Old", &[][..], true),
+        ]
+    );
+    let mis = &got.projects[1];
+    assert_eq!(mis.repos, ["tommy-xr/MakeItSo"]);
+    assert_eq!(mis.notes, ["~/notes/projects/make-it-so/"]);
+    assert_eq!(mis.description, "Short.");
+    // Listed, not fatal: a malformed record, and an alias that is another's id.
+    let errors: Vec<(&str, &str)> = (got.errors.iter())
+        .map(|e| (e.path.as_str(), e.error.as_str()))
+        .collect();
+    assert_eq!(
+        errors,
+        [
+            (
+                "projects/broken/README.md",
+                "must start with a `---` frontmatter line"
+            ),
+            (
+                "projects/amf/README.md",
+                "alias `Make-It-So` is taken by projects/make-it-so/README.md"
+            ),
+        ]
+    );
+    // A read token may not; a capture token reaches nothing but capturing.
+    for token in ["r", "c"] {
+        let (status, _) = get_json(&base, "/api/projects", token).await;
+        assert!(matches!(status, 401 | 403), "{token}: {status}");
+    }
+    // Without a remote: off.
+    let off = start_app(capturing(&dir.join("off"))).await;
+    let (status, body) = get_json(&off, "/api/projects", "s").await;
+    assert_eq!(status, 200);
+    let want = Projects {
+        state: SyncState::Off,
+        projects: vec![],
+        errors: vec![],
+    };
+    assert_eq!(serde_json::from_str::<Projects>(&body).unwrap(), want);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
