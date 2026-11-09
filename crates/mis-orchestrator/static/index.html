@@ -184,8 +184,9 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   /* Notes: folder rows (icon, name, size or count); a note's chips, body and pictures. */
   .nlist .r1 svg { flex: none; width: 1.125rem; height: 1.125rem; color: var(--dim); }
   .nlist .n { flex: none; color: var(--dim); font-size: .8125rem; }
-  #notes-body > p { margin: 1rem .375rem; }
-  #notes-body > .rows, .nlist { margin-top: .75rem; }
+  :is(#notes-body, #projects-body) > p { margin: 1rem .375rem; }
+  :is(#notes-body, #projects-body) > .rows, .nlist { margin-top: .75rem; }
+  .r2.bad { color: var(--bad); }
   .nchips { display: flex; flex-wrap: wrap; align-items: center; gap: .375rem; margin: .875rem 0; }
   .nchips .chip { margin: 0; }
   .nchips a { min-width: 0; max-width: 100%; color: var(--link); font-size: .8125rem; text-decoration: none; }
@@ -3608,7 +3609,7 @@ function noteRows(entries, dir) {
 }
 // A project record's folder, its files and the AI's (`ai/` mirrors the repo), and the one named `slug` (id or alias, any case).
 const projectDir = (p) => `${p.archived ? 'archive' : 'projects'}/${p.id}`;
-const projectActive = (p) => !p.archived && p.status === 'active';
+const projectActive = (p) => !p.archived && p.status.toLowerCase() === 'active';
 function projectFiles(entries, p) {
   const dir = projectDir(p);
   return { own: noteRows(entries, dir).filter((e) => e.path !== `${dir}/README.md`), ai: noteRows(entries, `ai/${dir}`) };
@@ -3657,7 +3658,7 @@ function loadNote(path) {
 // fetched again; one that can't be had (or isn't a picture by name) marks its box.
 const NOTE_MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' };
 function noteImg(img, path) {
-  const size = (notesTree.entries.find((e) => e.path === path) || {}).size || 0;
+  const size = (((notesTree && notesTree.entries) || []).find((e) => e.path === path) || {}).size || 0;
   const mime = NOTE_MIME[(path.match(/\.(\w+)$/) || [])[1]?.toLowerCase()];
   evMedia(img, { id: `note:${size}:${path}`, url: `/api/notes/file?path=${encodeURIComponent(path)}`, mime, bytes: size });
 }
@@ -4199,7 +4200,7 @@ for (const f of [$('prompt'), $('reply-text')]) f.addEventListener('input', () =
 $('prompt').value = drafts.get('draft:new');
 // Leaving a view stops dictation into it and any readback.
 // A press's click has landed once the view changes: nothing left to hold for.
-window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (route().view === 'apps' && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; if (route().view === 'notes') { noteShown = null; if (notesTree) loadNotes(); } if (route().view === 'projects') { if (projects) loadProjects(); if (notesTree) loadNotes(); } render(); };
+window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (route().view === 'apps' && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; if (route().view === 'notes') { noteShown = null; if (notesTree) loadNotes(); } if (route().view === 'projects') { if (projects) loadProjects(); if (notesTree && route().id) loadNotes(); } render(); };
 setInterval(tick, 1000);
 
 // `#new`, a link into the page for a new task, is Tasks with the composer focused; the hash becomes `#` so back links don't refocus.

@@ -7,14 +7,19 @@ use std::path::Path;
 
 use mis_types::{Project, ProjectError};
 
-use crate::routine::{strip_comment, unquote};
+use crate::routine::{parse_list, strip_comment, unquote};
 
 /// Where records live.
 const DIRS: [&str; 2] = ["projects", "archive"];
+/// The keys a record's frontmatter gives the project.
+const KEYS: [&str; 7] = [
+    "schema", "id", "title", "aliases", "status", "repos", "notes",
+];
 
 /// The record in folder `dir` (`projects/<id>` or `archive/<id>`) from its README's `text`:
 /// `---`, `key: value` lines, `---`, then the description. Lists are `[a, b]` or `- a` lines
-/// below their key; ` #` starts a comment; keys besides the project's are left alone.
+/// below their key; ` #` starts a comment; other keys, and anything indented under them, are
+/// left alone.
 /// `id` defaults to the folder's name and must match it; `title` defaults to the id,
 /// `status` to `active`.
 pub fn parse(dir: &str, text: &str) -> Result<Project, String> {
@@ -25,8 +30,8 @@ pub fn parse(dir: &str, text: &str) -> Result<Project, String> {
     }
     let mut keys: BTreeMap<&str, &str> = BTreeMap::new();
     let mut items: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    // The key `- x` lines belong to: the last one, if it had no value.
-    let mut block = None;
+    // The last top-level key, and whether it had no value (so `- x` lines below list it).
+    let mut last: Option<(&str, bool)> = None;
     let mut body = None;
     let mut at = text.find('\n').map_or(text.len(), |i| i + 1);
     for raw in lines {
@@ -40,13 +45,24 @@ pub fn parse(dir: &str, text: &str) -> Result<Project, String> {
         if line.is_empty() {
             continue;
         }
+        // Under another key: its own nested value, e.g. `links:` then `  docs: x`.
+        if raw.starts_with([' ', '\t']) && last.is_some_and(|(k, _)| !KEYS.contains(&k)) {
+            continue;
+        }
         if let Some(item) = line
             .strip_prefix('-')
             .filter(|r| r.is_empty() || r.starts_with(' '))
         {
-            let k = block.ok_or_else(|| format!("`{line}`: a list item, but not under a key"))?;
+            let Some((k, true)) = last else {
+                return Err(format!("`{line}`: a list item, but not under a key"));
+            };
             items.entry(k).or_default().push(unquote(item.trim()));
             continue;
+        }
+        if raw.starts_with([' ', '\t']) {
+            return Err(format!(
+                "`{line}`: indented, but not under a key that takes it"
+            ));
         }
         let (k, v) = line
             .split_once(':')
@@ -55,27 +71,16 @@ pub fn parse(dir: &str, text: &str) -> Result<Project, String> {
         if keys.insert(k, v).is_some() {
             return Err(format!("`{k}` is set twice"));
         }
-        block = v.is_empty().then_some(k);
+        last = Some((k, v.is_empty()));
     }
     let body = body.ok_or("the frontmatter needs a closing `---` line")?;
     let one = |k: &str| keys.get(k).map(|v| unquote(v)).filter(|v| !v.is_empty());
-    let list = |k: &str| -> Result<Vec<String>, String> {
-        let raw: Vec<&str> = match keys.get(k).copied().filter(|v| !v.is_empty()) {
-            None => items.get(k).cloned().unwrap_or_default(),
-            Some(v) => match v.strip_prefix('[') {
-                Some(rest) => (rest.strip_suffix(']'))
-                    .ok_or_else(|| format!("{k}: a list needs its closing `]`"))?
-                    .split(',')
-                    .map(|i| unquote(i.trim()))
-                    .collect(),
-                None => vec![unquote(v)],
-            },
-        };
-        Ok(raw
-            .into_iter()
+    let list = |k: &str| match keys.get(k).copied().filter(|v| !v.is_empty()) {
+        Some(v) => parse_list(k, v),
+        None => Ok((items.get(k).into_iter().flatten())
             .filter(|i| !i.is_empty())
-            .map(String::from)
-            .collect())
+            .map(|i| i.to_string())
+            .collect()),
     };
     if let Some(s) = one("schema").filter(|s| *s != "1") {
         return Err(format!("schema `{s}`: only 1 is known"));
@@ -111,7 +116,7 @@ pub fn collect(mut records: Vec<(String, Option<String>)>) -> (Vec<Project>, Vec
     for (dir, text) in records {
         let path = format!("{dir}/README.md");
         let parsed = text
-            .ok_or_else(|| "can't be read: not a UTF-8 file, or a symlink".to_string())
+            .ok_or_else(|| "can't be read: a symlink, too big, or not UTF-8".to_string())
             .and_then(|t| parse(&dir, &t));
         let p = match parsed {
             Ok(p) => p,
@@ -162,7 +167,7 @@ pub fn resolve<'a>(projects: &'a [Project], slug: &str) -> Option<&'a Project> {
 }
 
 /// Every record in `clone`: each folder under [`DIRS`] with a `README.md`. Read as the Notes
-/// view reads files ([`crate::apps::read_file`]: no symlinks below the clone); symlinked
+/// view serves them ([`crate::notes_view::read`]: no symlinks below the clone); symlinked
 /// folders are skipped.
 pub fn list(clone: &Path) -> (Vec<Project>, Vec<ProjectError>) {
     let mut records = Vec::new();
@@ -187,8 +192,8 @@ pub fn list(clone: &Path) -> (Vec<Project>, Vec<ProjectError>) {
             if std::fs::symlink_metadata(clone.join(&readme)).is_err() {
                 continue; // a folder, not a record
             }
-            let text =
-                crate::apps::read_file(clone, &readme).and_then(|b| String::from_utf8(b).ok());
+            let read = crate::notes_view::read(clone, &readme);
+            let text = read.ok().and_then(|(_, b)| String::from_utf8(b).ok());
             records.push((dir, text));
         }
     }
@@ -247,14 +252,11 @@ mod tests {
         );
         assert_eq!(got.description, "Text.");
         // Defaults.
-        let bare = parse("projects/b", "---\n---\n").unwrap();
-        assert_eq!(
-            bare,
-            Project {
-                archived: false,
-                ..project("b", &[])
-            }
-        );
+        assert_eq!(parse("projects/b", "---\n---\n"), Ok(project("b", &[])));
+        // What's indented under other keys is theirs, not the project's.
+        let nested =
+            "---\nlinks:\n  status: wip\n  title: Docs\n  - x\nsummary: >\n  some text\n---\n";
+        assert_eq!(parse("projects/b", nested), Ok(project("b", &[])));
     }
 
     #[test]
@@ -270,6 +272,14 @@ mod tests {
             ("---\ntitle: x\ntitle: y\n---\n", "`title` is set twice"),
             ("---\naliases: [x\n---\n", "closing `]`"),
             ("---\n- x\n---\n", "not under a key"),
+            ("---\ntitle: x\n- y\n---\n", "not under a key"),
+            (
+                "---\ntitle:\n  sub: y\n---\n",
+                "indented, but not under a key that takes it",
+            ),
+            ("---\n  title: x\n---\n", "indented"),
+            ("---\naliases: [\"a, b\"]\n---\n", "no commas inside quotes"),
+            ("---\nrepos: [a,,b]\n---\n", "repos: empty item"),
             ("---\njust words\n---\n", "want `key: value`"),
         ] {
             let err = parse("projects/a", text).unwrap_err();
@@ -318,7 +328,7 @@ mod tests {
                 ),
                 (
                     "projects/link/README.md",
-                    "can't be read: not a UTF-8 file, or a symlink"
+                    "can't be read: a symlink, too big, or not UTF-8"
                 ),
                 (
                     "projects/b/README.md",
