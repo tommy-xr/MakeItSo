@@ -163,7 +163,9 @@ async fn guard(
 /// A `Set-Cookie` dropping the draft cookie `req` carries if it no longer applies (the draft
 /// was replaced or decided, or the asker isn't its owner).
 fn stale_draft_cookie(req: &Request) -> Option<String> {
-    req.extensions().get::<Member>().filter(|m| m.draft.is_none())?;
+    req.extensions()
+        .get::<Member>()
+        .filter(|m| m.draft.is_none())?;
     let slug = app_access::app_of(req.uri().path())?;
     let name = format!("{}=", app_access::draft_cookie_name(slug));
     let cookies = req.headers().get(header::COOKIE)?.to_str().ok()?;
@@ -397,9 +399,9 @@ fn serving(apps: &Apps, slug: &str, m: &Member) -> Option<apps::Live> {
 }
 
 /// Where `m`'s records reads and writes go: the draft's copy while trying it, else the app's.
-fn store(apps: &Apps, slug: &str, m: &Member) -> Result<String, Response> {
+fn store(apps: &Apps, slug: &str, m: &Member) -> anyhow::Result<String> {
     match m.draft {
-        Some(_) => apps.sandbox(slug).map_err(|e| failed(slug, e)),
+        Some(_) => apps.sandbox(slug),
         None => Ok(slug.to_string()),
     }
 }
@@ -452,7 +454,7 @@ async fn mutate(
         }
         let key = match store(&apps, &slug, &m) {
             Ok(k) => k,
-            Err(r) => return r,
+            Err(e) => return failed(&slug, e),
         };
         let (who, now) = (m.subject.name(), crate::unix_ms());
         match records::parse_writes(&body) {
@@ -501,7 +503,7 @@ async fn list(
         };
         let key = match store(&apps, &slug, &m) {
             Ok(k) => k,
-            Err(r) => return r,
+            Err(e) => return failed(&slug, e),
         };
         match records.list(&key, &q, &c) {
             Ok(page) => Json(page).into_response(),
@@ -541,7 +543,7 @@ async fn get_record(
         }
         let key = match store(&apps, &slug, &m) {
             Ok(k) => k,
-            Err(r) => return r,
+            Err(e) => return failed(&slug, e),
         };
         let owner = records::owner(space, m.subject.name());
         match records.get(&key, space, owner, &collection, &id) {
@@ -567,7 +569,7 @@ async fn export(
         }
         let key = match store(&apps, &slug, &m) {
             Ok(k) => k,
-            Err(r) => return r,
+            Err(e) => return failed(&slug, e),
         };
         let user = m.subject.name();
         match records.visible(&key, user) {
