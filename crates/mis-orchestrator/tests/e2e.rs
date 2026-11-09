@@ -6277,7 +6277,7 @@ async fn feedback_from_an_editor_becomes_a_change_task_and_a_viewer_cant_send_an
     );
     for want in [
         "Feedback on `demo` v1 (live) from local:\n\n> Show pH too.",
-        "route `#/readings`, element `main > div.chart`, area 12,140 366x220 in a 390x844 viewport",
+        "route `#/readings`, element `main > div.chart`, page area 12,140 366x220 in a 390x844 viewport",
         "Reproduce it first",
     ] {
         assert!(task.prompt.contains(want), "{want}: {}", task.prompt);

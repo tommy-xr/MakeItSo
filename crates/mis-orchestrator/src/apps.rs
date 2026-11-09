@@ -753,7 +753,7 @@ impl Apps {
         crate::images::private_dir(&dir)?;
         let json = serde_json::to_vec(held).expect("feedback serializes");
         Ok(crate::push::write_private(
-            &dir.join(format!("{}.json", held.id)),
+            &self.held_path(slug, held.id),
             &json,
         )?)
     }
@@ -770,16 +770,21 @@ impl Apps {
         all
     }
 
-    /// Take kept feedback `id` off `slug`'s list. None: not there.
-    pub fn take_held(&self, slug: &str, id: uuid::Uuid) -> Option<HeldFeedback> {
-        let path = self
-            .dir
+    /// Kept feedback `id` of `slug`. None: not there.
+    pub fn held(&self, slug: &str, id: uuid::Uuid) -> Option<HeldFeedback> {
+        serde_json::from_slice(&std::fs::read(self.held_path(slug, id)).ok()?).ok()
+    }
+
+    /// Drop kept feedback `id` of `slug`: whether it was there.
+    pub fn drop_held(&self, slug: &str, id: uuid::Uuid) -> bool {
+        std::fs::remove_file(self.held_path(slug, id)).is_ok()
+    }
+
+    fn held_path(&self, slug: &str, id: uuid::Uuid) -> PathBuf {
+        self.dir
             .join(slug)
             .join(FEEDBACK)
-            .join(format!("{id}.json"));
-        let held = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
-        std::fs::remove_file(&path).ok()?;
-        Some(held)
+            .join(format!("{id}.json"))
     }
 
     /// Whether `slug`'s feedback waits for its owner.

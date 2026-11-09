@@ -614,19 +614,34 @@ async fn feedback(
     let Some(inbox) = &auth.feedback else {
         return (StatusCode::SERVICE_UNAVAILABLE, "feedback is off").into_response();
     };
-    let release = m.draft.or_else(|| apps.active_n(&slug));
     let held = HeldFeedback {
         id: uuid::Uuid::new_v4(),
         at: crate::unix_ms(),
         by: m.subject.name().into(),
-        release,
+        release: m.draft.or_else(|| apps.active_n(&slug)),
         draft: m.draft.is_some(),
+        // The draft's thread, if the app has one: feedback continues it (captured now, so a
+        // later draft from elsewhere doesn't get it).
+        draft_task: apps.draft(&slug).map(|d| d.task),
         feedback: f,
-        waiting: None,
+        waiting: Some("on its way to an agent".into()),
     };
-    match inbox.send((slug, held)) {
-        Ok(()) => StatusCode::ACCEPTED.into_response(),
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "feedback is off").into_response(),
+    // Kept before it is acknowledged, so a restart can't lose it; the owner sees it until it goes.
+    let (a, s) = (apps.clone(), slug.clone());
+    let keep = tokio::task::spawn_blocking(move || {
+        if a.held_feedback(&s).len() >= mis_types::MAX_HELD_FEEDBACK {
+            let why = "too much feedback is waiting for the owner".to_string();
+            return Err((StatusCode::TOO_MANY_REQUESTS, why));
+        }
+        let kept = a.keep_feedback(&s, &held).map(|()| held);
+        kept.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))
+    });
+    match keep.await.expect("keeping feedback doesn't panic") {
+        Ok(held) => {
+            let _ = inbox.send((slug, held));
+            StatusCode::ACCEPTED.into_response()
+        }
+        Err(refused) => refused.into_response(),
     }
 }
 

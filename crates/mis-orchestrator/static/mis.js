@@ -120,6 +120,7 @@
       let from = null;
       veil.onpointerdown = (e) => { from = [e.clientX, e.clientY]; veil.setPointerCapture(e.pointerId); };
       veil.onpointermove = (e) => { if (from) show(box(from, [e.clientX, e.clientY]), true); };
+      veil.onpointercancel = () => { from = null; ring.style.display = 'none'; };
       veil.onpointerup = (e) => {
         if (!from) return;
         const drawn = box(from, [e.clientX, e.clientY]), tap = drawn.w < 12 && drawn.h < 12;
@@ -131,8 +132,10 @@
         const rect = b ? { x: b.x, y: b.y, w: b.width, h: b.height } : drawn;
         show(rect, !tap);
         hint.remove();
-        veil.onpointerdown = veil.onpointermove = veil.onpointerup = null;
-        ask(veil, btn, { selector: el && el !== document.body ? selectorOf(el) : '', rect });
+        veil.onpointerdown = veil.onpointermove = veil.onpointerup = veil.onpointercancel = null;
+        // Page coordinates, so a scrolled view is found again.
+        const page = { ...rect, x: rect.x + scrollX, y: rect.y + scrollY };
+        ask(veil, btn, { selector: el && el !== document.body ? selectorOf(el) : '', rect: page });
       };
     }
 
@@ -149,7 +152,8 @@
       css(send, { ...pill, position: 'static', background: '#5EE6F2', color: '#062026' });
       css(cancel, { ...pill, position: 'static', background: 'transparent', color: '#ccc', boxShadow: 'none' });
       css(said, { color: '#F2726B', font: '13px system-ui, sans-serif' });
-      css(panel, { position: 'fixed', left: '8px', right: '8px', bottom: 'calc(8px + env(safe-area-inset-bottom))', zIndex: 2147483647,
+      // At the top: a phone's keyboard comes up from the bottom.
+      css(panel, { position: 'fixed', left: '8px', right: '8px', top: 'calc(8px + env(safe-area-inset-top))', zIndex: 2147483647,
         display: 'grid', gap: '8px', padding: '12px', borderRadius: '14px', background: '#16181d', boxShadow: '0 4px 16px rgba(0,0,0,.4)' });
       const row = document.createElement('div');
       css(row, { display: 'flex', gap: '8px', justifyContent: 'flex-end' });
@@ -163,10 +167,10 @@
         e.preventDefault();
         send.disabled = true;
         const path = location.pathname.slice(`/a/${slug}/`.length);
-        const body = { route: location.hash || `/${path}`, ...marked, viewport: { w: innerWidth, h: innerHeight }, note: note.value };
+        const body = { route: `/${path}${location.search}${location.hash}`, ...marked, viewport: { w: innerWidth, h: innerHeight }, note: note.value };
         const headers = { 'Content-Type': 'application/json', ...(draft ? { 'X-Mis-Draft': draft } : {}) };
         const res = await fetch(`/a/${slug}/api/v1/feedback`, { method: 'POST', headers, body: JSON.stringify(body) }).catch(() => null);
-        if (res && res.ok) { done(); toast('Sent: an agent will work on it'); return; }
+        if (res && res.ok) { done(); toast('Feedback sent'); return; }
         said.textContent = res ? (await res.text()) || `error ${res.status}` : 'not sent: no connection';
         send.disabled = false;
       };
@@ -176,7 +180,7 @@
   function toast(text) {
     const t = document.createElement('div');
     t.textContent = text;
-    css(t, { ...pill, left: '50%', top: '12px', transform: 'translateX(-50%)', background: '#111', color: '#fff' });
+    css(t, { ...pill, left: '50%', top: '12px', transform: 'translateX(-50%)', background: '#111', color: '#fff', whiteSpace: 'nowrap' });
     document.body.append(t);
     setTimeout(() => t.remove(), 3000);
   }
@@ -204,9 +208,7 @@
       const a = document.createElement('a');
       a.href = `/a/${slug}/?draft=off`;
       a.textContent = `Draft v${draft} · test data · exit`;
-      Object.assign(a.style, { position: 'fixed', left: '8px', bottom: 'calc(8px + env(safe-area-inset-bottom))', zIndex: 2147483647,
-        padding: '4px 10px', borderRadius: '999px', background: '#f5a524', color: '#000', font: '600 12px/1.5 system-ui, sans-serif',
-        textDecoration: 'none', boxShadow: '0 1px 4px rgba(0,0,0,.3)' });
+      css(a, { ...pill, left: '8px', bottom: 'calc(8px + env(safe-area-inset-bottom))', background: '#f5a524', color: '#000', textDecoration: 'none' });
       document.body.append(a);
     });
   }

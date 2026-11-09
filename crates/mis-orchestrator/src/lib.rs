@@ -871,18 +871,24 @@ impl App {
         tx
     }
 
-    /// Send `held` to an agent unless its app holds feedback (`force`: the owner sent it);
-    /// else, or if it can't go now, keep it for the owner with why. Whether it went.
+    /// Send `held` (kept on its app as it came in) to an agent unless its app holds feedback
+    /// (`force`: the owner sent it), then drop it; else, or if it can't go now, keep it for the
+    /// owner with why. Whether it went.
     async fn take_feedback(&self, slug: String, mut held: HeldFeedback, force: bool) -> bool {
         let Some(apps) = self.apps.clone() else {
             return false;
         };
         let (a, s) = (apps.clone(), slug.clone());
-        let read = tokio::task::spawn_blocking(move || (a.policy(&s).hold_feedback, a.draft(&s)));
-        let (hold, draft) = read.await.expect("reading an app doesn't panic");
+        let hold = tokio::task::spawn_blocking(move || a.policy(&s).hold_feedback).await;
+        let hold = hold.expect("reading a policy doesn't panic") && !force;
+        let (open, tip) = {
+            let l = self.ledger();
+            let tip = held.draft_task.flatten().and_then(|t| l.thread_tip(t));
+            (l.open_app_tasks(&slug), tip)
+        };
         let text = feedback::request(&slug, &held);
-        let sent = match feedback::send(&held, hold && !force, draft.and_then(|d| d.task)) {
-            feedback::Send::Hold(why) => Err(why.to_string()),
+        let sent = match feedback::send(&held, hold, open, tip) {
+            feedback::Send::Hold(why) => Err(why),
             feedback::Send::Reply(task) => {
                 let planner = self.planner.is_some();
                 self.transition(|l| match l.reply(task, text, vec![], planner) {
@@ -903,18 +909,20 @@ impl App {
                 self.start_app_task(t, None).await
             }
         };
-        match &sent {
-            Ok(task) => tracing::info!("apps/{slug}: feedback {} went to task {task}", held.id),
-            Err(why) => {
-                tracing::info!("apps/{slug}: feedback {} waits: {why}", held.id);
-                held.waiting = Some(why.clone());
-                let keep = tokio::task::spawn_blocking(move || apps.keep_feedback(&slug, &held));
-                if let Ok(Err(e)) = keep.await {
-                    tracing::warn!("keeping feedback: {e}");
-                }
+        tracing::info!("apps/{slug}: feedback {}: {sent:?}", held.id);
+        let ok = sent.is_ok();
+        held.waiting = sent.err();
+        let kept = tokio::task::spawn_blocking(move || match ok {
+            true => {
+                apps.drop_held(&slug, held.id);
+                Ok(())
             }
+            false => apps.keep_feedback(&slug, &held),
+        });
+        if let Ok(Err(e)) = kept.await {
+            tracing::warn!("keeping feedback: {e:#}");
         }
-        sent.is_ok()
+        ok
     }
 
     /// Who asks, as apps know members: an Access login, else (the full token, a direct local
@@ -2110,10 +2118,14 @@ async fn decide_feedback(
         Err(refused) => return refused.into_response(),
     };
     let s = slug.clone();
-    let taken = tokio::task::spawn_blocking(move || apps.take_held(&s, id)).await;
-    let Some(held) = taken.expect("reading feedback doesn't panic") else {
+    let read = tokio::task::spawn_blocking(move || match send {
+        true => apps.held(&s, id),
+        false => apps.held(&s, id).filter(|_| apps.drop_held(&s, id)),
+    });
+    let Some(held) = read.await.expect("reading feedback doesn't panic") else {
         return (StatusCode::NOT_FOUND, "no such feedback").into_response();
     };
+    // Sent, it is dropped; if it can't go, it stays, with why.
     if send && !app.take_feedback(slug, held, true).await {
         return (StatusCode::CONFLICT, "it couldn't go now; see why on it").into_response();
     }
@@ -2133,16 +2145,14 @@ async fn decide_draft(
     Path((slug, action)): Path<(String, String)>,
     body: Bytes,
 ) -> Response {
-    if let Err(refused) = app.admit_full(&headers, peer, "/api/apps").await {
-        return refused.into_response();
-    }
     let publish = match action.as_str() {
         "publish" => true,
         "discard" => false,
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
-    let (Some(apps), true) = (app.apps.clone(), apps::valid_slug(&slug)) else {
-        return (StatusCode::NOT_FOUND, "no such app").into_response();
+    let apps = match admit_owner(&app, &headers, peer, &slug).await {
+        Ok(a) => a,
+        Err(refused) => return refused.into_response(),
     };
     #[derive(serde::Deserialize)]
     struct Decide {
@@ -2154,16 +2164,8 @@ async fn decide_draft(
     };
     let _deciding = app.drafting.lock().await;
     let (a, s) = (apps.clone(), slug.clone());
-    let read = tokio::task::spawn_blocking(move || (a.policy(&s), a.draft(&s)));
-    let (policy, draft) = read.await.expect("reading a draft doesn't panic");
-    let who = app.app_subject(&headers).await;
-    if app_access::role_of(&policy, &who) != Some(AppRole::Owner) {
-        return (
-            StatusCode::FORBIDDEN,
-            "only the app's owner decides its draft",
-        )
-            .into_response();
-    }
+    let draft = tokio::task::spawn_blocking(move || a.draft(&s)).await;
+    let draft = draft.expect("reading a draft doesn't panic");
     let Some(draft) = draft.filter(|d| d.id == id) else {
         return (StatusCode::CONFLICT, "that draft was replaced or decided").into_response();
     };

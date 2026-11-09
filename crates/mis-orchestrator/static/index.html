@@ -3552,25 +3552,13 @@ async function loadApps() {
   renderNav();
 }
 async function activateApp(slug, n) {
-  appAsk = null; appBusy = slug;
-  renderApps();
-  try {
-    const r = await fetch(`/api/apps/${encodeURIComponent(slug)}/activate`, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ release: n }) });
-    if (r.ok) appErr.delete(slug); else appErr.set(slug, (await r.text()) || `error ${r.status}`);
-  } catch { appErr.set(slug, 'couldn’t reach the orchestrator'); }
-  appBusy = null;
-  await loadApps();
+  appAsk = null;
+  await appPost(slug, `/api/apps/${encodeURIComponent(slug)}/activate`, { release: n });
 }
 // Share `slug` with `email` as `role`; null role stops sharing.
 async function setMember(slug, email, role) {
-  memberAsk = null; appBusy = slug;
-  renderApps();
-  try {
-    const r = await fetch(`/api/apps/${encodeURIComponent(slug)}/members`, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ email, role }) });
-    if (r.ok) { appErr.delete(slug); if (role) shareDraft.delete(slug); } else appErr.set(slug, (await r.text()) || `error ${r.status}`);
-  } catch { appErr.set(slug, 'couldn’t reach the orchestrator'); }
-  appBusy = null;
-  await loadApps();
+  memberAsk = null;
+  await appPost(slug, `/api/apps/${encodeURIComponent(slug)}/members`, { email, role }, () => { if (role) shareDraft.delete(slug); });
 }
 // Who an app is shared with; full access can share it and, after a confirm, stop sharing.
 function appMembers(a, busy) {
@@ -3596,13 +3584,13 @@ function appMembers(a, busy) {
     email, role, el('button', { disabled: busy }, 'Share'));
   return el('div', {}, list, form);
 }
-// POST `body` to `path` for app `slug`, then reload apps; a failure shows on the app.
-async function appPost(slug, path, body) {
+// POST `body` to `path` for app `slug` (`done` once it went), then reload apps; a failure shows on the app.
+async function appPost(slug, path, body, done) {
   appBusy = slug;
   renderApps();
   try {
     const r = await fetch(path, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
-    if (r.ok) appErr.delete(slug); else appErr.set(slug, (await r.text()) || `error ${r.status}`);
+    if (r.ok) { appErr.delete(slug); if (done) done(); } else appErr.set(slug, (await r.text()) || `error ${r.status}`);
   } catch { appErr.set(slug, 'couldn’t reach the orchestrator'); }
   appBusy = null;
   await loadApps();

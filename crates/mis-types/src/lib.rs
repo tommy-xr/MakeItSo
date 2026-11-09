@@ -16,7 +16,7 @@ pub use apps::{
     valid_slug, AppBackup, AppDraft, AppFeedback, AppMe, AppMember, AppRelease, AppRole, AppTask,
     AppView, BackupKind, FeedbackRect, FeedbackSize, HeldFeedback, ProposeDraft, RestoreBackup,
     Restored, SetMember, MAX_APP_TITLE_CHARS, MAX_DRAFT_IMAGE_BYTES, MAX_DRAFT_NOTE_CHARS,
-    MAX_FEEDBACK_CHARS, SLUG_RULE,
+    MAX_FEEDBACK_CHARS, MAX_FEEDBACK_TASKS, MAX_HELD_FEEDBACK, SLUG_RULE,
 };
 pub mod diff;
 pub use diff::{DiffBase, DiffStat, TaskDiff};

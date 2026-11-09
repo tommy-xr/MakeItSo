@@ -74,7 +74,7 @@ pub struct AppFeedback {
     /// A CSS selector for the element marked (the one tapped, or under the circle's middle).
     #[serde(default)]
     pub selector: String,
-    /// What was marked, in CSS pixels of the viewport.
+    /// What was marked, in CSS pixels of the page (scroll included).
     pub rect: FeedbackRect,
     pub viewport: FeedbackSize,
     pub note: String,
@@ -106,6 +106,10 @@ pub struct HeldFeedback {
     pub release: Option<u32>,
     /// They saw the draft (`release` is it).
     pub draft: bool,
+    /// The app had a draft then: the task that proposed it (None: from no task), whose
+    /// thread the feedback continues rather than starting work the draft would replace.
+    #[serde(default)]
+    pub draft_task: Option<Option<uuid::Uuid>>,
     pub feedback: AppFeedback,
     /// Why it wasn't sent to an agent when it came in (held, or the agent was busy).
     #[serde(default)]
@@ -114,6 +118,10 @@ pub struct HeldFeedback {
 
 /// Longest feedback note.
 pub const MAX_FEEDBACK_CHARS: usize = 2000;
+/// Most feedback an app keeps waiting; more is refused (429) until some is sent or dismissed.
+pub const MAX_HELD_FEEDBACK: usize = 50;
+/// Most open tasks feedback starts for one app; past it, feedback waits for the owner.
+pub const MAX_FEEDBACK_TASKS: usize = 3;
 
 /// An app's draft: a staged release and the PR it was built from (`mis apps propose`). One
 /// per app; a newer proposal replaces it. Publishing merges the PR, then makes it live.
