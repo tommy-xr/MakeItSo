@@ -722,8 +722,8 @@ impl Ledger {
     }
 
     /// Queue an app task: `prompt` as is (no planner), in `cwd` on `harness`, on `worker`
-    /// only if given. It never merges: the user approves its PR. Err if `harness` is unknown
-    /// or `worker` is offline or doesn't run it.
+    /// only if given. It never merges: the user approves its PR. Err if no worker runs
+    /// `harness` (it would wait for good), or `worker` is offline or doesn't run it.
     pub fn submit_app_task(
         &mut self,
         prompt: String,
@@ -732,8 +732,8 @@ impl Ledger {
         model: Option<String>,
         worker: Option<WorkerId>,
     ) -> Result<(TaskId, Vec<Effect>), String> {
-        if !mis_agent::HARNESSES.contains(&harness.as_str()) {
-            return Err(format!("no harness {harness:?}"));
+        if worker.is_none() && !self.known_fleet().contains_key(&harness) {
+            return Err(format!("no worker runs {harness:?}"));
         }
         let task = Task {
             id: Uuid::new_v4(),

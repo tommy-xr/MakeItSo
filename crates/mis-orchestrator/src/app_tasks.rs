@@ -1,6 +1,6 @@
 //! Tasks that build or change an app (`+ App`, `Change…`): the prompt they run with. Pure.
 
-use mis_types::{guides, valid_slug, AppTask};
+use mis_types::{guides, valid_slug, AppTask, SLUG_RULE};
 
 /// What `t` asks for, then the apps guide. Err: why it can't be a task.
 pub fn prompt(t: &AppTask) -> Result<String, String> {
@@ -10,9 +10,7 @@ pub fn prompt(t: &AppTask) -> Result<String, String> {
     }
     let slug = t.slug.as_deref().map(str::trim).filter(|s| !s.is_empty());
     if let Some(s) = slug.filter(|s| !valid_slug(s)) {
-        return Err(format!(
-            "{s:?}: an app's name is a-z, 0-9 and -, up to 32, starting with a letter or digit"
-        ));
+        return Err(format!("{s:?}: {SLUG_RULE}"));
     }
     let what = match (t.change, slug) {
         (true, Some(s)) => format!("Change the Make It So app `{s}` (`apps/{s}/`)."),

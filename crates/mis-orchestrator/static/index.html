@@ -3983,32 +3983,41 @@ $('routine-new').onsubmit = async (e) => {
 };
 // + by Apps, or an app's Change…: a form atop Apps that starts a task building (`change` null) or
 // changing an app. Shown once Settings are read, with their harness and model.
-let appChange = null;
+let appChange = null, appOpening = null; // the app the form changes; the latest open, so an older one's reply is dropped
 async function showNewApp(change) {
+  const ask = {};
+  appOpening = ask;
   $('app-new').hidden = true;
   $('an-error').hidden = true;
+  const got = settings && settings.s ? settings : await loadSettings();
+  if (appOpening !== ask) return;
   if (change !== appChange) $('an-request').value = ''; // a request is for the app it was typed for
   appChange = change;
-  const got = await loadSettings();
   const a = change && hosted && hosted.list && hosted.list.find((x) => x.slug === change);
   $('an-head').textContent = change ? `Change ${a ? a.title : change}` : 'New app';
   $('an-slug').hidden = !!change;
   $('an-harness').value = got.s ? got.s.apps.harness : 'claude';
-  $('an-model').value = got.s ? got.s.apps.model : '';
-  $('an-worker').replaceChildren(el('option', { value: '' }, 'Any machine'),
-    ...workers.filter((w) => w.online).map((w) => el('option', { value: w.id }, w.info.hostname)));
+  pickHarness();
   if (got.error) { $('an-error').textContent = `Settings: ${got.error}`; $('an-error').hidden = false; }
   $('app-new').hidden = false;
   window.scrollTo(0, 0);
   $('an-request').focus();
 }
+// The harness's model from Settings (another harness: its own default), and the machines running it.
+function pickHarness() {
+  const h = $('an-harness').value, s = settings && settings.s;
+  $('an-model').value = s && s.apps.harness === h ? s.apps.model : '';
+  $('an-worker').replaceChildren(el('option', { value: '' }, 'Any machine'),
+    ...workers.filter((w) => w.online && w.info.harnesses.includes(h)).map((w) => el('option', { value: w.id }, w.info.hostname)));
+}
+$('an-harness').onchange = pickHarness;
 $('app-add').onclick = () => {
   $('menu').close();
   location.hash = '#apps';
   render();
   showNewApp(null);
 };
-$('an-cancel').onclick = () => { $('app-new').reset(); $('app-new').hidden = true; };
+$('an-cancel').onclick = () => { appOpening = null; $('app-new').reset(); $('app-new').hidden = true; };
 $('app-new').onsubmit = async (e) => {
   e.preventDefault();
   const body = { request: $('an-request').value, slug: appChange || $('an-slug').value.trim() || null, change: !!appChange,
