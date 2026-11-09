@@ -215,10 +215,18 @@ async fn admit(
 async fn directory(
     State(apps): State<Arc<Apps>>,
     Extension(subject): Extension<Subject>,
-) -> Html<String> {
-    let tiles: Vec<Tile> = (apps.list().iter())
+) -> Response {
+    off_thread(move || {
+        Html(directory_page(subject.name(), &tiles(&apps, &subject))).into_response()
+    })
+    .await
+}
+
+/// The live apps `subject` has a role in. Reads each app's policy and live manifest.
+fn tiles(apps: &Apps, subject: &Subject) -> Vec<Tile> {
+    (apps.list().iter())
         .filter(|a| a.active.is_some())
-        .filter(|a| app_access::role_of(&apps.policy(&a.slug), &subject).is_some())
+        .filter(|a| app_access::role_of(&apps.policy(&a.slug), subject).is_some())
         .map(|a| {
             let icon = apps.live(&a.slug).and_then(|l| l.manifest.icon);
             Tile {
@@ -227,8 +235,7 @@ async fn directory(
                 icon: icon.map(|i| format!("/a/{}/{}", a.slug, url_path(&i))),
             }
         })
-        .collect();
-    Html(directory_page(subject.name(), &tiles))
+        .collect()
 }
 
 /// One app in the directory. `icon`: its URL, served from the live release.
