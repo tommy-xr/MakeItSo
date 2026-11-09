@@ -77,11 +77,23 @@ pub fn new_app(template: &Path, dest: &Path, slug: &str, title: &str) -> Result<
         bail!("{} already exists", dest.display());
     }
     let name = dest.file_name().context("no app folder name")?;
-    let tmp = dest.with_file_name(format!(
+    let parent = dest.parent().context("no apps folder")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    // Else the copy would walk into its own output.
+    if parent.canonicalize()?.starts_with(template.canonicalize()?) {
+        bail!(
+            "{} is inside the template {}",
+            dest.display(),
+            template.display()
+        );
+    }
+    let tmp = parent.join(format!(
         ".{}.new-{}",
         name.to_string_lossy(),
         std::process::id()
     ));
+    // Not create_dir_all: a leftover from a crashed run must not be merged in.
+    std::fs::create_dir(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
     let built = copy(template, &tmp, slug, title).and_then(|()| write_sdk(&tmp.join(SDK_DIR)));
     let done = built.and_then(|()| {
         // Checked again: another `new` may have made it meanwhile (rename would replace an empty one).
@@ -96,8 +108,8 @@ pub fn new_app(template: &Path, dest: &Path, slug: &str, title: &str) -> Result<
     done
 }
 
+/// `from`'s contents into the folder `to`.
 fn copy(from: &Path, to: &Path, slug: &str, title: &str) -> Result<()> {
-    std::fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
     let mut entries: Vec<_> = std::fs::read_dir(from)
         .with_context(|| format!("reading {}", from.display()))?
         .collect::<Result<_, _>>()?;
@@ -110,8 +122,11 @@ fn copy(from: &Path, to: &Path, slug: &str, title: &str) -> Result<()> {
             bail!("{} is a symlink: templates hold only files", src.display());
         } else if kind.is_dir() {
             if !SKIP.iter().any(|s| e.file_name() == *s) {
+                std::fs::create_dir(&dst).with_context(|| format!("creating {}", dst.display()))?;
                 copy(&src, &dst, slug, title)?;
             }
+        } else if !kind.is_file() {
+            bail!("{} is not a regular file", src.display());
         } else {
             let bytes =
                 std::fs::read(&src).with_context(|| format!("reading {}", src.display()))?;
@@ -120,6 +135,8 @@ fn copy(from: &Path, to: &Path, slug: &str, title: &str) -> Result<()> {
                 Err(binary) => binary.into_bytes(),
             };
             std::fs::write(&dst, out).with_context(|| format!("writing {}", dst.display()))?;
+            // Keeps a script's execute bit.
+            std::fs::set_permissions(&dst, e.metadata()?.permissions())?;
         }
     }
     Ok(())
@@ -182,6 +199,22 @@ mod tests {
         assert_eq!(read("app.json"), "mine");
         assert!(new_app(&t, &root.join("apps/x"), "Bad_Slug", "X").is_err());
         assert!(new_app(&root.join("nope"), &root.join("apps/y"), "y", "Y").is_err());
+        // A template holding the apps folder would copy into itself.
+        assert!(new_app(&root, &root.join("apps/z"), "z", "Z").is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = t.join("run.sh");
+            std::fs::write(&script, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            new_app(&t, &root.join("apps/exec"), "exec", "Exec").unwrap();
+            let mode = std::fs::metadata(root.join("apps/exec/run.sh"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755);
+            std::fs::remove_dir_all(root.join("apps/exec")).unwrap();
+        }
         let left: Vec<_> = std::fs::read_dir(root.join("apps")).unwrap().collect();
         assert_eq!(left.len(), 2, "{left:?}"); // _template and demo
         std::fs::remove_dir_all(root).unwrap();

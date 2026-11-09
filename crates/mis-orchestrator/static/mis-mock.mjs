@@ -63,11 +63,18 @@ export function createMock({ role = 'owner', user = 'mock@example.com', app = 'm
     return null;
   };
 
+  // What the server's JSON parsing refuses (400 `bad mutation: …`), before any op is applied.
+  const shape = (op) =>
+    op?.op !== 'put' && op?.op !== 'remove' ? 'op is put or remove'
+      : !SPACES.includes(op.space) ? 'bad space'
+      : typeof op.collection !== 'string' || typeof op.id !== 'string' ? 'collection and id are strings'
+      : !Number.isInteger(op.rev) || op.rev < 0 ? 'rev must be a whole number'
+      : op.op === 'put' && op.data === undefined ? 'missing field `data`'
+      : null;
+
   function mutate(op) {
-    if (op?.op !== 'put' && op?.op !== 'remove') return fail(400, 'bad mutation: op is put or remove');
-    const bad = check(op.space, op.collection, op.id);
+    const bad = shape(op) ? `bad mutation: ${shape(op)}` : check(op.space, op.collection, op.id);
     if (bad) return fail(400, bad);
-    if (!Number.isInteger(op.rev) || op.rev < 0) return fail(400, 'rev must be a whole number');
     const k = rowKey(op.space, op.collection, op.id);
     const { e: cur, base = 0 } = rows.get(k) || {};
     if (op.op === 'remove') {
@@ -77,7 +84,6 @@ export function createMock({ role = 'owner', user = 'mock@example.com', app = 'm
       gone.set(k, cur.rev);
       return null;
     }
-    if (op.data === undefined) return fail(400, 'bad mutation: missing field `data`');
     const len = new TextEncoder().encode(JSON.stringify(op.data)).length;
     if (len > MAX_DATA) return fail(413, `data is ${len} bytes; the most is ${MAX_DATA}`);
     const put = (rev, base) => {
@@ -99,15 +105,20 @@ export function createMock({ role = 'owner', user = 'mock@example.com', app = 'm
 
   const writer = () => role === 'viewer' && fail(403, `a viewer can't do that here`);
 
-  // All or nothing, in order; each id once. A refusal names its op (`index`, `ops[i]: …`).
+  // All or nothing, in order; each id once. Checked as the server does: every op's shape, then
+  // repeated ids, then each op in turn. A refusal names its op (`index`, `ops[i]: …`).
   function batch(ops) {
     writer();
     if (!Array.isArray(ops)) fail(400, 'bad batch: ops must be a list');
     if (ops.length > MAX_BATCH) fail(400, `a batch holds at most ${MAX_BATCH} ops`);
+    const at = (i, status, message, current) => {
+      throw new Err(status, status === 409 ? message : `ops[${i}]: ${message}`, current, i);
+    };
+    ops.forEach((op, i) => shape(op) && at(i, 400, `bad mutation: ${shape(op)}`));
     const keys = new Set();
     ops.forEach((op, i) => {
-      const k = [op?.space, op?.collection, op?.id].join('/');
-      if (keys.has(k)) fail(400, `ops[${i}]: ${k} is already in this batch`);
+      const k = [op.space, op.collection, op.id].join('/');
+      if (keys.has(k)) at(i, 400, `${k} is already in this batch`);
       keys.add(k);
     });
     const before = [new Map(rows), new Map(gone)];
@@ -116,8 +127,7 @@ export function createMock({ role = 'owner', user = 'mock@example.com', app = 'm
         return mutate(op);
       } catch (e) {
         [rows, gone] = before;
-        const message = e.status === 409 ? e.message : `ops[${i}]: ${e.message}`;
-        throw new Err(e.status, message, e.current, i);
+        return at(i, e.status, e.message, e.current);
       }
     });
   }
@@ -131,6 +141,7 @@ export function createMock({ role = 'owner', user = 'mock@example.com', app = 'm
       const bad = check(space, collection, r?.id ?? '');
       if (bad) fail(400, `seed: ${bad}`);
       if (r.data === undefined) fail(400, `seed: ${r.id} has no data`);
+      if (new TextEncoder().encode(JSON.stringify(r.data)).length > MAX_DATA) fail(413, `seed: ${r.id} is over ${MAX_DATA} bytes`);
       if (r.rev !== undefined && !(Number.isInteger(r.rev) && r.rev >= 1)) fail(400, `seed: ${r.id}: rev must be 1 or more`);
     }
     for (const { space, collection, r } of all) {

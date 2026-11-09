@@ -14,7 +14,7 @@ pub use access::access_headers;
 mod apps;
 pub use apps::{
     valid_slug, AppBackup, AppMe, AppMember, AppRelease, AppRole, AppView, BackupKind,
-    RestoreBackup, Restored, SetMember,
+    RestoreBackup, Restored, SetMember, MAX_APP_TITLE_CHARS,
 };
 pub mod diff;
 pub use diff::{DiffBase, DiffStat, TaskDiff};

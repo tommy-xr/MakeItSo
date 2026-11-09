@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Most characters in an app's title.
+pub const MAX_APP_TITLE_CHARS: usize = 80;
+
 /// An app's name and path segment: `[a-z0-9][a-z0-9-]{0,31}`, e.g. `pool`, `chores-2`.
 pub fn valid_slug(s: &str) -> bool {
     let ok = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();

@@ -56,9 +56,9 @@ pub fn router(apps: Arc<Apps>, auth: Arc<Auth>) -> Router {
         .route("/", get(|| async { Redirect::temporary("/a/") }))
         .route("/a", get(|| async { Redirect::temporary("/a/") }))
         .route("/a/", get(directory))
-        .route("/a/_/mis.js", get(|| async { js(SDK) }))
-        .route("/a/_/mis-mock.js", get(|| async { js(SDK_MOCK) }))
-        .route("/a/_/mis.d.ts", get(|| async { text(SDK_TYPES) }))
+        .route("/a/_/mis.js", get(|| async { sdk_file(JS, SDK) }))
+        .route("/a/_/mis-mock.js", get(|| async { sdk_file(JS, SDK_MOCK) }))
+        .route("/a/_/mis.d.ts", get(|| async { sdk_file(TEXT, SDK_TYPES) }))
         .route("/a/{slug}", get(add_slash))
         .route("/a/{slug}/", get(entry))
         .route("/a/{slug}/api/v1/me", get(me))
@@ -86,13 +86,10 @@ pub fn router(apps: Arc<Apps>, auth: Arc<Auth>) -> Router {
         .with_state(apps)
 }
 
-fn js(body: &'static str) -> Response {
-    let ct = "text/javascript; charset=utf-8";
-    ([(header::CONTENT_TYPE, ct)], body).into_response()
-}
+const JS: &str = "text/javascript; charset=utf-8";
+const TEXT: &str = "text/plain; charset=utf-8";
 
-fn text(body: &'static str) -> Response {
-    let ct = "text/plain; charset=utf-8";
+fn sdk_file(ct: &'static str, body: &'static str) -> Response {
     ([(header::CONTENT_TYPE, ct)], body).into_response()
 }
 

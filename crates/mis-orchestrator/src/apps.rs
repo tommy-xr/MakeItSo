@@ -30,7 +30,7 @@ const MANIFEST: &str = "app.json";
 const META: &str = ".release.json";
 /// Beside `releases/`, so no bundle can ship or replace it.
 pub(crate) const POLICY: &str = "policy.json";
-const MAX_TITLE_CHARS: usize = 80;
+use mis_types::MAX_APP_TITLE_CHARS as MAX_TITLE_CHARS;
 
 pub use mis_types::valid_slug;
 

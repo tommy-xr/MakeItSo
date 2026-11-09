@@ -70,6 +70,25 @@ pub struct Batch {
     pub ops: Vec<Mutation>,
 }
 
+impl Mutation {
+    /// Which record it writes: `(space, collection, id)`.
+    pub fn key(&self) -> (Space, &str, &str) {
+        let (Self::Put {
+            space,
+            collection,
+            id,
+            ..
+        }
+        | Self::Remove {
+            space,
+            collection,
+            id,
+            ..
+        }) = self;
+        (*space, collection, id)
+    }
+}
+
 /// 200 to a mutation: the stored record; None after a remove.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Written {

@@ -203,7 +203,11 @@ test('mock: a batch lands whole or not at all', async () => {
   // Sent again after a lost answer: the same records.
   assert.deepEqual(await m.records.batch(ops), done);
   await assert.rejects(m.records.batch([p('c', 0, 1), p('big', 0, 'x'.repeat(MAX_DATA))]), (e) => e.status === 413 && e.index === 1 && /^ops\[1\]: /.test(e.message));
-  await assert.rejects(m.records.batch([p('d', 0, 1), p('d', 1, 2)]), (e) => e.status === 400 && e.message === 'ops[1]: shared/notes/d is already in this batch');
+  await assert.rejects(m.records.batch([p('d', 0, 1), p('d', 1, 2)]), (e) => e.status === 400 && e.index === 1 && e.message === 'ops[1]: shared/notes/d is already in this batch');
+  // Every op's shape is checked before any applies (a stale ops[0] doesn't hide a malformed ops[1]).
+  await assert.rejects(m.records.batch([p('a', 0, 1), { op: 'put', space: 'shared', collection: 'notes', id: 'e', rev: 0 }]), (e) => e.status === 400 && e.index === 1 && /^ops\[1\]: bad mutation/.test(e.message));
+  await assert.rejects(m.records.batch([{ op: 'put', space: 'shared', collection: 'notes', rev: 0, data: 1 }]), (e) => e.status === 400 && e.index === 0);
+  await assert.rejects(m.records.put('shared', 'notes', undefined, 0, 1), (e) => e.status === 400);
   const many = Array.from({ length: MAX_BATCH + 1 }, (_, i) => p(`m${i}`, 0, 1));
   await assert.rejects(m.records.batch(many), (e) => e.status === 400);
   assert.equal((await m.records.batch(many.slice(1))).length, MAX_BATCH);
@@ -228,8 +232,8 @@ test('mock: seed preloads records, whatever the role; an export seeds as is', as
   await twin.seed(await m.export());
   assert.deepEqual((await twin.export()).shared, (await m.export()).shared);
   // All or nothing.
-  for (const bad of [{ shared: { notes: [{ id: 'ok', data: 1 }, { id: 'a/b', data: 1 }] } }, { shared: { Notes: [{ id: 'a', data: 1 }] } }, { shared: { notes: [{ id: 'x' }] } }, { shared: { notes: [{ data: 1 }] } }, { shared: { notes: [{ id: 'x', data: 1, rev: 0 }] } }]) {
-    await assert.rejects(twin.seed(bad), (e) => e.status === 400, JSON.stringify(bad));
+  for (const bad of [{ shared: { notes: [{ id: 'ok', data: 1 }, { id: 'a/b', data: 1 }] } }, { shared: { Notes: [{ id: 'a', data: 1 }] } }, { shared: { notes: [{ id: 'x' }] } }, { shared: { notes: [{ data: 1 }] } }, { shared: { notes: [{ id: 'x', data: 1, rev: 0 }] } }, { shared: { notes: [{ id: 'x', data: 'x'.repeat(MAX_DATA) }] } }]) {
+    await assert.rejects(twin.seed(bad), (e) => e.status >= 400, JSON.stringify(bad).slice(0, 80));
   }
   assert.equal(await twin.records.get('shared', 'notes', 'ok'), null);
 });

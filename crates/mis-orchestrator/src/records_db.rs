@@ -166,20 +166,9 @@ impl Records {
         actor: &str,
         now: u64,
     ) -> anyhow::Result<Result<Option<Envelope>, Refusal>> {
-        let (Mutation::Put {
-            space,
-            collection,
-            id,
-            ..
-        }
-        | Mutation::Remove {
-            space,
-            collection,
-            id,
-            ..
-        }) = op;
-        let owner = records::owner(*space, actor);
-        let current = read(tx, *space, owner, collection, id)?;
+        let (space, collection, id) = op.key();
+        let owner = records::owner(space, actor);
+        let current = read(tx, space, owner, collection, id)?;
         Ok(Ok(match records::apply(&current, op, actor, now) {
             Err(refused) => return Ok(Err(refused)),
             Ok(Change::Unchanged(e)) => e,
