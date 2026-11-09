@@ -25,6 +25,7 @@ pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("MIS_GIT_
 pub mod access;
 pub mod access_gate;
 pub mod app_access;
+pub mod app_tasks;
 pub mod apps;
 pub mod apps_http;
 pub mod backups;
@@ -1062,6 +1063,7 @@ pub fn router(app: App) -> Router {
         .route("/api/routines", get(routines).post(new_routine))
         .route("/api/routines/{name}/{action}", post(routine_action))
         .route("/api/apps", get(list_apps))
+        .route("/api/apps/tasks", post(new_app_task))
         .route("/api/apps/{slug}/releases", post(publish_app))
         .route("/api/apps/{slug}/activate", post(activate_app))
         .route("/api/apps/{slug}/members", post(set_app_member))
@@ -1644,6 +1646,45 @@ async fn list_apps(
     }
     let list = app.apps.as_ref().map(|a| a.list()).unwrap_or_default();
     Json(list).into_response()
+}
+
+/// Start a task that builds or changes an app ([`mis_types::AppTask`]), in the settings' apps
+/// repo: 201 `{"task": id}`, 400 with why not. Full scope only.
+async fn new_app_task(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/apps").await {
+        return refused.into_response();
+    }
+    let t: mis_types::AppTask = match serde_json::from_slice(&body) {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let prompt = match app_tasks::prompt(&t) {
+        Ok(p) => p,
+        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
+    };
+    let repo = match app.settings() {
+        Ok(s) => s.apps.repo,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let model = t.model.filter(|m| !m.trim().is_empty());
+    app.transition(
+        |l| match l.submit_app_task(prompt, repo, t.harness, model, t.worker) {
+            Ok((task, effects)) => (
+                (
+                    StatusCode::CREATED,
+                    Json(serde_json::json!({ "task": task })),
+                )
+                    .into_response(),
+                effects,
+            ),
+            Err(why) => ((StatusCode::BAD_REQUEST, why).into_response(), vec![]),
+        },
+    )
 }
 
 #[derive(serde::Deserialize)]

@@ -721,6 +721,41 @@ impl Ledger {
         self.enqueue(entry)
     }
 
+    /// Queue an app task: `prompt` as is (no planner), in `cwd` on `harness`, on `worker`
+    /// only if given. It never merges: the user approves its PR. Err if `harness` is blank
+    /// or `worker` is offline or doesn't run it.
+    pub fn submit_app_task(
+        &mut self,
+        prompt: String,
+        cwd: String,
+        harness: String,
+        model: Option<String>,
+        worker: Option<WorkerId>,
+    ) -> Result<(TaskId, Vec<Effect>), String> {
+        let harness = harness.trim().to_string();
+        if harness.is_empty() {
+            return Err("pick a harness".into());
+        }
+        let task = Task {
+            id: Uuid::new_v4(),
+            prompt,
+            cwd: Some(cwd),
+            harness,
+            model,
+            resume: None,
+            send_to: None,
+            read_only: false,
+            diff_base: None,
+            merge: MergeRule::Never,
+        };
+        let (id, mut effects) = match worker {
+            Some(wid) => self.enqueue_pinned(wid, task, vec![])?,
+            None => self.enqueue(TaskEntry::new(task, self.now_ms)),
+        };
+        effects.push(Effect::Broadcast(self.status()));
+        Ok((id, effects))
+    }
+
     /// Add `entry` to the queue and hand out what can run now.
     fn enqueue(&mut self, entry: TaskEntry) -> (TaskId, Vec<Effect>) {
         let id = entry.task.id;

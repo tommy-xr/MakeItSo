@@ -25,7 +25,7 @@ pub fn canonical_roots(roots: &[PathBuf]) -> anyhow::Result<Vec<PathBuf>> {
 }
 
 /// Task cwd -> directory to run in. `roots` must be canonical and non-empty.
-/// None -> first root; relative -> joined to the first root; either way the
+/// None -> first root; `~/x` -> under this user's home; relative -> joined to the first root; either way the
 /// canonical result must sit under some root (so `../..` escapes, or a root
 /// swapped for a symlink, are refused).
 pub fn resolve_cwd(roots: &[PathBuf], requested: Option<&str>) -> Result<PathBuf, String> {
@@ -34,9 +34,9 @@ pub fn resolve_cwd(roots: &[PathBuf], requested: Option<&str>) -> Result<PathBuf
     };
     let first_str = first.to_string_lossy();
     let req = requested.unwrap_or(&first_str);
-    let path = Path::new(req);
+    let path = expand_home(req, std::env::home_dir().as_deref());
     let joined = if path.is_absolute() {
-        path.to_path_buf()
+        path
     } else {
         first.join(path)
     };
@@ -51,6 +51,16 @@ pub fn resolve_cwd(roots: &[PathBuf], requested: Option<&str>) -> Result<PathBuf
         Ok(c) if roots.iter().any(|r| c.starts_with(r)) => Ok(c),
         Ok(_) => refuse("is outside the worker's roots"),
         Err(e) => refuse(&format!("is not usable ({e})")),
+    }
+}
+
+/// `~` or `~/x` -> `home` or `home/x` (the orchestrator can't know a worker's home); else as is.
+fn expand_home(req: &str, home: Option<&Path>) -> PathBuf {
+    match (req.strip_prefix('~'), home) {
+        (Some(rest), Some(h)) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
+            h.join(rest.trim_start_matches(['/', '\\']))
+        }
+        _ => PathBuf::from(req),
     }
 }
 
@@ -115,6 +125,16 @@ mod tests {
         assert!(e.contains("outside"), "{e}");
         let e = resolve_cwd(&roots, Some("../sub/../..")).unwrap_err();
         assert!(e.contains("outside"), "{e}");
+    }
+
+    #[test]
+    fn tilde_is_the_home_dir() {
+        let h = Path::new("/home/u");
+        assert_eq!(expand_home("~", Some(h)), h);
+        assert_eq!(expand_home("~/code/x", Some(h)), h.join("code/x"));
+        assert_eq!(expand_home("~bob/x", Some(h)), Path::new("~bob/x"));
+        assert_eq!(expand_home("~/x", None), Path::new("~/x"));
+        assert_eq!(expand_home("code", Some(h)), Path::new("code"));
     }
 
     #[test]
