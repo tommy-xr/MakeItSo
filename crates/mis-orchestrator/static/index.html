@@ -764,6 +764,9 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
     :root.split:not(.vr) #list .rows a[aria-current] { background: var(--bubble); box-shadow: inset 3px 0 var(--accent); }
     :root.split:not(.vr) #detail .chead .back { display: none; }
     #choose { padding-top: 30svh; text-align: center; }
+    #choose .keys { display: none; margin-top: .5rem; font-size: .8125rem; }
+    @media (hover: hover) and (pointer: fine) { #choose .keys { display: block; } }
+    #choose kbd { padding: 0 .3125rem; border: 1px solid var(--sep); border-radius: .25rem; font: .75rem var(--mono); }
     .newtask { display: flex; align-items: center; justify-content: center; gap: .375rem; margin: .75rem 0 0; min-height: 2.5rem; border-radius: .75rem;
       background: var(--card); color: var(--fg); font-weight: 500; text-decoration: none; }
     @media (hover: hover) { .newtask:hover { background: var(--hover); } }
@@ -775,7 +778,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
 <body>
 <header class="strip">
   <div class="top">
-    <button type="button" id="menu-btn" class="ibtn" aria-label="Menu" aria-haspopup="dialog" aria-expanded="false" aria-controls="menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+    <button type="button" id="menu-btn" class="ibtn" aria-label="Menu" aria-haspopup="dialog" aria-expanded="false" aria-controls="menu" aria-keyshortcuts="Control+B Meta+B"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
     <svg class="logo" viewBox="0 0 18 18" aria-hidden="true"><rect x="1" y="3" width="6" height="12" rx="1" fill="var(--accent)"/><path d="M9 3h5l2 2-2 2H9z" fill="var(--accent)"/><path d="M9 8h5l2 2-2 2H9z" fill="#F2A65E"/></svg>
     <span class="title">Make It So</span>
     <a id="gauges" class="gauges" href="#workers" hidden></a>
@@ -828,7 +831,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
 
 <main id="list" hidden></main>
 
-<p id="choose" class="dim" hidden>Select a task, or start one below.</p>
+<p id="choose" class="dim" hidden>Select a task, or start one below.<span class="keys"><kbd>j</kbd> <kbd>k</kbd> to move · <kbd>c</kbd> new task</span></p>
 
 <main id="detail" hidden>
   <div class="chead"><a href="#" class="back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a><div id="task-head"></div></div>
@@ -2118,9 +2121,10 @@ function renderList() {
   const body = keys.map((k) => [secHead(label(k)), el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []), ...groups.get(k).flatMap((th) => threadRows(th, now)))]);
   const liveAt = keys.filter((k) => secRank(k) < 2).length;
   if (sessions.length) body.splice(liveAt, 0, [secHead('Live sessions', el('a', { href: '#workers' }, 'All sessions')), el('ul', { className: 'rows' }, ...sessions.map((s) => liveRow(s, now)))]);
-  $('list').replaceChildren(...(inSplit() ? [el('a', { href: '#new', className: 'newtask' }, '+ New task')] : []), ...body.flat());
+  $('list').replaceChildren(...(inSplit() ? [el('a', { href: '#new', className: 'newtask', title: 'New task (c)' }, '+ New task')] : []), ...body.flat());
   // The open task's links (its row, or its message under a live session), beside the list when wide.
   if (route().view === 'detail') for (const a of $('list').querySelectorAll(`a[href="${location.hash}"]`)) a.setAttribute('aria-current', 'page');
+  if (reveal) { reveal = false; $('list').querySelector('a[aria-current]')?.scrollIntoView({ block: 'nearest' }); }
   if (!body.length) $('list').append(el('p', { className: 'dim', style: 'padding: 1rem .375rem' }, inSplit() ? 'No tasks yet.' : 'No tasks yet. Start one below.'));
 }
 
@@ -4310,6 +4314,40 @@ $('harness').addEventListener('change', optLabel);
 $('model').addEventListener('input', optLabel);
 document.addEventListener('pointerdown', (e) => { if (!$('opts').hidden && !e.target.closest('#opts, #opt')) showOpts(false); });
 $('new').addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('opts').hidden) { showOpts(false); $('opt').focus(); } });
+
+// Keyboard shortcuts: c a new task, j/k the next/previous task, Esc back (or out of a field), Cmd/Ctrl+B the menu.
+let reveal = false; // a j/k step opened a task: renderList scrolls its row into view
+// The next (d = 1) or previous task in Home's list: beside the list it opens it, on Home it focuses its row.
+function step(d) {
+  const split = inSplit();
+  if (!split && route().view !== 'list') return;
+  const links = [...new Map([...$('list').querySelectorAll('a[href^="#task/"]')].map((a) => [a.getAttribute('href'), a])).values()];
+  const at = links.findIndex((a) => (split ? a.hasAttribute('aria-current') : a === document.activeElement));
+  const a = links[at < 0 ? 0 : Math.max(0, Math.min(links.length - 1, at + d))];
+  if (!a) return;
+  settle(); // like a tap, a step holds the rows' order a moment, so stepping back finds the row just left
+  if (split) { reveal = true; location.hash = a.getAttribute('href'); } else a.focus();
+}
+document.addEventListener('keydown', (e) => {
+  const modal = document.querySelector('dialog:modal');
+  if (e.isComposing || e.defaultPrevented || (modal && modal !== $('menu'))) return;
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'b') {
+    e.preventDefault();
+    if ($('menu').open) $('menu').close(); else $('menu-btn').click();
+    return;
+  }
+  if (modal) return; // the menu sheet: its own Esc closes it
+  const field = e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable]');
+  if (e.key === 'Escape') {
+    if (field) { if (!$('opts').contains(field)) field.blur(); return; }
+    const back = $(route().view).querySelector('.back');
+    if (back) { e.preventDefault(); location.hash = back.getAttribute('href'); }
+    return;
+  }
+  if (field || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === 'c') { e.preventDefault(); location.hash = '#new'; }
+  else if (e.key === 'j' || e.key === 'k') { e.preventDefault(); step(e.key === 'j' ? 1 : -1); }
+});
 
 // Menu: a modal sheet, so focus stays inside and Escape closes it; a backdrop tap or a view link closes it too.
 // On a desktop it is a rail instead (CSS), and ☰ hides or shows it.
