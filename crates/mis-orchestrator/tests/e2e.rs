@@ -6145,8 +6145,10 @@ async fn the_owner_tries_a_draft_on_a_copy_of_the_records_that_goes_with_it() {
     assert_eq!(app_get(&apps, "/a/demo/", &format!("{cookie}{editor}")).await.2, "v1");
 
     // Discarded: the cookie is stale (dropped), the copy gone; a new draft starts afresh.
-    let discard = r#"{"release":2}"#;
-    assert_eq!(post_json(&mis, "/api/apps/demo/draft/discard", "s", discard).await.0, 204);
+    let (_, list) = get_json(&mis, "/api/apps", "s").await;
+    let list: Vec<AppView> = serde_json::from_str(&list).unwrap();
+    let discard = format!(r#"{{"id":"{}"}}"#, list[0].draft.as_ref().unwrap().id);
+    assert_eq!(post_json(&mis, "/api/apps/demo/draft/discard", "s", &discard).await.0, 204);
     let (_, head, body) = app_get(&apps, "/a/demo/", cookie).await;
     assert_eq!(body, "v1");
     assert!(head.contains("set-cookie: mis-draft-demo=;"), "{head}");
