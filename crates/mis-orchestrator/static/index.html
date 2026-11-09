@@ -186,6 +186,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   :is(#routine-new, #settings-form) input { min-height: 2.75rem; padding: 0 .75rem; }
   :is(#routine-new, #settings-form) p { margin: 0; font-size: .8125rem; overflow-wrap: anywhere; }
   :is(#routine-new, #settings-form) .row { margin: 0; }
+  #settings-form fieldset { display: grid; gap: .5rem; min-width: 0; margin: 0; padding: 0; border: 0; }
   #settings-form label { margin-top: .25rem; font-size: .8125rem; color: var(--dim); }
   .nsub .dim { padding: .5rem 1.5rem; font-size: .8125rem; }
   #menu fieldset { margin: 1.25rem 0 0; padding: 0; border: 0; }
@@ -801,14 +802,14 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
 
 <main id="settings" hidden>
   <h3>Apps</h3>
-  <form id="settings-form">
+  <form id="settings-form"><fieldset disabled>
     <p class="dim">Tasks that build or change apps run with these.</p>
-    <label for="st-harness">Harness</label><select id="st-harness"></select>
+    <label for="st-harness">Harness</label><select id="st-harness"><option>claude</option><option>codex</option></select>
     <label for="st-model">Model</label><input id="st-model" placeholder="e.g. opus" autocomplete="off" autocapitalize="off" spellcheck="false" required>
     <label for="st-repo">Apps repo on the worker</label><input id="st-repo" placeholder="e.g. ~/code/mis-notes" autocomplete="off" autocapitalize="off" spellcheck="false" required>
     <p id="st-msg" hidden></p>
     <div class="row"><button>Save</button></div>
-  </form>
+  </fieldset></form>
 </main>
 
 <main id="workers" hidden>
@@ -3442,10 +3443,10 @@ function renderApps() {
   if (!hosted.list.length) $('app-list').append(el('li', { className: 'dim' }, 'No apps yet: publish one with mis apps publish <name> <folder>'));
 }
 
-// Settings (full access only), fetched each time the page opens. The form is filled per fetch,
-// so typing survives re-renders.
+// Settings (full access only), fetched each time the page opens. Its fields stay disabled until
+// they hold what was fetched, and while a save is in flight, so nothing typed is overwritten.
 let settings = null; // { s } | { error } | null while reading
-let settingsAsked = null;
+let settingsAsked = null, settingsBusy = false;
 async function loadSettings() {
   const ask = {};
   settingsAsked = ask;
@@ -3454,39 +3455,34 @@ async function loadSettings() {
     const r = await fetch('/api/settings', { headers: authHeaders() });
     got = r.ok ? { s: await r.json() } : { error: (await r.text()) || `error ${r.status}` };
   } catch { got = { error: 'couldn’t reach the orchestrator' }; }
-  if (settingsAsked !== ask) return;
+  if (settingsAsked !== ask) return got;
   settings = got;
-  if (got.s) { $('st-model').value = got.s.apps.model; $('st-repo').value = got.s.apps.repo; fillHarness(got.s.apps.harness); }
+  if (got.s) { $('st-harness').value = got.s.apps.harness; $('st-model').value = got.s.apps.model; $('st-repo').value = got.s.apps.repo; }
   settingsMsg(got.error || '', true);
   renderSettings();
-}
-// The fleet's harnesses, plus `pick` even while no worker runs it.
-function fillHarness(pick) {
-  const sel = $('st-harness'), hs = [...new Set([...workers.flatMap((w) => w.info.harnesses), pick])].filter(Boolean).sort();
-  if (sel.dataset.key !== hs.join()) { sel.replaceChildren(...hs.map((h) => el('option', { value: h }, h))); sel.dataset.key = hs.join(); }
-  sel.value = pick;
+  return got;
 }
 function settingsMsg(text, bad) { $('st-msg').textContent = text; $('st-msg').hidden = !text; $('st-msg').className = bad ? 'bad' : 'dim'; }
 function renderSettings() {
   if (!everOpen) return; // fetch once connected, with the token in place
   if (!settingsAsked) loadSettings();
-  if (settings && settings.s) fillHarness($('st-harness').value);
-  $('settings-form').querySelector('button').disabled = !(settings && settings.s);
+  $('settings-form').firstElementChild.disabled = settingsBusy || !(settings && settings.s);
 }
 $('settings-form').onsubmit = async (e) => {
   e.preventDefault();
-  const btn = $('settings-form').querySelector('button');
   const body = { apps: { harness: $('st-harness').value, model: $('st-model').value, repo: $('st-repo').value } };
-  btn.disabled = true;
+  settingsBusy = true;
+  renderSettings();
   let why = '';
   try {
     const r = await fetch('/api/settings', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!r.ok) why = (await r.text()) || `error ${r.status}`;
   } catch { why = 'couldn’t reach the orchestrator'; }
-  btn.disabled = false;
-  if (why) { settingsMsg(why, true); return; }
-  await loadSettings();
-  if (settings.s) settingsMsg('Saved', false);
+  let msg = why;
+  if (!why) { const err = (await loadSettings()).error; msg = err ? `Saved, but couldn’t read them back: ${err}` : 'Saved'; }
+  settingsBusy = false;
+  renderSettings();
+  settingsMsg(msg, msg !== 'Saved');
 };
 
 function renderWorkers() {
@@ -3883,6 +3879,7 @@ $('clear').onclick = (e) => {
   disconnect();
   everOpen = false;
   readOnly = false;
+  settingsAsked = null;
   feed = [];
   connMsg = authNeeded ? 'token required' : 'disconnected';
   render();

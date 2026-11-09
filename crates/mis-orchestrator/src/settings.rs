@@ -2,6 +2,7 @@
 //! `clean` is pure; `load` and `save` read and write the file.
 
 use std::path::Path;
+use std::sync::Mutex;
 
 use mis_types::Settings;
 
@@ -12,6 +13,10 @@ const MAX_CHARS: usize = 512;
 /// `s` with its values trimmed; Err: why one can't be saved.
 pub fn clean(mut s: Settings) -> Result<Settings, String> {
     let a = &mut s.apps;
+    if !mis_agent::HARNESSES.contains(&a.harness.trim()) {
+        let known = mis_agent::HARNESSES.join(" or ");
+        return Err(format!("apps harness {:?}: want {known}", a.harness));
+    }
     for (name, v) in [
         ("apps harness", &mut a.harness),
         ("apps model", &mut a.model),
@@ -37,7 +42,10 @@ pub fn load(dir: &Path) -> anyhow::Result<Settings> {
 
 /// Replaces `dir`'s settings with `s`, atomically.
 pub fn save(dir: &Path, s: &Settings) -> std::io::Result<()> {
+    // One save at a time: they share a temp file.
+    static SAVING: Mutex<()> = Mutex::new(());
     let json = serde_json::to_vec_pretty(s).expect("settings serialize");
+    let _one = SAVING.lock().unwrap_or_else(|e| e.into_inner());
     crate::push::write_private(&dir.join(FILE), &json)
 }
 
@@ -68,6 +76,8 @@ mod tests {
             t.apps.repo = bad.into();
             assert!(clean(t).unwrap_err().starts_with("apps repo"), "{bad:?}");
         }
+        s.apps.harness = "gpt".into();
+        assert!(clean(s).unwrap_err().contains("claude or codex"));
     }
 
     #[test]

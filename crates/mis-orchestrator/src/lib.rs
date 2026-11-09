@@ -1667,8 +1667,8 @@ async fn get_settings(
     }
 }
 
-/// Replace the settings with the body's: 204, or 400 with why not. Full scope only; 404 without
-/// a state dir to keep them in.
+/// Replace all the settings with the body's (a key left out takes its default): 204, or 400
+/// with why not. Full scope only; 404 without a state dir to keep them in.
 async fn set_settings(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
