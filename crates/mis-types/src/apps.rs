@@ -57,7 +57,63 @@ pub struct AppView {
     /// The asker's role in it: only an owner publishes or discards its draft. None: not a member.
     #[serde(default)]
     pub role: Option<AppRole>,
+    /// Feedback waits for the owner to send it to an agent, rather than going at once.
+    #[serde(default)]
+    pub hold_feedback: bool,
+    /// Feedback waiting, oldest first.
+    #[serde(default)]
+    pub feedback: Vec<HeldFeedback>,
 }
+
+/// `POST /a/{slug}/api/v1/feedback`: an owner's or editor's note on what they see, from the
+/// app's feedback button. No screenshot: the agent reproduces the view with Playwright.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AppFeedback {
+    /// Where in the app: its `#hash` route, else the path after `/a/<slug>/`.
+    pub route: String,
+    /// A CSS selector for the element marked (the one tapped, or under the circle's middle).
+    #[serde(default)]
+    pub selector: String,
+    /// What was marked, in CSS pixels of the viewport.
+    pub rect: FeedbackRect,
+    pub viewport: FeedbackSize,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct FeedbackRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct FeedbackSize {
+    pub w: u32,
+    pub h: u32,
+}
+
+/// Feedback as the orchestrator has it: who sent it, about which release.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HeldFeedback {
+    pub id: uuid::Uuid,
+    /// Unix millis it came in.
+    pub at: u64,
+    /// Their email, or `local`.
+    pub by: String,
+    /// The release they saw; None: none was live.
+    pub release: Option<u32>,
+    /// They saw the draft (`release` is it).
+    pub draft: bool,
+    pub feedback: AppFeedback,
+    /// Why it wasn't sent to an agent when it came in (held, or the agent was busy).
+    #[serde(default)]
+    pub waiting: Option<String>,
+}
+
+/// Longest feedback note.
+pub const MAX_FEEDBACK_CHARS: usize = 2000;
 
 /// An app's draft: a staged release and the PR it was built from (`mis apps propose`). One
 /// per app; a newer proposal replaces it. Publishing merges the PR, then makes it live.

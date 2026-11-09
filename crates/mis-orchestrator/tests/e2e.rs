@@ -4555,8 +4555,13 @@ async fn start_with_apps_auth(
     let addr = listener.local_addr().unwrap();
     let base = mis_orchestrator::apps::base_url(None, Some(addr));
     let apps = std::sync::Arc::new(mis_orchestrator::apps::Apps::new(dir.clone(), base));
-    tokio::spawn(mis_orchestrator::serve_apps(listener, apps.clone(), auth));
-    let mis = start_app(app.with_apps(apps)).await;
+    let app = app.with_apps(apps.clone());
+    let auth = mis_orchestrator::apps_http::Auth {
+        feedback: Some(app.feedback_inbox()),
+        ..auth
+    };
+    tokio::spawn(mis_orchestrator::serve_apps(listener, apps, auth));
+    let mis = start_app(app).await;
     (mis, format!("ws://{addr}"), dir)
 }
 
@@ -4805,6 +4810,7 @@ fn apps_auth() -> mis_orchestrator::apps_http::Auth {
         gate: Some(gate),
         public_host: Some(HOME.into()),
         dev: false,
+        feedback: None,
     }
 }
 
@@ -6224,4 +6230,200 @@ async fn owners_and_editors_try_a_draft_on_a_copy_of_the_records_that_goes_with_
     assert!(status == 303 && head.contains("Max-Age=0"), "{head}");
     // Windows: the app's records are still open.
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Feedback marking `div.chart` on route `#/readings` at 390x844.
+fn feedback_body(note: &str) -> String {
+    serde_json::json!({"route": "#/readings", "selector": "main > div.chart",
+        "rect": {"x": 12, "y": 140, "w": 366, "h": 220}, "viewport": {"w": 390, "h": 844},
+        "note": note})
+    .to_string()
+}
+
+#[tokio::test]
+async fn feedback_from_an_editor_becomes_a_change_task_and_a_viewer_cant_send_any() {
+    let dev = mis_orchestrator::apps_http::Auth {
+        dev: true,
+        ..Default::default()
+    };
+    let (mis, apps, dir) = live_demo(with_read_token(), dev).await;
+    let (_, mut worker) = join_as(&mis).await;
+    let path = "/a/demo/api/v1/feedback";
+    let (status, _) = app_post(
+        &apps,
+        path,
+        "\r\nX-Mis-Dev-Role: viewer",
+        &feedback_body("x"),
+    )
+    .await;
+    assert_eq!(status, 403);
+    let (status, why) = app_post(&apps, path, "", &feedback_body(" ")).await;
+    assert!(status == 400 && why.contains("say what"), "{status} {why}");
+    let editor = "\r\nX-Mis-Dev-Role: editor";
+    assert_eq!(
+        app_post(&apps, path, editor, &feedback_body("Show pH too."))
+            .await
+            .0,
+        202
+    );
+
+    let OrchMsg::Assign { task, token, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    assert!(
+        task.prompt.starts_with("Change the Make It So app `demo`"),
+        "{}",
+        task.prompt
+    );
+    for want in [
+        "Feedback on `demo` v1 (live) from local:\n\n> Show pH too.",
+        "route `#/readings`, element `main > div.chart`, area 12,140 366x220 in a 390x844 viewport",
+        "Reproduce it first",
+    ] {
+        assert!(task.prompt.contains(want), "{want}: {}", task.prompt);
+    }
+    assert_eq!(task.merge, MergeRule::Never);
+    assert!(token.is_some(), "it can stage the app's next release");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn feedback_on_a_draft_continues_its_thread_and_the_owner_can_hold_it() {
+    let dev = mis_orchestrator::apps_http::Auth {
+        dev: true,
+        ..Default::default()
+    };
+    let (mis, apps, dir) = live_demo(with_read_token(), dev).await;
+    let (_, mut worker) = join_as(&mis).await;
+    let auth = [("authorization", "Bearer s")];
+    let change = serde_json::json!({"request": "A chart.", "slug": "demo", "change": true,
+        "harness": "claude"});
+    let (task, token) = app_task(&mis, &mut worker, &auth, change).await;
+    assert_eq!(
+        publish(&mis, "/api/apps/demo/releases", &token, &demo("v2"))
+            .await
+            .0,
+        201
+    );
+    let propose = r#"{"release":2,"pr":"https://github.com/o/r/pull/1","head":"d68ea1f8a9b4b0890914ce16e5539e480e68c07b"}"#;
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/draft", &token, propose)
+            .await
+            .0,
+        201
+    );
+    for event in [
+        AgentEvent::Started {
+            session: Some("sess".into()),
+            model: None,
+        },
+        AgentEvent::Finished {
+            ok: true,
+            summary: None,
+        },
+    ] {
+        send(
+            &mut worker,
+            &WorkerMsg::Event {
+                task: task.id,
+                event,
+            },
+        )
+        .await;
+    }
+
+    // Trying the draft: feedback goes back to the task that made it, in its session.
+    assert_eq!(app_get(&apps, "/a/demo/?draft=2", "").await.0, 303);
+    let path = "/a/demo/api/v1/feedback";
+    let in_draft = "\r\nX-Mis-Draft: 2";
+    assert_eq!(
+        app_post(&apps, path, in_draft, &feedback_body("Bars too thin."))
+            .await
+            .0,
+        202
+    );
+    let OrchMsg::Assign { task: reply, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    assert_eq!(reply.resume.as_deref(), Some("sess"));
+    assert!(
+        reply
+            .prompt
+            .starts_with("Feedback on `demo` v2 (the draft) from local:"),
+        "{}",
+        reply.prompt
+    );
+    for event in [
+        AgentEvent::Started {
+            session: Some("sess".into()),
+            model: None,
+        },
+        AgentEvent::Finished {
+            ok: true,
+            summary: None,
+        },
+    ] {
+        send(
+            &mut worker,
+            &WorkerMsg::Event {
+                task: reply.id,
+                event,
+            },
+        )
+        .await;
+    }
+
+    // Held: it waits on the app for the owner, who sends one and dismisses another.
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/feedback", "r", r#"{"hold":true}"#)
+            .await
+            .0,
+        403
+    );
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/feedback", "s", r#"{"hold":true}"#)
+            .await
+            .0,
+        204
+    );
+    for note in ["Rename it.", "Never mind."] {
+        assert_eq!(app_post(&apps, path, "", &feedback_body(note)).await.0, 202);
+    }
+    let mut held = vec![];
+    for _ in 0..100 {
+        let (_, list) = get_json(&mis, "/api/apps", "s").await;
+        let list: Vec<AppView> = serde_json::from_str(&list).unwrap();
+        held = list[0].feedback.clone();
+        if held.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(held.len(), 2, "{held:?}");
+    assert_eq!(held[0].waiting.as_deref(), Some("held for the owner"));
+    let first = held
+        .iter()
+        .find(|h| h.feedback.note == "Rename it.")
+        .unwrap()
+        .id;
+    let other = held
+        .iter()
+        .find(|h| h.feedback.note == "Never mind.")
+        .unwrap()
+        .id;
+    let url = |id, action| format!("/api/apps/demo/feedback/{id}/{action}");
+    assert_eq!(post_json(&mis, &url(first, "send"), "r", "").await.0, 403);
+    assert_eq!(post_json(&mis, &url(first, "send"), "s", "").await.0, 204);
+    let OrchMsg::Assign { task: sent, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    assert!(sent.prompt.contains("> Rename it."), "{}", sent.prompt);
+    assert_eq!(
+        post_json(&mis, &url(other, "dismiss"), "s", "").await.0,
+        204
+    );
+    let (_, list) = get_json(&mis, "/api/apps", "s").await;
+    let list: Vec<AppView> = serde_json::from_str(&list).unwrap();
+    assert!(list[0].feedback.is_empty() && list[0].hold_feedback);
+    std::fs::remove_dir_all(dir).unwrap();
 }

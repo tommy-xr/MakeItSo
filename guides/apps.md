@@ -41,6 +41,15 @@ live. Nothing you do goes live.
    publish a new release and propose it again; it replaces the draft.
 8. Report the PR URL, the release number and what the owner should try.
 
+## Feedback tasks
+
+Owners and editors send feedback from the app's own Feedback button: a note, the route, a
+selector and area they marked, their viewport, and the release (live or the draft). It arrives
+as the request (a reply in this thread when it is about your draft). Reproduce it before
+changing anything: Playwright in mock mode at that route and viewport, a screenshot of that
+element or area (the before shot). Fix it in the same branch, `npm run verify`, take the after
+shot at the same route and viewport, publish, and propose again: it replaces the draft.
+
 ## Layout: functional core, thin shell
 
 - `src/domain/*.ts`: every rule the app has (parsing, validation, totals, schedules, what a

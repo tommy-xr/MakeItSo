@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use chrono::TimeZone;
 use mis_types::{
-    AppBackup, AppDraft, AppMember, AppRelease, AppRole, AppView, ProposeDraft, Restored,
+    AppBackup, AppDraft, AppMember, AppRelease, AppRole, AppView, HeldFeedback, ProposeDraft,
+    Restored,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -35,6 +36,8 @@ pub(crate) const POLICY: &str = "policy.json";
 /// `<slug>/draft/`: the current draft (`draft.json`, `before`, `after`), replaced whole.
 const DRAFT: &str = "draft";
 const DRAFT_FILE: &str = "draft.json";
+/// `<slug>/feedback/<id>.json`: feedback waiting for the owner.
+const FEEDBACK: &str = "feedback";
 use mis_types::MAX_APP_TITLE_CHARS as MAX_TITLE_CHARS;
 
 pub use mis_types::valid_slug;
@@ -555,7 +558,8 @@ impl Apps {
         ns
     }
 
-    fn active_n(&self, slug: &str) -> Option<u32> {
+    /// `slug`'s live release.
+    pub fn active_n(&self, slug: &str) -> Option<u32> {
         let raw = std::fs::read_to_string(self.dir.join(slug).join("active")).ok()?;
         release_n(raw.trim())
     }
@@ -743,6 +747,52 @@ impl Apps {
         }
     }
 
+    /// Keep `held` for `slug`'s owner (replacing a copy kept before).
+    pub fn keep_feedback(&self, slug: &str, held: &HeldFeedback) -> anyhow::Result<()> {
+        let dir = self.dir.join(slug).join(FEEDBACK);
+        crate::images::private_dir(&dir)?;
+        let json = serde_json::to_vec(held).expect("feedback serializes");
+        Ok(crate::push::write_private(
+            &dir.join(format!("{}.json", held.id)),
+            &json,
+        )?)
+    }
+
+    /// Feedback kept for `slug`'s owner, oldest first.
+    pub fn held_feedback(&self, slug: &str) -> Vec<HeldFeedback> {
+        let Ok(entries) = std::fs::read_dir(self.dir.join(slug).join(FEEDBACK)) else {
+            return vec![];
+        };
+        let mut all: Vec<HeldFeedback> = (entries.flatten())
+            .filter_map(|e| serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok())
+            .collect();
+        all.sort_by_key(|h| (h.at, h.id));
+        all
+    }
+
+    /// Take kept feedback `id` off `slug`'s list. None: not there.
+    pub fn take_held(&self, slug: &str, id: uuid::Uuid) -> Option<HeldFeedback> {
+        let path = self
+            .dir
+            .join(slug)
+            .join(FEEDBACK)
+            .join(format!("{id}.json"));
+        let held = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+        std::fs::remove_file(&path).ok()?;
+        Some(held)
+    }
+
+    /// Whether `slug`'s feedback waits for its owner.
+    pub fn set_hold_feedback(&self, slug: &str, hold: bool) -> Result<(), MemberError> {
+        let _held = self.lock.lock().unwrap();
+        if self.release_ns(slug).is_empty() {
+            return Err(MemberError::NoSuchApp);
+        }
+        let mut policy = self.read_policy(slug).map_err(MemberError::Io)?;
+        policy.hold_feedback = hold;
+        (self.write_policy(slug, &policy)).map_err(|e| MemberError::Io(e.to_string()))
+    }
+
     /// `/a/<slug>/` on this server, if it is served.
     pub fn url(&self, slug: &str) -> Option<String> {
         Some(format!("{}/a/{slug}/", self.base_url.as_ref()?))
@@ -778,15 +828,18 @@ impl Apps {
             .active_n(slug)
             .filter(|n| releases.iter().any(|r| r.n == *n));
         let shown = active.or(releases.last().map(|r| r.n))?;
+        let policy = self.policy(slug);
         Some(AppView {
             slug: slug.into(),
             title: self.release_manifest(slug, shown)?.title.trim().into(),
             url: self.url(slug),
             active,
             releases,
-            members: self.policy(slug).list(),
+            members: policy.list(),
             draft: self.draft(slug),
             role: None,
+            hold_feedback: policy.hold_feedback,
+            feedback: self.held_feedback(slug),
         })
     }
 }

@@ -398,6 +398,8 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .draft .try { display: inline-flex; align-items: center; background: var(--accent); color: var(--on-accent); font-weight: 600; text-decoration: none; }
   .draft .row button.quiet { padding: 0 .5rem; background: none; color: var(--dim); }
   .draftrow .r1 strong { font-weight: 600; }
+  /* In-app feedback waiting, and the owner's hold switch. */
+  .fb .hold { display: flex; align-items: center; gap: .5rem; margin-top: .75rem; font-size: .8125rem; }
   /* A merge approval: the PR's facts as a small grid. */
   .appr dl { display: grid; grid-template-columns: auto 1fr; gap: .125rem .75rem; margin: .25rem 0 .5rem; font-size: .8125rem; }
   .appr dt { color: var(--dim); }
@@ -3594,6 +3596,32 @@ function appMembers(a, busy) {
     email, role, el('button', { disabled: busy }, 'Share'));
   return el('div', {}, list, form);
 }
+// POST `body` to `path` for app `slug`, then reload apps; a failure shows on the app.
+async function appPost(slug, path, body) {
+  appBusy = slug;
+  renderApps();
+  try {
+    const r = await fetch(path, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    if (r.ok) appErr.delete(slug); else appErr.set(slug, (await r.text()) || `error ${r.status}`);
+  } catch { appErr.set(slug, 'couldn’t reach the orchestrator'); }
+  appBusy = null;
+  await loadApps();
+}
+// Feedback from the app's own button that waits (held for the owner, or its agent was busy),
+// and the owner's switch to hold it all for them first.
+function appFeedback(a, busy) {
+  const owner = !readOnly && a.role === 'owner', base = `/api/apps/${encodeURIComponent(a.slug)}/feedback`;
+  const items = (a.feedback || []).map((f) => el('li', {},
+    el('div', { className: 'one' }, `${f.by}: ${f.feedback.note}`),
+    el('div', { className: 'sub dim' }, ...dots([f.draft ? `draft v${f.release}` : f.release && `v${f.release}`, f.feedback.route, f.waiting])),
+    owner ? el('div', { className: 'row' },
+      el('button', { type: 'button', disabled: busy, onclick: () => appPost(a.slug, `${base}/${f.id}/send`) }, 'Send to agent'),
+      el('button', { type: 'button', disabled: busy, onclick: () => appPost(a.slug, `${base}/${f.id}/dismiss`) }, 'Dismiss')) : ''));
+  const hold = owner && el('label', { className: 'hold dim' },
+    el('input', { type: 'checkbox', checked: !!a.hold_feedback, disabled: busy, onchange: (e) => appPost(a.slug, base, { hold: e.target.checked }) }),
+    ' Hold feedback for me before an agent works on it');
+  return el('div', { className: 'fb' }, items.length ? el('ul', { className: 'members' }, ...items) : '', hold || '');
+}
 // A relative time that renderApps refreshes in place.
 function appAge(at, now) {
   const s = el('span', {}, ago(now - at));
@@ -3621,6 +3649,7 @@ function appRow(a, now) {
     ready ? el('div', { className: 'sub dim' }, `v${ready.n} ready · published `, appAge(ready.at, now)) : '',
     err ? el('div', { className: 'err bad' }, err) : '',
     a.draft ? draftCard(a, false) : '',
+    appFeedback(a, busy),
     actions, confirm, appMembers(a, busy));
 }
 // An app's draft: an agent's staged release, its PR and before/after shots. The owner publishes
