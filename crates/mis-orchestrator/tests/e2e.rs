@@ -3892,6 +3892,8 @@ async fn refused_everywhere_else(base: &str, headers: &[(&'static str, &str)]) {
         ("GET", "/api/routines".into()),
         ("POST", "/api/routines/r/run".into()),
         ("GET", "/api/notes/sync".into()),
+        ("GET", "/api/notes/tree".into()),
+        ("GET", "/api/notes/file?path=inbox/a.md".into()),
         ("GET", "/api/apps".into()),
         ("POST", "/api/apps/a/releases".into()),
         ("POST", "/api/apps/a/activate".into()),
@@ -4072,6 +4074,143 @@ async fn a_capture_is_published_to_the_notes_repo_soon_after() {
         serde_json::from_str::<NotesSync>(&body).unwrap(),
         NotesSync::OFF
     );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn the_notes_view_reads_the_clone_for_full_scope_only() {
+    use std::time::Duration;
+    let dir = std::env::temp_dir().join(format!("mis-e2e-notes-view-{}", uuid::Uuid::new_v4()));
+    let human = dir.join("human");
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args([
+                "-c",
+                "user.name=Human",
+                "-c",
+                "user.email=human@example.com",
+            ])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "git {args:?}: {err}");
+    };
+    git(&["init", "--quiet", "--bare", "-b", "main", "remote.git"]);
+    git(&["clone", "--quiet", "remote.git", "human"]);
+    // No line-ending conversion on checkout (Windows runners set core.autocrlf), so sizes
+    // and bytes are as written here.
+    let files: [(&str, &[u8]); 8] = [
+        (".gitattributes", b"* -text\n"),
+        ("README.md", b"# notes\n"),
+        (
+            "inbox/2026-11-08-a.md",
+            b"---\nvia: \"shortcut\"\n---\nhello\n",
+        ),
+        ("inbox/2026-11-08-a-1.jpg", b"\xFF\xD8\xFF\xE0 photo"),
+        ("inbox/fake.png", b"<html><script>alert(1)</script>"),
+        ("inbox/logo.svg", b"<svg onload=alert(1)>"),
+        ("projects/amf/README.md", b"# All Must Fall\n"),
+        ("apps/todo/index.html", b"<h1>app</h1>"),
+    ];
+    for (path, bytes) in files {
+        let at = human.join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, bytes).unwrap();
+    }
+    git(&["-C", "human", "add", "-A"]);
+    git(&["-C", "human", "commit", "--quiet", "-m", "init"]);
+    git(&["-C", "human", "push", "--quiet", "origin", "HEAD:main"]);
+    let state = dir.join("state");
+    let notes =
+        mis_orchestrator::notes::Notes::new(dir.join("remote.git").display().to_string(), &state)
+            .with_timing(Duration::from_secs(3600), Duration::from_secs(3600));
+    let base = start_app(capturing(&state).with_notes(notes)).await;
+    // The first run, at start, clones it.
+    let mut tree = None;
+    for _ in 0..100 {
+        let (status, body) = get_json(&base, "/api/notes/tree", "s").await;
+        assert_eq!(status, 200, "{body}");
+        let t: NotesTree = serde_json::from_str(&body).unwrap();
+        if !t.entries.is_empty() {
+            tree = Some(t);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let tree = tree.expect("cloned");
+    assert_eq!(tree.state, SyncState::Idle);
+    let got: Vec<(&str, NoteKind, u64)> = (tree.entries.iter())
+        .map(|e| (e.path.as_str(), e.kind, e.size))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("inbox", NoteKind::Dir, 0),
+            ("inbox/2026-11-08-a-1.jpg", NoteKind::Image, 10),
+            ("inbox/2026-11-08-a.md", NoteKind::Md, 30),
+            ("inbox/fake.png", NoteKind::Image, 31),
+            ("inbox/logo.svg", NoteKind::Other, 21),
+            ("projects", NoteKind::Dir, 0),
+            ("projects/amf", NoteKind::Dir, 0),
+            ("projects/amf/README.md", NoteKind::Md, 16),
+        ]
+    );
+    let file = |path: &str, token: &str| {
+        let head =
+            format!("GET /api/notes/file?path={path} HTTP/1.1\r\nAuthorization: Bearer {token}");
+        let base = base.clone();
+        async move { http(&base, &head, b"").await }
+    };
+    let (status, head, body) = file("inbox/2026-11-08-a.md", "s").await;
+    assert_eq!(status, 200, "{head}");
+    assert!(
+        head.contains("content-type: text/markdown; charset=utf-8"),
+        "{head}"
+    );
+    assert!(head.contains("x-content-type-options: nosniff"), "{head}");
+    assert_eq!(body, files[2].1);
+    let (status, head, body) = file("inbox/2026-11-08-a-1.jpg", "s").await;
+    assert_eq!(status, 200, "{head}");
+    assert!(head.contains("content-type: image/jpeg"), "{head}");
+    assert_eq!(body, files[3].1);
+    // HTML named .png, and SVG, are never served.
+    assert_eq!(file("inbox/fake.png", "s").await.0, 415);
+    assert_eq!(file("inbox/logo.svg", "s").await.0, 415);
+    for path in [
+        "README.md",
+        "apps/todo/index.html",
+        "inbox/../README.md",
+        "inbox%2F..%2FREADME.md",
+        "/etc/hosts",
+        ".git/config",
+        "inbox",
+        "inbox/missing.md",
+        "",
+    ] {
+        assert_eq!(file(path, "s").await.0, 404, "{path}");
+    }
+    // A read token may not; a capture token reaches nothing but capturing.
+    for token in ["r", "c"] {
+        let (status, _) = get_json(&base, "/api/notes/tree", token).await;
+        assert!(matches!(status, 401 | 403), "{token}: {status}");
+        let status = file("inbox/2026-11-08-a.md", token).await.0;
+        assert!(matches!(status, 401 | 403), "{token}: {status}");
+    }
+    // Without a remote: off.
+    let off = start_app(capturing(&dir.join("off"))).await;
+    let (status, body) = get_json(&off, "/api/notes/tree", "s").await;
+    assert_eq!(status, 200);
+    let want = NotesTree {
+        state: SyncState::Off,
+        entries: vec![],
+    };
+    assert_eq!(serde_json::from_str::<NotesTree>(&body).unwrap(), want);
+    let head = "GET /api/notes/file?path=inbox/a.md HTTP/1.1\r\nAuthorization: Bearer s";
+    assert_eq!(http(&off, head, b"").await.0, 404);
     std::fs::remove_dir_all(dir).unwrap();
 }
 

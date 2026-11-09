@@ -180,6 +180,19 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .ngrp [aria-expanded=true] .chev { transform: rotate(180deg); }
   #menu .nsub a { gap: .625rem; min-height: 2.5rem; padding-left: 1.5rem; font-size: .875rem; }
   .nsub .sd { background: var(--s, var(--faint)); } /* never run: faint, as on Routines */
+  .nsub .n { margin-left: auto; color: var(--dim); font-size: .75rem; font-variant-numeric: tabular-nums; }
+  /* Notes: folder rows (icon, name, size or count); a note's chips, body and pictures. */
+  .nlist .r1 svg { flex: none; width: 1.125rem; height: 1.125rem; color: var(--dim); }
+  .nlist .n { flex: none; color: var(--dim); font-size: .8125rem; }
+  #notes-body > p { margin: 1rem .375rem; }
+  #notes-body > .rows, .nlist { margin-top: .75rem; }
+  .nchips { display: flex; flex-wrap: wrap; align-items: center; gap: .375rem; margin: .875rem 0; }
+  .nchips .chip { margin: 0; }
+  .nchips a { min-width: 0; max-width: 100%; color: var(--link); font-size: .8125rem; text-decoration: none; }
+  .chip.by-ai { --t: var(--t-run); --tf: var(--f-run); } .chip.by-capture { --t: var(--t-warn); --tf: var(--warn); } .chip.by-you { --t: var(--t-ok); --tf: var(--ok); }
+  .nbody { margin: 0 0 1rem; font: .9375rem/1.55 var(--sans); overflow-wrap: anywhere; }
+  .nimg { position: relative; display: block; min-height: 4rem; margin: 0 0 .75rem; border-radius: .75rem; overflow: hidden; background: var(--raised); }
+  .nimg img { display: block; max-width: 100%; height: auto; margin: 0 auto; }
   /* New routine: name, schedule and prompt atop Routines. 16px fields: iOS zooms into smaller ones. */
   #routine-new, #settings-form, #app-new { display: grid; gap: .5rem; margin: 0 0 1rem; padding: .875rem; border-radius: 1rem; background: var(--card); }
   :is(#routine-new, #settings-form, #app-new) :is(input, textarea, select) { width: 100%; font-size: 1rem; }
@@ -514,6 +527,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   .md ul ul { list-style: circle; }
   .md li { margin: .25rem 0; } .md li > :is(ul, ol) { margin: .25rem 0 0; }
   .md a { color: var(--link); }
+  .md li > a { display: inline; padding: 0; } /* not a list row's link */
   .md code { padding: .0625rem .3125rem; border-radius: .375rem; font: .8125em var(--mono); background: var(--raised); }
   .md pre { padding: .75rem; overflow-x: auto; white-space: pre; word-break: normal; border-radius: .75rem; background: var(--code); font: .75rem/1.6 var(--mono); }
   .md pre code { padding: 0; font: inherit; background: none; }
@@ -727,6 +741,8 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
     <div class="sheet-top"><span class="title">Make It So</span><button type="button" id="menu-close" class="ibtn" aria-label="Close menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
     <nav aria-label="Views">
       <a href="#" data-view="list">Home</a>
+      <div class="ngrp"><a href="#notes" data-view="notes">Notes</a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-notes" aria-label="Show notes"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
+      <ul id="nav-notes" class="nsub" hidden></ul>
       <div class="ngrp"><a href="#routines" data-view="routines">Routines</a><button type="button" id="routine-add" class="ibtn" aria-label="New routine" title="New routine"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-routines" aria-label="Show routines"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
       <ul id="nav-routines" class="nsub" hidden></ul>
       <div class="ngrp"><a href="#apps" data-view="apps">Apps</a><button type="button" id="app-add" class="ibtn" aria-label="New app" title="New app"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-apps" aria-label="Show apps"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
@@ -821,6 +837,11 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
     <p id="st-msg" hidden></p>
     <div class="row"><button>Save</button></div>
   </fieldset></form>
+</main>
+
+<main id="notes" hidden>
+  <div class="chead"><a href="#" class="back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a><div id="notes-head"></div></div>
+  <div id="notes-body"></div>
 </main>
 
 <main id="workers" hidden>
@@ -938,22 +959,50 @@ function el(tag, props, ...kids) {
 
 // md:begin. Markdown to HTML for transcript text. All of the text is HTML-escaped first; after that only fixed
 // tags are added, and an href only when it starts with http:// or https://, so nothing in the text can become markup.
-// tests/md.test.mjs runs this block.
+// Given `base`, a note's folder in the notes repo (`inbox`), relative links also open notes in the Notes view and
+// relative images become `<img data-note="<path, URI-encoded>">` for the page to fill. tests/md.test.mjs runs this block.
 const MD_ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const MD_LIST = /^( *)([-*+]|\d{1,9}[.)]) +(.*)$/, MD_FENCE = /^ *(```|~~~)/, MD_HEAD = /^(#{1,6}) +(.*?)[ #]*$/;
 const MD_RULE = /^ *([-*_])( *\1){2,} *$/, MD_QUOTE = /^ *&gt;/;
 const mdStarts = (l) => MD_FENCE.test(l) || MD_HEAD.test(l) || MD_RULE.test(l) || MD_QUOTE.test(l) || MD_LIST.test(l);
 const mdEsc = (s) => s.replace(/[&<>"']/g, (c) => MD_ESC[c]);
-function md(src) {
+let mdBase = null;
+function md(src, base = null) {
   const text = mdEsc(String(src).replace(/\0/g, '').replace(/\t/g, '    '));
-  return mdBlocks(text.split(/\r?\n/));
+  mdBase = base;
+  try { return mdBlocks(text.split(/\r?\n/)); } finally { mdBase = null; }
 }
+// Repo path of `rel` (as written in a note in folder `base`), or null if it isn't a relative path inside the repo:
+// `notePath('inbox', '../projects/a%20b.md')` is `projects/a b.md`; a URL, `/x`, or `..` past the top is null.
+function notePath(base, rel) {
+  rel = rel.replace(/[?#].*$/, '');
+  if (!rel || /^[a-z][\w+.-]*:/i.test(rel) || rel.startsWith('/') || rel.includes('\\')) return null;
+  const out = base ? base.split('/') : [];
+  for (const seg of rel.split('/')) {
+    let s;
+    try { s = decodeURIComponent(seg); } catch { return null; }
+    if (s === '..') { if (!out.length) return null; out.pop(); } else if (s && s !== '.') out.push(s);
+  }
+  return out.length ? out.join('/') : null;
+}
+const noteHref = (path) => `#notes/${path.split('/').map(encodeURIComponent).join('/')}`;
+const mdNote = (href) => notePath(mdBase, mdUnesc(href));
 const mdLink = (href, label) => `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`;
 // Code spans and links are set aside as \0n\0 first, so emphasis never reaches inside them.
 function mdInline(s) {
   const keep = [], put = (html) => `\0${keep.push(html) - 1}\0`;
-  s = s.replace(/(`+)(.+?)\1/g, (_, __, code) => put(`<code>${code}</code>`))
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)\0]+)\)/gi, (_, label, href) => put(mdLink(href, label)))
+  s = s.replace(/(`+)(.+?)\1/g, (_, __, code) => put(`<code>${code}</code>`));
+  // A note's own images and links; anything else stays text, or becomes an http(s) link below.
+  if (mdBase !== null) {
+    s = s.replace(/!\[([^\]]*)\]\(([^\s)\0]+)\)/g, (all, alt, href) => {
+      const p = mdNote(href);
+      return p === null ? all : put(`<img alt="${alt.replace(/\0\d+\0/g, '')}" data-note="${encodeURIComponent(p)}">`);
+    }).replace(/\[([^\]]+)\]\(([^\s)\0]+)\)/g, (all, label, href) => {
+      const p = mdNote(href);
+      return p === null ? all : put(`<a href="${noteHref(p)}">${label}</a>`);
+    });
+  }
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)\0]+)\)/gi, (_, label, href) => put(mdLink(href, label)))
     .replace(/https?:\/\/[^\s\0]+/gi, (url) => {
       // Trailing punctuation ends the sentence, not the link.
       const tail = url.match(/(?:[.,;:!?)\]]|&gt;|&quot;|&#39;)*$/)[0], href = url.slice(0, url.length - tail.length);
@@ -1067,6 +1116,7 @@ function mdTable(lines, i, out) {
 // each token escaped again inside a fixed `<span class="hl-x">`, so nothing in it becomes markup. Classes: k keyword,
 // s string, c comment, n number or literal, t type, f function, p key; a/d/m a diff's added, deleted and meta lines.
 const MD_UNESC = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
+const mdUnesc = (s) => s.replace(/&(?:amp|lt|gt|quot|#39);/g, (e) => MD_UNESC[e]);
 const HL_MAX = 20000; // longer blocks stay plain
 const HL_SLASH = /\/\/.*|\/\*[\s\S]*?(?:\*\/|$)/y, HL_HASH = /#.*/y, HL_NUM = /(?:0[xob][\da-f_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:e[+-]?\d+)?)\w*/iy;
 const HL_DQ = /"(?:[^"\\\n]|\\.)*"?/y, HL_SQ = /'(?:[^'\\\n]|\\.)*'?/y;
@@ -1102,7 +1152,7 @@ const hlTag = (cls, s) => `<span class="hl-${cls}">${mdEsc(s)}</span>`;
 function hl(lang, code) {
   const name = HL_ALIAS[lang.toLowerCase()] || lang.toLowerCase(), L = HL_LANG[name];
   if ((!L && name !== 'diff') || code.length > HL_MAX) return code;
-  const src = code.replace(/&(?:amp|lt|gt|quot|#39);/g, (e) => MD_UNESC[e]);
+  const src = mdUnesc(code);
   if (!L) {
     return src.split('\n').map((l) => (/^(?:@@|\+\+\+ |--- |diff |index )/.test(l) ? hlTag('m', l) : l[0] === '+' ? hlTag('a', l)
       : l[0] === '-' ? hlTag('d', l) : mdEsc(l))).join('\n');
@@ -1698,20 +1748,23 @@ $('upd').onclick = (e) => {
   renderUpdate();
 };
 
-// `#` tasks, `#task/<id>`, `#routines`, `#apps`, `#settings`, `#workers`, `#worker/<id>`, `#session/<worker>/<harness>/<id>`.
+// `#` tasks, `#task/<id>`, `#routines`, `#apps`, `#settings`, `#workers`, `#worker/<id>`, `#session/<worker>/<harness>/<id>`,
+// `#notes/<repo path>` (each segment URI-encoded).
 // `#new` (see takeNew) is Tasks with the composer focused.
 function route() {
   const m = location.hash.match(/^#(task|worker)\/([0-9a-f-]{36})$/);
   if (m) return { view: m[1] === 'task' ? 'detail' : 'machine', id: m[2] };
   const s = location.hash.match(/^#session\/([0-9a-f-]{36}\/(?:claude|codex)\/[0-9a-f-]{36})$/);
   if (s) return { view: 'session', id: s[1] };
+  const n = location.hash.match(/^#notes(?:\/(.*?))?\/*$/);
+  if (n) { try { return { view: 'notes', id: (n[1] || '').split('/').map(decodeURIComponent).join('/') }; } catch { return { view: 'notes', id: '' }; } }
   return { view: { '#workers': 'workers', '#routines': 'routines', '#apps': 'apps', '#settings': 'settings' }[location.hash] || 'list' };
 }
 
 function render() {
   const r = route();
   const live = ws && ws.readyState === WebSocket.OPEN;
-  const views = { list: renderList, detail: renderDetail, routines: renderRoutines, apps: renderApps, settings: renderSettings, workers: renderWorkers, machine: renderMachine, session: renderSession };
+  const views = { list: renderList, detail: renderDetail, routines: renderRoutines, apps: renderApps, settings: renderSettings, notes: renderNotes, workers: renderWorkers, machine: renderMachine, session: renderSession };
   $('auth').hidden = live || !authNeeded || !!store.get();
   // Placeholder rows until the first socket opens, unless that is stuck (a token, no server).
   $('skel').hidden = everOpen || !$('auth').hidden || offline || connMsg !== 'connecting…';
@@ -1734,7 +1787,7 @@ function render() {
   if (r.view !== 'detail' && r.view !== 'session') { follow.key = null; $('latest').hidden = true; if (detail) detail.sig = null; }
   if (r.view !== 'session') closeSession();
   const onWorkers = r.view === 'workers' || r.view === 'machine' || r.view === 'session';
-  const area = onWorkers ? 'workers' : ['routines', 'apps', 'settings'].includes(r.view) ? r.view : 'list';
+  const area = onWorkers ? 'workers' : ['routines', 'apps', 'settings', 'notes'].includes(r.view) ? r.view : 'list';
   for (const a of $('menu').querySelectorAll('nav a')) {
     if (a.dataset.view === area) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
@@ -2083,14 +2136,14 @@ $('refresh-ev').onclick = () => {
 // Evidence files, fetched with the token (an <img> can't send it) and kept by file id, most recently used last, up
 // to EV_KEEP files and EV_BYTES: an object URL for media, the parsed table, an output's text. Only settled files
 // are evicted, so no URL is made after its entry is gone. A failure is kept EV_RETRY_MS (a 404 for good), so
-// redraws don't ask again at once.
+// redraws don't ask again at once. Notes' pictures are kept here too, with their own `url`.
 const evFiles = new Map(), EV_KEEP = 120, EV_BYTES = 64 << 20, EV_RETRY_MS = 30e3;
 const MEDIA = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'video/mp4']);
 function evFile(f) {
   let e = evFiles.get(f.id);
   if (e) { evFiles.delete(f.id); evFiles.set(f.id, e); return e.p; }
   e = { v: undefined, bytes: f.bytes || 0, settled: false };
-  e.p = fetch(`/api/evidence/${f.id}`, { headers: authHeaders() }).then(async (r) => {
+  e.p = fetch(f.url || `/api/evidence/${f.id}`, { headers: authHeaders() }).then(async (r) => {
     if (!r.ok) throw Object.assign(new Error(`error ${r.status}`), { gone: r.status === 404 });
     // Media gets the type its kind names, never one from the response.
     if (MEDIA.has(f.mime)) e.v = URL.createObjectURL(new Blob([await r.arrayBuffer()], { type: f.mime }));
@@ -3338,13 +3391,20 @@ function renderNav() {
   fillNav($('nav-apps'), !hosted ? [['Loading…']] : hosted.error ? [[hosted.error]] : !as.length ? [['No apps']]
     : as.map((a) => [a.active && a.url ? a.url : '#apps', a.active ? 'done' : '', a.title]));
   fillNav($('nav-workers'), !workers.length ? [['No workers']] : workers.map((w) => [`#worker/${w.id}`, workerState(w), w.info.hostname]));
+  // Notes: one link per folder the repo has, no dot; the inbox with how many notes wait in it.
+  const ns = notesTree && notesTree.entries, inbox = ns && ns.filter((e) => e.kind === 'md' && /^inbox\/[^/]+$/.test(e.path)).length;
+  const folders = ns ? NOTE_FOLDERS.filter(([f]) => ns.some((e) => e.path === f)) : [];
+  fillNav($('nav-notes'), !notesTree ? [['Loading…']] : notesTree.error ? [[notesTree.error]] : notesTree.state === 'off' ? [['Not configured']]
+    : !folders.length ? [['No notes yet']] : folders.map(([f, label]) => [noteHref(f), null, label, f === 'inbox' && inbox ? String(inbox) : '']));
 }
+// Rows as [href, dot class (null: none), name, count], or [text] for a note.
 function fillNav(ul, rows) {
   const key = JSON.stringify(rows);
   if (ul.dataset.key === key) return;
   ul.dataset.key = key;
-  ul.replaceChildren(...rows.map(([href, cls, name]) => (cls === undefined ? el('li', { className: 'dim' }, href)
-    : el('li', {}, el('a', { href, ...(href[0] === '#' ? {} : { target: '_blank', rel: 'noopener' }), onclick: href === '#routines' ? (e) => pickRoutine(e, name) : null }, el('span', { className: `sd ${cls}` }), el('span', { className: 'one' }, name))))));
+  ul.replaceChildren(...rows.map(([href, cls, name, n]) => (cls === undefined ? el('li', { className: 'dim' }, href)
+    : el('li', {}, el('a', { href, ...(href[0] === '#' ? {} : { target: '_blank', rel: 'noopener' }), onclick: href === '#routines' ? (e) => pickRoutine(e, name) : null },
+      cls === null ? '' : el('span', { className: `sd ${cls}` }), el('span', { className: 'one' }, name), n ? el('span', { className: 'n' }, n) : '')))));
 }
 // Already on Routines, the link's own jump to the top would undo the scroll to the row.
 function pickRoutine(e, name) {
@@ -3501,6 +3561,138 @@ $('settings-form').onsubmit = async (e) => {
   renderSettings();
   settingsMsg(msg, msg !== 'Saved');
 };
+
+// notes:begin. The Notes view, pure: a note's frontmatter, who wrote it, a folder's rows. tests/md.test.mjs runs this block.
+const NOTE_FOLDERS = [['inbox', 'Inbox'], ['projects', 'Projects'], ['areas', 'Areas'], ['resources', 'Resources'], ['archive', 'Archive'], ['ai', 'AI']];
+// A YAML scalar or flow list as the notes repo writes them: `"json"`, `'single'`, `[a, b]`, plain (`# comment` dropped).
+function yamlValue(v) {
+  v = v.trim();
+  if (/^".*"$/.test(v)) { try { return JSON.parse(v); } catch { return v.slice(1, -1); } }
+  if (/^'.*'$/.test(v)) return v.slice(1, -1).replace(/''/g, "'");
+  v = v.replace(/\s+#.*$/, '');
+  if (/^\[.*\]$/.test(v)) return v.slice(1, -1).split(',').map(yamlValue).filter((x) => x !== '');
+  return v;
+}
+// `---` frontmatter as { key: value }, block list items (`  - x`, `  - path: x`) as arrays; and the body after it.
+function noteFront(text) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(text);
+  if (!m) return { meta: {}, body: text };
+  const meta = {};
+  let key = null;
+  for (const line of m[1].split(/\r?\n/)) {
+    let a;
+    if ((a = /^\s+-\s+(?:path:\s*)?(.*)$/.exec(line)) && key) (meta[key] = Array.isArray(meta[key]) ? meta[key] : []).push(yamlValue(a[1]));
+    else if ((a = /^([\w-]+):(?:\s+(.*))?$/.exec(line))) { key = a[1]; meta[key] = yamlValue(a[2] || ''); }
+  }
+  return { meta, body: text.slice(m[0].length) };
+}
+const noteAuthor = (path) => (path.startsWith('ai/') ? 'AI' : path.startsWith('inbox/') ? 'Capture' : 'You');
+// What's directly in folder `dir` of `entries`: folders A-Z, then files newest first by name (dated names sort).
+function noteRows(entries, dir) {
+  const pre = `${dir}/`, kids = entries.filter((e) => e.path.startsWith(pre) && !e.path.slice(pre.length).includes('/'));
+  const cmp = (a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  return [...kids.filter((e) => e.kind === 'dir').sort(cmp), ...kids.filter((e) => e.kind !== 'dir').sort((a, b) => cmp(b, a))];
+}
+// notes:end
+
+// The notes repo's tree, fetched on open and on each move within Notes; the open note's text, fetched when shown.
+let notesTree = null; // { state, entries } | { error } | null while reading
+let notesAsked = null;
+let noteShown = null; // { path, got: null | { text } | { error } }
+let notesDrawn = null; // what #notes-body shows, so redraws that change nothing leave it be
+function forgetNotes() { notesTree = notesAsked = noteShown = notesDrawn = null; $('notes-body').replaceChildren(); }
+async function loadNotes() {
+  const ask = {};
+  notesAsked = ask;
+  let got;
+  try {
+    const r = await fetch('/api/notes/tree', { headers: authHeaders() });
+    got = r.ok ? await r.json() : { error: (await r.text()) || `error ${r.status}` };
+  } catch { got = { error: 'couldn’t reach the orchestrator' }; }
+  if (notesAsked !== ask) return;
+  // The same tree as shown: keep it, so the view isn't redrawn.
+  if (JSON.stringify(got) !== JSON.stringify(notesTree)) notesTree = got;
+  if (route().view === 'notes') renderNotes(route().id);
+  renderNav();
+}
+function loadNote(path) {
+  const shown = { path, got: null };
+  noteShown = shown;
+  fetch(`/api/notes/file?path=${encodeURIComponent(path)}`, { headers: authHeaders() }).then(async (r) => {
+    shown.got = r.ok ? { text: await r.text() } : { error: r.status === 404 ? 'Not in the notes repo' : r.status === 415 ? 'Can’t show this file' : (await r.text()) || `error ${r.status}` };
+  }, () => { shown.got = { error: 'couldn’t reach the orchestrator' }; }).then(() => { if (noteShown === shown && route().view === 'notes') renderNotes(route().id); });
+}
+// Fills `img` with repo image `path` through the evidence file cache, keyed by size too so a changed picture is
+// fetched again; one that can't be had (or isn't a picture by name) marks its box.
+const NOTE_MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' };
+function noteImg(img, path) {
+  const size = (notesTree.entries.find((e) => e.path === path) || {}).size || 0;
+  const mime = NOTE_MIME[(path.match(/\.(\w+)$/) || [])[1]?.toLowerCase()];
+  evMedia(img, { id: `note:${size}:${path}`, url: `/api/notes/file?path=${encodeURIComponent(path)}`, mime, bytes: size });
+}
+// A picture in its box; `href` (its own page) when shown inside a note.
+const noteFig = (path, href) => { const img = el('img', { alt: '' }), f = el(href ? 'a' : 'span', { className: 'nimg', ...(href ? { href } : {}) }, img); noteImg(img, path); return f; };
+const noteLabel = (path) => { const name = path.slice(path.lastIndexOf('/') + 1); return (NOTE_FOLDERS.find(([f]) => f === path) || [])[1] || name.replace(/\.md$/i, ''); };
+const noteSize = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
+const NOTE_ICON = { dir: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z', md: 'M7 3h7l5 5v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM9 13h6M9 17h4', image: 'M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM3 16l5-5 5 5 3-3 5 5', other: 'M7 3h7l5 5v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z' };
+function noteRow(e, entries) {
+  const n = e.kind === 'dir' ? noteRows(entries, e.path).length : 0;
+  return el('li', {}, el('a', { href: noteHref(e.path) },
+    el('div', { className: 'r1' }, svg(NOTE_ICON[e.kind] || NOTE_ICON.other), el('span', { className: 'one' }, noteLabel(e.path)),
+      el('span', { className: 'n' }, e.kind === 'dir' ? plural(n, 'item') : e.kind === 'md' ? '' : noteSize(e.size)))));
+}
+// Chips over a note: who wrote it, then via, captured, project and tags from its frontmatter; a url as a link.
+function noteChips(path, meta) {
+  const by = noteAuthor(path), list = (v) => (Array.isArray(v) ? v : v ? [v] : []);
+  const at = meta.captured && new Date(meta.captured);
+  const url = typeof meta.url === 'string' && /^https?:\/\//i.test(meta.url) ? meta.url : '';
+  return el('div', { className: 'nchips' }, el('span', { className: `chip by-${by.toLowerCase()}` }, by),
+    ...[meta.via && `via ${meta.via}`, at && !isNaN(at) && at.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }),
+      ...list(meta.project), ...list(meta.tags).map((t) => `#${t}`)].filter((x) => x && typeof x === 'string').map((x) => el('span', { className: 'chip' }, x)),
+    url ? el('a', { href: url, target: '_blank', rel: 'noopener noreferrer', className: 'one' }, url.replace(/^https?:\/\//i, '')) : '');
+}
+function renderNotes(path) {
+  if (!everOpen) return; // fetch once connected, with the token in place
+  const cut = path.lastIndexOf('/'), dir = cut < 0 ? '' : path.slice(0, cut);
+  $('notes').querySelector('.back').href = !path ? '#' : dir ? noteHref(dir) : '#notes';
+  const entry = notesTree && notesTree.entries && (path ? notesTree.entries.find((e) => e.path === path) : { kind: 'dir', path: '' });
+  if (entry && entry.kind === 'md' && (!noteShown || noteShown.path !== path)) loadNote(path);
+  const got = entry && entry.kind === 'md' ? noteShown.got : null;
+  const drawn = [path, notesTree, got];
+  if (notesDrawn && drawn.every((x, i) => x === notesDrawn[i])) return;
+  notesDrawn = drawn;
+  const body = $('notes-body'), front = got && got.text !== undefined ? noteFront(got.text) : null;
+  $('notes-head').replaceChildren(el('div', { className: 'ttl' }, el('span', {}, (front && typeof front.meta.title === 'string' && front.meta.title) || (path ? noteLabel(path) : 'Notes'))),
+    dir ? el('div', { className: 'r2 one dim' }, path) : '');
+  if (!notesTree) { body.replaceChildren(el('div', { className: 'rows' }, skel())); if (!notesAsked) loadNotes(); return; }
+  const say = (cls, text) => body.replaceChildren(el('p', { className: cls }, text));
+  if (notesTree.error) return say('bad', notesTree.error);
+  if (notesTree.state === 'off') return say('dim', 'Notes repo not configured (MIS_NOTES_REMOTE)');
+  if (!entry) return say('dim', 'Not in the notes repo');
+  const stale = ['offline', 'conflict'].includes(notesTree.state) ? el('p', { className: 'dim' }, `Notes repo ${notesTree.state}: showing the last copy`) : '';
+  if (entry.kind === 'dir') {
+    const rows = path ? noteRows(notesTree.entries, path)
+      : NOTE_FOLDERS.map(([f]) => notesTree.entries.find((e) => e.path === f)).filter(Boolean);
+    const ul = el('ul', { className: 'rows nlist' }, ...rows.map((e) => noteRow(e, notesTree.entries)));
+    if (!rows.length) ul.append(el('li', { className: 'dim' }, path ? 'Empty' : 'No notes yet'));
+    return body.replaceChildren(stale, ul);
+  }
+  if (entry.kind === 'image') return body.replaceChildren(stale, noteFig(path));
+  if (entry.kind !== 'md') return say('dim', 'Can’t show this file here');
+  if (!got) return body.replaceChildren(el('div', { className: 'rows' }, skel()));
+  if (got.error) return say('bad', got.error);
+  const text = el('div', { className: 'md nbody' });
+  // md() escapes all of the text before adding its own tags.
+  text.innerHTML = md(front.body, dir);
+  for (const img of text.querySelectorAll('img[data-note]')) {
+    const box = el('span', { className: 'nimg' });
+    img.replaceWith(box);
+    box.append(img);
+    noteImg(img, decodeURIComponent(img.dataset.note));
+  }
+  const assets = (Array.isArray(front.meta.assets) ? front.meta.assets : []).map((a) => notePath(dir, String(a))).filter(Boolean);
+  body.replaceChildren(stale, noteChips(path, front.meta), text, ...assets.map((a) => noteFig(a, noteHref(a))));
+}
 
 function renderWorkers() {
   renderNotify();
@@ -3894,6 +4086,7 @@ $('clear').onclick = (e) => {
   $('menu').close();
   store.set('');
   disconnect();
+  forgetNotes(); // the next token may not see them
   everOpen = false;
   readOnly = false;
   settingsAsked = null;
@@ -3905,7 +4098,7 @@ for (const f of [$('prompt'), $('reply-text')]) f.addEventListener('input', () =
 $('prompt').value = drafts.get('draft:new');
 // Leaving a view stops dictation into it and any readback.
 // A press's click has landed once the view changes: nothing left to hold for.
-window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (route().view === 'apps' && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; render(); };
+window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (route().view === 'apps' && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; if (route().view === 'notes') { noteShown = null; if (notesTree) loadNotes(); } render(); };
 setInterval(tick, 1000);
 
 // `#new`, a link into the page for a new task, is Tasks with the composer focused; the hash becomes `#` so back links don't refocus.
@@ -3954,6 +4147,7 @@ $('menu-btn').onclick = () => {
   $('menu-btn').setAttribute('aria-expanded', 'true');
   if (!$('nav-routines').hidden) loadRoutines();
   if (!$('nav-apps').hidden) loadApps();
+  if (!$('nav-notes').hidden) loadNotes();
   renderNav();
 };
 // + opens the new-routine form atop Routines; the orchestrator writes `<name>.md`, paused.
@@ -4048,6 +4242,7 @@ for (const b of $('menu').querySelectorAll('.ngrp button[aria-controls]')) b.onc
   $(b.getAttribute('aria-controls')).hidden = !open;
   if (open && b.getAttribute('aria-controls') === 'nav-routines') loadRoutines();
   if (open && b.getAttribute('aria-controls') === 'nav-apps') loadApps();
+  if (open && b.getAttribute('aria-controls') === 'nav-notes') loadNotes();
 };
 $('menu').addEventListener('close', () => $('menu-btn').setAttribute('aria-expanded', 'false'));
 $('menu-close').onclick = () => $('menu').close();

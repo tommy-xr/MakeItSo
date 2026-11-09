@@ -1,5 +1,5 @@
 // The page's pure renderers (index.html): markdown between `md:begin` and `md:end`, evidence helpers between `ev:begin`
-// and `ev:end`, diff helpers between `diff:begin` and `diff:end`. Run: node --test crates/mis-orchestrator/tests
+// and `ev:end`, diff helpers between `diff:begin` and `diff:end`, notes helpers between `notes:begin` and `notes:end`. Run: node --test crates/mis-orchestrator/tests
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -11,6 +11,8 @@ const evBlock = page.slice(page.indexOf('// ev:begin'), page.indexOf('// ev:end'
 const ev = new Function(`${evBlock}; return { ansi, better, change, fmtChange, tone, deltas, tableMd, resultMd };`)();
 const diffBlock = page.slice(page.indexOf('// diff:begin'), page.indexOf('// diff:end'));
 const df = new Function(`${diffBlock}; return { patchRows, pathParts, diffOffer, prPrompt, pushPrompt };`)();
+const notesBlock = page.slice(page.indexOf('// notes:begin'), page.indexOf('// notes:end'));
+const nt = { ...new Function(`${notesBlock}; return { noteFront, noteAuthor, noteRows };`)(), notePath: new Function(`${block}; return notePath;`)() };
 
 // Every tag in the output, e.g. ['p', 'a', 'code'].
 const tags = (html) => [...html.matchAll(/<([a-z0-9]+)/g)].map((m) => m[1]);
@@ -324,4 +326,51 @@ test('paths split at the last slash; offers follow the branch, remote and thread
   for (const want of ['gh pr create', 'Conventional Commits', 'report_evidence', 'new branch', 'before/after', '"notes.md", "a`b\\nc"']) assert.ok(pr.includes(want), want);
   assert.ok(!df.prPrompt([]).includes('leave them out'));
   assert.ok(df.pushPrompt([]).includes('push the current branch'));
+});
+
+test('a note links to notes and shows its images, relative to its folder, and nothing else', () => {
+  const html = md('See [the plan](../projects/amf/README.md) and [top](#x).\n\n![a "sky"](a%20b-1.jpg)', 'inbox');
+  assert.ok(html.includes('<a href="#notes/projects/amf/README.md">the plan</a>'), html);
+  assert.ok(html.includes('[top](#x)'), html);
+  assert.ok(html.includes('<img alt="a &quot;sky&quot;" data-note="inbox%2Fa%20b-1.jpg">'), html);
+  // Without a folder, transcripts get neither.
+  assert.ok(!md('[x](a.md) ![y](b.png)').includes('<a') && !md('![y](b.png)').includes('<img'));
+  // http(s) links still open outside; other schemes and escapes stay text.
+  assert.ok(md('[x](https://a.co/)', 'inbox').includes('href="https://a.co/" target="_blank"'));
+  for (const src of ['[x](javascript:alert(1))', '![x](data:image/png;base64,AA)', '[x](/etc/passwd)', '[x](../../etc/passwd)',
+    '![x](..)', '[x](a\\b.md)', '![x](%zz.png)']) {
+    const out = md(src, 'inbox');
+    assert.ok(!/<(a|img)\b/.test(out), `${src} -> ${out}`);
+  }
+  // Nothing in a target or alt breaks out of its attribute.
+  for (const src of ['![x" onerror="y](a.png)', '[x](a.md"onclick="y)', '![`</code>"<b>`](a.png)', '[x](a.md?q="><script>)']) {
+    const out = md(src, 'ai/projects');
+    for (const [, tag, attrs] of out.matchAll(/<([a-z0-9]+)([^>]*)>/g)) {
+      assert.ok(!attrs || /^ (href="#notes\/[\w%.~*'()!/-]*"|alt="[^"<>]*" data-note="[\w%.~*'()!-]*")$/.test(attrs), `${tag}${attrs} in ${out}`);
+    }
+  }
+  assert.equal(nt.notePath('inbox', '../projects/a%20b.md'), 'projects/a b.md');
+  assert.equal(nt.notePath('ai/projects/amf', '../../../inbox/x.md#top'), 'inbox/x.md');
+  assert.equal(nt.notePath('inbox', '../..'), null);
+  assert.equal(nt.notePath('inbox', './'), 'inbox');
+});
+
+test('a note’s frontmatter, author and folder order', () => {
+  const capture = '---\nschema: 1\nid: 0b8a\ncaptured: 2026-11-07T18:42:10Z\nvia: "shortcut"\nurl: "https://a.co/?q=\\"1\\""\nproject: "amf"\n'
+    + 'assets:\n  - path: 2026-11-07-a-1.jpg\n    sha256: h\n  - path: 2026-11-07-a-2.png\n    sha256: h\n---\nbody\n---\nmore';
+  const { meta, body } = nt.noteFront(capture);
+  assert.deepEqual(meta.assets, ['2026-11-07-a-1.jpg', '2026-11-07-a-2.png']);
+  assert.equal(meta.via, 'shortcut');
+  assert.equal(meta.url, 'https://a.co/?q="1"');
+  assert.equal(meta.captured, '2026-11-07T18:42:10Z');
+  assert.equal(body, 'body\n---\nmore');
+  const record = nt.noteFront("---\nid: all-must-fall\ntitle: 'All Must Fall'\naliases: [amf, 'a m f']\nrepos: [tommy-xr/MakeItSo]   # optional\ntags:\n  - weekly\n---\nText.");
+  assert.deepEqual(record.meta, { id: 'all-must-fall', title: 'All Must Fall', aliases: ['amf', 'a m f'], repos: ['tommy-xr/MakeItSo'], tags: ['weekly'] });
+  assert.deepEqual(nt.noteFront('# no frontmatter\n---\n'), { meta: {}, body: '# no frontmatter\n---\n' });
+  assert.deepEqual(['ai/x.md', 'inbox/x.md', 'projects/x.md', 'ai'].map(nt.noteAuthor), ['AI', 'Capture', 'You', 'You']);
+  const e = (path, kind = 'md') => ({ path, kind, size: 1 });
+  const entries = [e('inbox', 'dir'), e('inbox/2026-11-06-a.md'), e('inbox/2026-11-08-b.md'), e('inbox/2026-11-08-b-1.jpg', 'image'),
+    e('inbox/z', 'dir'), e('inbox/old', 'dir'), e('inbox/old/2026-01-01.md'), e('inboxes/x.md')];
+  assert.deepEqual(nt.noteRows(entries, 'inbox').map((x) => x.path),
+    ['inbox/old', 'inbox/z', 'inbox/2026-11-08-b.md', 'inbox/2026-11-08-b-1.jpg', 'inbox/2026-11-06-a.md']);
 });

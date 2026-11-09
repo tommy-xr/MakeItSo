@@ -228,6 +228,21 @@ fn two_captures_make_one_commit_and_a_second_run_does_nothing() {
 }
 
 #[test]
+fn a_run_with_nothing_to_publish_still_catches_the_clone_up() {
+    let w = World::new();
+    let notes = w.notes();
+    let s = notes.run();
+    assert_eq!((s.state, s.pending, &s.last_error), (Idle, 0, &None));
+    assert!(w.state.join("notes/README.md").exists(), "cloned");
+    std::fs::write(w.human.join("inbox/by-hand.md"), "# mine\n").unwrap();
+    w.human_commit("by hand");
+    let s = notes.run();
+    assert_eq!((s.state, s.last_push), (Idle, None), "nothing pushed");
+    let got = std::fs::read_to_string(w.state.join("notes/inbox/by-hand.md")).unwrap();
+    assert_eq!(got, "# mine\n");
+}
+
+#[test]
 fn a_resend_after_restart_is_not_published_twice() {
     let w = World::new();
     let first = w.capture("resend me", &[JPEG]);

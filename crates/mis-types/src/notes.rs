@@ -1,4 +1,5 @@
-//! Publishing captures to the notes repo, as `GET /api/notes/sync` reports it.
+//! The notes repo: publishing captures to it (`GET /api/notes/sync`) and reading it (`GET
+//! /api/notes/tree`).
 
 use serde::{Deserialize, Serialize};
 
@@ -34,4 +35,32 @@ impl NotesSync {
         last_push: None,
         last_error: None,
     };
+}
+
+/// What a path in the notes repo is, as the Notes view shows it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NoteKind {
+    Dir,
+    Md,
+    /// Named like a JPEG, PNG, WebP or GIF; served only if its bytes are one.
+    Image,
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NoteEntry {
+    /// Repo-relative, `/`-separated, e.g. `inbox/2026-11-08-foo.md`.
+    pub path: String,
+    pub kind: NoteKind,
+    /// Bytes; 0 for a dir.
+    pub size: u64,
+}
+
+/// `GET /api/notes/tree`: the clone's shown folders, every entry under them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotesTree {
+    /// `off`: no notes remote configured.
+    pub state: SyncState,
+    pub entries: Vec<NoteEntry>,
 }
