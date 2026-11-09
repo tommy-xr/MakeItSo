@@ -1,0 +1,2 @@
+# Guides are compiled into the binaries (include_str!); LF everywhere so prompts match on Windows.
+guides/*.md text eol=lf
