@@ -304,13 +304,13 @@ fn is_commit(s: &str) -> bool {
     (4..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// `git -C dir <args>`: its stdout, and whether it was cut at `MAX_OUTPUT`.
 /// `dir`'s `origin` remote URL.
 pub async fn origin(dir: &str) -> Option<String> {
-    let (out, ok) = git(dir, &["remote", "get-url", "origin"]).await.ok()?;
-    ok.then(|| String::from_utf8_lossy(&out).trim().to_string())
+    let (out, _) = git(dir, &["remote", "get-url", "origin"]).await.ok()?;
+    Some(String::from_utf8_lossy(&out).trim().to_string()).filter(|u| !u.is_empty())
 }
 
+/// `git -C dir <args>`: its stdout, and whether it was cut at `MAX_OUTPUT`.
 async fn git(dir: &str, args: &[&str]) -> Result<(Vec<u8>, bool), String> {
     let mut cmd = tokio::process::Command::new("git");
     cmd.arg("-C").arg(dir);

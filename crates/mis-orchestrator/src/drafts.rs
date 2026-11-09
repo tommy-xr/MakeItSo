@@ -64,6 +64,9 @@ pub fn image(what: &str, b64: &str) -> Result<Vec<u8>, String> {
         ));
     }
     let bytes = Base64::decode_vec(b64.trim()).map_err(|e| format!("{what}: {e}"))?;
+    if bytes.len() > MAX_DRAFT_IMAGE_BYTES {
+        return Err(format!("{what} is over {} MiB", MAX_DRAFT_IMAGE_BYTES >> 20));
+    }
     match ImageKind::sniff(&bytes) {
         Some(ImageKind::Png | ImageKind::Jpeg | ImageKind::Gif) => Ok(bytes),
         _ => Err(format!("{what} isn't a PNG, JPEG or GIF")),
