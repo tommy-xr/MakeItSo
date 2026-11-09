@@ -731,7 +731,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
     :root:not(.vr) { --rail: 16rem; --list: 0px; --side: calc(var(--rail) + var(--list)); --head: calc(3.5rem + env(safe-area-inset-top, 0px)); scroll-padding-top: var(--head); }
     :root.rail-off:not(.vr) { --rail: 0px; }
     :root:not(.vr) body { max-width: none; padding-left: calc(var(--side) + var(--pad)); }
-    :root:not(.vr) body > :is(main, #auth, #skel, #pick) { max-width: calc(48rem - 2 * var(--pad)); margin-inline: auto; }
+    :root:not(.vr) body > :is(main, #auth, #skel, #choose) { max-width: calc(48rem - 2 * var(--pad)); margin-inline: auto; }
     :root:not(.vr) .strip { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; gap: .625rem; box-sizing: border-box; height: var(--head);
       margin: 0 calc(-1 * var(--pad)) .25rem calc(-1 * (var(--side) + var(--pad))); padding: env(safe-area-inset-top, 0px) var(--pad) 0 .75rem; background: var(--bg); border-bottom: 1px solid var(--sep); }
     /* The two rows' items join one flex row: ☰ logo title · dot ticker update · gauges · needs-you. */
@@ -762,7 +762,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
       padding: 0 var(--pad) 1.5rem; overflow-y: auto; overscroll-behavior: contain; border-right: 1px solid var(--sep); }
     :root.split:not(.vr) #list .rows a[aria-current] { background: var(--bubble); box-shadow: inset 3px 0 var(--accent); }
     :root.split:not(.vr) #detail .chead .back { display: none; }
-    #pick { padding-top: 30svh; text-align: center; }
+    #choose { padding-top: 30svh; text-align: center; }
     .newtask { display: flex; align-items: center; justify-content: center; gap: .375rem; margin: .75rem 0 0; min-height: 2.5rem; border-radius: .75rem;
       background: var(--card); color: var(--fg); font-weight: 500; text-decoration: none; }
     @media (hover: hover) { .newtask:hover { background: var(--hover); } }
@@ -827,7 +827,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
 
 <main id="list" hidden></main>
 
-<p id="pick" class="dim" hidden>Select a task, or start one below.</p>
+<p id="choose" class="dim" hidden>Select a task, or start one below.</p>
 
 <main id="detail" hidden>
   <div class="chead"><a href="#" class="back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a><div id="task-head"></div></div>
@@ -1819,7 +1819,7 @@ function route() {
   return { view: { '#workers': 'workers', '#routines': 'routines', '#apps': 'apps', '#settings': 'settings' }[location.hash] || 'list' };
 }
 
-// Wide desktop (75rem+, not Quest): Home's list stays up beside the open task (or `#pick` when none is).
+// Wide desktop (75rem+, not Quest): Home's list stays up beside the open task (or `#choose` when none is).
 const wide = matchMedia('(min-width: 75rem)');
 const isSplit = (view) => wide.matches && isDesk() && (view === 'list' || view === 'detail');
 const inSplit = () => document.documentElement.classList.contains('split'); // as render() last laid out
@@ -1853,7 +1853,7 @@ function render() {
   if (shots.some((x) => !x.id)) $('send').disabled = true; // photos still uploading
   $('clip').disabled = shots.length >= MAX_SHOTS || !!pending;
   for (const v in views) $(v).hidden = !everOpen || (v !== r.view && !(split && v === 'list'));
-  $('pick').hidden = !everOpen || !split || r.view !== 'list';
+  $('choose').hidden = !everOpen || !split || r.view !== 'list';
   // A conversation's back link returns to the view it was opened from.
   if (r.view === 'detail' || r.view === 'session') $(r.view).querySelector('.back').href = from;
   else from = location.hash || '#';
