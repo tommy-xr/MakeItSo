@@ -726,9 +726,9 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
      dialog shown in place; ☰ hides it); views, composer, Latest and toasts centre in the room beside it, 48rem wide. */
   #nav-need { display: none; margin-left: auto; font-size: .8125rem; font-weight: 600; }
   @media (min-width: 64rem) {
-    :root:not(.vr) { scroll-padding-top: var(--head); }
-    :root:not(.vr) body { --rail: 16rem; --head: calc(3.5rem + env(safe-area-inset-top, 0px)); max-width: none; padding-left: calc(var(--rail) + var(--pad)); }
-    :root.rail-off:not(.vr) body { --rail: 0px; }
+    :root:not(.vr) { --rail: 16rem; --head: calc(3.5rem + env(safe-area-inset-top, 0px)); scroll-padding-top: var(--head); }
+    :root.rail-off:not(.vr) { --rail: 0px; }
+    :root:not(.vr) body { max-width: none; padding-left: calc(var(--rail) + var(--pad)); }
     :root:not(.vr) body > :is(main, #auth, #skel) { max-width: calc(48rem - 2 * var(--pad)); margin-inline: auto; }
     :root:not(.vr) .strip { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; gap: .625rem; box-sizing: border-box; height: var(--head);
       margin: 0 calc(-1 * var(--pad)) .25rem calc(-1 * (var(--rail) + var(--pad))); padding: env(safe-area-inset-top, 0px) var(--pad) 0 .75rem; background: var(--bg); border-bottom: 1px solid var(--sep); }
@@ -751,6 +751,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
     :root:not(.vr) #dock { left: var(--rail); }
     :root:not(.vr) .composer { max-width: calc(48rem - 2 * var(--pad)); }
     :root:not(.vr) :is(#latest, #toast) { left: calc(50% + var(--rail) / 2); }
+    :root:not(.vr) #toast { max-width: calc(100vw - var(--rail) - 2rem); }
   }
   /* VR panels: bigger type, secondary text pulled toward the foreground. */
   html.vr { font-size: 22px; --dim: color-mix(in srgb, var(--fg) 85%, var(--bg)); }
@@ -2882,7 +2883,7 @@ function placeConvo(key, sig, wasAtBottom, box, toEnd, toTop) {
     $('latest').hidden = true;
     // The earlier-turns line and your last message under the sticky head; a short exchange just ends at the bottom.
     const head = box.parentNode.querySelector('.chead'), top = box.querySelector('.fold') || [...box.querySelectorAll(':scope > .msg.user')].pop();
-    scrollTo(0, toTop ? 0 : top && !toEnd ? top.getBoundingClientRect().top + scrollY - head.offsetHeight - 8 : end);
+    scrollTo(0, toTop ? 0 : top && !toEnd ? top.getBoundingClientRect().top + scrollY - (parseFloat(getComputedStyle(head).top) || 0) - head.offsetHeight - 8 : end);
     return;
   }
   if (follow.sig === sig) return;
@@ -3949,6 +3950,7 @@ function connect() {
   sock.onopen = () => {
     retries = 0;
     everOpen = true;
+    if (railShown()) loadNav(); // the rail's lists, for this token
     offline = false;
     clearTimeout(offlineTimer);
     offlineTimer = 0;
@@ -4130,7 +4132,7 @@ for (const f of [$('prompt'), $('reply-text')]) f.addEventListener('input', () =
 $('prompt').value = drafts.get('draft:new');
 // Leaving a view stops dictation into it and any readback.
 // A press's click has landed once the view changes: nothing left to hold for.
-window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (route().view === 'apps' && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; if (route().view === 'notes') { noteShown = null; if (notesTree) loadNotes(); } if (railShown()) loadNav(); render(); };
+window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (route().view === 'apps' && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; if (route().view === 'notes') { noteShown = null; if (notesTree) loadNotes(); } render(); };
 setInterval(tick, 1000);
 
 // `#new`, a link into the page for a new task, is Tasks with the composer focused; the hash becomes `#` so back links don't refocus.
@@ -4297,10 +4299,10 @@ for (const b of $('menu').querySelectorAll('.ngrp button[aria-controls]')) b.onc
   if (open && b.getAttribute('aria-controls') === 'nav-apps') loadApps();
   if (open && b.getAttribute('aria-controls') === 'nav-notes') loadNotes();
 };
-$('menu').addEventListener('close', () => $('menu-btn').setAttribute('aria-expanded', 'false'));
+$('menu').addEventListener('close', () => $('menu-btn').setAttribute('aria-expanded', String(railShown())));
 // The rail opens with Notes and Workers unfolded: short lists, and Workers carries what's running.
 if (isDesk()) for (const id of ['nav-notes', 'nav-workers']) $('menu').querySelector(`[aria-controls=${id}]`).click();
-deskMode();
+$('menu-btn').setAttribute('aria-expanded', String(railShown()));
 $('menu-close').onclick = () => $('menu').close();
 let downOnBackdrop = false;
 $('menu').addEventListener('pointerdown', (e) => { downOnBackdrop = e.target === $('menu'); });
