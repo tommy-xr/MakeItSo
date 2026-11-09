@@ -152,6 +152,9 @@ pub struct AppMe {
     pub role: AppRole,
     /// The app's slug.
     pub app: String,
+    /// The draft release its owner is trying (on a copy of the records). None: the live app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<u32>,
 }
 
 /// One published bundle.

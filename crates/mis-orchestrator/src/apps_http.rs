@@ -6,12 +6,12 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Path, Query, Request, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
-use mis_types::{AppMe, BatchWritten, Conflict, Export, RecordQuery, Space, Written};
+use mis_types::{AppMe, AppRole, BatchWritten, Conflict, Export, RecordQuery, Space, Written};
 
 use crate::access_gate::{AccessGate, JWT_HEADER};
 use crate::app_access::{self, Action, Member, Subject};
@@ -131,11 +131,29 @@ async fn guard(
     mut req: Request,
     next: Next,
 ) -> Response {
+    let mut stale = None;
     let mut resp = match admit(&apps, &auth, peer, &mut req).await {
-        Ok(()) => next.run(req).await,
+        Ok(()) => {
+            // A draft cookie that no longer applies (replaced, decided, not the owner) is dropped.
+            let has = |slug: &str| {
+                let name = app_access::draft_cookie_name(slug);
+                let cookies = req.headers().get(header::COOKIE).and_then(|v| v.to_str().ok());
+                cookies.is_some_and(|c| c.split(';').any(|c| c.trim().starts_with(&format!("{name}="))))
+            };
+            if let Some(m) = req.extensions().get::<Member>() {
+                let slug = app_access::app_of(req.uri().path()).unwrap_or_default().to_string();
+                if m.draft.is_none() && has(&slug) {
+                    stale = Some(app_access::draft_cookie(&slug, None, crate::via_cloudflare(req.headers())));
+                }
+            }
+            next.run(req).await
+        }
         Err(refused) => refused.into_response(),
     };
     let h = resp.headers_mut();
+    if let Some(clear) = stale.and_then(|c| HeaderValue::from_str(&c).ok()) {
+        h.append(header::SET_COOKIE, clear);
+    }
     h.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(CSP),
@@ -207,7 +225,15 @@ async fn admit(
     let role = app_access::role_of(&policy.unwrap_or_default(), &subject)
         .ok_or((StatusCode::FORBIDDEN, "this app isn't shared with you"))?;
     let role = dev_role.unwrap_or(role);
-    req.extensions_mut().insert(Member { subject, role });
+    // Read only when a draft cookie rides along.
+    let cookies = req.headers().get(header::COOKIE).and_then(|v| v.to_str().ok());
+    let current = cookies.and_then(|_| apps.draft(slug)).map(|d| d.release);
+    let draft = app_access::draft_of(cookies, slug, role, current);
+    req.extensions_mut().insert(Member {
+        subject,
+        role,
+        draft,
+    });
     Ok(())
 }
 
@@ -348,6 +374,7 @@ async fn me(
         user: m.subject.name().into(),
         role: m.role,
         app: slug,
+        draft: m.draft,
     })
     .into_response()
 }
@@ -358,10 +385,26 @@ async fn off_thread(f: impl FnOnce() -> Response + Send + 'static) -> Response {
     done.unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-/// Why `m` may not do `action` in `slug`: it isn't live, or their role doesn't allow it.
+/// The release `m` is served: the draft they try, else the live one.
+fn serving(apps: &Apps, slug: &str, m: &Member) -> Option<apps::Live> {
+    match m.draft {
+        Some(n) => apps.release(slug, n),
+        None => apps.live(slug),
+    }
+}
+
+/// Where `m`'s records reads and writes go: the draft's copy while trying it, else the app's.
+fn store(apps: &Apps, slug: &str, m: &Member) -> Result<String, Response> {
+    match m.draft {
+        Some(_) => apps.sandbox(slug).map_err(|e| failed(slug, e)),
+        None => Ok(slug.to_string()),
+    }
+}
+
+/// Why `m` may not do `action` in `slug`: it isn't served, or their role doesn't allow it.
 fn denied(apps: &Apps, slug: &str, m: &Member, action: Action) -> Option<Response> {
     // Checked again: the path's slug was, but this one is decoded (`a%2F..%2Fa`).
-    if !apps::valid_slug(slug) || apps.live(slug).is_none() {
+    if !apps::valid_slug(slug) || serving(apps, slug, m).is_none() {
         return Some(StatusCode::NOT_FOUND.into_response());
     }
     if !app_access::allows(m.role, action) {
@@ -404,15 +447,19 @@ async fn mutate(
         if let Some(r) = denied(&apps, &slug, &m, Action::Write) {
             return r;
         }
+        let key = match store(&apps, &slug, &m) {
+            Ok(k) => k,
+            Err(r) => return r,
+        };
         let (who, now) = (m.subject.name(), crate::unix_ms());
         match records::parse_writes(&body) {
             Err(why) => (StatusCode::BAD_REQUEST, why).into_response(),
-            Ok(Writes::One(op)) => match records.mutate(&slug, &op, who, now) {
+            Ok(Writes::One(op)) => match records.mutate(&key, &op, who, now) {
                 Ok(Ok(record)) => Json(Written { record }).into_response(),
                 Ok(Err(r)) => refused(r, None),
                 Err(e) => failed(&slug, e),
             },
-            Ok(Writes::Batch(ops)) => match records.mutate_all(&slug, &ops, who, now) {
+            Ok(Writes::Batch(ops)) => match records.mutate_all(&key, &ops, who, now) {
                 Ok(Ok(records)) => Json(BatchWritten { records }).into_response(),
                 Ok(Err((i, r))) => refused(r, Some(i)),
                 Err(e) => failed(&slug, e),
@@ -449,7 +496,11 @@ async fn list(
             Ok(c) => c,
             Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
         };
-        match records.list(&slug, &q, &c) {
+        let key = match store(&apps, &slug, &m) {
+            Ok(k) => k,
+            Err(r) => return r,
+        };
+        match records.list(&key, &q, &c) {
             Ok(page) => Json(page).into_response(),
             Err(e) => failed(&slug, e),
         }
@@ -485,8 +536,12 @@ async fn get_record(
         if !records::valid_collection(&collection) || !records::valid_id(&id) {
             return (StatusCode::BAD_REQUEST, "bad collection or id").into_response();
         }
+        let key = match store(&apps, &slug, &m) {
+            Ok(k) => k,
+            Err(r) => return r,
+        };
         let owner = records::owner(space, m.subject.name());
-        match records.get(&slug, space, owner, &collection, &id) {
+        match records.get(&key, space, owner, &collection, &id) {
             Ok(Some(e)) => Json(e).into_response(),
             Ok(None) if params.missing.is_some() => Json(serde_json::Value::Null).into_response(),
             Ok(None) => (StatusCode::NOT_FOUND, "no such record").into_response(),
@@ -507,8 +562,12 @@ async fn export(
         if let Some(r) = denied(&apps, &slug, &m, Action::Read) {
             return r;
         }
+        let key = match store(&apps, &slug, &m) {
+            Ok(k) => k,
+            Err(r) => return r,
+        };
         let user = m.subject.name();
-        match records.visible(&slug, user) {
+        match records.visible(&key, user) {
             Ok((shared, me)) => Json(Export {
                 version: 1,
                 app: slug,
@@ -524,25 +583,65 @@ async fn export(
     .await
 }
 
-async fn entry(State(apps): State<Arc<Apps>>, Path(slug): Path<String>) -> Response {
-    blocking(apps, slug, String::new()).await
+#[derive(serde::Deserialize)]
+struct EntryParams {
+    /// A draft's release to try, or `off`.
+    draft: Option<String>,
+}
+
+/// The app's entry page. `?draft=<n>`: its owner tries draft n (its release, on a copy of the
+/// records); `?draft=off` leaves it. Either sets a cookie, then goes back to the bare URL.
+async fn entry(
+    State(apps): State<Arc<Apps>>,
+    Extension(m): Extension<Member>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Query(params): Query<EntryParams>,
+) -> Response {
+    let Some(want) = params.draft else {
+        return blocking(apps, slug, String::new(), m).await;
+    };
+    let secure = crate::via_cloudflare(&headers);
+    off_thread(move || {
+        let n = match want.as_str() {
+            "off" => None,
+            n => match n.parse::<u32>() {
+                Ok(n) => Some(n),
+                Err(_) => return (StatusCode::BAD_REQUEST, "draft=<n> or draft=off").into_response(),
+            },
+        };
+        if let Some(n) = n {
+            let current = apps::valid_slug(&slug).then(|| apps.draft(&slug)).flatten();
+            if m.role != AppRole::Owner || current.is_none_or(|d| d.release != n) {
+                return (StatusCode::NOT_FOUND, "no such draft").into_response();
+            }
+            if let Err(e) = apps.sandbox(&slug) {
+                return failed(&slug, e);
+            }
+        }
+        let cookie = app_access::draft_cookie(&slug, n, secure);
+        let back = format!("/a/{slug}/");
+        (StatusCode::SEE_OTHER, [(header::SET_COOKIE, cookie), (header::LOCATION, back)]).into_response()
+    })
+    .await
 }
 
 async fn file(
     State(apps): State<Arc<Apps>>,
+    Extension(m): Extension<Member>,
     Path((slug, path)): Path<(String, String)>,
 ) -> Response {
-    blocking(apps, slug, path).await
+    blocking(apps, slug, path, m).await
 }
 
 /// [`serve`] off the async workers: reads may be large, and the orchestrator shares them.
-async fn blocking(apps: Arc<Apps>, slug: String, path: String) -> Response {
-    off_thread(move || serve(&apps, &slug, &path)).await
+async fn blocking(apps: Arc<Apps>, slug: String, path: String, m: Member) -> Response {
+    off_thread(move || serve(&apps, &slug, &path, &m)).await
 }
 
-/// `path` (empty: the entry) from `slug`'s live release; an extensionless miss gets the entry.
-fn serve(apps: &Apps, slug: &str, path: &str) -> Response {
-    let live = apps::valid_slug(slug).then(|| apps.live(slug)).flatten();
+/// `path` (empty: the entry) from the release `m` is served; an extensionless miss gets the entry.
+fn serve(apps: &Apps, slug: &str, path: &str, m: &Member) -> Response {
+    let live = apps::valid_slug(slug).then(|| serving(apps, slug, m)).flatten();
     // `api/…` is the server's: unknown API paths 404 rather than get the entry page.
     let Some(live) = live.filter(|_| !apps::reserved(path)) else {
         return StatusCode::NOT_FOUND.into_response();

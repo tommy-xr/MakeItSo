@@ -325,7 +325,7 @@ fn prune_kind(app: &Path, kind: BackupKind) {
 }
 
 /// `conn`'s database into new file `to` (`0600`), in rollback-journal mode so it is one file.
-fn copy_to(conn: &Connection, to: &Path) -> anyhow::Result<()> {
+pub(crate) fn copy_to(conn: &Connection, to: &Path) -> anyhow::Result<()> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]

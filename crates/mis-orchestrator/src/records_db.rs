@@ -52,6 +52,11 @@ impl Records {
         }
     }
 
+    /// Forget `slug`'s open connection (its folder is going away): the next use opens afresh.
+    pub fn close(&self, slug: &str) {
+        self.open.lock().unwrap().remove(slug);
+    }
+
     /// Whether `slug` has a database yet.
     pub fn has(&self, slug: &str) -> bool {
         self.dir.join(slug).join("data.sqlite").exists()

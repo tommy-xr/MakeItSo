@@ -76,5 +76,22 @@
   } else {
     const slug = location.pathname.split('/')[2];
     globalThis.mis = front(Promise.resolve(client(`/a/${slug}/api/v1/`)));
+    draftBadge(slug);
+  }
+
+  // Trying a draft (its owner, on a copy of the records): say so, with a way back to the live app.
+  function draftBadge(slug) {
+    const draft = typeof document === 'object' && new RegExp(`(?:^|; )mis-draft-${slug}=(\\d+)`).exec(document.cookie);
+    if (!draft) return;
+    const show = () => {
+      const a = document.createElement('a');
+      a.href = `/a/${slug}/?draft=off`;
+      a.textContent = `Draft v${draft[1]} · test data · exit`;
+      Object.assign(a.style, { position: 'fixed', left: '8px', bottom: 'calc(8px + env(safe-area-inset-bottom))', zIndex: 2147483647,
+        padding: '4px 10px', borderRadius: '999px', background: '#f5a524', color: '#000', font: '600 12px/1.5 system-ui, sans-serif',
+        textDecoration: 'none', boxShadow: '0 1px 4px rgba(0,0,0,.3)' });
+      document.body.append(a);
+    };
+    if (document.body) show(); else addEventListener('DOMContentLoaded', show);
   }
 })();

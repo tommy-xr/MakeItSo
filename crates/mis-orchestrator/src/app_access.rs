@@ -31,6 +31,8 @@ impl Subject {
 pub struct Member {
     pub subject: Subject,
     pub role: AppRole,
+    /// The owner is trying the app's draft, this release: its files and a copy of the records.
+    pub draft: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +74,36 @@ pub fn role_of(policy: &Policy, subject: &Subject) -> Option<AppRole> {
             .find(|(email, _)| email.eq_ignore_ascii_case(who))
             .map(|(_, role)| *role),
     }
+}
+
+/// The cookie that puts `/a/<slug>/` in draft mode for its owner. Only a selector (each
+/// request is checked again), so not HttpOnly: `mis.js` reads it to say it's a draft.
+pub fn draft_cookie_name(slug: &str) -> String {
+    format!("mis-draft-{slug}")
+}
+
+/// The draft a request tries: its `Cookie` header names `current` (the app's draft now) and
+/// it comes from the owner. Anything else (a stale cookie, an editor) gets the live app.
+pub fn draft_of(cookies: Option<&str>, slug: &str, role: AppRole, current: Option<u32>) -> Option<u32> {
+    let name = draft_cookie_name(slug);
+    let asked: u32 = (cookies?.split(';'))
+        .filter_map(|c| c.trim().split_once('='))
+        .find(|(k, _)| *k == name)?
+        .1
+        .parse()
+        .ok()?;
+    (role == AppRole::Owner && current == Some(asked)).then_some(asked)
+}
+
+/// `Set-Cookie` entering draft `n` of `slug`, or (None) leaving it. `secure` over HTTPS.
+pub fn draft_cookie(slug: &str, n: Option<u32>, secure: bool) -> String {
+    let (value, age) = match n {
+        Some(n) => (n.to_string(), ""),
+        None => (String::new(), "; Max-Age=0"),
+    };
+    let secure = if secure { "; Secure" } else { "" };
+    let name = draft_cookie_name(slug);
+    format!("{name}={value}; Path=/a/{slug}/; SameSite=Lax{age}{secure}")
 }
 
 /// Header a `local` request sends, under `--apps-dev`, to act as `viewer` or `editor`.
@@ -205,6 +237,27 @@ pub fn app_of(path: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_owner_tries_the_current_draft_named_by_its_cookie() {
+        use AppRole::*;
+        let c = Some("a=1; mis-draft-pool=3; mis-draft-budget=7");
+        assert_eq!(draft_of(c, "pool", Owner, Some(3)), Some(3));
+        assert_eq!(draft_of(c, "pool", Editor, Some(3)), None);
+        assert_eq!(draft_of(c, "pool", Owner, Some(4)), None, "replaced since");
+        assert_eq!(draft_of(c, "pool", Owner, None), None);
+        assert_eq!(draft_of(c, "chores", Owner, Some(3)), None);
+        assert_eq!(draft_of(None, "pool", Owner, Some(3)), None);
+        assert_eq!(draft_of(Some("mis-draft-pool=x"), "pool", Owner, Some(3)), None);
+        assert_eq!(
+            draft_cookie("pool", Some(3), true),
+            "mis-draft-pool=3; Path=/a/pool/; SameSite=Lax; Secure"
+        );
+        assert_eq!(
+            draft_cookie("pool", None, false),
+            "mis-draft-pool=; Path=/a/pool/; SameSite=Lax; Max-Age=0"
+        );
+    }
     use AppRole::*;
 
     fn policy(members: &[(&str, AppRole)]) -> Policy {

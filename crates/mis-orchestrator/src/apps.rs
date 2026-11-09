@@ -567,11 +567,7 @@ impl Apps {
 
     /// `slug`'s live release, if it has one.
     pub fn live(&self, slug: &str) -> Option<Live> {
-        let n = self.active_n(slug)?;
-        Some(Live {
-            dir: self.releases_dir(slug).join(n.to_string()),
-            manifest: self.release_manifest(slug, n)?,
-        })
+        self.release(slug, self.active_n(slug)?)
     }
 
     /// `slug`'s members. Missing: shared with no one. Unreadable: also no one (fail closed).
@@ -656,6 +652,7 @@ impl Apps {
                     crate::push::write_private(&tmp.join(name), &b)?;
                 }
             }
+            self.records.close(&Self::draft_store(slug));
             match std::fs::remove_dir_all(app.join(DRAFT)) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
                 _ => {}
@@ -667,6 +664,40 @@ impl Apps {
             return Err(DraftError::Io(format!("{e:#}")));
         }
         Ok(draft)
+    }
+
+    /// Where the draft of `slug` keeps its records ([`Records`] key): a throwaway copy, so trying
+    /// it never writes the app's own.
+    pub fn draft_store(slug: &str) -> String {
+        format!("{slug}/{DRAFT}")
+    }
+
+    /// The draft's records, copied from `slug`'s own (a fresh snapshot) on first use; a new
+    /// app's start empty. Err: no draft.
+    pub fn sandbox(&self, slug: &str) -> anyhow::Result<String> {
+        let key = Self::draft_store(slug);
+        let _held = self.lock.lock().unwrap();
+        anyhow::ensure!(self.draft(slug).is_some(), "{slug} has no draft");
+        if !self.records.has(&key) && self.records.has(slug) {
+            let to = self.dir.join(&key);
+            let tmp = to.join(format!(".tmp-{}", uuid::Uuid::new_v4()));
+            let db = self.records.db(slug)?;
+            let copied = backups::copy_to(&db.lock().unwrap(), &tmp)
+                .and_then(|()| Ok(std::fs::rename(&tmp, to.join("data.sqlite"))?));
+            if copied.is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            copied?;
+        }
+        Ok(key)
+    }
+
+    /// Release `n` of `slug`: its folder and manifest.
+    pub fn release(&self, slug: &str, n: u32) -> Option<Live> {
+        Some(Live {
+            dir: self.releases_dir(slug).join(n.to_string()),
+            manifest: self.release_manifest(slug, n)?,
+        })
     }
 
     /// `slug`'s draft, if it has one.
@@ -687,6 +718,7 @@ impl Apps {
         if self.draft(slug).is_none_or(|d| d.id != id) {
             return false;
         }
+        self.records.close(&Self::draft_store(slug));
         std::fs::remove_dir_all(self.dir.join(slug).join(DRAFT)).is_ok()
     }
 
