@@ -19,6 +19,7 @@ pub use apps::{
 pub mod diff;
 pub use diff::{DiffBase, DiffStat, TaskDiff};
 pub mod evidence;
+pub mod guides;
 pub use evidence::{Evidence, EvidenceDraft, TaskResult};
 mod image;
 mod inventory;
