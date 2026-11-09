@@ -59,6 +59,20 @@ pub fn router(apps: Arc<Apps>, auth: Arc<Auth>) -> Router {
         .route("/a/_/mis.js", get(|| async { sdk_file(JS, SDK) }))
         .route("/a/_/mis-mock.js", get(|| async { sdk_file(JS, SDK_MOCK) }))
         .route("/a/_/mis.d.ts", get(|| async { sdk_file(TEXT, SDK_TYPES) }))
+        .route(
+            "/a/_/apps.webmanifest",
+            get(|| async { sdk_file(MANIFEST, DIRECTORY_MANIFEST) }),
+        )
+        .route(
+            "/a/_/apps-icon.svg",
+            get(|| async { sdk_file(SVG, DIRECTORY_ICON) }),
+        )
+        .route(
+            "/a/_/apps-touch-icon.png",
+            get(|| async {
+                ([(header::CONTENT_TYPE, "image/png")], DIRECTORY_TOUCH_ICON).into_response()
+            }),
+        )
         .route("/a/{slug}", get(add_slash))
         .route("/a/{slug}/", get(entry))
         .route("/a/{slug}/api/v1/me", get(me))
@@ -88,6 +102,8 @@ pub fn router(apps: Arc<Apps>, auth: Arc<Auth>) -> Router {
 
 const JS: &str = "text/javascript; charset=utf-8";
 const TEXT: &str = "text/plain; charset=utf-8";
+const MANIFEST: &str = "application/manifest+json";
+const SVG: &str = "image/svg+xml";
 
 fn sdk_file(ct: &'static str, body: &'static str) -> Response {
     ([(header::CONTENT_TYPE, ct)], body).into_response()
@@ -172,10 +188,15 @@ async fn admit(
         ),
         _ => None,
     };
-    // The SDK is for anyone signed in.
+    // The SDK and the directory's own files are for anyone signed in.
     let sdk = matches!(
         req.uri().path(),
-        "/a/_/mis.js" | "/a/_/mis-mock.js" | "/a/_/mis.d.ts"
+        "/a/_/mis.js"
+            | "/a/_/mis-mock.js"
+            | "/a/_/mis.d.ts"
+            | "/a/_/apps.webmanifest"
+            | "/a/_/apps-icon.svg"
+            | "/a/_/apps-touch-icon.png"
     );
     let Some(slug) = app_access::app_of(req.uri().path()).filter(|_| !sdk) else {
         req.extensions_mut().insert(subject);
@@ -190,32 +211,105 @@ async fn admit(
     Ok(())
 }
 
-/// Links to every live app shared with the asker.
+/// Lists every live app shared with the asker.
 async fn directory(
     State(apps): State<Arc<Apps>>,
     Extension(subject): Extension<Subject>,
 ) -> Html<String> {
-    let items: String = (apps.list().iter())
+    let tiles: Vec<Tile> = (apps.list().iter())
         .filter(|a| a.active.is_some())
         .filter(|a| app_access::role_of(&apps.policy(&a.slug), &subject).is_some())
         .map(|a| {
+            let icon = apps.live(&a.slug).and_then(|l| l.manifest.icon);
+            Tile {
+                slug: a.slug.clone(),
+                title: a.title.clone(),
+                icon: icon.map(|i| format!("/a/{}/{}", a.slug, url_path(&i))),
+            }
+        })
+        .collect();
+    Html(directory_page(subject.name(), &tiles))
+}
+
+/// One app in the directory. `icon`: its URL, served from the live release.
+struct Tile {
+    slug: String,
+    title: String,
+    icon: Option<String>,
+}
+
+const DIRECTORY_CSS: &str = include_str!("../static/apps.css");
+/// Makes the directory pinnable on its own: `/a/` in a standalone window.
+const DIRECTORY_MANIFEST: &str = r##"{"name":"Apps","short_name":"Apps","start_url":"/a/","scope":"/a/",
+"display":"standalone","background_color":"#0E1217","theme_color":"#0E1217","icons":[
+{"src":"/a/_/apps-icon.svg","sizes":"any","type":"image/svg+xml"},
+{"src":"/a/_/apps-touch-icon.png","sizes":"180x180","type":"image/png"}]}
+"##;
+const DIRECTORY_ICON: &str = include_str!("../static/apps-icon.svg");
+const DIRECTORY_TOUCH_ICON: &[u8] = include_bytes!("../static/apps-touch-icon.png");
+
+/// The directory: `who` is signed in and may open `tiles`. Static: no script.
+fn directory_page(who: &str, tiles: &[Tile]) -> String {
+    let rows: String = tiles
+        .iter()
+        .map(|t| {
+            let icon = match &t.icon {
+                Some(src) => format!(r#"<img class="icon" src="{}" alt="">"#, escape(src)),
+                // The title's first letter: "garden" -> "G".
+                None => {
+                    let letter = t
+                        .title
+                        .chars()
+                        .next()
+                        .map_or("?".into(), |c| c.to_uppercase().to_string());
+                    format!(
+                        r#"<span class="icon" aria-hidden="true">{}</span>"#,
+                        escape(&letter)
+                    )
+                }
+            };
             format!(
-                "<li><a href=\"/a/{}/\">{}</a></li>",
-                a.slug,
-                escape(&a.title)
+                r#"<li><a href="/a/{}/">{icon}<span class="name">{}</span></a></li>"#,
+                escape(&t.slug),
+                escape(&t.title)
             )
         })
         .collect();
-    let list = if items.is_empty() {
-        "<p>No apps are shared with you yet.</p>".to_string()
+    let body = if rows.is_empty() {
+        r#"<p class="empty">No apps are shared with you yet.</p>"#.to_string()
     } else {
-        format!("<ul>{items}</ul>")
+        format!("<ul>{rows}</ul>")
     };
-    Html(format!(
-        "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\">\
-         <title>Apps</title><style>body{{font:16px system-ui;margin:2rem}}li{{margin:.5rem 0}}</style>\
-         <h1>Apps</h1>{list}"
-    ))
+    format!(
+        r##"<!doctype html><html lang="en"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0E1217" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#EAF3F7" media="(prefers-color-scheme: light)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Apps">
+<link rel="manifest" href="/a/_/apps.webmanifest" crossorigin="use-credentials">
+<link rel="icon" href="/a/_/apps-icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/a/_/apps-touch-icon.png">
+<title>Apps</title>
+<style>{DIRECTORY_CSS}</style>
+<header><svg class="logo" viewBox="0 0 18 18" aria-hidden="true"><rect x="1" y="3" width="6" height="12" rx="1" fill="var(--accent)"/><path d="M9 3h5l2 2-2 2H9z" fill="var(--accent)"/><path d="M9 8h5l2 2-2 2H9z" fill="#F2A65E"/></svg><h1>Apps</h1><span class="who">{}</span></header>
+<main>{body}</main>
+"##,
+        escape(who)
+    )
+}
+
+/// `path` for a URL path: bytes outside `A-Za-z0-9-._~/` percent-encoded. `my icon.png` -> `my%20icon.png`.
+fn url_path(path: &str) -> String {
+    path.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 fn escape(s: &str) -> String {
@@ -460,5 +554,63 @@ fn serve(apps: &Apps, slug: &str, path: &str) -> Response {
             ([(header::CONTENT_TYPE, apps::content_type(&rel))], bytes).into_response()
         }
         None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tile(slug: &str, title: &str, icon: Option<&str>) -> Tile {
+        Tile {
+            slug: slug.into(),
+            title: title.into(),
+            icon: icon.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn directory_rows_link_each_app_with_its_icon_or_letter() {
+        let page = directory_page(
+            "me@example.com",
+            &[
+                tile("garden", "Garden", Some("/a/garden/icon.png")),
+                tile("notes", "notes", None),
+            ],
+        );
+        assert!(page.contains(r#"<a href="/a/garden/"><img class="icon" src="/a/garden/icon.png" alt=""><span class="name">Garden</span></a>"#), "{page}");
+        assert!(page.contains(r#"<a href="/a/notes/"><span class="icon" aria-hidden="true">N</span><span class="name">notes</span></a>"#), "{page}");
+        assert!(page.contains(r#"<span class="who">me@example.com</span>"#));
+        assert!(!page.contains("No apps are shared"));
+        assert!(!page.contains("<script"));
+    }
+
+    #[test]
+    fn directory_escapes_titles_icons_and_who() {
+        let page = directory_page(
+            "<b>@example.com",
+            &[tile("x", "<Tom & \"Jerry\">", Some("/a/x/\"><q"))],
+        );
+        assert!(page.contains("&lt;b&gt;@example.com"));
+        assert!(page.contains("&lt;Tom &amp; &quot;Jerry&quot;&gt;"));
+        assert!(page.contains(r#"src="/a/x/&quot;&gt;&lt;q""#));
+        assert!(!page.contains("<b>") && !page.contains("<q"));
+        // A lettered tile escapes its letter too.
+        let page = directory_page("me", &[tile("x", "<x", None)]);
+        assert!(page.contains(r#"aria-hidden="true">&lt;</span>"#), "{page}");
+    }
+
+    #[test]
+    fn directory_with_no_apps_says_so() {
+        let page = directory_page("me", &[]);
+        assert!(page.contains(r#"<p class="empty">No apps are shared with you yet.</p>"#));
+        assert!(!page.contains("<ul>"));
+    }
+
+    #[test]
+    fn icon_paths_are_percent_encoded() {
+        assert_eq!(url_path("img/icon-1_a.~.png"), "img/icon-1_a.~.png");
+        assert_eq!(url_path("my icon#?.png"), "my%20icon%23%3F.png");
+        assert_eq!(url_path("é.png"), "%C3%A9.png");
     }
 }
