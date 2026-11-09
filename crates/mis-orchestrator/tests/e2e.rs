@@ -3406,7 +3406,8 @@ async fn settings_take_defaults_save_and_need_full_access() {
     assert!(status == 400 && why.contains("apps repo"), "{status} {why}");
     let (_, body) = get_json(&base, "/api/settings", "s").await;
     assert_eq!(serde_json::from_str::<Settings>(&body).unwrap(), got);
-    std::fs::remove_dir_all(dir).unwrap();
+    // The running ledger may still be saving into it.
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
