@@ -101,6 +101,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AppsCmd,
     },
+    /// Print guide `name` (how an agent does something in MIS); none: list them.
+    Guide { name: Option<String> },
     /// Run an orchestrator and a worker on this machine for quick testing.
     Dev {
         /// Let agents run tools without permission prompts.
@@ -414,6 +416,23 @@ fn size_text(b: u64) -> String {
         1024..1048576 => format!("{:.1} KiB", b as f64 / 1024.0),
         _ => format!("{:.1} MiB", b as f64 / 1048576.0),
     }
+}
+
+/// `mis guide <name>` prints it; `mis guide` lists each with what it is for.
+fn guide(name: Option<&str>) -> Result<()> {
+    match name {
+        Some(n) => match mis_types::guides::guide(n) {
+            Some(text) => print!("{text}"),
+            None => bail!("no guide {n:?}; `mis guide` lists them"),
+        },
+        None => {
+            for (n, text) in mis_types::guides::GUIDES {
+                let what = mis_types::guides::front(text, "description").unwrap_or("");
+                println!("{n}: {what}");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `mis routines` (GET /api/routines), or `run`, `live` or `dry-run <name>`.
@@ -1047,6 +1066,10 @@ async fn run(args: Args) -> Result<Option<TaskSummary>> {
         dev(&args.url, args.token.as_deref(), skip_permissions).await?;
         return Ok(None);
     }
+    if let Cmd::Guide { name } = &args.cmd {
+        guide(name.as_deref())?;
+        return Ok(None);
+    }
     if let Cmd::Ask { words, ask_model } = &args.cmd {
         ask(&args, words, ask_model).await?;
         return Ok(None);
@@ -1258,7 +1281,11 @@ async fn run(args: Args) -> Result<Option<TaskSummary>> {
                 }
             }
         }
-        Cmd::Dev { .. } | Cmd::Ask { .. } | Cmd::Routines { .. } | Cmd::Apps { .. } => {
+        Cmd::Dev { .. }
+        | Cmd::Ask { .. }
+        | Cmd::Routines { .. }
+        | Cmd::Apps { .. }
+        | Cmd::Guide { .. } => {
             unreachable!()
         }
     }
