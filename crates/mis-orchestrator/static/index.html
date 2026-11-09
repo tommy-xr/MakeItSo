@@ -14,7 +14,9 @@
 <!-- Quest browser: VR panels are read at arm's length, so `html.vr` enlarges type. In head to avoid a 16px first paint. -->
 <script>if (/OculusBrowser|Quest/.test(navigator.userAgent)) document.documentElement.classList.add('vr');
 // A theme chosen in the menu overrides the system's; set before first paint.
-try { const t = localStorage.getItem('mis-theme'); if (t) document.documentElement.dataset.theme = t; } catch {}</script>
+try { const t = localStorage.getItem('mis-theme'); if (t) document.documentElement.dataset.theme = t; } catch {}
+// A desktop rail hidden with ☰ stays hidden.
+try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.classList.add('rail-off'); } catch {}</script>
 <style>
   /* Theme: every colour and face is a token here; a new theme redefines this block. Soft: a dark slate ground, grouped
      rounded cards, tinted pills; cyan for work, amber for waiting, red for failures. Light: a cool blue-grey twin. */
@@ -720,6 +722,37 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
     .recbar .dots i { opacity: .6; }
     .pi.live .pk { border: 1.5px solid var(--run); background: conic-gradient(var(--run) 0 50%, transparent 0); }
   }
+  /* Desktop (64rem+, not Quest): one sticky header row across the top; the menu is a rail on the left (the closed
+     dialog shown in place; ☰ hides it); views, composer, Latest and toasts centre in the room beside it, 48rem wide. */
+  #nav-need { display: none; margin-left: auto; font-size: .8125rem; font-weight: 600; }
+  @media (min-width: 64rem) {
+    :root:not(.vr) { --rail: 16rem; --head: calc(3.5rem + env(safe-area-inset-top, 0px)); scroll-padding-top: var(--head); }
+    :root.rail-off:not(.vr) { --rail: 0px; }
+    :root:not(.vr) body { max-width: none; padding-left: calc(var(--rail) + var(--pad)); }
+    :root:not(.vr) body > :is(main, #auth, #skel) { max-width: calc(48rem - 2 * var(--pad)); margin-inline: auto; }
+    :root:not(.vr) .strip { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; gap: .625rem; box-sizing: border-box; height: var(--head);
+      margin: 0 calc(-1 * var(--pad)) .25rem calc(-1 * (var(--rail) + var(--pad))); padding: env(safe-area-inset-top, 0px) var(--pad) 0 .75rem; background: var(--bg); border-bottom: 1px solid var(--sep); }
+    /* The two rows' items join one flex row: ☰ logo title · dot ticker update · gauges · needs-you. */
+    :root:not(.vr) .strip :is(.top, .status) { display: contents; }
+    :root:not(.vr) #menu-btn { margin-right: 0; }
+    :root:not(.vr) .strip :is(#dot, #ticker, .upd) { order: 1; }
+    :root:not(.vr) #dot { margin-left: 1.25rem; }
+    :root:not(.vr) #ticker { flex: 1 1 0; overflow: hidden; }
+    :root:not(.vr) #ticker:not(.run, .ask) { white-space: nowrap; text-overflow: ellipsis; }
+    :root:not(.vr) #gauges { order: 2; flex: 0 1 auto; }
+    :root:not(.vr) .strip .end { order: 3; margin-left: 0; }
+    :root:not(.vr) #menu { display: block; position: fixed; z-index: 3; inset: var(--head) auto 0 0; width: var(--rail); height: auto; margin: 0; overflow-y: auto; overscroll-behavior: contain;
+      background: var(--bg); border-right: 1px solid var(--sep); box-shadow: none; animation: none; }
+    :root.rail-off:not(.vr) #menu { display: none; }
+    :root:not(.vr) #menu .sheet { padding: .75rem .75rem 1rem; }
+    :root:not(.vr) #menu .sheet-top { display: none; }
+    :root:not(.vr) #nav-need:not([hidden]) { display: inline; }
+    :root:not(.vr) .chead { top: var(--head); }
+    :root:not(.vr) #dock { left: var(--rail); }
+    :root:not(.vr) .composer { max-width: calc(48rem - 2 * var(--pad)); }
+    :root:not(.vr) :is(#latest, #toast) { left: calc(50% + var(--rail) / 2); }
+    :root:not(.vr) #toast { max-width: calc(100vw - var(--rail) - 2rem); }
+  }
   /* VR panels: bigger type, secondary text pulled toward the foreground. */
   html.vr { font-size: 22px; --dim: color-mix(in srgb, var(--fg) 85%, var(--bg)); }
 </style>
@@ -740,7 +773,7 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   <div class="sheet">
     <div class="sheet-top"><span class="title">Make It So</span><button type="button" id="menu-close" class="ibtn" aria-label="Close menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
     <nav aria-label="Views">
-      <a href="#" data-view="list">Home</a>
+      <a href="#" data-view="list">Home<span id="nav-need" hidden></span></a>
       <div class="ngrp"><a href="#notes" data-view="notes">Notes</a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-notes" aria-label="Show notes"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
       <ul id="nav-notes" class="nsub" hidden></ul>
       <div class="ngrp"><a href="#routines" data-view="routines">Routines</a><button type="button" id="routine-add" class="ibtn" aria-label="New routine" title="New routine"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-routines" aria-label="Show routines"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
@@ -1691,11 +1724,11 @@ const needYou = () => tasks.filter((t) => ATTENTION[t.attention]).reverse().sort
 const needLabel = (n) => `${n} need${n === 1 ? 's' : ''} you`;
 // The header badge: how many need you, lit in the most urgent one's colour.
 function renderNeed() {
-  const need = everOpen ? needYou() : [], b = $('need');
-  b.hidden = !need.length;
+  const need = everOpen ? needYou() : [], b = $('need'), n = $('nav-need');
+  b.hidden = n.hidden = !need.length;
   if (!need.length) return;
-  b.textContent = need.length;
-  b.className = `att ${need[0].attention}`;
+  b.textContent = n.textContent = need.length;
+  b.className = n.className = `att ${need[0].attention}`;
   b.href = `#task/${need[0].id}`;
   b.setAttribute('aria-label', needLabel(need.length));
 }
@@ -2850,7 +2883,7 @@ function placeConvo(key, sig, wasAtBottom, box, toEnd, toTop) {
     $('latest').hidden = true;
     // The earlier-turns line and your last message under the sticky head; a short exchange just ends at the bottom.
     const head = box.parentNode.querySelector('.chead'), top = box.querySelector('.fold') || [...box.querySelectorAll(':scope > .msg.user')].pop();
-    scrollTo(0, toTop ? 0 : top && !toEnd ? top.getBoundingClientRect().top + scrollY - head.offsetHeight - 8 : end);
+    scrollTo(0, toTop ? 0 : top && !toEnd ? top.getBoundingClientRect().top + scrollY - (parseFloat(getComputedStyle(head).top) || 0) - head.offsetHeight - 8 : end);
     return;
   }
   if (follow.sig === sig) return;
@@ -3382,7 +3415,7 @@ function renderRoutines() {
 let routineFocus = null; // routine to scroll to when Routines next renders
 function renderNav() {
   $('routine-add').hidden = $('app-add').hidden = $('nav-settings').hidden = readOnly;
-  if (!$('menu').open) return;
+  if (!$('menu').open && !railShown()) return;
   // Rows as [href, dot class, name], or [text] for a note; a list is rebuilt only when they change, so focus stays.
   const rs = routines && routines.list;
   fillNav($('nav-routines'), !routines ? [['Loading…']] : routines.error ? [[routines.error]] : !rs.length ? [['No routines']]
@@ -3917,6 +3950,7 @@ function connect() {
   sock.onopen = () => {
     retries = 0;
     everOpen = true;
+    if (railShown()) loadNav(); // the rail's lists, for this token
     offline = false;
     clearTimeout(offlineTimer);
     offlineTimer = 0;
@@ -4142,14 +4176,35 @@ document.addEventListener('pointerdown', (e) => { if (!$('opts').hidden && !e.ta
 $('new').addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('opts').hidden) { showOpts(false); $('opt').focus(); } });
 
 // Menu: a modal sheet, so focus stays inside and Escape closes it; a backdrop tap or a view link closes it too.
-$('menu-btn').onclick = () => {
-  $('menu').showModal();
-  $('menu-btn').setAttribute('aria-expanded', 'true');
+// On a desktop it is a rail instead (CSS), and ☰ hides or shows it.
+const desk = matchMedia('(min-width: 64rem)');
+const isDesk = () => desk.matches && !document.documentElement.classList.contains('vr');
+const railShown = () => isDesk() && !document.documentElement.classList.contains('rail-off');
+// Unfolded lists fetched fresh, then drawn.
+function loadNav() {
   if (!$('nav-routines').hidden) loadRoutines();
   if (!$('nav-apps').hidden) loadApps();
   if (!$('nav-notes').hidden) loadNotes();
   renderNav();
+}
+$('menu-btn').onclick = () => {
+  if (isDesk()) {
+    const off = document.documentElement.classList.toggle('rail-off');
+    try { off ? localStorage.setItem('mis-rail', 'off') : localStorage.removeItem('mis-rail'); } catch {}
+    deskMode();
+    return;
+  }
+  $('menu').showModal();
+  $('menu-btn').setAttribute('aria-expanded', 'true');
+  loadNav();
 };
+// Crossing the breakpoint: a sheet left open would sit over the rail, so it closes.
+function deskMode() {
+  if (isDesk() && $('menu').open) $('menu').close();
+  $('menu-btn').setAttribute('aria-expanded', String(railShown()));
+  if (railShown()) loadNav();
+}
+desk.addEventListener('change', deskMode);
 // + opens the new-routine form atop Routines; the orchestrator writes `<name>.md`, paused.
 function showNewRoutine(on) {
   $('routine-new').hidden = !on;
@@ -4244,7 +4299,10 @@ for (const b of $('menu').querySelectorAll('.ngrp button[aria-controls]')) b.onc
   if (open && b.getAttribute('aria-controls') === 'nav-apps') loadApps();
   if (open && b.getAttribute('aria-controls') === 'nav-notes') loadNotes();
 };
-$('menu').addEventListener('close', () => $('menu-btn').setAttribute('aria-expanded', 'false'));
+$('menu').addEventListener('close', () => $('menu-btn').setAttribute('aria-expanded', String(railShown())));
+// The rail opens with Notes and Workers unfolded: short lists, and Workers carries what's running.
+if (isDesk()) for (const id of ['nav-notes', 'nav-workers']) $('menu').querySelector(`[aria-controls=${id}]`).click();
+$('menu-btn').setAttribute('aria-expanded', String(railShown()));
 $('menu-close').onclick = () => $('menu').close();
 let downOnBackdrop = false;
 $('menu').addEventListener('pointerdown', (e) => { downOnBackdrop = e.target === $('menu'); });
