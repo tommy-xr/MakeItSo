@@ -1,5 +1,5 @@
 //! The notes repo: publishing captures to it (`GET /api/notes/sync`) and reading it (`GET
-//! /api/notes/tree`).
+//! /api/notes/tree`, `GET /api/projects`).
 
 use serde::{Deserialize, Serialize};
 
@@ -63,4 +63,42 @@ pub struct NotesTree {
     /// `off`: no notes remote configured.
     pub state: SyncState,
     pub entries: Vec<NoteEntry>,
+}
+
+/// A project record in the notes repo: `projects/<id>/README.md`, or `archive/<id>/README.md`
+/// once archived.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Project {
+    /// Its folder's name, e.g. `make-it-so`.
+    pub id: String,
+    pub title: String,
+    /// Other names it goes by, e.g. `mis`; no two projects share a name, ignoring case.
+    pub aliases: Vec<String>,
+    /// As written, e.g. `active`.
+    pub status: String,
+    /// GitHub `owner/repo`s.
+    pub repos: Vec<String>,
+    /// Paths on the orchestrator's machine, as written; not served.
+    pub notes: Vec<String>,
+    /// Under `archive/`.
+    pub archived: bool,
+    /// The README's Markdown after its frontmatter.
+    pub description: String,
+}
+
+/// A record that isn't one, or a name it can't have, and why.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectError {
+    /// The record, e.g. `projects/x/README.md`.
+    pub path: String,
+    pub error: String,
+}
+
+/// `GET /api/projects`: the notes clone's project records, those under `projects/` first.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Projects {
+    /// `off`: no notes remote configured.
+    pub state: SyncState,
+    pub projects: Vec<Project>,
+    pub errors: Vec<ProjectError>,
 }

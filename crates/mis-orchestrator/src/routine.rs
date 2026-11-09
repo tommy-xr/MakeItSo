@@ -559,7 +559,7 @@ fn parse_list(k: &str, v: &str) -> Result<Vec<String>, String> {
 }
 
 /// `value  # note` -> `value`; a `#` inside quotes, or not after a space, stays.
-fn strip_comment(line: &str) -> &str {
+pub(crate) fn strip_comment(line: &str) -> &str {
     if line.starts_with('#') {
         return "";
     }
@@ -578,7 +578,7 @@ fn strip_comment(line: &str) -> &str {
 }
 
 /// `"x"` or `'x'` -> `x`.
-fn unquote(v: &str) -> &str {
+pub(crate) fn unquote(v: &str) -> &str {
     for q in ['"', '\''] {
         if let Some(inner) = v.strip_prefix(q).and_then(|v| v.strip_suffix(q)) {
             return inner;
