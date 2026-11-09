@@ -186,7 +186,6 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
   :is(#routine-new, #settings-form) input { min-height: 2.75rem; padding: 0 .75rem; }
   :is(#routine-new, #settings-form) p { margin: 0; font-size: .8125rem; overflow-wrap: anywhere; }
   :is(#routine-new, #settings-form) .row { margin: 0; }
-  #settings-form h3 { margin: 0; font-size: 1rem; }
   #settings-form label { margin-top: .25rem; font-size: .8125rem; color: var(--dim); }
   .nsub .dim { padding: .5rem 1.5rem; font-size: .8125rem; }
   #menu fieldset { margin: 1.25rem 0 0; padding: 0; border: 0; }
@@ -801,8 +800,8 @@ try { const t = localStorage.getItem('mis-theme'); if (t) document.documentEleme
 </main>
 
 <main id="settings" hidden>
+  <h3>Apps</h3>
   <form id="settings-form">
-    <h3>Apps</h3>
     <p class="dim">Tasks that build or change apps run with these.</p>
     <label for="st-harness">Harness</label><select id="st-harness"></select>
     <label for="st-model">Model</label><input id="st-model" placeholder="e.g. opus" autocomplete="off" autocapitalize="off" spellcheck="false" required>
