@@ -33,7 +33,9 @@ pub use merge::{
     is_merge_label, merge_label, MergeApprove, MergeFacts, MergeMethod, MergePolicy, MergeRule,
     MERGE_TOOL,
 };
-pub use notes::{NoteEntry, NoteKind, NotesSync, NotesTree, SyncState};
+pub use notes::{
+    NoteEntry, NoteKind, NotesSync, NotesTree, Project, ProjectError, Projects, SyncState,
+};
 pub mod mcp;
 mod permissions;
 mod plan;

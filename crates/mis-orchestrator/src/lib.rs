@@ -39,6 +39,7 @@ pub mod note;
 pub mod notes;
 pub mod notes_view;
 pub mod plan;
+pub mod projects;
 pub mod push;
 pub mod records;
 pub mod records_db;
@@ -1085,6 +1086,7 @@ pub fn router(app: App) -> Router {
         .route("/api/notes/sync", get(notes_sync))
         .route("/api/notes/tree", get(notes_tree))
         .route("/api/notes/file", get(notes_file))
+        .route("/api/projects", get(projects_list))
         .route("/api/images/{id}", get(image))
         .route("/api/evidence/{id}", get(evidence_file))
         .route("/api/update", get(update_status).post(set_update))
@@ -1589,6 +1591,34 @@ async fn notes_tree(
     let walk = tokio::task::spawn_blocking(move || notes_view::tree(notes.clone_dir()));
     let entries = walk.await.expect("walks");
     Json(NotesTree { state, entries }).into_response()
+}
+
+/// The notes clone's project records, for the Projects view. Auth as for the Notes view.
+async fn projects_list(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/projects").await {
+        return refused.into_response();
+    }
+    let Some(notes) = app.notes.clone() else {
+        let off = Projects {
+            state: SyncState::Off,
+            projects: vec![],
+            errors: vec![],
+        };
+        return Json(off).into_response();
+    };
+    let state = notes.status().state;
+    let read = tokio::task::spawn_blocking(move || projects::list(notes.clone_dir()));
+    let (projects, errors) = read.await.expect("reads");
+    Json(Projects {
+        state,
+        projects,
+        errors,
+    })
+    .into_response()
 }
 
 #[derive(serde::Deserialize)]

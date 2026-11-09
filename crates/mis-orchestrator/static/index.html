@@ -186,8 +186,9 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   /* Notes: folder rows (icon, name, size or count); a note's chips, body and pictures. */
   .nlist .r1 svg { flex: none; width: 1.125rem; height: 1.125rem; color: var(--dim); }
   .nlist .n { flex: none; color: var(--dim); font-size: .8125rem; }
-  #notes-body > p { margin: 1rem .375rem; }
-  #notes-body > .rows, .nlist { margin-top: .75rem; }
+  :is(#notes-body, #projects-body) > p { margin: 1rem .375rem; }
+  :is(#notes-body, #projects-body) > .rows, .nlist { margin-top: .75rem; }
+  .r2.bad { color: var(--bad); }
   .nchips { display: flex; flex-wrap: wrap; align-items: center; gap: .375rem; margin: .875rem 0; }
   .nchips .chip { margin: 0; }
   .nchips a { min-width: 0; max-width: 100%; color: var(--link); font-size: .8125rem; text-decoration: none; }
@@ -776,6 +777,8 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
       <a href="#" data-view="list">Home<span id="nav-need" hidden></span></a>
       <div class="ngrp"><a href="#notes" data-view="notes">Notes</a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-notes" aria-label="Show notes"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
       <ul id="nav-notes" class="nsub" hidden></ul>
+      <div class="ngrp"><a href="#projects" data-view="projects">Projects</a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-projects" aria-label="Show projects"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
+      <ul id="nav-projects" class="nsub" hidden></ul>
       <div class="ngrp"><a href="#routines" data-view="routines">Routines</a><button type="button" id="routine-add" class="ibtn" aria-label="New routine" title="New routine"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-routines" aria-label="Show routines"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
       <ul id="nav-routines" class="nsub" hidden></ul>
       <div class="ngrp"><a href="#apps" data-view="apps">Apps</a><button type="button" id="app-add" class="ibtn" aria-label="New app" title="New app"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-apps" aria-label="Show apps"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
@@ -875,6 +878,11 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
 <main id="notes" hidden>
   <div class="chead"><a href="#" class="back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a><div id="notes-head"></div></div>
   <div id="notes-body"></div>
+</main>
+
+<main id="projects" hidden>
+  <div class="chead"><a href="#projects" class="back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a><div id="projects-head"></div></div>
+  <div id="projects-body"></div>
 </main>
 
 <main id="workers" hidden>
@@ -1782,7 +1790,7 @@ $('upd').onclick = (e) => {
 };
 
 // `#` tasks, `#task/<id>`, `#routines`, `#apps`, `#settings`, `#workers`, `#worker/<id>`, `#session/<worker>/<harness>/<id>`,
-// `#notes/<repo path>` (each segment URI-encoded).
+// `#notes/<repo path>` (each segment URI-encoded), `#projects`, `#projects/<id or alias>`.
 // `#new` (see takeNew) is Tasks with the composer focused.
 function route() {
   const m = location.hash.match(/^#(task|worker)\/([0-9a-f-]{36})$/);
@@ -1791,13 +1799,15 @@ function route() {
   if (s) return { view: 'session', id: s[1] };
   const n = location.hash.match(/^#notes(?:\/(.*?))?\/*$/);
   if (n) { try { return { view: 'notes', id: (n[1] || '').split('/').map(decodeURIComponent).join('/') }; } catch { return { view: 'notes', id: '' }; } }
+  const p = location.hash.match(/^#projects(?:\/([^/]*))?\/*$/);
+  if (p) { try { return { view: 'projects', id: decodeURIComponent(p[1] || '') }; } catch { return { view: 'projects', id: '' }; } }
   return { view: { '#workers': 'workers', '#routines': 'routines', '#apps': 'apps', '#settings': 'settings' }[location.hash] || 'list' };
 }
 
 function render() {
   const r = route();
   const live = ws && ws.readyState === WebSocket.OPEN;
-  const views = { list: renderList, detail: renderDetail, routines: renderRoutines, apps: renderApps, settings: renderSettings, notes: renderNotes, workers: renderWorkers, machine: renderMachine, session: renderSession };
+  const views = { list: renderList, detail: renderDetail, routines: renderRoutines, apps: renderApps, settings: renderSettings, notes: renderNotes, projects: renderProjects, workers: renderWorkers, machine: renderMachine, session: renderSession };
   $('auth').hidden = live || !authNeeded || !!store.get();
   // Placeholder rows until the first socket opens, unless that is stuck (a token, no server).
   $('skel').hidden = everOpen || !$('auth').hidden || offline || connMsg !== 'connecting…';
@@ -1820,7 +1830,7 @@ function render() {
   if (r.view !== 'detail' && r.view !== 'session') { follow.key = null; $('latest').hidden = true; if (detail) detail.sig = null; }
   if (r.view !== 'session') closeSession();
   const onWorkers = r.view === 'workers' || r.view === 'machine' || r.view === 'session';
-  const area = onWorkers ? 'workers' : ['routines', 'apps', 'settings', 'notes'].includes(r.view) ? r.view : 'list';
+  const area = onWorkers ? 'workers' : ['routines', 'apps', 'settings', 'notes', 'projects'].includes(r.view) ? r.view : 'list';
   for (const a of $('menu').querySelectorAll('nav a')) {
     if (a.dataset.view === area) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
@@ -3429,6 +3439,10 @@ function renderNav() {
   const folders = ns ? NOTE_FOLDERS.filter(([f]) => ns.some((e) => e.path === f)) : [];
   fillNav($('nav-notes'), !notesTree ? [['Loading…']] : notesTree.error ? [[notesTree.error]] : notesTree.state === 'off' ? [['Not configured']]
     : !folders.length ? [['No notes yet']] : folders.map(([f, label]) => [noteHref(f), null, label, f === 'inbox' && inbox ? String(inbox) : '']));
+  // Projects: one link per active one.
+  const active = projects && projects.projects && projects.projects.filter(projectActive);
+  fillNav($('nav-projects'), !projects ? [['Loading…']] : projects.error ? [[projects.error]] : projects.state === 'off' ? [['Not configured']]
+    : !active.length ? [['No active projects']] : active.map((p) => [projectHref(p.id), null, p.title]));
 }
 // Rows as [href, dot class (null: none), name, count], or [text] for a note.
 function fillNav(ul, rows) {
@@ -3626,6 +3640,19 @@ function noteRows(entries, dir) {
   const cmp = (a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
   return [...kids.filter((e) => e.kind === 'dir').sort(cmp), ...kids.filter((e) => e.kind !== 'dir').sort((a, b) => cmp(b, a))];
 }
+// A project record's folder, its files and the AI's (`ai/` mirrors the repo), and the one named `slug` (id or alias, any case).
+const projectDir = (p) => `${p.archived ? 'archive' : 'projects'}/${p.id}`;
+const projectActive = (p) => !p.archived && p.status.toLowerCase() === 'active';
+function projectFiles(entries, p) {
+  const dir = projectDir(p);
+  return { own: noteRows(entries, dir).filter((e) => e.path !== `${dir}/README.md`), ai: noteRows(entries, `ai/${dir}`) };
+}
+function projectFind(list, slug) {
+  const s = slug.toLowerCase(), is = (n) => n.toLowerCase() === s;
+  return list.find((p) => is(p.id) || p.aliases.some(is)) || null;
+}
+// A GitHub `owner/repo`'s page; null for anything else.
+const repoHref = (r) => (/^[\w.-]+\/[\w.-]+$/.test(r) && !/(^|\/)\.\.?($|\/)/.test(r) ? `https://github.com/${r}` : null);
 // notes:end
 
 // The notes repo's tree, fetched on open and on each move within Notes; the open note's text, fetched when shown.
@@ -3633,7 +3660,11 @@ let notesTree = null; // { state, entries } | { error } | null while reading
 let notesAsked = null;
 let noteShown = null; // { path, got: null | { text } | { error } }
 let notesDrawn = null; // what #notes-body shows, so redraws that change nothing leave it be
-function forgetNotes() { notesTree = notesAsked = noteShown = notesDrawn = null; $('notes-body').replaceChildren(); }
+function forgetNotes() {
+  notesTree = notesAsked = noteShown = notesDrawn = projects = projectsAsked = projectsDrawn = null;
+  $('notes-body').replaceChildren();
+  $('projects-body').replaceChildren();
+}
 async function loadNotes() {
   const ask = {};
   notesAsked = ask;
@@ -3646,6 +3677,7 @@ async function loadNotes() {
   // The same tree as shown: keep it, so the view isn't redrawn.
   if (JSON.stringify(got) !== JSON.stringify(notesTree)) notesTree = got;
   if (route().view === 'notes') renderNotes(route().id);
+  if (route().view === 'projects') renderProjects(route().id);
   renderNav();
 }
 function loadNote(path) {
@@ -3659,7 +3691,7 @@ function loadNote(path) {
 // fetched again; one that can't be had (or isn't a picture by name) marks its box.
 const NOTE_MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' };
 function noteImg(img, path) {
-  const size = (notesTree.entries.find((e) => e.path === path) || {}).size || 0;
+  const size = (((notesTree && notesTree.entries) || []).find((e) => e.path === path) || {}).size || 0;
   const mime = NOTE_MIME[(path.match(/\.(\w+)$/) || [])[1]?.toLowerCase()];
   evMedia(img, { id: `note:${size}:${path}`, url: `/api/notes/file?path=${encodeURIComponent(path)}`, mime, bytes: size });
 }
@@ -3683,6 +3715,19 @@ function noteChips(path, meta) {
     ...[meta.via && `via ${meta.via}`, at && !isNaN(at) && at.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }),
       ...list(meta.project), ...list(meta.tags).map((t) => `#${t}`)].filter((x) => x && typeof x === 'string').map((x) => el('span', { className: 'chip' }, x)),
     url ? el('a', { href: url, target: '_blank', rel: 'noopener noreferrer', className: 'one' }, url.replace(/^https?:\/\//i, '')) : '');
+}
+// Markdown `src` of a note in folder `dir`, rendered, its pictures filled in.
+function noteText(src, dir) {
+  const text = el('div', { className: 'md nbody' });
+  // md() escapes all of the text before adding its own tags.
+  text.innerHTML = md(src, dir);
+  for (const img of text.querySelectorAll('img[data-note]')) {
+    const box = el('span', { className: 'nimg' });
+    img.replaceWith(box);
+    box.append(img);
+    noteImg(img, decodeURIComponent(img.dataset.note));
+  }
+  return text;
 }
 function renderNotes(path) {
   if (!everOpen) return; // fetch once connected, with the token in place
@@ -3714,17 +3759,74 @@ function renderNotes(path) {
   if (entry.kind !== 'md') return say('dim', 'Can’t show this file here');
   if (!got) return body.replaceChildren(el('div', { className: 'rows' }, skel()));
   if (got.error) return say('bad', got.error);
-  const text = el('div', { className: 'md nbody' });
-  // md() escapes all of the text before adding its own tags.
-  text.innerHTML = md(front.body, dir);
-  for (const img of text.querySelectorAll('img[data-note]')) {
-    const box = el('span', { className: 'nimg' });
-    img.replaceWith(box);
-    box.append(img);
-    noteImg(img, decodeURIComponent(img.dataset.note));
-  }
+  const text = noteText(front.body, dir);
   const assets = (Array.isArray(front.meta.assets) ? front.meta.assets : []).map((a) => notePath(dir, String(a))).filter(Boolean);
   body.replaceChildren(stale, noteChips(path, front.meta), text, ...assets.map((a) => noteFig(a, noteHref(a))));
+}
+
+// The notes repo's project records, fetched on open and on each move within Projects.
+let projects = null; // { state, projects, errors } | { error } | null while reading
+let projectsAsked = null;
+let projectsDrawn = null; // what #projects-body shows, as for notesDrawn
+const projectHref = (id) => `#projects/${encodeURIComponent(id)}`;
+async function loadProjects() {
+  const ask = {};
+  projectsAsked = ask;
+  let got;
+  try {
+    const r = await fetch('/api/projects', { headers: authHeaders() });
+    got = r.ok ? await r.json() : { error: (await r.text()) || `error ${r.status}` };
+  } catch { got = { error: 'couldn’t reach the orchestrator' }; }
+  if (projectsAsked !== ask) return;
+  if (JSON.stringify(got) !== JSON.stringify(projects)) projects = got;
+  if (route().view === 'projects') renderProjects(route().id);
+  renderNav();
+}
+// Rows of files, linking into the Notes view; skeleton until the tree is in.
+function projectRows(rows) {
+  if (!notesTree || !notesTree.entries) return el('ul', { className: 'rows nlist' }, notesTree && notesTree.error ? el('li', { className: 'bad' }, notesTree.error) : el('li', {}, skel()));
+  const ul = el('ul', { className: 'rows nlist' }, ...rows.map((e) => noteRow(e, notesTree.entries)));
+  if (!rows.length) ul.append(el('li', { className: 'dim' }, 'None'));
+  return ul;
+}
+// `#projects`: every project, then records that couldn't be read. `#projects/<slug>`: one project.
+function renderProjects(slug) {
+  if (!everOpen) return; // fetch once connected, with the token in place
+  const list = projects && projects.projects, p = slug && list ? projectFind(list, slug) : null;
+  if (p && !notesTree && !notesAsked) loadNotes();
+  const drawn = [slug, projects, p && notesTree];
+  if (projectsDrawn && drawn.every((x, i) => x === projectsDrawn[i])) return;
+  projectsDrawn = drawn;
+  $('projects').querySelector('.back').href = slug ? '#projects' : '#';
+  const body = $('projects-body');
+  $('projects-head').replaceChildren(el('div', { className: 'ttl' }, el('span', {}, p ? p.title : slug || 'Projects'),
+    p ? el('span', { className: 'chip' }, p.archived ? 'archived' : p.status) : ''), p ? el('div', { className: 'r2 one dim' }, projectDir(p)) : '');
+  if (!projects) { body.replaceChildren(el('div', { className: 'rows' }, skel())); if (!projectsAsked) loadProjects(); return; }
+  const say = (cls, text) => body.replaceChildren(el('p', { className: cls }, text));
+  if (projects.error) return say('bad', projects.error);
+  if (projects.state === 'off') return say('dim', 'Notes repo not configured (MIS_NOTES_REMOTE)');
+  const stale = ['offline', 'conflict'].includes(projects.state) ? el('p', { className: 'dim' }, `Notes repo ${projects.state}: showing the last copy`) : '';
+  if (!slug) {
+    const row = (q) => el('li', {}, el('a', { href: projectHref(q.id) },
+      el('div', { className: 'r1' }, el('span', { className: 'one' }, q.title), el('span', { className: 'n' }, q.archived ? 'archived' : q.status))));
+    const ul = el('ul', { className: 'rows nlist' }, ...list.map(row));
+    if (!list.length) ul.append(el('li', { className: 'dim' }, 'No projects yet'));
+    const bad = projects.errors.map((e) => el('li', {}, el('a', { href: noteHref(e.path) },
+      el('div', { className: 'r1' }, el('span', { className: 'one' }, e.path)), el('div', { className: 'r2 bad' }, e.error))));
+    return body.replaceChildren(stale, ul, ...(bad.length ? [el('h3', {}, 'Can’t read'), el('ul', { className: 'rows nlist' }, ...bad)] : []));
+  }
+  if (!p) return say('dim', 'No such project');
+  const dir = projectDir(p), files = notesTree && notesTree.entries ? projectFiles(notesTree.entries, p) : { own: [], ai: [] };
+  const facts = [
+    ...(p.aliases.length ? [el('dt', {}, 'aliases'), el('dd', {}, p.aliases.join(', '))] : []),
+    ...(p.repos.length ? [el('dt', {}, 'repos'), el('dd', {}, ...p.repos.flatMap((r, i) => {
+      const href = repoHref(r);
+      return [i ? '\n' : '', href ? el('a', { href, target: '_blank', rel: 'noopener noreferrer' }, r) : r];
+    }))] : []),
+    ...(p.notes.length ? [el('dt', {}, 'notes'), el('dd', { className: 'dim' }, p.notes.join('\n'))] : []),
+  ];
+  body.replaceChildren(stale, facts.length ? el('dl', {}, ...facts) : '', p.description ? noteText(p.description, dir) : '',
+    el('h3', {}, 'Files'), projectRows(files.own), el('h3', {}, 'AI'), projectRows(files.ai));
 }
 
 function renderWorkers() {
@@ -4132,7 +4234,7 @@ for (const f of [$('prompt'), $('reply-text')]) f.addEventListener('input', () =
 $('prompt').value = drafts.get('draft:new');
 // Leaving a view stops dictation into it and any readback.
 // A press's click has landed once the view changes: nothing left to hold for.
-window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (route().view === 'apps' && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; if (route().view === 'notes') { noteShown = null; if (notesTree) loadNotes(); } render(); };
+window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (route().view === 'apps' && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; if (route().view === 'notes') { noteShown = null; if (notesTree) loadNotes(); } if (route().view === 'projects') { if (projects) loadProjects(); if (notesTree && route().id) loadNotes(); } render(); };
 setInterval(tick, 1000);
 
 // `#new`, a link into the page for a new task, is Tasks with the composer focused; the hash becomes `#` so back links don't refocus.
@@ -4185,6 +4287,7 @@ function loadNav() {
   if (!$('nav-routines').hidden) loadRoutines();
   if (!$('nav-apps').hidden) loadApps();
   if (!$('nav-notes').hidden) loadNotes();
+  if (!$('nav-projects').hidden) loadProjects();
   renderNav();
 }
 $('menu-btn').onclick = () => {
@@ -4298,6 +4401,7 @@ for (const b of $('menu').querySelectorAll('.ngrp button[aria-controls]')) b.onc
   if (open && b.getAttribute('aria-controls') === 'nav-routines') loadRoutines();
   if (open && b.getAttribute('aria-controls') === 'nav-apps') loadApps();
   if (open && b.getAttribute('aria-controls') === 'nav-notes') loadNotes();
+  if (open && b.getAttribute('aria-controls') === 'nav-projects') loadProjects();
 };
 $('menu').addEventListener('close', () => $('menu-btn').setAttribute('aria-expanded', String(railShown())));
 // The rail opens with Notes and Workers unfolded: short lists, and Workers carries what's running.

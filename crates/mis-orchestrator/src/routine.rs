@@ -467,7 +467,10 @@ pub const MAX_MERGE_FILES: u32 = 100;
 /// `require_labels`, `method` (squash, merge or rebase; default squash) and
 /// `approve` (phone or none; default phone). Lists are `[a, b]`.
 fn parse_merge(keys: &BTreeMap<&str, &str>) -> Result<MergePolicy, String> {
-    let list = |k: &str| keys.get(k).map_or(Ok(vec![]), |v| parse_list(k, v));
+    let list = |k: &str| {
+        let got = keys.get(k).map_or(Ok(vec![]), |v| parse_list(k, v));
+        got.map_err(|e| format!("merge: {e}"))
+    };
     let num = |k: &str, max: u32| {
         let v = keys.get(k).map(|v| unquote(v));
         let n = v.ok_or_else(|| format!("merge: needs `{k}`"))?;
@@ -537,10 +540,11 @@ fn parse_merge(keys: &BTreeMap<&str, &str>) -> Result<MergePolicy, String> {
 }
 
 /// `[a, "b c"]` -> `a`, `b c`; a bare value is a list of one.
-fn parse_list(k: &str, v: &str) -> Result<Vec<String>, String> {
+pub(crate) fn parse_list(k: &str, v: &str) -> Result<Vec<String>, String> {
     let inner = match v.strip_prefix('[') {
-        Some(rest) => (rest.strip_suffix(']'))
-            .ok_or_else(|| format!("merge: {k}: a list needs its closing `]`"))?,
+        Some(rest) => {
+            (rest.strip_suffix(']')).ok_or_else(|| format!("{k}: a list needs its closing `]`"))?
+        }
         None => v,
     };
     if inner.trim().is_empty() {
@@ -548,10 +552,10 @@ fn parse_list(k: &str, v: &str) -> Result<Vec<String>, String> {
     }
     (inner.split(','))
         .map(|item| match (item.trim(), unquote(item.trim())) {
-            (_, "") => Err(format!("merge: {k}: empty item")),
+            (_, "") => Err(format!("{k}: empty item")),
             // `"a,b"` was split at its comma: half-quoted, it would match nothing.
             (raw, same) if raw == same && raw.starts_with(['"', '\'']) => {
-                Err(format!("merge: {k}: `{raw}`: no commas inside quotes"))
+                Err(format!("{k}: `{raw}`: no commas inside quotes"))
             }
             (_, item) => Ok(item.to_string()),
         })
@@ -559,7 +563,7 @@ fn parse_list(k: &str, v: &str) -> Result<Vec<String>, String> {
 }
 
 /// `value  # note` -> `value`; a `#` inside quotes, or not after a space, stays.
-fn strip_comment(line: &str) -> &str {
+pub(crate) fn strip_comment(line: &str) -> &str {
     if line.starts_with('#') {
         return "";
     }
@@ -578,7 +582,7 @@ fn strip_comment(line: &str) -> &str {
 }
 
 /// `"x"` or `'x'` -> `x`.
-fn unquote(v: &str) -> &str {
+pub(crate) fn unquote(v: &str) -> &str {
     for q in ['"', '\''] {
         if let Some(inner) = v.strip_prefix(q).and_then(|v| v.strip_suffix(q)) {
             return inner;
