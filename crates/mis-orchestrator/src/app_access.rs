@@ -71,6 +71,18 @@ pub fn role_of(policy: &Policy, subject: &Subject) -> Option<AppRole> {
     }
 }
 
+/// Header a `local` request sends, under `--apps-dev`, to act as `viewer` or `editor`.
+pub const DEV_ROLE: &str = "x-mis-dev-role";
+
+/// [`DEV_ROLE`]'s value: a role below owner, which `local` already is, so it only lowers.
+pub fn dev_role(v: &str) -> Option<AppRole> {
+    match v {
+        "viewer" => Some(AppRole::Viewer),
+        "editor" => Some(AppRole::Editor),
+        _ => None,
+    }
+}
+
 /// Exhaustive, so a new role or action must be classified.
 pub fn allows(role: AppRole, action: Action) -> bool {
     match (role, action) {
@@ -189,6 +201,15 @@ mod tests {
     fn policy(members: &[(&str, AppRole)]) -> Policy {
         let members = members.iter().map(|(e, r)| (e.to_string(), *r)).collect();
         Policy { members }
+    }
+
+    #[test]
+    fn dev_roles_only_lower() {
+        assert_eq!(dev_role("viewer"), Some(Viewer));
+        assert_eq!(dev_role("editor"), Some(Editor));
+        for bad in ["owner", "Viewer", "", "admin"] {
+            assert_eq!(dev_role(bad), None, "{bad}");
+        }
     }
 
     #[test]

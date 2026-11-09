@@ -32,11 +32,7 @@ const META: &str = ".release.json";
 pub(crate) const POLICY: &str = "policy.json";
 const MAX_TITLE_CHARS: usize = 80;
 
-/// `[a-z0-9][a-z0-9-]{0,31}`: `pool`, `chores-2`.
-pub fn valid_slug(s: &str) -> bool {
-    let ok = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
-    (1..=32).contains(&s.len()) && s.starts_with(ok) && s.chars().all(|c| ok(c) || c == '-')
-}
+pub use mis_types::valid_slug;
 
 /// `app.json` at the top of a bundle.
 #[derive(Debug, Clone, PartialEq, Deserialize)]

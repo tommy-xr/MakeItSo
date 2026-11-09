@@ -1,18 +1,23 @@
-// The apps SDK (static/mis.js) against a stubbed fetch, and its in-memory twin
-// (static/mis-mock.mjs). Run: node --test crates/mis-orchestrator/tests/sdk.test.mjs
+// The apps SDK (static/mis.js) against a stubbed fetch, its in-memory twin
+// (static/mis-mock.mjs), and their types (static/mis.d.ts).
+// Run: node --test crates/mis-orchestrator/tests/sdk.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { createMock, MAX_DATA } from '../static/mis-mock.mjs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { createMock, MAX_BATCH, MAX_DATA } from '../static/mis-mock.mjs';
 
-const src = readFileSync(new URL('../static/mis.js', import.meta.url), 'utf8');
+const file = (name) => readFileSync(new URL(`../static/${name}`, import.meta.url), 'utf8');
+const src = file('mis.js');
 
-// mis.js loaded on /a/demo/<path>, its fetches answered by `reply(url, init)`; the calls seen.
-function load(reply, search = '') {
+// mis.js loaded on /a/demo/<path> from `script`, its fetches answered by `reply(url, init)`; the calls seen.
+function load(reply, search = '', script = 'http://x/a/_/mis.js') {
   const calls = [];
   const g = {
     location: { pathname: '/a/demo/list', search },
-    document: { currentScript: { src: 'http://x/a/_/mis.js' } },
+    document: { currentScript: { src: script } },
     fetch: async (url, init) => {
       calls.push({ url, init });
       return reply(url, init);
@@ -45,14 +50,34 @@ test('mis.js speaks the HTTP API under /a/<slug>/api/v1/', async () => {
   assert.deepEqual(JSON.parse(remove.init.body), { op: 'remove', space: 'shared', collection: 'notes', id: 'a', rev: 1 });
 });
 
-test('mis.js turns refusals into MisErrors and a missing record into null', async () => {
-  const { mis } = load((url, init) =>
-    !init ? new Response('no such record', { status: 404 })
+test('mis.js turns refusals into MisErrors and asks for a missing record as null', async () => {
+  const { mis, calls } = load((url, init) =>
+    !init ? json(200, null)
       : JSON.parse(init.body).rev === 0 ? json(409, { current: env })
       : new Response("a viewer can't do that here", { status: 403 }));
   assert.equal(await mis.records.get('shared', 'notes', 'zz'), null);
-  await assert.rejects(mis.records.put('shared', 'notes', 'a', 0, {}), (e) => e.name === 'MisError' && e.status === 409 && e.current.rev === 1);
+  assert.equal(calls[0].url, '/a/demo/api/v1/records/shared/notes/zz?missing=null');
+  await assert.rejects(mis.records.put('shared', 'notes', 'a', 0, {}), (e) => e instanceof mis.MisError && e.status === 409 && e.current.rev === 1 && e.index === undefined);
   await assert.rejects(mis.records.put('shared', 'notes', 'a', 1, {}), (e) => e.status === 403 && /viewer/.test(e.message));
+  // Not live: still an error, not a quiet null.
+  const gone = load(() => new Response('', { status: 404, statusText: 'Not Found' }));
+  await assert.rejects(gone.mis.records.get('shared', 'notes', 'zz'), (e) => e.status === 404);
+});
+
+test('mis.js batches POST {ops} and name the refused op', async () => {
+  const ops = [
+    { op: 'put', space: 'shared', collection: 'notes', id: 'a', rev: 0, data: { t: 1 } },
+    { op: 'remove', space: 'shared', collection: 'notes', id: 'b', rev: 2 },
+  ];
+  let answer = json(200, { records: [env, null] });
+  const { mis, calls } = load(() => answer);
+  assert.deepEqual(await mis.records.batch(ops), [env, null]);
+  assert.equal(calls[0].url, '/a/demo/api/v1/mutations');
+  assert.deepEqual(JSON.parse(calls[0].init.body), { ops });
+  answer = json(409, { current: env, index: 1 });
+  await assert.rejects(mis.records.batch(ops), (e) => e.status === 409 && e.index === 1 && e.current.rev === 1);
+  answer = new Response('ops[1]: data is 70000 bytes; the most is 65536', { status: 413 });
+  await assert.rejects(mis.records.batch(ops), (e) => e.status === 413 && e.index === 1);
 });
 
 test('mock: create, update, stale and create-only conflicts', async () => {
@@ -163,4 +188,89 @@ test('mock: rejects with the error class it is given (mis.js passes mis.MisError
   class E extends Error {}
   const m = createMock({ role: 'viewer', Err: E });
   await assert.rejects(m.records.put('shared', 'notes', 'a', 0, {}), (e) => e instanceof E);
+});
+
+test('mock: a batch lands whole or not at all', async () => {
+  const m = createMock();
+  const p = (id, rev, data) => ({ op: 'put', space: 'shared', collection: 'notes', id, rev, data });
+  await m.records.put('shared', 'notes', 'a', 0, { n: 1 });
+  // A conflict at ops[1]: ops[0] isn't kept.
+  await assert.rejects(m.records.batch([p('b', 0, 1), p('a', 0, 9)]), (e) => e.status === 409 && e.index === 1 && e.current.rev === 1);
+  assert.equal(await m.records.get('shared', 'notes', 'b'), null);
+  const ops = [p('b', 0, 1), p('a', 1, 9), { op: 'remove', space: 'shared', collection: 'notes', id: 'zz', rev: 3 }];
+  const done = await m.records.batch(ops);
+  assert.deepEqual(done.map((e) => e && e.rev), [1, 2, null]);
+  // Sent again after a lost answer: the same records.
+  assert.deepEqual(await m.records.batch(ops), done);
+  await assert.rejects(m.records.batch([p('c', 0, 1), p('big', 0, 'x'.repeat(MAX_DATA))]), (e) => e.status === 413 && e.index === 1 && /^ops\[1\]: /.test(e.message));
+  await assert.rejects(m.records.batch([p('d', 0, 1), p('d', 1, 2)]), (e) => e.status === 400 && e.message === 'ops[1]: shared/notes/d is already in this batch');
+  const many = Array.from({ length: MAX_BATCH + 1 }, (_, i) => p(`m${i}`, 0, 1));
+  await assert.rejects(m.records.batch(many), (e) => e.status === 400);
+  assert.equal((await m.records.batch(many.slice(1))).length, MAX_BATCH);
+  for (const id of ['c', 'd', 'm0']) assert.equal(await m.records.get('shared', 'notes', id), null, id);
+  await m.setRole('viewer');
+  await assert.rejects(m.records.batch([p('v', 0, 1)]), (e) => e.status === 403);
+  assert.equal(await m.records.get('shared', 'notes', 'v'), null);
+});
+
+test('mock: seed preloads records, whatever the role; an export seeds as is', async () => {
+  const m = createMock({ role: 'viewer', user: 'me@example.com' });
+  await m.seed({ shared: { notes: [{ id: 'a', data: { t: 1 } }, { id: 'b', rev: 4, by: 'x@example.com', at: 7, data: 2 }] }, me: { drafts: [{ id: 'd', data: 'mine' }] } });
+  const a = await m.records.get('shared', 'notes', 'a');
+  assert.deepEqual([a.rev, a.by, a.data], [1, 'me@example.com', { t: 1 }]);
+  assert.deepEqual(await m.records.get('shared', 'notes', 'b'), { id: 'b', rev: 4, by: 'x@example.com', at: 7, data: 2 });
+  assert.equal((await m.records.get('me', 'drafts', 'd')).data, 'mine');
+  // Seeded revisions behave like stored ones.
+  await m.setRole('editor');
+  await assert.rejects(m.records.put('shared', 'notes', 'b', 3, 0), (e) => e.status === 409 && e.current.rev === 4);
+  assert.equal((await m.records.put('shared', 'notes', 'b', 4, 0)).rev, 5);
+  const twin = createMock({ user: 'me@example.com' });
+  await twin.seed(await m.export());
+  assert.deepEqual((await twin.export()).shared, (await m.export()).shared);
+  // All or nothing.
+  for (const bad of [{ shared: { notes: [{ id: 'ok', data: 1 }, { id: 'a/b', data: 1 }] } }, { shared: { Notes: [{ id: 'a', data: 1 }] } }, { shared: { notes: [{ id: 'x' }] } }, { shared: { notes: [{ data: 1 }] } }, { shared: { notes: [{ id: 'x', data: 1, rev: 0 }] } }]) {
+    await assert.rejects(twin.seed(bad), (e) => e.status === 400, JSON.stringify(bad));
+  }
+  assert.equal(await twin.records.get('shared', 'notes', 'ok'), null);
+});
+
+test('mis.js in mock mode loads mis-mock.js beside it, with no server', async () => {
+  // As `mis apps sdk <dir>` writes them, for an app's dev server to serve at /a/_/.
+  const dir = mkdtempSync(join(tmpdir(), 'mis-sdk-'));
+  writeFileSync(join(dir, 'mis-mock.js'), file('mis-mock.mjs'));
+  writeFileSync(join(dir, 'package.json'), '{"type": "module"}');
+  const { mis, calls } = load(() => assert.fail('no fetch in mock mode'), '?mock=1&role=viewer', pathToFileURL(join(dir, 'mis.js')).href);
+  assert.equal((await mis.me()).role, 'viewer');
+  await mis.mock.seed({ shared: { notes: [{ id: 'a', data: 1 }] } });
+  assert.equal((await mis.records.get('shared', 'notes', 'a')).data, 1);
+  await assert.rejects(mis.records.batch([{ op: 'remove', space: 'shared', collection: 'notes', id: 'a', rev: 1 }]), (e) => e instanceof mis.MisError && e.status === 403);
+  await mis.mock.setRole('editor');
+  assert.deepEqual(await mis.records.batch([{ op: 'remove', space: 'shared', collection: 'notes', id: 'a', rev: 1 }]), [null]);
+  assert.equal(calls.length, 0);
+});
+
+// The members of `interface name` in mis.d.ts.
+function members(name) {
+  const dts = file('mis.d.ts');
+  const body = new RegExp(`interface ${name}\\b[^{]*\\{\\n([\\s\\S]*?)\\n  \\}`).exec(dts);
+  assert.ok(body, name);
+  return [...body[1].matchAll(/^    (\w+)\??[(<:]/gm)].map((m) => m[1]).sort();
+}
+const keys = (o) => Object.keys(o).sort();
+
+test('mis.d.ts declares exactly what mis.js and the mock define', async () => {
+  const { mis } = load(() => json(200, null));
+  assert.deepEqual(keys(mis), members('Sdk').filter((k) => k !== 'mock'));
+  assert.deepEqual(keys(mis.records), members('Records'));
+  const mocked = load(() => json(200, null), '?mock=1', 'file:///nowhere/mis.js').mis;
+  assert.deepEqual(keys(mocked), members('Sdk'));
+  assert.deepEqual(keys(mocked.mock), members('MockControls'));
+  await assert.rejects(mocked.me()); // no mis-mock.js at /nowhere
+  const m = createMock();
+  const top = members('Sdk').filter((k) => !['MisError', 'mock'].includes(k));
+  assert.deepEqual(keys(m), [...top, ...members('MockControls')].sort());
+  assert.deepEqual(keys(m.records), members('Records'));
+  const err = new mis.MisError(409, 'conflict', null, 2);
+  assert.deepEqual([err.name, err.status, err.current, err.index], ['MisError', 409, null, 2]);
+  assert.deepEqual(members('MisError'), ['current', 'index', 'name', 'status']);
 });

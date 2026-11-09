@@ -2,6 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
+/// An app's name and path segment: `[a-z0-9][a-z0-9-]{0,31}`, e.g. `pool`, `chores-2`.
+pub fn valid_slug(s: &str) -> bool {
+    let ok = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
+    (1..=32).contains(&s.len()) && s.starts_with(ok) && s.chars().all(|c| ok(c) || c == '-')
+}
+
 /// An app as `GET /api/apps` lists it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppView {

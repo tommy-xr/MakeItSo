@@ -395,7 +395,8 @@ Under `/a/<name>/api/v1/`, GET and POST only (so clients that have just those wo
 | --- | --- |
 | `POST mutations` `{"op": "put", "space", "collection", "id", "rev", "data"}` | `{"record": {...}}` |
 | `POST mutations` `{"op": "remove", "space", "collection", "id", "rev"}` | `{"record": null}` |
-| `GET records/<space>/<collection>/<id>` | the record, or 404 |
+| `POST mutations` `{"ops": [<put or remove>, ...]}` | `{"records": [...]}`, one per op |
+| `GET records/<space>/<collection>/<id>` | the record, or 404 (`?missing=null`: 200 `null`) |
 | `GET records/<space>/<collection>?q=<json>` | `{"records": [...], "cursor"}` |
 | `GET export` | `{"version": 1, "app", "user", "at", "shared": {collection: [...]}, "me": {...}}` |
 
@@ -407,6 +408,11 @@ Removing a missing record is 200 too. A removed record's id keeps its revision: 
 it continues from there, so a late write aimed at the old record conflicts instead of landing.
 That small row (key, revision, last writer) is kept and counts toward the cap.
 `export` reads everything visible at once (fine at household scale).
+
+A batch (`ops`, up to 100, each id at most once) applies in order in one transaction: all land or
+none do. Each op follows the rules above; the first refused one stops it, and the answer names it:
+409 `{"current", "index"}`, other refusals `ops[<index>]: <why>`. A batch sent again after its
+answer was lost gets the same 200.
 
 `q` (all optional): `{"where": {"score": {"gte": 1, "lt": 5}, "done": {"eq": false}}, "order_by":
 ["score", "desc"], "limit": 20, "cursor": "..."}`. Fields are top-level keys of `data`
@@ -434,16 +440,43 @@ await mis.records.put('shared', 'chores', 'dishes', r.rev, {done: true});       
 await mis.records.get('shared', 'chores', 'dishes');    // the record, or null
 await mis.records.list('shared', 'chores', {where: {done: {eq: false}}, limit: 20});
 await mis.records.remove('shared', 'chores', 'dishes', 2);
+await mis.records.batch([{op: 'put', space: 'shared', collection: 'chores', id: 'trash', rev: 0, data: {}}]);
 await mis.export();
 ```
 
-Refusals reject with a `MisError`: `status` (403, 409, 413…), `message`, and on a 409 `current`.
+Refusals reject with a `MisError`: `status` (403, 409, 413…), `message`, on a 409 `current`, and
+in a batch `index`. TypeScript types for all of it: `/a/_/mis.d.ts` (globals; add it to
+tsconfig `include`).
 
 Open any app page with `?mock=1` (add `&role=viewer` to try a viewer) and `mis` talks to
-`mis-mock.js`, an in-memory twin with the same revisions, conflicts, create-only, retries, caps,
-queries and viewer 403s, so screenshots and UI tests need no data. `(await mis.mock).setRole(r)`
-changes the role; nothing is kept across reloads. Both are tested by
+`mis-mock.js`, an in-memory twin with the same revisions, conflicts, create-only, retries,
+batches, caps, queries and viewer 403s, so screenshots and UI tests need no data or server.
+`mis.mock.seed({shared: {chores: [{id: 'dishes', data: {done: false}}]}})` preloads records (an
+`export()` seeds as is; `rev`, `by`, `at` optional); `mis.mock.setRole(r)` changes the role.
+Nothing is kept across reloads. All three files are tested by
 `node --test crates/mis-orchestrator/tests/sdk.test.mjs`.
+
+#### Building an app
+
+```sh
+mis apps new chores                     # ./apps/_template -> ./apps/chores, SDK in apps/chores/sdk/
+mis apps new chores --template ~/t --title "Chores"
+mis apps sdk apps/chores/sdk            # refresh mis.js, mis-mock.js, mis.d.ts from this CLI
+```
+
+`new` copies the template folder (leaving out `node_modules`, `dist`, `.git`), fills `{{slug}}`
+and `{{title}}` in its text files and never writes over an existing folder. MIS ships no
+template; keep yours with your apps.
+
+A dev server (e.g. Vite) serves the app under `/a/<slug>/`, and either:
+
+- serves `sdk/` at `/a/_/` and opens the page with `?mock=1`: no orchestrator needed; or
+- proxies `/a/_/` and `/a/<slug>/api/` to a local apps listener. Writes must come from the
+  listener's own origin, so the proxy sets `Origin` to the listener's URL (e.g.
+  `http://127.0.0.1:7475`), else 403. Start that orchestrator with `--apps-dev`
+  (`MIS_APPS_DEV=1`) and the proxy may send `X-Mis-Dev-Role: viewer` or `editor` to try a lesser
+  role; without it, direct loopback requests are always owner. Never set it on a served
+  household.
 
 ### Backups
 

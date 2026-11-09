@@ -45,6 +45,10 @@ struct Args {
     /// Default: the --apps-bind address.
     #[arg(long, env = "MIS_APPS_PUBLIC_URL")]
     apps_public_url: Option<String>,
+    /// App development: a direct loopback request may act as a viewer or editor by sending
+    /// `X-Mis-Dev-Role`, to try an app's other roles locally. Never for a served household.
+    #[arg(long, env = "MIS_APPS_DEV", value_parser = clap::builder::BoolishValueParser::new())]
+    apps_dev: bool,
     /// Browser origin allowed to connect, e.g. `https://mis.example.com` (repeatable).
     #[arg(
         long = "allowed-origin",
@@ -362,6 +366,9 @@ async fn main() -> anyhow::Result<()> {
         if apps_gate.is_none() {
             tracing::info!("no --apps-cf-access-aud: apps answer direct loopback requests only");
         }
+        if args.apps_dev {
+            tracing::warn!("--apps-dev: direct loopback requests may act as a viewer or editor");
+        }
         if !addr.ip().is_loopback() && nonempty(&args.apps_public_url).is_none() {
             tracing::warn!("no --apps-public-url: app links are left out (only loopback names and its host are answered)");
         }
@@ -430,6 +437,7 @@ async fn main() -> anyhow::Result<()> {
             let auth = mis_orchestrator::apps_http::Auth {
                 gate: apps_gate,
                 public_host: apps_public_host,
+                dev: args.apps_dev,
             };
             if let Err(e) = mis_orchestrator::serve_apps(listener, apps, auth).await {
                 tracing::error!("apps listener stopped: {e:#}");
