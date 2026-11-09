@@ -93,8 +93,8 @@ struct Args {
     /// Holds task history (`ledger.json`, `transcripts/`; tasks are kept 30 days
     /// after they end), the push notification key and subscriptions, and uploaded
     /// images (`images/`, deleted after a week), evidence files agents attach
-    /// (`evidence/`, deleted after 30 days), captures (`captures/inbox/`, kept) and published
-    /// apps (`apps/`, every release kept). Default: ~/.local/state/mis
+    /// (`evidence/`, deleted after 30 days), captures (`captures/inbox/`, kept), the notes
+    /// repo clone (`notes/`) and published apps (`apps/`, every release kept). Default: ~/.local/state/mis
     /// (%LOCALAPPDATA%\mis on Windows).
     #[arg(long, env = "MIS_STATE_DIR")]
     state_dir: Option<std::path::PathBuf>,
@@ -102,6 +102,11 @@ struct Args {
     /// Default: ~/.config/mis/routines.
     #[arg(long, env = "MIS_ROUTINES_DIR")]
     routines_dir: Option<std::path::PathBuf>,
+    /// Git remote of the notes repo, e.g. `https://github.com/you/mis-notes.git`. Captures are
+    /// published to its `inbox/` on `main`, through a clone at `<state-dir>/notes`, with the
+    /// user's git credentials (e.g. `gh auth setup-git`). Unset: not published.
+    #[arg(long, env = "MIS_NOTES_REMOTE")]
+    notes_remote: Option<String>,
     /// VAPID contact push services may use about this sender (`mailto:` or `https:`).
     #[arg(
         long,
@@ -457,6 +462,14 @@ async fn main() -> anyhow::Result<()> {
                 Ok(inbox) => app = app.with_captures(inbox),
                 Err(e) => tracing::warn!("captures off: {e:#}"),
             }
+            if let Some(remote) = nonempty(&args.notes_remote) {
+                // Not the URL: it may carry a token.
+                tracing::info!("publishing captures to the notes repo");
+                app = app.with_notes(mis_orchestrator::notes::Notes::new(remote, &dir));
+            }
+        }
+        None if nonempty(&args.notes_remote).is_some() => {
+            anyhow::bail!("--notes-remote / MIS_NOTES_REMOTE needs a state dir")
         }
         None => tracing::warn!(
             "no --state-dir and no home dir: task history is lost on restart; \

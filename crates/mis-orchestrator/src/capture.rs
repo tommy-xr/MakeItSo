@@ -236,7 +236,7 @@ fn taken(stem: &str, existing: &[String]) -> bool {
 }
 
 /// `base`, else `base-2`, `base-3`, … whichever `existing` doesn't use.
-fn free_stem(base: &str, existing: &[String]) -> String {
+pub(crate) fn free_stem(base: &str, existing: &[String]) -> String {
     std::iter::once(base.to_string())
         .chain((2..).map(|n| format!("{base}-{n}")))
         .find(|s| !taken(s, existing))
@@ -306,12 +306,14 @@ pub fn plan(
     }
 }
 
-/// What dedupe needs from a kept capture.
+/// What dedupe and publishing need from a kept capture.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Kept {
     pub id: Uuid,
     pub captured: DateTime<Utc>,
     pub key: String,
+    /// Its images' file names, in order.
+    pub assets: Vec<String>,
 }
 
 /// Read back a capture [`plan`] wrote; None if it isn't one.
@@ -320,7 +322,7 @@ pub fn parse(md: &str) -> Option<Kept> {
     let end = rest.find("\n---\n")?;
     let (front, body) = (&rest[..end + 1], &rest[end + 5..]);
     let (mut id, mut captured, mut url, mut shared) = (None, None, None, None);
-    let mut hashes = Vec::new();
+    let (mut hashes, mut assets) = (Vec::new(), Vec::new());
     for line in front.lines() {
         if let Some(v) = line.strip_prefix("id: ") {
             id = v.parse().ok();
@@ -332,6 +334,8 @@ pub fn parse(md: &str) -> Option<Kept> {
             shared = Some(serde_json::from_str::<String>(v).ok()?);
         } else if let Some(v) = line.strip_prefix("    sha256: ") {
             hashes.push(v.to_string());
+        } else if let Some(v) = line.strip_prefix("  - path: ") {
+            assets.push(v.to_string());
         }
     }
     let text = (!body.is_empty()).then_some(body);
@@ -339,6 +343,7 @@ pub fn parse(md: &str) -> Option<Kept> {
         id: id?,
         captured: captured?.to_utc(),
         key: key(url.as_deref(), text, shared.as_deref(), &hashes),
+        assets,
     })
 }
 
@@ -724,7 +729,8 @@ mod tests {
                 Kept {
                     id,
                     captured: now(),
-                    key: c.key()
+                    key: c.key(),
+                    assets: p.assets.clone(),
                 }
             );
         }
@@ -742,6 +748,7 @@ mod tests {
                 id: Uuid::nil(),
                 captured: now(),
                 key: c.key(),
+                assets: vec![],
             },
         )];
         assert_eq!(duplicate(&c.key(), at(10), &kept).unwrap().0, "f.md");

@@ -3708,6 +3708,7 @@ async fn refused_everywhere_else(base: &str, headers: &[(&'static str, &str)]) {
         ("GET", format!("/api/tasks/{id}/diff")),
         ("GET", "/api/routines".into()),
         ("POST", "/api/routines/r/run".into()),
+        ("GET", "/api/notes/sync".into()),
         ("GET", "/api/apps".into()),
         ("POST", "/api/apps/a/releases".into()),
         ("POST", "/api/apps/a/activate".into()),
@@ -3797,6 +3798,97 @@ async fn capture_is_kept_once_and_its_token_opens_nothing_else() {
     let full = ("authorization", "Bearer s");
     assert_eq!(capture(&base, &[full], &text).await.0, 201);
     refused_everywhere_else(&base, &[bearer]).await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_capture_is_published_to_the_notes_repo_soon_after() {
+    use std::time::Duration;
+    let dir = std::env::temp_dir().join(format!("mis-e2e-notes-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        let human = [
+            "-c",
+            "user.name=Human",
+            "-c",
+            "user.email=human@example.com",
+        ];
+        let out = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(human)
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "git {args:?}: {err}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    // A bare remote with one commit, as the real repo has.
+    git(&["init", "--quiet", "--bare", "-b", "main", "remote.git"]);
+    git(&["clone", "--quiet", "remote.git", "human"]);
+    std::fs::write(dir.join("human/README.md"), "# notes\n").unwrap();
+    git(&["-C", "human", "add", "README.md"]);
+    git(&["-C", "human", "commit", "--quiet", "-m", "init"]);
+    git(&["-C", "human", "push", "--quiet", "origin", "HEAD:main"]);
+    let state = dir.join("state");
+    let notes =
+        mis_orchestrator::notes::Notes::new(dir.join("remote.git").display().to_string(), &state)
+            .with_timing(Duration::from_secs(1), Duration::from_secs(3600));
+    let base = start_app(capturing(&state).with_notes(notes)).await;
+    let sync = || async {
+        let (status, body) = get_json(&base, "/api/notes/sync", "r").await;
+        assert_eq!(status, 200, "{body}");
+        serde_json::from_str::<NotesSync>(&body).unwrap()
+    };
+    let text: [(&str, Option<&str>, &[u8]); 1] = [("text", None, b"publish me #amf")];
+    let (status, body) = capture(&base, &[("authorization", "Bearer c")], &text).await;
+    assert_eq!(status, 201, "{body}");
+    let file = serde_json::from_str::<serde_json::Value>(&body).unwrap()["file"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let s = sync().await;
+    assert_eq!(
+        (s.state, s.pending),
+        (SyncState::Pending, 1),
+        "waits a moment"
+    );
+    let mut s = s;
+    for _ in 0..100 {
+        if s.last_push.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        s = sync().await;
+    }
+    assert_eq!(
+        (s.state, s.pending, &s.last_error),
+        (SyncState::Idle, 0, &None)
+    );
+    assert!(s.last_push.is_some());
+    let log = git(&[
+        "--git-dir",
+        "remote.git",
+        "log",
+        "--format=%s",
+        "--name-only",
+        "main",
+    ]);
+    assert_eq!(
+        log,
+        format!("capture: 1 item\n\ninbox/{file}\ninit\n\nREADME.md\n")
+    );
+    // The capture token can't see it; without a remote it is off.
+    let (status, _) = get_json(&base, "/api/notes/sync", "c").await;
+    assert!(matches!(status, 401 | 403), "{status}");
+    let off = start_app(capturing(&dir.join("off"))).await;
+    let (status, body) = get_json(&off, "/api/notes/sync", "r").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_str::<NotesSync>(&body).unwrap(),
+        NotesSync::OFF
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 

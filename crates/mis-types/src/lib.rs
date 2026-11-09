@@ -26,11 +26,13 @@ pub use image::{ImageFile, ImageKind, MAX_IMAGES, MAX_IMAGE_BYTES};
 pub use inventory::{InstalledApp, Inventory, Machine};
 mod links;
 pub mod merge;
+mod notes;
 pub use links::{github_link, github_links, Checks, Link, LinkKind, PrState, PrStatus};
 pub use merge::{
     is_merge_label, merge_label, MergeApprove, MergeFacts, MergeMethod, MergePolicy, MergeRule,
     MERGE_TOOL,
 };
+pub use notes::{NotesSync, SyncState};
 pub mod mcp;
 mod permissions;
 mod plan;
