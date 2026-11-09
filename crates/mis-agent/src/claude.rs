@@ -488,6 +488,7 @@ impl Agent for ClaudeAgent {
                 cmd.current_dir(d);
             }
             cmd.env(TASK_ENV, task.to_string());
+            cmd.envs(opts.env.iter().copied());
             // Current models get no checklist tool unless asked; tasks off picks
             // `TodoWrite` (one call, whole list) over the TaskCreate/TaskUpdate set.
             cmd.env("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1")

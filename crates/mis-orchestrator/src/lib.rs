@@ -25,6 +25,7 @@ pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("MIS_GIT_
 pub mod access;
 pub mod access_gate;
 pub mod app_access;
+pub mod app_grant;
 pub mod app_tasks;
 pub mod apps;
 pub mod apps_http;
@@ -139,6 +140,8 @@ pub struct App {
     watchers: Arc<AtomicUsize>,
     /// Published apps. None: publishing is off.
     apps: Option<Arc<apps::Apps>>,
+    /// Held while an app task's token creates its app, so a thread creates only one.
+    creating: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl App {
@@ -181,6 +184,7 @@ impl App {
             routine_every: ROUTINE_EVERY,
             watchers: Default::default(),
             apps: None,
+            creating: Default::default(),
         }
     }
 
@@ -365,13 +369,22 @@ impl App {
                         let _ = tx.send(msg);
                     }
                 }
-                Effect::Assign { conn, task, images } => {
+                Effect::Assign {
+                    conn,
+                    task,
+                    images,
+                    token,
+                } => {
                     let images = match (&self.images, images.is_empty()) {
                         (Some(store), false) => store.files(&images),
                         _ => vec![],
                     };
                     if let Some(tx) = self.conns.lock().unwrap().get(&conn) {
-                        let _ = tx.send(OrchMsg::Assign { task, images });
+                        let _ = tx.send(OrchMsg::Assign {
+                            task,
+                            images,
+                            token,
+                        });
                     }
                 }
                 Effect::Broadcast(msg) => {
@@ -837,7 +850,9 @@ impl App {
     ) -> Result<(), (StatusCode, &'static str)> {
         match self.admit_scope(headers, peer, path).await {
             Some(Scope::Full) => Ok(()),
-            Some(Scope::Read | Scope::Capture) => Err((StatusCode::FORBIDDEN, "read-only token")),
+            Some(Scope::Read | Scope::Capture | Scope::AppTask(_)) => {
+                Err((StatusCode::FORBIDDEN, "read-only token"))
+            }
             None => Err((StatusCode::UNAUTHORIZED, "")),
         }
     }
@@ -850,6 +865,12 @@ impl App {
     /// [`Self::authorized_on`] any route but `/api/capture`.
     fn authorized(&self, headers: &HeaderMap, peer: IpAddr, access: &Access) -> Option<Scope> {
         self.authorized_on(headers, peer, access, Route::Other)
+    }
+
+    /// The running app task whose token `bearer` is.
+    fn app_token_task(&self, bearer: Option<&str>) -> Option<TaskId> {
+        let bearer = bearer.filter(|b| b.starts_with(app_grant::TOKEN_PREFIX))?;
+        self.ledger().app_token(bearer).map(|(task, _)| task)
     }
 
     /// `peer` is the TCP peer. None: refused.
@@ -871,8 +892,9 @@ impl App {
         // process can still connect directly, as without Access.)
         let peer = peer.to_canonical();
         let full = |t: &String| bearer_from(headers) == Some(t.as_str());
-        let direct =
-            peer.is_loopback() || (private_net(peer) && self.token.as_ref().is_some_and(full));
+        let app_task = self.app_token_task(bearer_from(headers));
+        let direct = peer.is_loopback()
+            || (private_net(peer) && (self.token.as_ref().is_some_and(full) || app_task.is_some()));
         if matches!(access, Access::Failed) && (!direct || via_cloudflare(headers)) {
             return None;
         }
@@ -897,8 +919,9 @@ impl App {
         let listed = |tokens: &[String]| bearer.is_some_and(|b| tokens.iter().any(|t| t == b));
         let scope = match &self.token {
             None => Scope::Full,
-            // Before the Access login: that never upgrades a capture token.
+            // Before the Access login: that never upgrades a capture or app task token.
             Some(_) if listed(&self.capture_tokens) => Scope::Capture,
+            Some(_) if app_task.is_some() => Scope::AppTask(app_task.expect("checked")),
             Some(t) if passed || bearer == Some(t.as_str()) => Scope::Full,
             Some(_) if listed(&self.read_tokens) => Scope::Read,
             Some(_) => return None,
@@ -1462,7 +1485,9 @@ async fn capture(
         .await
     {
         Some(Scope::Full | Scope::Capture) => {}
-        Some(Scope::Read) | None => return StatusCode::UNAUTHORIZED.into_response(),
+        Some(Scope::Read | Scope::AppTask(_)) | None => {
+            return StatusCode::UNAUTHORIZED.into_response()
+        }
     }
     let Some(inbox) = app.captures.clone() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "captures are off").into_response();
@@ -1671,9 +1696,17 @@ async fn new_app_task(
         Ok(s) => s.apps.repo,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
+    // Who asked owns the app it creates: an Access login's email, else no one but the MIS.
+    let requester = match app.access_check(&headers, Route::Other).await {
+        Access::Passed(id) => Some(id.subject),
+        _ => None,
+    };
+    let requester = requester
+        .filter(|e| app_access::set_member(Default::default(), e, Some(AppRole::Owner)).is_ok());
+    let bound = app_tasks::binding(&t, requester);
     let model = t.model.filter(|m| !m.trim().is_empty());
     app.transition(
-        |l| match l.submit_app_task(prompt, repo, t.harness, model, t.worker) {
+        |l| match l.submit_app_task(prompt, repo, t.harness, model, t.worker, bound) {
             Ok((task, effects)) => (
                 (
                     StatusCode::CREATED,
@@ -1735,7 +1768,8 @@ async fn set_settings(
 }
 
 /// A `.tar.gz` bundle (raw body) as `slug`'s next release; `?activate=true` makes it live.
-/// Replies 201 `{"release": n}`. Full scope only.
+/// Replies 201 `{"release": n}`. Full scope, or a running app task's token within its
+/// binding ([`app_grant::publish`]): 403 outside it, 409 creating an app that exists.
 async fn publish_app(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -1744,9 +1778,14 @@ async fn publish_app(
     Params(params): Params<PublishParams>,
     body: axum::body::Body,
 ) -> Response {
-    if let Err(refused) = app.admit_full(&headers, peer, "/api/apps").await {
-        return refused.into_response();
-    }
+    let task = match (app.admit_route(&headers, peer, "/api/apps", Route::AppPublish)).await {
+        Some(Scope::Full) => None,
+        Some(Scope::AppTask(task)) => Some(task),
+        Some(Scope::Read | Scope::Capture) => {
+            return (StatusCode::FORBIDDEN, "read-only token").into_response()
+        }
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
     let Some(apps) = app.apps.clone() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1762,13 +1801,41 @@ async fn publish_app(
         let why = format!("bundles are limited to {} MiB", apps::MAX_BYTES >> 20);
         return (StatusCode::PAYLOAD_TOO_LARGE, why).into_response();
     };
+    // An app task creates at most one app: creates wait their turn, and each re-reads the
+    // binding the one before may have bound.
+    let _creating = match task {
+        Some(_) => Some(app.creating.clone().lock_owned().await),
+        None => None,
+    };
+    let target = match task.map(|t| app.ledger().app_binding(t)) {
+        None => apps::Target::Any,
+        Some(None) => return StatusCode::UNAUTHORIZED.into_response(),
+        Some(Some(b)) => match app_grant::publish(&b, &slug, params.activate) {
+            Ok(app_grant::Publish::Existing) => apps::Target::Existing,
+            Ok(app_grant::Publish::Create { owner }) => apps::Target::New { owner },
+            Err(why) => return (StatusCode::FORBIDDEN, why).into_response(),
+        },
+    };
+    let creates = matches!(target, apps::Target::New { .. });
     let at = unix_ms();
+    let (to, activate) = (slug.clone(), params.activate);
     let published = tokio::task::spawn_blocking(move || {
         let bundle = apps::unpack(&bytes).map_err(|why| (StatusCode::BAD_REQUEST, why))?;
-        let n = apps.publish(&slug, &bundle, at, params.activate);
-        n.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))
+        let n = apps.publish_to(&to, &bundle, at, activate, target);
+        n.map_err(|e| match e {
+            apps::PublishError::NoSuchApp => (StatusCode::NOT_FOUND, "no such app".into()),
+            apps::PublishError::Exists => (
+                StatusCode::CONFLICT,
+                format!("{to} exists: this task makes a new app; pick another name"),
+            ),
+            apps::PublishError::Io(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+        })
     });
-    match published.await.expect("publish doesn't panic") {
+    let published = published.await.expect("publish doesn't panic");
+    if let (Ok(_), Some(task), true) = (&published, task, creates) {
+        app.ledger().app_created(task, &slug);
+    }
+    match published {
         Ok(n) => (
             StatusCode::CREATED,
             Json(serde_json::json!({ "release": n })),

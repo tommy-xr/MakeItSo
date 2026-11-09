@@ -61,6 +61,8 @@ pub struct RunOpts<'a> {
     /// Deny the usual ways around `merge_pr` (see `claude::NO_MERGE`): a live
     /// routine run. Codex ignores it, as it has no deny rules; its prompt says so.
     pub no_merge: bool,
+    /// Extra environment for the agent process, e.g. an app task's `MIS_TOKEN`.
+    pub env: &'a [(&'a str, &'a str)],
 }
 
 pub trait Agent: Send + Sync {

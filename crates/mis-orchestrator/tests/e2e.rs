@@ -2439,6 +2439,7 @@ async fn attached_image_reaches_the_agent_as_a_file() {
     let OrchMsg::Assign {
         task: assigned,
         images,
+        ..
     } = recv(&mut worker).await
     else {
         panic!()
@@ -5448,4 +5449,181 @@ async fn writes_during_a_restore_are_kept_or_backed_up_never_lost() {
     assert_eq!([before.clone(), after].concat(), all);
     assert!(before.len() >= 10);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Start an app task (`body`, with `headers`) and take its assignment: task and token.
+async fn app_task(
+    base: &str,
+    worker: &mut Ws,
+    headers: &[(&str, &str)],
+    body: serde_json::Value,
+) -> (Task, String) {
+    let body = Some((
+        "application/json".to_string(),
+        body.to_string().into_bytes(),
+    ));
+    let (status, reply) = call(base, "POST", "/api/apps/tasks", headers, body).await;
+    assert_eq!(status, 201, "{reply}");
+    let OrchMsg::Assign { task, token, .. } = recv(worker).await else {
+        panic!("assign")
+    };
+    (task, token.expect("an app task carries a token"))
+}
+
+/// End `task` on `worker` as done, in session `sess`; returns once its token is refused.
+async fn finish_app_task(mis: &str, worker: &mut Ws, task: TaskId, token: &str) {
+    for event in [
+        AgentEvent::Started {
+            session: Some("sess".into()),
+            model: None,
+        },
+        AgentEvent::Finished {
+            ok: true,
+            summary: None,
+        },
+    ] {
+        send(worker, &WorkerMsg::Event { task, event }).await;
+    }
+    for _ in 0..100 {
+        if publish(mis, "/api/apps/pool/releases", token, &demo("x"))
+            .await
+            .0
+            == 401
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the token outlived its task");
+}
+
+#[tokio::test]
+async fn a_change_task_token_stages_only_its_app_until_the_task_ends() {
+    let (mis, _, dir) = start_with_apps(with_read_token()).await;
+    for slug in ["pool", "budget"] {
+        let path = format!("/api/apps/{slug}/releases");
+        assert_eq!(publish(&mis, &path, "s", &demo("v1")).await.0, 201);
+    }
+    let (_, mut worker) = join_as(&mis).await;
+    let change = serde_json::json!({"request": "Add a chart.", "slug": "pool", "change": true,
+        "harness": "claude"});
+    let auth = [("authorization", "Bearer s")];
+    let (task, token) = app_task(&mis, &mut worker, &auth, change).await;
+
+    // Its app, staged: yes. Live, another app, or any other route: no.
+    let (status, body) = publish(&mis, "/api/apps/pool/releases", &token, &demo("v2")).await;
+    assert_eq!((status, body.as_str()), (201, r#"{"release":2}"#));
+    let live = "/api/apps/pool/releases?activate=true";
+    let (status, why) = publish(&mis, live, &token, &demo("v3")).await;
+    assert!(status == 403 && why.contains("owner"), "{status} {why}");
+    let (status, why) = publish(&mis, "/api/apps/budget/releases", &token, &demo("v2")).await;
+    assert!(status == 403 && why.contains("pool"), "{status} {why}");
+    let bearer = format!("Bearer {token}");
+    refused_everywhere_else(&mis, &[("authorization", bearer.as_str())]).await;
+    let (status, _) = post_json(&mis, "/api/apps/pool/activate", &token, r#"{"release":2}"#).await;
+    assert_eq!(status, 401);
+    let (_, list) = get_json(&mis, "/api/apps", "s").await;
+    let list: Vec<AppView> = serde_json::from_str(&list).unwrap();
+    let pool = list.iter().find(|a| a.slug == "pool").unwrap();
+    assert_eq!((pool.active, pool.releases.len()), (None, 2));
+
+    // Ended: refused. A reply gets a token of its own, bound the same way.
+    finish_app_task(&mis, &mut worker, task.id, &token).await;
+    let (mut client, _) = connect_async(client_req(&mis, &[("authorization", "Bearer s")]))
+        .await
+        .unwrap();
+    reply(&mut client, task.id, "Bigger.").await;
+    let OrchMsg::Assign {
+        token: Some(again), ..
+    } = recv(&mut worker).await
+    else {
+        panic!("assign with a token")
+    };
+    assert_ne!(again, token);
+    assert_eq!(
+        publish(&mis, "/api/apps/pool/releases", &again, &demo("v3"))
+            .await
+            .0,
+        201
+    );
+    assert_eq!(
+        publish(&mis, "/api/apps/budget/releases", &again, &demo("v3"))
+            .await
+            .0,
+        403
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_new_app_task_token_creates_one_app_owned_by_whoever_asked() {
+    let (mis, _, dir) = start_with_apps(behind_access()).await;
+    assert_eq!(
+        publish(&mis, "/api/apps/pool/releases", "s", &demo("v1"))
+            .await
+            .0,
+        201
+    );
+    let (_, mut worker) = join_as(&mis).await;
+    let jwt = access_jwt_for(ACCESS_AUD, "Me@Example.com");
+    let new = serde_json::json!({"request": "Chores.", "harness": "claude"});
+    let (_, token) = app_task(
+        &mis,
+        &mut worker,
+        &[("cf-access-jwt-assertion", jwt.as_str())],
+        new,
+    )
+    .await;
+
+    // Not over an app that exists; one new one, then only that one.
+    let (status, why) = publish(&mis, "/api/apps/pool/releases", &token, &demo("x")).await;
+    assert!(
+        status == 409 && why.contains("pool exists"),
+        "{status} {why}"
+    );
+    let (status, body) = publish(&mis, "/api/apps/chores/releases", &token, &demo("v1")).await;
+    assert_eq!((status, body.as_str()), (201, r#"{"release":1}"#));
+    let (status, why) = publish(&mis, "/api/apps/dishes/releases", &token, &demo("v1")).await;
+    assert!(status == 403 && why.contains("chores"), "{status} {why}");
+    let (status, body) = publish(&mis, "/api/apps/chores/releases", &token, &demo("v2")).await;
+    assert_eq!((status, body.as_str()), (201, r#"{"release":2}"#));
+
+    let (_, list) = get_json(&mis, "/api/apps", "s").await;
+    let list: Vec<AppView> = serde_json::from_str(&list).unwrap();
+    let chores = list.iter().find(|a| a.slug == "chores").unwrap();
+    assert_eq!(chores.active, None);
+    let owner = AppMember {
+        email: "me@example.com".into(),
+        role: AppRole::Owner,
+    };
+    assert_eq!(chores.members, vec![owner]);
+    assert!(!list.iter().any(|a| a.slug == "dishes"));
+
+    // Asked with the full token, not a login: the new app is shared with no one.
+    let new = serde_json::json!({"request": "Dishes.", "slug": "dishes", "harness": "claude"});
+    let auth = [("authorization", "Bearer s")];
+    // The worker is busy with the first: a second worker takes it.
+    let (_, mut second) = join_as(&mis).await;
+    let (_, token) = app_task(&mis, &mut second, &auth, new).await;
+    assert_eq!(
+        publish(&mis, "/api/apps/chores/releases", &token, &demo("x"))
+            .await
+            .0,
+        403
+    );
+    assert_eq!(
+        publish(&mis, "/api/apps/dishes/releases", &token, &demo("v1"))
+            .await
+            .0,
+        201
+    );
+    let (_, list) = get_json(&mis, "/api/apps", "s").await;
+    let list: Vec<AppView> = serde_json::from_str(&list).unwrap();
+    assert!(list
+        .iter()
+        .find(|a| a.slug == "dishes")
+        .unwrap()
+        .members
+        .is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
 }

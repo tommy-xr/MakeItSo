@@ -8,7 +8,7 @@ use std::time::Duration;
 use mis_types::*;
 use uuid::Uuid;
 
-use crate::{note, plan, routine, summary};
+use crate::{app_grant, note, plan, routine, summary};
 
 mod alerts;
 pub mod persist;
@@ -29,11 +29,12 @@ pub enum Effect {
         conn: ConnId,
         msg: OrchMsg,
     },
-    /// Send `OrchMsg::Assign` for `task` with these images' bytes.
+    /// Send `OrchMsg::Assign` for `task` with these images' bytes and its app token.
     Assign {
         conn: ConnId,
         task: Task,
         images: Vec<Uuid>,
+        token: Option<String>,
     },
     Broadcast(ServerMsg),
     /// Worker went offline; call `expire(wid, generation)` after the grace period.
@@ -237,6 +238,12 @@ struct TaskEntry {
     /// Builds or changes an app (`submit_app_task`): it and replies in its thread never merge.
     #[serde(default)]
     app: bool,
+    /// The app its thread works on, which its `token` may stage releases of.
+    #[serde(default)]
+    bound: Option<app_grant::Binding>,
+    /// Its agent's credential (`MIS_TOKEN`) while it hasn't finished. Each task its own.
+    #[serde(default)]
+    token: Option<String>,
 }
 
 /// A message delivered into an open session, followed in its worker's live sessions
@@ -320,6 +327,8 @@ impl TaskEntry {
             routine_mode: None,
             delivery: None,
             app: false,
+            bound: None,
+            token: None,
         }
     }
 
@@ -726,7 +735,8 @@ impl Ledger {
     }
 
     /// Queue an app task: `prompt` as is (no planner), in `cwd` on `harness`, on `worker`
-    /// only if given. It never merges: the user approves its PR. Err if no worker runs
+    /// only if given, bound to `bound`'s app (its `thread` becomes this task) with a token
+    /// of its own. It never merges: the user approves its PR. Err if no worker runs
     /// `harness` (it would wait for good), or `worker` is offline or doesn't run it.
     pub fn submit_app_task(
         &mut self,
@@ -735,6 +745,7 @@ impl Ledger {
         harness: String,
         model: Option<String>,
         worker: Option<WorkerId>,
+        bound: app_grant::Binding,
     ) -> Result<(TaskId, Vec<Effect>), String> {
         if worker.is_none() && !self.known_fleet().contains_key(&harness) {
             return Err(format!("no worker runs {harness:?}"));
@@ -751,14 +762,44 @@ impl Ledger {
             diff_base: None,
             merge: MergeRule::Never,
         };
-        let (id, mut effects) = match worker {
-            Some(wid) => self.enqueue_pinned(wid, task, vec![])?,
-            None => self.enqueue(TaskEntry::new(task, self.now_ms)),
+        let id = task.id;
+        let mut entry = TaskEntry::new(task, self.now_ms);
+        (entry.app, entry.token) = (true, Some(app_grant::mint()));
+        entry.bound = Some(app_grant::Binding {
+            thread: id,
+            ..bound
+        });
+        let mut effects = match worker {
+            Some(wid) => self.enqueue_entry_pinned(wid, entry)?.1,
+            None => self.enqueue(entry).1,
         };
-        let t = self.tasks.iter_mut().find(|t| t.task.id == id);
-        t.expect("just added").app = true;
         effects.push(Effect::Broadcast(self.status()));
         Ok((id, effects))
+    }
+
+    /// The unfinished app task whose token is `token`, and its thread's binding.
+    pub fn app_token(&self, token: &str) -> Option<(TaskId, app_grant::Binding)> {
+        let t = (self.tasks.iter()).find(|t| t.token.as_deref() == Some(token))?;
+        Some((t.task.id, self.app_binding(t.task.id)?))
+    }
+
+    /// `task`'s thread's binding, while it hasn't finished.
+    pub fn app_binding(&self, task: TaskId) -> Option<app_grant::Binding> {
+        let t = self.tasks.iter().find(|t| t.task.id == task)?;
+        t.bound.clone().filter(|_| !t.status.finished())
+    }
+
+    /// `task`'s thread created app `slug`: every task in it is bound to that app now.
+    pub fn app_created(&mut self, task: TaskId, slug: &str) {
+        let thread = self.tasks.iter().find(|t| t.task.id == task);
+        let Some(thread) = thread.and_then(|t| t.bound.as_ref()).map(|b| b.thread) else {
+            return;
+        };
+        for b in (self.tasks.iter_mut()).filter_map(|t| t.bound.as_mut()) {
+            if b.thread == thread {
+                *b = app_grant::created(b.clone(), slug);
+            }
+        }
     }
 
     /// Add `entry` to the queue and hand out what can run now.
@@ -805,6 +846,16 @@ impl Ledger {
         let by_planner = p.task.harness == "planner" || p.task.harness.is_empty();
         // An app task's thread stays one: its replies never merge either (the user approves the PR).
         let app = p.app;
+        // Its own token, for the app the thread is bound to.
+        let now_ms = self.now_ms;
+        let bound = p.bound.clone();
+        let entry = |task: Task, images: Vec<Uuid>| {
+            let mut e = TaskEntry::new(task, now_ms);
+            e.images = images;
+            e.token = bound.as_ref().map(|_| app_grant::mint());
+            e.bound = bound.clone();
+            e
+        };
         let merge = if app {
             MergeRule::Never
         } else {
@@ -825,7 +876,7 @@ impl Ledger {
                         .or_else(|| p.task.diff_base.clone()),
                     ..p.task.clone()
                 };
-                self.enqueue_pinned(wid, task, images)
+                self.enqueue_entry_pinned(wid, entry(task, images))
                     .map_err(|why| format!("{why}; task {short}'s session lives there"))?
             }
             // No session to resume: a fresh app task on the same harness and machine. It carries the
@@ -856,12 +907,8 @@ impl Ledger {
                     ..p.task.clone()
                 };
                 match p.pin {
-                    Some(wid) => self.enqueue_pinned(wid, task, images)?,
-                    None => {
-                        let mut entry = TaskEntry::new(task, self.now_ms);
-                        entry.images = images;
-                        self.enqueue(entry)
-                    }
+                    Some(wid) => self.enqueue_entry_pinned(wid, entry(task, images))?,
+                    None => self.enqueue(entry(task, images)),
                 }
             }
             _ => {
@@ -918,15 +965,27 @@ impl Ledger {
         task: Task,
         images: Vec<Uuid>,
     ) -> Result<(TaskId, Vec<Effect>), String> {
+        let mut entry = TaskEntry::new(task, self.now_ms);
+        entry.images = images;
+        self.enqueue_entry_pinned(wid, entry)
+    }
+
+    /// [`Self::enqueue_pinned`] for a built entry.
+    fn enqueue_entry_pinned(
+        &mut self,
+        wid: WorkerId,
+        mut entry: TaskEntry,
+    ) -> Result<(TaskId, Vec<Effect>), String> {
         let host = &wid.to_string()[..8];
         let w = (self.workers.get(&wid).filter(|w| w.conn.is_some()))
             .ok_or_else(|| format!("worker {host} is offline"))?;
-        if !w.info.harnesses.contains(&task.harness) {
-            return Err(format!("worker {host} no longer runs {}", task.harness));
+        if !w.info.harnesses.contains(&entry.task.harness) {
+            return Err(format!(
+                "worker {host} no longer runs {}",
+                entry.task.harness
+            ));
         }
-        let mut entry = TaskEntry::new(task, self.now_ms);
         entry.pin = Some(wid);
-        entry.images = images;
         Ok(self.enqueue(entry))
     }
 
@@ -1775,6 +1834,7 @@ impl Ledger {
                         conn,
                         task: t.task.clone(),
                         images: t.images.clone(),
+                        token: t.token.clone(),
                     });
                 }
                 None => remaining.push_back(id),
@@ -1888,15 +1948,98 @@ mod tests {
         workers.into_iter().find(|w| w.id == wid).unwrap()
     }
 
+    /// A `+ App` binding whose slug the agent picks.
+    fn new_app() -> app_grant::Binding {
+        app_grant::Binding {
+            thread: Uuid::nil(),
+            slug: None,
+            create: true,
+            requester: Some("me@example.com".into()),
+        }
+    }
+
+    #[test]
+    fn app_tasks_hold_a_token_until_they_end_and_replies_get_their_own() {
+        let mut l = Ledger::default();
+        let wid = Uuid::new_v4();
+        l.connect(wid, info(), &[], 1, T0);
+        let (app, eff) = (l.submit_app_task(
+            "p".into(),
+            "~/a".into(),
+            "claude".into(),
+            None,
+            None,
+            new_app(),
+        ))
+        .unwrap();
+        let token = |l: &Ledger, id| {
+            l.tasks
+                .iter()
+                .find(|t| t.task.id == id)
+                .unwrap()
+                .token
+                .clone()
+                .unwrap()
+        };
+        let first = token(&l, app);
+        // It goes to the worker with the task; the binding's thread is the task.
+        assert!(eff
+            .iter()
+            .any(|e| matches!(e, Effect::Assign { token: Some(t), .. } if *t == first)));
+        let (id, bound) = l.app_token(&first).unwrap();
+        assert_eq!((id, bound.thread, bound.create), (app, app, true));
+        assert_eq!(l.app_token("mis-app-nope"), None);
+
+        l.app_created(app, "chores");
+        let bound = l.app_token(&first).unwrap().1;
+        assert_eq!(
+            (bound.slug.as_deref(), bound.create),
+            (Some("chores"), false)
+        );
+        // Ended: the token stops working. A reply gets its own, bound to the app created.
+        let t = l.tasks.iter_mut().find(|t| t.task.id == app).unwrap();
+        (t.status, t.session, t.worker) = (TaskStatus::Done, Some("s".into()), Some(wid));
+        assert_eq!(l.app_token(&first), None);
+        let (reply, eff) = l.reply(app, "add a chart".into(), vec![], false).unwrap();
+        let second = token(&l, reply);
+        assert_ne!(second, first);
+        assert!(eff
+            .iter()
+            .any(|e| matches!(e, Effect::Assign { token: Some(t), .. } if *t == second)));
+        let (id, bound) = l.app_token(&second).unwrap();
+        assert_eq!(
+            (id, bound.thread, bound.slug.as_deref()),
+            (reply, app, Some("chores"))
+        );
+        // Other tasks hold none.
+        let (plain, eff) = l.submit("hi".into(), None, Some("claude".into()), None, vec![]);
+        assert!(l
+            .tasks
+            .iter()
+            .find(|t| t.task.id == plain)
+            .unwrap()
+            .token
+            .is_none());
+        assert!(!eff
+            .iter()
+            .any(|e| matches!(e, Effect::Assign { token: Some(_), .. })));
+    }
+
     #[test]
     fn replies_to_an_app_task_never_merge_either() {
         let mut l = Ledger::default();
         let wid = Uuid::new_v4();
         l.connect(wid, info(), &[], 1, T0);
         let prompt = format!("Build it.\n{}", "guide ".repeat(2_000));
-        let (app, _) =
-            (l.submit_app_task(prompt.clone(), "~/apps".into(), "claude".into(), None, None))
-                .unwrap();
+        let (app, _) = (l.submit_app_task(
+            prompt.clone(),
+            "~/apps".into(),
+            "claude".into(),
+            None,
+            None,
+            new_app(),
+        ))
+        .unwrap();
         let finish = |l: &mut Ledger, id, session: Option<&str>| {
             let t = l.tasks.iter_mut().find(|t| t.task.id == id).unwrap();
             (t.status, t.session, t.worker) =
@@ -1932,6 +2075,7 @@ mod tests {
                 "claude".into(),
                 None,
                 Some(wid),
+                new_app(),
             )
             .unwrap();
         finish(&mut l, other, None);

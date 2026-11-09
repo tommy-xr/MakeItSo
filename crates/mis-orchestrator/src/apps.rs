@@ -283,6 +283,26 @@ pub enum ActivateError {
     Io(String),
 }
 
+/// Which apps a publish may write: any (the full token), or an app task's (see
+/// [`crate::app_grant`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Target {
+    Any,
+    /// An app that has a release already.
+    Existing,
+    /// An app that has none yet, shared with only `owner` (an email) as owner.
+    New {
+        owner: Option<String>,
+    },
+}
+
+#[derive(Debug)]
+pub enum PublishError {
+    NoSuchApp,
+    Exists,
+    Io(anyhow::Error),
+}
+
 #[derive(Debug, PartialEq)]
 pub enum MemberError {
     NoSuchApp,
@@ -340,26 +360,72 @@ impl Apps {
         at: u64,
         activate: bool,
     ) -> anyhow::Result<u32> {
+        (self.publish_to(slug, bundle, at, activate, Target::Any)).map_err(|e| match e {
+            PublishError::Io(e) => e,
+            other => anyhow::anyhow!("{other:?}"),
+        })
+    }
+
+    /// [`Self::publish`] into `target` only; a new app's policy is written first.
+    pub fn publish_to(
+        &self,
+        slug: &str,
+        bundle: &Bundle,
+        at: u64,
+        activate: bool,
+        target: Target,
+    ) -> Result<u32, PublishError> {
         let releases = self.releases_dir(slug);
-        crate::images::private_dir(&releases)?;
+        crate::images::private_dir(&releases).map_err(PublishError::Io)?;
         let tmp = releases.join(format!(".tmp-{}", uuid::Uuid::new_v4()));
-        let written = write_release(&tmp, bundle, at);
+        let written = write_release(&tmp, bundle, at).map_err(PublishError::Io);
         let n = written.and_then(|()| {
             let _held = self.lock.lock().unwrap();
-            let n = next_release(self.release_ns(slug));
-            if activate {
-                self.pre_activation(slug, n, at)?;
+            let ns = self.release_ns(slug);
+            match (&target, ns.is_empty()) {
+                (Target::Existing, true) => return Err(PublishError::NoSuchApp),
+                (Target::New { .. }, false) => return Err(PublishError::Exists),
+                (Target::New { owner }, true) => self.new_policy(slug, owner.as_deref())?,
+                _ => {}
             }
-            std::fs::rename(&tmp, releases.join(n.to_string()))?;
-            if activate {
-                self.write_active(slug, n)?;
-            }
-            Ok(n)
+            self.release(slug, &tmp, next_release(ns), at, activate)
+                .map_err(PublishError::Io)
         });
         if n.is_err() {
             let _ = std::fs::remove_dir_all(&tmp);
         }
         n
+    }
+
+    /// A new app's `policy.json`: `owner` alone, or no one; whatever an earlier one said.
+    fn new_policy(&self, slug: &str, owner: Option<&str>) -> Result<(), PublishError> {
+        let policy = match owner {
+            Some(o) => app_access::set_member(Policy::default(), o, Some(AppRole::Owner))
+                .map_err(|e| PublishError::Io(anyhow::anyhow!(e)))?,
+            None => Policy::default(),
+        };
+        let json = serde_json::to_vec_pretty(&policy).expect("policy serializes");
+        crate::push::write_private(&self.dir.join(slug).join(POLICY), &json)
+            .map_err(|e| PublishError::Io(e.into()))
+    }
+
+    /// Rename `tmp` into place as release `n` (lock held), making it live if `activate`.
+    fn release(
+        &self,
+        slug: &str,
+        tmp: &Path,
+        n: u32,
+        at: u64,
+        activate: bool,
+    ) -> anyhow::Result<u32> {
+        if activate {
+            self.pre_activation(slug, n, at)?;
+        }
+        std::fs::rename(tmp, self.releases_dir(slug).join(n.to_string()))?;
+        if activate {
+            self.write_active(slug, n)?;
+        }
+        Ok(n)
     }
 
     /// Make release `n` of `slug` the live one, at Unix millis `at`.

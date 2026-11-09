@@ -19,16 +19,26 @@ live. Nothing you do goes live.
 2. New app: from the worktree's root, `mis apps new <slug>` (copies `apps/_template`, puts the
    SDK in `sdk/`; slug: `a-z 0-9 -`, up to 32), then `cd apps/<slug> && npm install`. Read its
    README. A change: work in `apps/<slug>/`; `npm run sdk` refreshes `sdk/`.
-3. Replace the template's sample `items` with the app's own model and screens: pure logic in
-   `src/domain/` with vitest tests in `tests/`, screens in `src/ui/`, state over the SDK in
-   `src/store.ts`, invented sample data in `src/mock-seed.ts`. Update the app's README (data
-   model, commands).
-4. `npm test && npm run build && npm run shots` until all pass (see Verify).
+3. Replace the template's sample `items` with the app's own model and screens (see Layout).
+   Update the app's README (data model, commands).
+4. `npm run verify` until it passes (see Verify), looking at every shot it writes.
 5. `mis apps publish <slug> dist`: a new staged release on the live orchestrator, the one write
-   to it you may make. Never `--activate` there, and never `activate`, `share`, `unshare` or
-   `restore`. If it is refused (no token), say so and leave publishing to the owner.
+   to it you may make. Your env holds `MIS_URL` and a `MIS_TOKEN` for this task only: it stages
+   releases of this task's app (a new app: it creates exactly one, under the slug you
+   publish first, owned by whoever asked) and nothing else, and stops working when the task
+   ends. Never `--activate`. If it is refused, say why and leave publishing to the owner.
 6. Commit (`feat: …`/`fix: …`), push the branch, open a PR in mis-notes (see PR).
 7. Report the PR URL, the release number and what the owner should try before making it live.
+
+## Layout: functional core, thin shell
+
+- `src/domain/*.ts`: every rule the app has (parsing, validation, totals, schedules, what a
+  screen shows), as pure functions of plain data: no SDK, DOM, clock or randomness (pass `now`
+  and ids in). Each has vitest tests in `tests/`; a bug fix starts as a failing one.
+- `src/store.ts`: the only code that calls the SDK; `src/ui/`: React components that render
+  what domain functions return and call the store. Keep both thin: logic in either moves to
+  `src/domain/`.
+- `src/mock-seed.ts`: invented sample data for mock mode and shots.
 
 ## SDK
 
@@ -67,12 +77,15 @@ own page.
 
 ## Verify
 
-- `npm test`, `npm run build` (type-check + `dist/`).
-- `npm run shots`: serves `dist/` in mock mode (`?mock=1`, in memory) with the listener's CSP,
-  screenshots every screen at 390 px light and dark into `shots/` (gitignored), and fails on
-  console errors, CSP violations and HTTP errors. It needs Chrome or
-  `npx playwright install chromium`. Extend `scripts/shots.mjs` for each new screen and flow,
-  including the viewer UI (`&role=viewer`).
+`npm run verify` must pass before any publish or PR: type-check, vitest, build, then a
+Playwright smoke in mock mode (`?mock=1`, in memory, the listener's CSP) that drives every
+screen and flow at 390 px light and dark, writes screenshots to `shots/` (gitignored) and fails
+on console errors, CSP violations and HTTP errors. It needs Chrome or
+`npx playwright install chromium`.
+
+- Playwright is your eyes: open the shots and look at them after every change, as the owner
+  would on a phone; fix what looks wrong even when verify passes.
+- Extend the smoke for each new screen and flow, including the viewer UI (`&role=viewer`).
 - Against a real orchestrator only on a throwaway one: clean env, temp state dir AND temp
   routines dir (the default routines dir is the owner's real one), ports of its own, no updates:
 
