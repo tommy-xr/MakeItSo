@@ -35,8 +35,8 @@ The prompt each run gets.
 - One `key: value` per line; quotes optional; ` #` starts a comment; lists are `[a, b]` (no
   `- item` lines, no commas inside quotes). Only `merge:` takes indented keys. Unknown or
   repeated keys, or an empty prompt, make the file bad.
-- `cwd`: absolute or relative to the worker's first root, either way under one of its roots;
-  no `~`. A bad one fails each run.
+- `cwd`: absolute, `~/…` (the worker's home) or relative to the worker's first root, any way
+  under one of its roots. A bad one fails each run.
 - `paused`: Pause or Resume in the Routines view overrides the file's value from then on.
 - `every`: `<n>m`, `<n>h` or `<n>d`, at least 1m, counted from the last run; the first run is
   as soon as MIS sees the file, so write new files with `paused: true` and let the owner resume.

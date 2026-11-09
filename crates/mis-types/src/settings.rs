@@ -15,7 +15,7 @@ pub struct AppSettings {
     pub harness: String,
     /// A CLI alias (`opus`) follows the newest model.
     pub model: String,
-    /// The apps repo's checkout on the worker: the tasks' folder.
+    /// The apps repo's checkout on the worker: the tasks' folder. `~/` is the worker's home.
     pub repo: String,
 }
 
