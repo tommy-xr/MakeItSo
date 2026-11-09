@@ -1841,8 +1841,10 @@ function taskRows(ul, rows) {
   if (!rows.length) ul.append(el('li', { className: 'dim' }, 'No tasks yet'));
 }
 
-// A routine run's own prompt, past the paragraph of rules the orchestrator puts first.
-const promptOf = (t) => (t.routine ? t.prompt.split('\n\n').slice(1).join('\n\n') || t.prompt : t.prompt);
+// A routine run's own prompt, past the paragraph of rules the orchestrator puts first; an app task's, less the apps
+// guide it carries (up to a reply's earlier answer).
+const promptOf = (t) => (t.routine ? t.prompt.split('\n\n').slice(1).join('\n\n') || t.prompt : t.prompt)
+  .replace(/\n\n---\nname: apps\n[\s\S]*?(?=\n\nEarlier answer:\n|$)/, '\n\n(+ the apps guide: mis guide apps)');
 // A routine run's row: `↻ <routine> · `, the mode it ran in, then its own prompt.
 const routineHead = (t) => (t.routine ? [`↻ ${t.routine} · `, modeChip(t.routine_mode), promptOf(t)] : [t.prompt]);
 const modeChip = (m) => (m ? el('span', { className: `chip mode-${m}` }, cap(m.replace('_', ' '))) : '');

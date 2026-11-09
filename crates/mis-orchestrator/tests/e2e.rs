@@ -3430,7 +3430,7 @@ async fn join_as(base: &str) -> (WorkerId, Ws) {
 }
 
 #[tokio::test]
-async fn new_app_task_runs_the_apps_guide_in_the_settings_repo() {
+async fn new_app_task_runs_the_apps_guide_in_the_settings_repo_and_its_replies_never_merge() {
     let dir = std::env::temp_dir().join(format!("mis-e2e-app-task-{}", uuid::Uuid::new_v4()));
     let base = start_app(with_read_token().with_ledger_dir(dir.clone())).await;
     let mut s = Settings::default();
@@ -3442,10 +3442,10 @@ async fn new_app_task_runs_the_apps_guide_in_the_settings_repo() {
     let body =
         r#"{"request":"Track pool chlorine.","slug":"pool","harness":"claude","model":"opus"}"#;
     assert_eq!(post_json(&base, "/api/apps/tasks", "r", body).await.0, 403);
-    let (status, reply) = post_json(&base, "/api/apps/tasks", "s", body).await;
-    assert_eq!(status, 201, "{reply}");
+    let (status, created) = post_json(&base, "/api/apps/tasks", "s", body).await;
+    assert_eq!(status, 201, "{created}");
     let id: TaskId = serde_json::from_value(
-        serde_json::from_str::<serde_json::Value>(&reply).unwrap()["task"].clone(),
+        serde_json::from_str::<serde_json::Value>(&created).unwrap()["task"].clone(),
     )
     .unwrap();
     let OrchMsg::Assign { task, .. } = recv(&mut worker).await else {
@@ -3464,6 +3464,31 @@ async fn new_app_task_runs_the_apps_guide_in_the_settings_repo() {
         (task.harness.as_str(), task.model.as_deref()),
         ("claude", Some("opus"))
     );
+    assert_eq!(task.merge, MergeRule::Never);
+
+    // A reply in its thread resumes the session, and can't merge either.
+    let (mut client, _) = connect_async(client_req(&base, &[("authorization", "Bearer s")]))
+        .await
+        .unwrap();
+    send(&mut client, &ClientMsg::Subscribe).await;
+    for event in [
+        AgentEvent::Started {
+            session: Some("sess-1".into()),
+            model: None,
+        },
+        AgentEvent::Finished {
+            ok: true,
+            summary: Some("PR opened".into()),
+        },
+    ] {
+        send(&mut worker, &WorkerMsg::Event { task: id, event }).await;
+        let _: ServerMsg = recv(&mut client).await;
+    }
+    let again = reply(&mut client, id, "Looks good, merge it.").await;
+    let OrchMsg::Assign { task, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    assert_eq!((task.id, task.resume.as_deref()), (again, Some("sess-1")));
     assert_eq!(task.merge, MergeRule::Never);
 
     // A blank request or an unknown harness starts nothing.

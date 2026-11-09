@@ -234,6 +234,9 @@ struct TaskEntry {
     /// Its message is in its session (`TaskStatus::Delivered`).
     #[serde(default)]
     delivery: Option<Delivery>,
+    /// Builds or changes an app (`submit_app_task`): it and replies in its thread never merge.
+    #[serde(default)]
+    app: bool,
 }
 
 /// A message delivered into an open session, followed in its worker's live sessions
@@ -316,6 +319,7 @@ impl TaskEntry {
             routine: None,
             routine_mode: None,
             delivery: None,
+            app: false,
         }
     }
 
@@ -751,6 +755,8 @@ impl Ledger {
             Some(wid) => self.enqueue_pinned(wid, task, vec![])?,
             None => self.enqueue(TaskEntry::new(task, self.now_ms)),
         };
+        let t = self.tasks.iter_mut().find(|t| t.task.id == id);
+        t.expect("just added").app = true;
         effects.push(Effect::Broadcast(self.status()));
         Ok((id, effects))
     }
@@ -797,6 +803,11 @@ impl Ledger {
             return Err(format!("task {short} hasn't finished; reply once it has"));
         }
         let by_planner = p.task.harness == "planner" || p.task.harness.is_empty();
+        // An app task's thread stays one: its replies never merge either (the user approves the PR).
+        let (app, merge) = match p.app {
+            true => (true, MergeRule::Never),
+            false => (false, MergeRule::Any),
+        };
         let (id, effects) = match (&p.session, p.worker) {
             (Some(session), Some(wid)) if !by_planner => {
                 // A reply continues this task's session, in its folder.
@@ -806,7 +817,7 @@ impl Ledger {
                     resume: Some(session.clone()),
                     // The user replies: their worker's permissions, not the run's.
                     read_only: false,
-                    merge: MergeRule::Any,
+                    merge,
                     // The thread's changes add up from where it started.
                     diff_base: (p.diff_base.clone().map(Box::new))
                         .or_else(|| p.task.diff_base.clone()),
@@ -815,8 +826,22 @@ impl Ledger {
                 self.enqueue_pinned(wid, task, images)
                     .map_err(|why| format!("{why}; task {short}'s session lives there"))?
             }
+            // No session to resume: a fresh app task carrying the exchange, on the same harness.
+            _ if app => {
+                let task = Task {
+                    id: Uuid::new_v4(),
+                    prompt: reply_context(&p.task.prompt, p.summary.as_deref(), &text, true),
+                    resume: None,
+                    send_to: None,
+                    diff_base: None,
+                    ..p.task.clone()
+                };
+                let mut entry = TaskEntry::new(task, self.now_ms);
+                entry.images = images;
+                self.enqueue(entry)
+            }
             _ => {
-                let prompt = reply_context(&p.task.prompt, p.summary.as_deref(), &text);
+                let prompt = reply_context(&p.task.prompt, p.summary.as_deref(), &text, false);
                 let (harness, model) = match by_planner {
                     true => (None, None),
                     false => (Some(p.task.harness.clone()), p.task.model.clone()),
@@ -826,7 +851,8 @@ impl Ledger {
             }
         };
         let t = self.tasks.iter_mut().find(|t| t.task.id == id);
-        t.expect("just added").parent = Some(parent);
+        let t = t.expect("just added");
+        (t.parent, t.app) = (Some(parent), app);
         Ok((id, effects))
     }
 
@@ -1797,13 +1823,18 @@ impl Ledger {
 }
 
 /// Prompt for a reply that can't resume a session: the follow-up first (so
-/// lists show it), then the earlier exchange it follows.
-fn reply_context(prompt: &str, answer: Option<&str>, text: &str) -> String {
+/// lists show it), then the earlier exchange it follows. `whole` keeps the
+/// earlier request uncut (an app task's, which carries the apps guide).
+fn reply_context(prompt: &str, answer: Option<&str>, text: &str, whole: bool) -> String {
     let cut = |s: &str| summary::cut(s.trim(), MAX_CONTEXT_CHARS);
+    let request = if whole {
+        prompt.trim().to_string()
+    } else {
+        cut(prompt)
+    };
     format!(
-        "{text}\n\n---\nThis follows up an earlier request.\nEarlier request:\n{}\n\n\
+        "{text}\n\n---\nThis follows up an earlier request.\nEarlier request:\n{request}\n\n\
          Earlier answer:\n{}",
-        cut(prompt),
         cut(answer.unwrap_or("(none)"))
     )
 }
@@ -1831,6 +1862,49 @@ mod tests {
             panic!()
         };
         workers.into_iter().find(|w| w.id == wid).unwrap()
+    }
+
+    #[test]
+    fn replies_to_an_app_task_never_merge_either() {
+        let mut l = Ledger::default();
+        let wid = Uuid::new_v4();
+        l.connect(wid, info(), &[], 1, T0);
+        let prompt = format!("Build it.\n{}", "guide ".repeat(2_000));
+        let (app, _) =
+            (l.submit_app_task(prompt.clone(), "~/apps".into(), "claude".into(), None, None))
+                .unwrap();
+        let finish = |l: &mut Ledger, id, session: Option<&str>| {
+            let t = l.tasks.iter_mut().find(|t| t.task.id == id).unwrap();
+            (t.status, t.session, t.worker) =
+                (TaskStatus::Done, session.map(Into::into), Some(wid));
+        };
+        // Resuming its session, and a reply to that one without a session: a fresh task.
+        finish(&mut l, app, Some("s"));
+        let (resumed, _) = l.reply(app, "now merge it".into(), vec![], false).unwrap();
+        finish(&mut l, resumed, None);
+        let (fresh, _) = l
+            .reply(resumed, "merge it now".into(), vec![], false)
+            .unwrap();
+        for id in [resumed, fresh] {
+            let t = &l.tasks.iter().find(|t| t.task.id == id).unwrap();
+            assert!(t.app && t.task.merge == MergeRule::Never, "{id}");
+            let (cwd, harness) = (t.task.cwd.as_deref(), t.task.harness.as_str());
+            assert_eq!((cwd, harness), (Some("~/apps"), "claude"));
+        }
+        // A fresh reply carries the app task's whole request, guide included.
+        let (other, _) =
+            (l.submit_app_task(prompt.clone(), "~/apps".into(), "claude".into(), None, None))
+                .unwrap();
+        finish(&mut l, other, None);
+        let (fresh, _) = l.reply(other, "add a chart".into(), vec![], false).unwrap();
+        let fresh = &l.tasks.iter().find(|t| t.task.id == fresh).unwrap().task;
+        assert!(fresh.prompt.starts_with("add a chart") && fresh.prompt.contains(prompt.trim()));
+        // Other tasks' replies are the user's as before.
+        let (plain, _) = l.submit("hi".into(), None, Some("claude".into()), None, vec![]);
+        finish(&mut l, plain, Some("s2"));
+        let (r, _) = l.reply(plain, "merge".into(), vec![], false).unwrap();
+        let r = l.tasks.iter().find(|t| t.task.id == r).unwrap();
+        assert!(!r.app && r.task.merge == MergeRule::Any);
     }
 
     #[test]
