@@ -404,6 +404,10 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .draft { margin: .75rem 0 0; padding: .75rem; border-radius: .75rem; background: var(--bg); box-shadow: inset 3px 0 0 var(--accent); }
   .appr.draft { margin: 1rem 0; background: var(--card); }
   .draft .what, .appr.draft .what { margin: .25rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .875rem/1.45 var(--sans); }
+  /* A draft, live: the app itself, framed from its own origin (apps allow only this page to). */
+  .draft .preview { margin: .5rem 0 0; }
+  .draft .preview iframe { display: block; width: 100%; height: min(70svh, 44rem); border: 0; border-radius: .75rem; background: #fff; }
+  .draft .preview a { display: inline-block; margin-top: .25rem; font-size: .8125rem; color: var(--dim); }
   .draft .ba { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; margin: .5rem 0 0; }
   .draft figure { margin: 0; }
   .draft figure img { display: block; width: 100%; max-height: 14rem; object-fit: cover; object-position: top; border-radius: .5rem; background: var(--raised); box-shadow: 0 0 0 1px var(--raised); }
@@ -3728,7 +3732,7 @@ function appRow(a, now, alone) {
     el('div', { className: 'sub dim' }, ...dots([a.slug, a.active ? `v${a.active} live` : 'not live', plural(a.releases.length, 'release')])),
     ready ? el('div', { className: 'sub dim' }, `v${ready.n} ready · published `, appAge(ready.at, now)) : '',
     err ? el('div', { className: 'err bad' }, err) : '',
-    a.draft ? draftCard(a, false) : '',
+    a.draft ? draftCard(a, false, alone) : '',
     appFeedback(a, busy),
     actions, confirm, appMembers(a, busy));
 }
@@ -3768,7 +3772,8 @@ function askChanges(a) {
   location.hash = `#task/${a.draft.task}`;
   setTimeout(() => { const t = $('reply-text'); t.focus(); t.setSelectionRange(t.value.length, t.value.length); }, 0);
 }
-function draftCard(a, inTask) {
+// `preview`: the draft itself, framed (on its app's or its task's page).
+function draftCard(a, inTask, preview) {
   const d = a.draft, doing = draftBusy && draftBusy[0] === a.slug && draftBusy[1], busy = !!doing, err = draftErr.get(a.slug);
   // Its review: approved, it merges when it can, sending failures back to its task.
   const rv = a.review || { state: { state: 'open' } }, st = rv.state, merging = st.state === 'approved';
@@ -3791,16 +3796,31 @@ function draftCard(a, inTask) {
     : el('div', { className: 'row' },
       tryIt,
       merging ? '' : el('button', { type: 'button', disabled: busy, onclick: () => ask('publish') }, doing === 'publish' ? 'Publishing…' : publishAs),
-      d.task && !inTask ? el('button', { type: 'button', onclick: () => askChanges(a) }, 'Request changes') : '',
+      d.task && !inTask && !preview ? el('button', { type: 'button', onclick: () => askChanges(a) }, 'Request changes') : '', // beside a preview, the composer asks
       el('button', { type: 'button', className: 'quiet', disabled: busy, onclick: () => ask('discard') }, doing === 'discard' ? 'Rejecting…' : 'Reject'));
   return el('div', { className: inTask ? 'appr draft' : 'draft' },
     el('div', { className: 'dim' }, `Draft v${d.release}${inTask ? ` of ${a.title}` : ''} · proposed `, appAge(d.at, Date.now() + skew)),
     d.note ? el('p', { className: 'what' }, d.note) : '',
+    preview && tryIt ? draftPreview(a) : '',
     d.before || d.after ? el('div', { className: 'ba' }, d.before ? draftShot(a, 'before') : el('div'), d.after ? draftShot(a, 'after') : '') : '',
     el('a', { className: 'pr', href: d.pr, target: '_blank', rel: 'noopener' }, d.pr.replace('https://github.com/', '').replace('/pull/', '#')),
     said ? el('div', { className: st.state === 'needs_you' ? 'err bad' : 'sub dim' }, said) : '',
     err ? el('div', { className: 'err bad' }, err) : '',
     actions);
+}
+// Until it's been opened once in a tab, a preview offers that: framed, the apps' sign-in page
+// can't show, so a frame left blank by it needs the tab (Access then lets the frame in too).
+const signedIn = { get() { try { return !!localStorage.getItem('mis-apps-signed-in'); } catch { return false; } } };
+function draftPreview(a) {
+  const url = `${a.url}?draft=${a.draft.release}`;
+  const frame = el('iframe', { src: url, title: `Draft v${a.draft.release} of ${a.title}` });
+  const signIn = signedIn.get() ? '' : el('a', { href: url, target: '_blank', rel: 'noopener', onclick: () => {
+    try { localStorage.setItem('mis-apps-signed-in', '1'); } catch {}
+    signIn.remove();
+    // Back from the tab, signed in: load it again.
+    window.addEventListener('focus', () => { frame.src = url; }, { once: true });
+  } }, 'Blank? Sign in to apps ↗');
+  return el('div', { className: 'preview' }, frame, signIn);
 }
 // The drafts proposed by task `id`, as cards for its page.
 // Kept while nothing they show changes, so a render doesn't redraw their screenshots.
@@ -3811,7 +3831,7 @@ function taskDrafts(id) {
     const key = JSON.stringify([a.draft, a.role, readOnly, draftAsk, draftBusy, draftErr.get(a.slug)]);
     const had = draftNodes.get(a.slug);
     if (had && had.key === key) return had.node;
-    const node = draftCard(a, true);
+    const node = draftCard(a, true, true);
     draftNodes.set(a.slug, { key, node });
     return node;
   });
@@ -3845,6 +3865,9 @@ function renderBuild(slug) {
   $('build-head').replaceChildren(el('div', { className: 'ttl' }, el('span', {}, slug ? (a ? a.title : slug) : 'New app')));
   $('build-hint').hidden = !!slug;
   $('refs').disabled = shots.length >= MAX_SHOTS || appSending;
+  // Feedback on a draft carries no images, and goes to the task that made it: no references, no placement.
+  $('refs').hidden = !!(a && reviewing(a));
+  if (a && reviewing(a)) $('clip').disabled = true;
   if (!slug) { delete ul.dataset.key; ul.replaceChildren(); return; }
   if (a) { drawApps(ul, [a], true); return; }
   delete ul.dataset.key;
@@ -3898,12 +3921,16 @@ $('settings-form').onsubmit = async (e) => {
 // apps:begin. The app composer, pure. tests/md.test.mjs runs this block.
 // What the composer says and where its text is kept, in view `view`: a new app (`build`, no `slug`), a change to
 // app `slug` (`title` once known), else a task.
-function composerFor(view, slug, title) {
+// `draft`: the release of its draft being reviewed, which the composer then sends feedback on.
+function composerFor(view, slug, title, draft) {
   if (view !== 'build') return { key: 'draft:new', placeholder: 'Start a task or ask anything', label: 'new task' };
   if (!slug) return { key: 'draft:app', placeholder: 'Create an app: what should it do?', label: 'new app' };
   const name = title || slug;
+  if (draft) return { key: `draft:app:${slug}`, placeholder: `What should change in draft v${draft}?`, label: `feedback on ${name} v${draft}` };
   return { key: `draft:app:${slug}`, placeholder: `Change ${name}: what should change?`, label: `change ${name}` };
 }
+// In-app feedback (`AppFeedback`) on a draft from beside its preview, `w`×`h`: about the whole page at its entry.
+const draftNote = (note, w, h) => ({ route: '/', selector: '', rect: { x: 0, y: 0, w, h }, viewport: { w, h }, note });
 // `POST /api/apps/tasks`: `request` building (`slug` null) or changing app `slug`, where the chips (`pick`) say,
 // else on Settings' apps harness (`apps`), with uploaded `images`.
 function appTaskBody(request, slug, pick, apps, images) {
@@ -4577,6 +4604,8 @@ $('new').onsubmit = (e) => {
   unlock();
   const prompt = $('prompt').value.trim();
   if (!prompt || pending || appSending) return;
+  const a = route().view === 'build' && hosted && hosted.list && hosted.list.find((x) => x.slug === route().id);
+  if (a && reviewing(a)) { sendNote(prompt, a); return; }
   if (route().view === 'build') { startApp(prompt, route().id); return; }
   pending = { key: 'draft:new', text: prompt };
   send({ type: 'submit', prompt, cwd: null, harness: pick.harness || null, model: pick.model || null, worker: pick.worker ? pick.worker.id : null, images: shots.map((x) => x.id) });
@@ -4586,6 +4615,27 @@ $('new').onsubmit = (e) => {
 // Build (`slug` null) or change app `slug` from the composer, then open its task. The text and images stay
 // until it starts, so a refusal (e.g. no worker runs the harness) loses nothing.
 let appSending = false;
+// App `a`'s draft, while its owner is on its page: the composer sends feedback on it.
+const reviewing = (a) => (a.draft && a.role === 'owner' && !readOnly ? a.draft.release : null);
+// `note` on app `a`'s draft as in-app feedback (the frame's size its viewport): it goes back to the task
+// that made the draft. The text stays until it's taken.
+async function sendNote(note, a) {
+  const key = promptKey, f = document.querySelector('#build-app .preview iframe');
+  const body = draftNote(note, (f && f.clientWidth) || innerWidth, (f && f.clientHeight) || innerHeight);
+  appSending = true;
+  render();
+  let why = '';
+  try {
+    const r = await fetch(`/api/apps/${a.slug}/feedback/new`, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) why = (await r.text()) || `error ${r.status}`;
+  } catch { why = 'couldn’t reach the orchestrator'; }
+  appSending = false;
+  if (why) { flash(`error: ${why}`); render(); return; }
+  drafts.set(key, '');
+  if (promptKey === key) $('prompt').value = '';
+  flash('sent to its task');
+  await loadApps();
+}
 async function startApp(request, slug) {
   const key = promptKey;
   const body = appTaskBody(request, slug, pick, settings && settings.s && settings.s.apps, shots.map((x) => x.id));
@@ -4686,7 +4736,8 @@ function appDefaults() {
 // The composer as the view `r` wants it: its words, its draft, its chips.
 function composeFor(r) {
   const a = r.view === 'build' && r.id && hosted && hosted.list && hosted.list.find((x) => x.slug === r.id);
-  const c = composerFor(r.view, r.id, a && a.title);
+  const c = composerFor(r.view, r.id, a && a.title, a && reviewing(a));
+  $('opts').hidden = !!(a && reviewing(a)); // feedback goes where its draft's task ran
   if (c.key !== promptKey) {
     keptShots.set(promptKey, shots);
     shots = keptShots.get(c.key) || [];
