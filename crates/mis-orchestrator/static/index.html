@@ -4107,7 +4107,12 @@ async function loadNotes() {
 let noteSugs = null, sugsAsked = null, sugsTimer = 0, sugsError = '', sugsTries = 0, sugsStale = 0;
 const sugOf = (path) => (noteSugs ? noteSugs.notes[path] : undefined);
 const sugPending = (path) => !!noteSugs && noteSugs.pending.includes(path);
-const sugsLater = (ms) => { if (!sugsTimer) sugsTimer = setTimeout(() => { sugsTimer = 0; if (route().view === 'notes') loadSuggestions(); }, ms); };
+// The one suggestions timer: a poll keeps one already set; a retry (`now`) replaces it, so it comes sooner.
+function sugsLater(ms, now = false) {
+  if (sugsTimer && !now) return;
+  clearTimeout(sugsTimer);
+  sugsTimer = setTimeout(() => { sugsTimer = 0; if (route().view === 'notes') loadSuggestions(); }, ms);
+}
 async function loadSuggestions() {
   const ask = {};
   sugsAsked = ask;
@@ -4121,7 +4126,7 @@ async function loadSuggestions() {
     if (route().view === 'notes') renderNotes(route().id);
   }
   if (!error) pollSuggestions();
-  else if (sugsTries <= 4) sugsLater(5000 * 2 ** (sugsTries - 1));
+  else if (sugsTries <= 4) sugsLater(5000 * 2 ** (sugsTries - 1), true);
 }
 function pollSuggestions() {
   const r = route(), shown = r.view === 'notes' ? ((notesTree && notesTree.entries) || []).filter((e) => isInboxNote(e) && (r.id === 'inbox' || r.id === e.path)) : [];
@@ -4145,7 +4150,11 @@ function loadNote(path) {
     // Its sha256 goes with a move, so a note changed since it was shown isn't filed.
     const bytes = await r.arrayBuffer(), digest = crypto.subtle && new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
     shown.got = { text: new TextDecoder().decode(bytes), hash: digest ? [...digest].map((b) => b.toString(16).padStart(2, '0')).join('') : undefined };
-  }, () => { shown.got = { error: 'couldn’t reach the orchestrator' }; }).then(() => { if (noteShown === shown && route().view === 'notes') renderNotes(route().id); });
+  }, () => { shown.got = { error: 'couldn’t reach the orchestrator' }; }).then(() => {
+    if (noteShown !== shown || route().view !== 'notes') return;
+    renderNotes(route().id);
+    pollSuggestions(); // only now is a suggestion for other bytes seen (after a 409, the tree may be in first)
+  });
 }
 // The open inbox note's card: the folder and summary to file it with, and whether a filing is under way or why it
 // failed. It belongs to the note's bytes (`hash`): the suggestion made for them fills it until edited. When the bytes
