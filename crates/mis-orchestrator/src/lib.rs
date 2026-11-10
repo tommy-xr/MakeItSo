@@ -35,6 +35,7 @@ pub mod drafts;
 pub mod email;
 pub mod evidence;
 pub mod feedback;
+pub mod file_suggest;
 pub mod filing;
 pub mod images;
 pub mod ledger;

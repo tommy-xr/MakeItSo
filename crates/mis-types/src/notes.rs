@@ -1,5 +1,8 @@
 //! The notes repo: publishing captures to it (`GET /api/notes/sync`), reading it (`GET
-//! /api/notes/tree`, `GET /api/projects`) and filing its inbox (`POST /api/notes/move`).
+//! /api/notes/tree`, `GET /api/projects`) and filing its inbox (`GET /api/notes/suggestions`,
+//! `POST /api/notes/move`).
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -129,4 +132,23 @@ pub struct NoteMove {
 pub struct NoteMoved {
     /// The note's new path, e.g. `projects/amf/2026-11-08-foo.md`.
     pub path: String,
+}
+
+/// `GET /api/notes/suggestions`: inbox note path -> where it might go.
+pub type NoteSuggestions = BTreeMap<String, NoteSuggestion>;
+
+/// Where an inbox note might be filed, as a model proposed from its text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NoteSuggestion {
+    /// sha256 (hex) of the note it was made for: a changed note gets a new one.
+    pub hash: String,
+    /// One of [`NotesTree::dests`], or `none`.
+    pub dest: String,
+    /// One line, at most 200 characters; may be empty.
+    pub summary: String,
+    /// Unix ms it was made.
+    pub at: u64,
+    /// Why the reply couldn't be used as given (then `dest` is `none`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
