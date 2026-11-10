@@ -742,9 +742,11 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   /* Desktop (64rem+, not Quest): one sticky header row across the top; the menu is a rail on the left (the closed
      dialog shown in place; ☰ hides it); views, composer, Latest and toasts centre in the room beside it, 48rem wide.
      Wide (75rem+, `.split`): the list (Home, Tasks or Sessions) is a column of its own beside what it opened, or a prompt to pick.
-     Rail rows carry counts: Home's in its attention tint, the rest dim unless tinted (Sessions waiting on you). */
-  :is(#nav-need, #menu .nc) { display: none; margin: 0 .375em 0 auto; font-size: .8125rem; font-weight: 600; }
+     Rail rows carry counts in one column left of the chevrons: dim, or tinted when they need you (Home, Sessions). */
+  #menu .nc { display: none; margin: 0 .375em 0 auto; font-size: .8125rem; font-weight: 600; }
   #menu .nc:not(.att) { color: var(--dim); font-weight: 500; }
+  #menu nav > a > .nc { margin-right: calc(.375em + 2.625rem); } /* a chevron (2.5rem) and the gap before it */
+  .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; } /* read aloud, not shown */
   @media (min-width: 64rem) {
     :root:not(.vr) { --rail: 16rem; --list: 0px; --side: calc(var(--rail) + var(--list)); --head: calc(3.5rem + env(safe-area-inset-top, 0px)); scroll-padding-top: var(--head); }
     :root.rail-off:not(.vr) { --rail: 0px; }
@@ -766,7 +768,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
     :root.rail-off:not(.vr) #menu { display: none; }
     :root:not(.vr) #menu .sheet { padding: .75rem .75rem 1rem; }
     :root:not(.vr) #menu .sheet-top { display: none; }
-    :root:not(.vr) :is(#nav-need, #menu .nc):not([hidden]) { display: inline; }
+    :root:not(.vr) #menu .nc:not([hidden]) { display: inline; }
     :root:not(.vr) .chead { top: var(--head); }
     :root:not(.vr) #dock { left: var(--side); }
     :root:not(.vr) .composer { max-width: calc(48rem - 2 * var(--pad)); }
@@ -809,7 +811,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   <div class="sheet">
     <div class="sheet-top"><span class="title">Make It So</span><button type="button" id="menu-close" class="ibtn" aria-label="Close menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
     <nav aria-label="Views">
-      <a href="#" data-view="home">Home<span id="nav-need" hidden></span></a>
+      <a href="#" data-view="home">Home<span id="nav-need" class="nc" hidden></span></a>
       <a href="#tasks" data-view="tasks">Tasks<span id="n-tasks" class="nc" hidden></span></a>
       <a href="#sessions" data-view="sessions">Sessions<span id="n-sessions" class="nc" hidden></span></a>
       <div class="ngrp"><a href="#notes" data-view="notes">Notes<span id="n-inbox" class="nc" hidden></span></a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-notes" aria-label="Show notes"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
@@ -980,7 +982,9 @@ let everOpen = false, offline = false, offlineTimer = 0;
 let connMsg = 'connecting…'; // shown in the ticker until the first socket opens
 let orchVersion = ''; // from /api/info; workers on another build are flagged
 let skew = 0; // orchestrator clock minus ours, from the last Status; task times are on its clock
-let from = '#'; // last list view, so a task's back link returns to Workers when opened from there
+// Where the view sits: its list (`home`, `tasks`, `sessions`; null elsewhere) and where its back link goes (Workers, say).
+// An open task or session keeps the ones it was opened from in its history entry, so Back and Forward restore them.
+let here = { sec: null, back: '#' };
 let wantNew = false; // `#new` was opened: focus the new-task field once it shows
 // The one submit awaiting its Submitted, as { key, text }: its draft key and what was sent.
 // A reply's Submitted opens the new task.
@@ -1773,11 +1777,11 @@ const needYou = () => tasks.filter((t) => ATTENTION[t.attention]).reverse().sort
 const needLabel = (n) => `${n} need${n === 1 ? 's' : ''} you`;
 // The header badge: how many need you, lit in the most urgent one's colour.
 function renderNeed() {
-  const need = everOpen ? needYou() : [], b = $('need'), n = $('nav-need');
-  b.hidden = n.hidden = !need.length;
+  const need = everOpen ? needYou() : [], b = $('need');
+  b.hidden = !need.length;
   if (!need.length) return;
-  b.textContent = n.textContent = need.length;
-  b.className = n.className = `att ${need[0].attention}`;
+  b.textContent = need.length;
+  b.className = `att ${need[0].attention}`;
   b.href = `#task/${need[0].id}`;
   b.setAttribute('aria-label', needLabel(need.length));
 }
@@ -1842,20 +1846,28 @@ function route() {
   if (n) { try { return { view: 'notes', id: (n[1] || '').split('/').map(decodeURIComponent).join('/') }; } catch { return { view: 'notes', id: '' }; } }
   const p = location.hash.match(/^#projects(?:\/([^/]*))?\/*$/);
   if (p) { try { return { view: 'projects', id: decodeURIComponent(p[1] || '') }; } catch { return { view: 'projects', id: '' }; } }
-  if (location.hash === '#tasks' || location.hash === '#sessions') return { view: 'list', id: location.hash.slice(1) };
+  if (secOf(location.hash)) return { view: 'list', id: secOf(location.hash) };
   return { view: { '#workers': 'workers', '#routines': 'routines', '#apps': 'apps', '#settings': 'settings' }[location.hash] || 'list' };
 }
 
 // The list a hash shows (Home, Tasks or Sessions), else null.
 const secOf = (h) => ({ '': 'home', '#': 'home', '#tasks': 'tasks', '#sessions': 'sessions' })[h] || null;
 // The list in view, or the one the open task or session came from (Home if neither).
-const listSec = () => (route().view === 'list' ? route().id || 'home' : secOf(from) || 'home');
+const listSec = () => here.sec || 'home';
+// On entering a view: a task or session takes its place from its history entry, else stamps it with the view it left.
+function locate() {
+  const r = route();
+  if (r.view !== 'detail' && r.view !== 'session') here = { sec: r.view === 'list' ? r.id || 'home' : null, back: location.hash || '#' };
+  else if (history.state?.here) here = history.state.here;
+  else history.replaceState({ here }, '');
+}
 // Wide desktop (75rem+, not Quest): the list stays up beside the open task, or a session opened from it (or `#choose`).
 const wide = matchMedia('(min-width: 75rem)');
-const isSplit = (r) => wide.matches && isDesk() && (r.view === 'list' || r.view === 'detail' || (r.view === 'session' && !!secOf(from)));
+const isSplit = (r) => wide.matches && isDesk() && (r.view === 'list' || r.view === 'detail' || (r.view === 'session' && !!here.sec));
 const inSplit = () => document.documentElement.classList.contains('split'); // as render() last laid out
-// The finished task last opened beside the list, and the attention it had: its row keeps its place until another is
-// opened or Home is left, rather than leaving Needs you the moment opening it marks it seen. { id, attention } or null.
+// The task last opened beside the list, its list, and the attention it had or whether it was under way: its row keeps
+// its place until another is opened or its list is left, rather than leaving Needs you (or In flight) the moment opening
+// it marks it seen (or it finishes). { id, sec, attention, underway } or null.
 let kept = null;
 // A task's attention for placing its row: its own, else the kept one's.
 const att = (t) => (ATTENTION[t.attention] || kept?.id !== t.id ? t.attention : kept.attention);
@@ -1866,7 +1878,9 @@ function render() {
   const r = route(), split = everOpen && isSplit(r);
   document.documentElement.classList.toggle('split', split);
   const open = split && r.view === 'detail' && tasks.find((t) => t.id === r.id);
-  if (open) kept = { id: open.id, attention: ATTENTION[open.attention] ? open.attention : kept?.id === open.id && isFinished(open) ? kept.attention : null };
+  if (kept && kept.sec !== listSec()) kept = null;
+  const was = open && kept?.id === open.id && kept;
+  if (open) kept = { id: open.id, sec: listSec(), attention: ATTENTION[open.attention] ? open.attention : was && isFinished(open) ? was.attention : null, underway: underway(open) || !!was?.underway };
   else if (!split || r.view !== 'list') kept = null;
   const live = ws && ws.readyState === WebSocket.OPEN;
   const views = { list: renderList, detail: renderDetail, routines: renderRoutines, apps: renderApps, settings: renderSettings, notes: renderNotes, projects: renderProjects, workers: renderWorkers, machine: renderMachine, session: renderSession };
@@ -1889,12 +1903,11 @@ function render() {
   $('choose').hidden = !everOpen || !split || r.view !== 'list';
   $('choose').firstChild.textContent = r.id === 'sessions' ? 'Select a session, or start a task below.' : 'Select a task, or start one below.';
   // A conversation's back link returns to the view it was opened from.
-  if (r.view === 'detail' || r.view === 'session') $(r.view).querySelector('.back').href = from;
-  else from = location.hash || '#';
-  if (split && secOf(from)) lastOpen[secOf(from)] = r.view === 'list' ? null : location.hash;
-  if (r.view !== 'detail' && r.view !== 'session') { follow.key = null; $('latest').hidden = true; if (detail) { detail.sig = null; detail.since = 0; } }
+  if (r.view === 'detail' || r.view === 'session') $(r.view).querySelector('.back').href = here.back;
+  if (r.view !== 'detail' && r.view !== 'session') { follow.key = null; $('latest').hidden = true; if (detail) detail.sig = null; }
+  if (r.view !== 'detail' && detail) detail.since = 0; // its 2s start again on return, from a session too
   if (r.view !== 'session') closeSession();
-  const onWorkers = r.view === 'workers' || r.view === 'machine' || (r.view === 'session' && !secOf(from));
+  const onWorkers = r.view === 'workers' || r.view === 'machine' || (r.view === 'session' && !here.sec);
   const area = onWorkers ? 'workers' : ['routines', 'apps', 'settings', 'notes', 'projects'].includes(r.view) ? r.view : listSec();
   for (const a of $('menu').querySelectorAll('nav a')) {
     if (a.dataset.view === area) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
@@ -1913,7 +1926,8 @@ const placement = (t) => [t.harness, t.model, t.worker && hostOf(t.worker)].filt
 // Why a task needs the user, most urgent first: [rank, label].
 const ATTENTION = { approval: [-1, 'needs you: approval'], failed: [0, 'needs you'], limited: [1, 'needs you: usage limit'], unread: [2, 'needs you: unread'] };
 // Needs you, then working, then the rest.
-const rank = (t) => ATTENTION[att(t)]?.[0] ?? (['planning', 'queued', 'running'].includes(t.status) || awaited(t) ? 3 : 4);
+const rank = (t) => ATTENTION[att(t)]?.[0] ?? (underway(t) || (kept?.id === t.id && kept.underway) ? 3 : 4);
+const underway = (t) => ['planning', 'queued', 'running'].includes(t.status) || awaited(t);
 // Delivered into a session and followed there for its answer (a day).
 const awaited = (t) => t.status === 'delivered' && Date.now() + skew - (t.finished_at || 0) < 864e5;
 // Threads, each followed by its replies (oldest first), nested: [depth, task]. A thread ranks as its
@@ -2137,15 +2151,28 @@ function liveRow(s, now) {
 const secHead = (label, ...end) => el('div', { className: 'sec' }, el('h3', {}, label), ...end);
 // Waiting on you, or stalled mid-turn (as the orchestrator ranks them): Home lists these.
 const asks = (s) => s.online && (s.state === 'waiting' || s.state === 'stalled');
-// Under way: Sessions' Live; the rest (idle, offline) are Recent.
-const isLive = (s) => s.online && s.state !== 'idle';
+// Under way: Sessions' Live; the rest (idle, in shell, offline) are Recent, as the orchestrator ranks them.
+const isLive = (s) => s.online && ['working', 'waiting', 'stalled'].includes(s.state);
+// A list's threads (Home shows those `onHome`) and live sessions. Home holds the row of a session open beside it.
+function listOf(sec) {
+  const fed = sec === 'home' ? feed.filter((s) => asks(s) || (here.sec === 'home' && location.hash === `#session/${liveKey(s)}`)) : sec === 'sessions' ? feed : [];
+  return { fed, threads: sec === 'sessions' ? [] : homeThreads(tasks, new Set(fed.flatMap((s) => s.messages.map((m) => m.task)))) };
+}
+const onHome = (th) => secRank(th.sec) < 2;
+// Whether list `sec` shows `h` (a task or session), in a row of its own or under a session's.
+function shows(sec, h) {
+  const { fed, threads } = listOf(sec);
+  return threads.some((th) => (sec !== 'home' || onHome(th)) && [th.root, ...th.replies].some((t) => `#task/${t.id}` === h))
+    || fed.some((s) => `#session/${liveKey(s)}` === h || s.messages.some((m) => `#task/${m.task}` === h));
+}
+// Sessions: those under way, then the rest of the last six hours.
+const sessionGroups = (ss, now) => [['Live', ss.filter(isLive)], ['Recent', ss.filter((s) => !isLive(s))]].filter(([, g]) => g.length)
+  .map(([h, g], i) => [secHead(h, ...(i ? [] : [el('a', { href: '#workers' }, 'All sessions')])), el('ul', { className: 'rows' }, ...g.map((s) => liveRow(s, now)))]);
 function renderList() {
   if (frozen()) return;
-  const sec = listSec(), now = Date.now() + skew;
-  const fed = sec === 'home' ? feed.filter(asks) : sec === 'sessions' ? feed : [];
-  const listed = new Set(fed.flatMap((s) => s.messages.map((m) => m.task)));
+  const sec = listSec(), now = Date.now() + skew, { fed, threads: all } = listOf(sec);
   hintBudget = HINT_FILES;
-  const threads = sec === 'sessions' ? [] : held(sec, homeThreads(tasks, listed), (th) => th.root.id).filter((th) => sec === 'tasks' || secRank(th.sec) < 2);
+  const threads = held(sec, all, (th) => th.root.id).filter((th) => sec !== 'home' || onHome(th));
   const sessions = held(`${sec}:live`, [...fed], liveKey);
   const label = (sec) => (sec === 'need' ? 'Needs you' : sec === 'flight' ? 'In flight' : dayLabel(sec.slice(4), now));
   const groups = new Map();
@@ -2163,11 +2190,8 @@ function renderList() {
   if (sec === 'home' && (drafted.length || sessions.length) && !groups.has('need')) groups.set('need', []);
   // Sections in Home's order; on Home, drafts, then the tasks needing you, then sessions waiting on you.
   const keys = [...groups.keys()].sort((a, b) => secRank(a) - secRank(b) || b.localeCompare(a));
-  const body = keys.map((k) => [secHead(label(k)), el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []), ...(k === 'need' ? drafted : []), ...groups.get(k).flatMap((th) => threadRows(th, now)),
-    ...(k === 'need' && sec === 'home' ? sessions.map((s) => liveRow(s, now)) : []))]);
-  if (sec === 'sessions') for (const [h, ss] of [['Live', sessions.filter(isLive)], ['Recent', sessions.filter((s) => !isLive(s))]]) {
-    if (ss.length) body.push([secHead(h, ...(body.length ? [] : [el('a', { href: '#workers' }, 'All sessions')])), el('ul', { className: 'rows' }, ...ss.map((s) => liveRow(s, now)))]);
-  }
+  const body = sec === 'sessions' ? sessionGroups(sessions, now) : keys.map((k) => [secHead(label(k)), el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []),
+    ...(k === 'need' ? drafted : []), ...groups.get(k).flatMap((th) => threadRows(th, now)), ...(k === 'need' && sec === 'home' ? sessions.map((s) => liveRow(s, now)) : []))]);
   const focused = $('list').contains(document.activeElement) && document.activeElement.getAttribute('href');
   $('list').replaceChildren(...(inSplit() ? [el('a', { href: '#new', className: 'newtask', title: 'New task (c)' }, '+ New task')] : []), ...body.flat());
   // The open task's or session's links (its row, or a message under a live session), beside the list when wide.
@@ -3531,12 +3555,15 @@ function renderNav() {
   // Notes: one link per folder the repo has, no dot; the inbox with how many notes wait in it.
   const ns = notesTree && notesTree.entries, inbox = ns && ns.filter((e) => e.kind === 'md' && /^inbox\/[^/]+$/.test(e.path)).length;
   const folders = ns ? NOTE_FOLDERS.filter(([f]) => ns.some((e) => e.path === f)) : [];
-  // Rail counts: Tasks under way, Sessions waiting on you (tinted; else live), the notes inbox, busy workers.
-  const waits = feed.filter(asks).length;
-  navCount('n-tasks', tasks.filter((t) => t.status === 'running' || t.status === 'queued').length);
-  navCount('n-sessions', waits || feed.filter(isLive).length, waits ? 'att approval' : '');
-  navCount('n-inbox', inbox);
-  navCount('n-busy', workers.filter((w) => w.online && w.busy).length);
+  // Rail counts: Home's Needs you rows (tinted as the most urgent), Tasks in flight, Sessions waiting on you (tinted;
+  // else live), the notes inbox, busy workers.
+  const need = listOf('home').threads.filter((th) => th.sec === 'need'), waits = feed.filter(asks).length;
+  const urgent = need.length ? Object.keys(ATTENTION).find((a) => ATTENTION[a][0] === need[0].rank) : 'approval';
+  navCount('nav-need', everOpen ? need.length + waits : 0, 'need you', `att ${urgent}`);
+  navCount('n-tasks', tasks.filter((t) => rank(t) === 3).length, 'under way');
+  if (waits) navCount('n-sessions', waits, 'waiting', 'att approval'); else navCount('n-sessions', feed.filter(isLive).length, 'live');
+  navCount('n-inbox', inbox, 'in inbox');
+  navCount('n-busy', workers.filter((w) => workerState(w) === 'busy').length, 'busy');
   fillNav($('nav-notes'), !notesTree ? [['Loading…']] : notesTree.error ? [[notesTree.error]] : notesTree.state === 'off' ? [['Not configured']]
     : !folders.length ? [['No notes yet']] : folders.map(([f, label]) => [noteHref(f), null, label, f === 'inbox' && inbox ? String(inbox) : '']));
   // Projects: one link per active one.
@@ -3544,7 +3571,11 @@ function renderNav() {
   fillNav($('nav-projects'), !projects ? [['Loading…']] : projects.error ? [[projects.error]] : projects.state === 'off' ? [['Not configured']]
     : !active.length ? [['No active projects']] : active.map((p) => [projectHref(p.id), null, p.title]));
 }
-const navCount = (id, n, cls = '') => Object.assign($(id), { hidden: !n, textContent: n || '', className: `nc ${cls}` });
+// A rail count: `2` shown, `, 2 under way` read aloud; none at 0.
+function navCount(id, n, label, cls = '') {
+  Object.assign($(id), { hidden: !n, className: `nc ${cls}` });
+  $(id).replaceChildren(...(n ? [el('span', { ariaHidden: 'true' }, String(n)), el('span', { className: 'vh' }, `, ${n} ${label}`)] : []));
+}
 // Rows as [href, dot class (null: none), name, count], or [text] for a note.
 function fillNav(ul, rows) {
   const key = JSON.stringify(rows);
@@ -4430,12 +4461,14 @@ for (const f of [$('prompt'), $('reply-text')]) f.addEventListener('input', () =
 $('prompt').value = drafts.get('draft:new');
 // Leaving a view stops dictation into it and any readback.
 // A press's click has landed once the view changes: nothing left to hold for.
-window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (route().view === 'apps' && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; if (route().view === 'notes') { noteShown = null; if (notesTree) loadNotes(); } if (route().view === 'projects') { if (projects) loadProjects(); if (notesTree && route().id) loadNotes(); } render(); };
+window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); locate(); remember(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (route().view === 'apps' && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; if (route().view === 'notes') { noteShown = null; if (notesTree) loadNotes(); } if (route().view === 'projects') { if (projects) loadProjects(); if (notesTree && route().id) loadNotes(); } render(); };
 setInterval(tick, 1000);
 
-// `#new`, a link into the page for a new task, is Tasks with the composer focused; the hash becomes `#` so back links don't refocus.
-function takeNew() { if (location.hash === '#new') { history.replaceState(null, '', '#'); wantNew = true; } }
+// `#new`, a link into the page for a new task, is a list with the composer focused: the one in view (or the open task's),
+// else Home. The hash becomes that list's so back links don't refocus.
+function takeNew() { if (location.hash === '#new') { history.replaceState(null, '', here.sec ? here.back : '#'); wantNew = true; } }
 takeNew();
+locate();
 
 // Composer fields grow with their text from one line to six (the CSS cap); refit when the text or width changes.
 const composerFields = [$('prompt'), $('reply-text'), $('say-text')], fitted = new WeakMap();
@@ -4631,7 +4664,7 @@ $('app-new').onsubmit = async (e) => {
 for (const b of $('menu').querySelectorAll('.ngrp button[aria-controls]')) b.onclick = () => {
   const open = b.getAttribute('aria-expanded') !== 'true';
   b.setAttribute('aria-expanded', String(open));
-  b.setAttribute('aria-label', `${open ? 'Hide' : 'Show'} ${b.parentElement.querySelector('a').textContent.toLowerCase()}`);
+  b.setAttribute('aria-label', `${open ? 'Hide' : 'Show'} ${b.parentElement.querySelector('a').firstChild.textContent.toLowerCase()}`);
   $(b.getAttribute('aria-controls')).hidden = !open;
   if (open && b.getAttribute('aria-controls') === 'nav-routines') loadRoutines();
   if (open && b.getAttribute('aria-controls') === 'nav-apps') loadApps();
@@ -4639,13 +4672,16 @@ for (const b of $('menu').querySelectorAll('.ngrp button[aria-controls]')) b.onc
   if (open && b.getAttribute('aria-controls') === 'nav-projects') loadProjects();
 };
 $('menu').addEventListener('close', () => $('menu-btn').setAttribute('aria-expanded', String(railShown())));
-// Beside the list, Home, Tasks and Sessions reopen what each last had open beside it.
+// Beside the list, Home, Tasks and Sessions reopen what each last had open beside it, while that list still shows it.
+function remember() { const r = route(); if (here.sec && isSplit(r)) lastOpen[here.sec] = r.view === 'list' ? null : location.hash; }
 for (const a of $('menu').querySelectorAll('nav a[data-view]')) a.addEventListener('click', (e) => {
-  const h = lastOpen[a.dataset.view];
+  const sec = a.dataset.view, h = lastOpen[sec];
   if (!h || !wide.matches || !isDesk()) return;
+  if (!shows(sec, h)) { lastOpen[sec] = null; return; }
   e.preventDefault();
-  from = a.getAttribute('href');
-  if (location.hash === h) render(); else location.hash = h;
+  here = { sec, back: a.getAttribute('href') };
+  if (location.hash !== h) location.hash = h;
+  else { history.replaceState({ here }, ''); remember(); render(); }
 });
 // The rail opens with Notes and Workers unfolded: short lists, and Workers carries what's running.
 if (isDesk()) for (const id of ['nav-notes', 'nav-workers']) $('menu').querySelector(`[aria-controls=${id}]`).click();
