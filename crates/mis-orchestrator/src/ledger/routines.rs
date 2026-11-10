@@ -389,15 +389,7 @@ mod tests {
         let mut l = Ledger::default();
         worker(&mut l, "mac");
         // The worker is busy, so the dry run waits.
-        l.submit(
-            "other".into(),
-            None,
-            Some("claude".into()),
-            None,
-            vec![],
-            None,
-        )
-        .unwrap();
+        l.submit("other".into(), None, Some("claude".into()), None, vec![]);
         let act = defs("---\nevery: 1h\nact: true\n---\ngo");
         let r = act[0].as_ref().unwrap();
         l.routine_tick(&act, &Utc);
@@ -421,15 +413,7 @@ mod tests {
     fn an_edit_cancels_queued_live_runs() {
         let mut l = Ledger::default();
         worker(&mut l, "mac");
-        l.submit(
-            "other".into(),
-            None,
-            Some("claude".into()),
-            None,
-            vec![],
-            None,
-        )
-        .unwrap();
+        l.submit("other".into(), None, Some("claude".into()), None, vec![]);
         let act = defs("---\nevery: 1h\nact: true\n---\ngo");
         l.set_live(act[0].as_ref().unwrap(), true).unwrap();
         l.routine_tick(&act, &Utc);

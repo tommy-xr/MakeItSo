@@ -162,16 +162,13 @@ mod tests {
             ..Default::default()
         };
         l.connect(wid, info, &[], 1, Duration::ZERO);
-        let (a, _) = l
-            .submit(
-                "count files".into(),
-                None,
-                Some("claude".into()),
-                None,
-                vec![],
-                None,
-            )
-            .unwrap();
+        let (a, _) = l.submit(
+            "count files".into(),
+            None,
+            Some("claude".into()),
+            None,
+            vec![],
+        );
         for e in [
             AgentEvent::Started {
                 session: Some("s1".into()),
@@ -188,16 +185,7 @@ mod tests {
             l.now_ms = 43_000;
             l.event(wid, 1, a, e);
         }
-        let (b, _) = l
-            .submit(
-                "second".into(),
-                None,
-                Some("codex".into()),
-                None,
-                vec![],
-                None,
-            )
-            .unwrap();
+        let (b, _) = l.submit("second".into(), None, Some("codex".into()), None, vec![]);
         (l, a, b)
     }
 
