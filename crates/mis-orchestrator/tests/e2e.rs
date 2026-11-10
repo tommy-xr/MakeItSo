@@ -3684,6 +3684,48 @@ async fn change_app_task_runs_only_on_the_picked_worker() {
 }
 
 #[tokio::test]
+async fn app_task_carries_its_reference_images_to_the_agent() {
+    use base64ct::{Base64, Encoding};
+    let dir = image_dir();
+    let store = mis_orchestrator::images::Images::open(dir.clone()).unwrap();
+    let base = start_app(with_read_token().with_images(store)).await;
+    let (_, mut worker) = join_as(&base).await;
+    let sketch = jpeg();
+    let auth = "Authorization: Bearer s\r\nContent-Type: image/jpeg\r\n";
+    let (status, body) = upload(&base, auth, &sketch).await;
+    assert_eq!(status, 200, "{body}");
+    let id: uuid::Uuid = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let body = |images: Vec<uuid::Uuid>| {
+        serde_json::json!({ "request": "Track pool chlorine, laid out like this sketch.",
+            "slug": "pool", "harness": "claude", "images": images })
+        .to_string()
+    };
+
+    // As for a task: one never uploaded, or a fifth, is refused and starts nothing.
+    for (images, why) in [
+        (vec![uuid::Uuid::new_v4()], "unknown image"),
+        (vec![id; 5], "at most 4 images"),
+    ] {
+        let (status, got) = post_json(&base, "/api/apps/tasks", "s", &body(images)).await;
+        assert!(status == 400 && got.contains(why), "{status} {got}");
+    }
+    let (status, created) = post_json(&base, "/api/apps/tasks", "s", &body(vec![id])).await;
+    assert_eq!(status, 201, "{created}");
+    let OrchMsg::Assign { task, images, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    assert!(task.prompt.contains("laid out like this sketch"));
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].id, id);
+    assert_eq!(Base64::decode_vec(&images[0].data).unwrap(), sketch);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
 async fn acting_routine_runs_dry_until_switched_live() {
     let dir = std::env::temp_dir().join(format!("mis-e2e-act-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
