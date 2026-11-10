@@ -18,7 +18,7 @@ const netBlock = page.slice(page.indexOf('// net:begin'), page.indexOf('// net:e
 const awayStatus = new Function(`${netBlock}; return awayStatus;`)();
 const appsBlock = page.slice(page.indexOf('// apps:begin'), page.indexOf('// apps:end'));
 const ap = new Function(`${appsBlock}; return { composerFor, appTaskBody, draftNote };`)();
-const nt = { ...new Function(`${notesBlock}; return { noteFront, noteAuthor, noteRows, noteDestGroups, projectDir, projectActive, projectFiles, projectFind, repoHref };`)(), notePath: new Function(`${block}; return notePath;`)() };
+const nt = { ...new Function(`${notesBlock}; return { noteFront, noteAuthor, noteRows, noteDestGroups, noteDestLabel, noteSuggested, noteWhy, projectDir, projectActive, projectFiles, projectFind, repoHref };`)(), notePath: new Function(`${block}; return notePath;`)() };
 
 // Every tag in the output, e.g. ['p', 'a', 'code'].
 const tags = (html) => [...html.matchAll(/<([a-z0-9]+)/g)].map((m) => m[1]);
@@ -389,6 +389,24 @@ test('Move to… groups the server’s folders, projects by title', () => {
     ['Areas', [['areas/home', 'home']]], ['Resources', [['resources/rust', 'rust']]], ['Archive', [['archive', 'Archive']]]]);
   assert.deepEqual(nt.noteDestGroups(['projects/mis'], null), [['Projects', [['projects/mis', 'mis']]]], 'titles not in yet; no archive offered');
   assert.deepEqual(nt.noteDestGroups([], []), []);
+});
+
+test('an inbox row files as suggested, waits while one is pending, or offers Move to…', () => {
+  const dests = ['archive', 'areas/home', 'projects/mis'], list = [{ id: 'mis', title: 'Make It So', archived: false }];
+  assert.equal(nt.noteDestLabel('projects/mis', dests, list), 'Make It So');
+  assert.equal(nt.noteDestLabel('areas/home', dests, list), 'Areas › home');
+  assert.equal(nt.noteDestLabel('archive', dests, list), 'Archive');
+  assert.equal(nt.noteDestLabel('areas/gone', dests, list), 'areas/gone');
+  const s = (dest, error) => ({ hash: 'h', dest, summary: 'x', at: 1, ...(error ? { error } : {}) });
+  assert.equal(nt.noteSuggested(s('projects/mis'), dests, false), 'file');
+  assert.equal(nt.noteSuggested(undefined, dests, true), 'wait', 'being asked for');
+  assert.equal(nt.noteSuggested(undefined, dests, false), 'none', 'not asked for: suggestions off, or till the next pass');
+  assert.equal(nt.noteSuggested(s('areas/gone'), dests, true), 'wait', 'its folder is gone: asked again');
+  assert.equal(nt.noteSuggested(s('areas/gone'), dests, false), 'none');
+  assert.equal(nt.noteSuggested(s('none'), dests, false), 'none');
+  assert.equal(nt.noteSuggested(s('none', 'resources/reading is not a folder to file in'), dests, false), 'none');
+  assert.equal(nt.noteWhy('inbox/a.md', 'inbox/a.md changed since it was read'), 'Changed since it was read');
+  assert.equal(nt.noteWhy('inbox/a.md', 'offline; try again when connected'), 'Offline; try again when connected');
 });
 
 test('a project’s folder, files, name and repo links', () => {
