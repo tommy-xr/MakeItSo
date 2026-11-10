@@ -931,8 +931,8 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
 
 <main id="settings" hidden>
   <form id="settings-form"><fieldset disabled>
-    <label for="st-default">New tasks start on</label><select id="st-default"><option value="">Auto</option><option>claude</option><option>codex</option></select>
-    <p class="dim">Auto: the planner (claude) picks.</p>
+    <label for="st-default">Default harness</label><select id="st-default"><option value="">Auto</option><option>claude</option><option>codex</option></select>
+    <p class="dim">Auto tasks run on this unless the planner picks another. Auto: claude.</p>
     <h3>Apps</h3>
     <p class="dim">Tasks that build or change apps run with these.</p>
     <label for="st-harness">Harness</label><select id="st-harness"><option>claude</option><option>codex</option></select>
@@ -4325,10 +4325,8 @@ function onMessage(msg) {
       workers = [...msg.workers].sort((a, b) => a.info.hostname.localeCompare(b.info.hostname) || a.id.localeCompare(b.id));
       // The chosen machine as now seen; one that left stays chosen, offline (its task waits for it).
       if (pick.worker) pick.worker = workers.find((w) => w.id === pick.worker.id) || { ...pick.worker, online: false, busy: false };
-      // Settings' default harness, as it is now. A harness no longer offered goes back to Auto (or
-      // the default, if now offered), and its model with it.
       taskDefault = msg.default_harness || '';
-      followDefault();
+      // A harness no longer offered goes back to Auto, and its model with it.
       if (pick.harness && !pickHarnesses().includes(pick.harness)) pick.harness = pick.model = '';
       optLabel();
       break;
@@ -4829,7 +4827,6 @@ function composeFor(r) {
   const want = r.view === 'build' ? appPick : taskPick, filled = appDefaults();
   if (want === pick && !filled) return;
   pick = want;
-  followDefault();
   optLabel();
 }
 let menuFor = ''; // the chip whose list is open: 'worker', 'harness', 'model' or ''
@@ -4840,19 +4837,11 @@ const workerName = (w) => w.info.hostname + (workers.some((x) => x.id !== w.id &
 // (under Auto, the one the server runs a model on: `autoHarness`).
 const pickFrom = () => (pick.worker ? [pick.worker] : workers);
 const pickHarnesses = () => [...new Set(pickFrom().flatMap((w) => w.info.harnesses))].sort();
-let taskDefault = ''; // Settings' default harness, from each Status; '' is Auto
+let taskDefault = ''; // Settings' default harness, from each Status; '' is unset (claude)
 // As the server's `default_harness` picks: the default if among `runs`, else claude, else the first.
 // With no workers it assumes every harness, as the server does.
 const preferred = (runs) => [taskDefault, 'claude'].find((h) => h && runs.includes(h)) || runs[0];
 const autoHarness = () => (pick.worker ? preferred(pick.worker.info.harnesses) : workers.length ? preferred(pickHarnesses()) : taskDefault || 'claude');
-// Until a harness is chosen here, the Harness chip follows Settings' default where the machine runs it, else Auto.
-let harnessChosen = false;
-function followDefault() {
-  if (harnessChosen || pick !== taskPick) return;
-  const was = pick.harness, d = taskDefault;
-  pick.harness = pickHarnesses().includes(d) ? d : '';
-  if (pick.harness !== was) pick.model = '';
-}
 const pickModels = () => [...new Set(pickFrom().flatMap((w) => w.info.models[pick.harness || autoHarness()] || []))];
 // A worker's status dot, its state as text; without a worker, an empty one keeping the column.
 function stateDot(w) {
@@ -4904,8 +4893,6 @@ function choose(k, value) {
   const was = { harness: pick.harness, listed: pickModels().includes(pick.model) };
   pick[k] = value;
   if (pick === appPick) appChosen = true;
-  else if (k === 'harness') harnessChosen = true;
-  else followDefault();
   // The new machine doesn't run it: Auto, or for an app (which has no Auto) one it runs.
   if (pick.harness && !pickHarnesses().includes(pick.harness)) pick.harness = pick === appPick ? pickHarnesses()[0] || '' : '';
   // A model belongs to its harness; one picked from a machine's list goes with a machine that doesn't list it.
