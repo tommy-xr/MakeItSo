@@ -370,6 +370,11 @@ impl Apps {
         }
     }
 
+    /// Where apps are served, e.g. `https://home.example.com`; see [`base_url`].
+    pub fn base_url(&self) -> Option<&str> {
+        self.base_url.as_deref()
+    }
+
     pub fn records(&self) -> Arc<Records> {
         self.records.clone()
     }

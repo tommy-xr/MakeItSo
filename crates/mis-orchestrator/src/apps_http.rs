@@ -34,13 +34,59 @@ pub struct Auth {
     pub dev: bool,
     /// Where in-app feedback goes (`App::feedback_inbox`). None: refused.
     pub feedback: Option<tokio::sync::mpsc::UnboundedSender<(String, HeldFeedback)>>,
+    /// The MIS page's origins, e.g. `https://mis.example.com`: the only pages that may frame
+    /// apps (its draft previews). None: no page may.
+    pub frame_ancestors: Vec<String>,
+}
+
+/// The MIS page's origins, for [`Auth::frame_ancestors`]: `public_url`'s (a `ws(s)://` or
+/// `http(s)://` URL), each `allowed` browser origin, and the listener `local` when it is loopback.
+/// Anything that isn't a bare `http(s)://host[:port]` is left out, so it can't add a directive.
+pub fn frame_ancestors(
+    public_url: Option<&str>,
+    allowed: &[String],
+    local: SocketAddr,
+) -> Vec<String> {
+    let public = public_url.map(|u| {
+        let u = mis_types::http_url(u.trim()).to_ascii_lowercase();
+        let rest = u.find("://").map_or(0, |i| i + 3);
+        u[..u[rest..].find('/').map_or(u.len(), |i| rest + i)].to_string()
+    });
+    let loopback = local.ip().is_loopback().then(|| format!("http://{local}"));
+    let origin = |o: &String| {
+        let host = o
+            .strip_prefix("https://")
+            .or_else(|| o.strip_prefix("http://"));
+        host.is_some_and(|h| {
+            !h.is_empty()
+                && h.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c))
+        })
+    };
+    let mut out: Vec<String> = public
+        .into_iter()
+        .chain(allowed.iter().cloned())
+        .chain(loopback)
+        .filter(origin)
+        .collect();
+    out.dedup();
+    out
 }
 
 /// Pages load scripts, styles and fonts only from, and connect only to, this origin. Every app
-/// shares it (and its storage): apps are not isolated from each other.
-pub const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-    img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; \
-    base-uri 'none'; form-action 'self'";
+/// shares it (and its storage): apps are not isolated from each other. Only `ancestors` (the
+/// MIS page) may frame them.
+pub fn csp(ancestors: &[String]) -> String {
+    let ancestors = match ancestors.join(" ") {
+        a if a.is_empty() => "'none'".to_string(),
+        a => a,
+    };
+    format!(
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+        img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors {ancestors}; \
+        base-uri 'none'; form-action 'self'"
+    )
+}
 
 /// The SDK every app may load from `/a/_/mis.js` (`_` is no app's slug), and its in-memory twin.
 const SDK: &str = include_str!("../static/mis.js");
@@ -160,10 +206,10 @@ async fn guard(
     {
         h.append(header::SET_COOKIE, clear);
     }
-    h.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CSP),
-    );
+    // `frame_ancestors` checks them; one that slipped through frames nothing rather than panicking.
+    let policy = HeaderValue::from_str(&csp(&auth.frame_ancestors))
+        .unwrap_or_else(|_| HeaderValue::from_str(&csp(&[])).expect("a fixed policy"));
+    h.insert(header::CONTENT_SECURITY_POLICY, policy);
     h.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
@@ -776,6 +822,31 @@ fn serve(apps: &Apps, slug: &str, path: &str, m: &Member) -> Response {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_the_mis_page_may_frame_apps() {
+        let local: SocketAddr = "127.0.0.1:7474".parse().unwrap();
+        let allowed = [
+            "https://mis.lan".to_string(),
+            "https://x.example; script-src *".to_string(),
+        ];
+        let got = frame_ancestors(Some("wss://MIS.example.com/"), &allowed, local);
+        assert_eq!(
+            got,
+            [
+                "https://mis.example.com",
+                "https://mis.lan",
+                "http://127.0.0.1:7474"
+            ]
+        );
+        let lan: SocketAddr = "0.0.0.0:7474".parse().unwrap();
+        assert!(frame_ancestors(None, &[], lan).is_empty());
+        assert!(csp(&[]).contains("frame-ancestors 'none';"));
+        assert!(csp(&got).contains(
+            "frame-ancestors https://mis.example.com https://mis.lan http://127.0.0.1:7474;"
+        ));
+    }
+
     use super::*;
 
     #[test]

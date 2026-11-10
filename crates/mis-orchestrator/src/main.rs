@@ -387,6 +387,8 @@ async fn main() -> anyhow::Result<()> {
     let local = listener.local_addr()?;
     tracing::info!("listening on {local}");
     let origins = normalize_origins(args.allowed_origins);
+    let ui_origins =
+        mis_orchestrator::apps_http::frame_ancestors(args.public_url.as_deref(), &origins, local);
     print_connect_hints(
         local,
         args.token.as_deref(),
@@ -441,6 +443,7 @@ async fn main() -> anyhow::Result<()> {
                 public_host: apps_public_host,
                 dev: args.apps_dev,
                 feedback: Some(inbox),
+                frame_ancestors: ui_origins,
             };
             if let Err(e) = mis_orchestrator::serve_apps(listener, apps, auth).await {
                 tracing::error!("apps listener stopped: {e:#}");

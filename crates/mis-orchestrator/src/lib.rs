@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, FromRequest, Path, Query as Params, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -1336,6 +1336,7 @@ pub fn router(app: App) -> Router {
             get(draft_shot).post(decide_draft),
         )
         .route("/api/apps/{slug}/feedback", post(hold_feedback))
+        .route("/api/apps/{slug}/feedback/new", post(new_feedback))
         .route(
             "/api/apps/{slug}/feedback/{id}/{action}",
             post(decide_feedback),
@@ -1422,13 +1423,23 @@ pub fn self_test(dir: Option<&std::path::Path>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The phone page. Not framable: it acts with the token stored for this origin.
+/// The phone page. Not framable: it acts with the token stored for this origin. It frames
+/// only the apps origin (draft previews; apps allow this page as their ancestor).
 /// `no-cache` makes browsers revalidate, so a rebuilt orchestrator's page shows on reload.
-async fn page() -> impl IntoResponse {
+async fn page(State(app): State<App>) -> impl IntoResponse {
+    let apps = app
+        .apps
+        .as_ref()
+        .and_then(|a| a.base_url())
+        .unwrap_or("'none'");
+    let csp = HeaderValue::from_str(&format!("frame-ancestors 'none'; frame-src {apps}"))
+        .unwrap_or(HeaderValue::from_static(
+            "frame-ancestors 'none'; frame-src 'none'",
+        ));
     (
         [
-            (header::CONTENT_SECURITY_POLICY, "frame-ancestors 'none'"),
-            (header::CACHE_CONTROL, "no-cache"),
+            (header::CONTENT_SECURITY_POLICY, csp),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
         ],
         Html(include_str!("../static/index.html")),
     )
@@ -2194,6 +2205,53 @@ async fn hold_feedback(
         Err(apps::MemberError::NoSuchApp) => (StatusCode::NOT_FOUND, "no such app").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")).into_response(),
     }
+}
+
+/// An [`AppFeedback`] from the owner on this page, beside the app's draft preview: it goes as
+/// in-app feedback does ([`App::take_feedback`]), into the draft's thread, else a change task.
+/// 202 once sent; 409 if it can't go now (kept on the app, with why). Owner only.
+async fn new_feedback(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    body: Bytes,
+) -> Response {
+    let apps = match admit_owner(&app, &headers, peer, &slug).await {
+        Ok(a) => a,
+        Err(refused) => return refused.into_response(),
+    };
+    let f: AppFeedback = match serde_json::from_slice(&body) {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    if let Err(why) = feedback::check(&f) {
+        return (StatusCode::BAD_REQUEST, why).into_response();
+    }
+    let by = app.app_subject(&headers).await.name().to_string();
+    let s = slug.clone();
+    let seen = tokio::task::spawn_blocking(move || (apps.draft(&s), apps.active_n(&s))).await;
+    let (draft, live) = seen.expect("reading an app doesn't panic");
+    let held = HeldFeedback {
+        id: uuid::Uuid::new_v4(),
+        at: unix_ms(),
+        by,
+        release: draft.as_ref().map(|d| d.release).or(live),
+        draft: draft.is_some(),
+        draft_task: draft.map(|d| d.task),
+        feedback: f,
+        waiting: Some("on its way to an agent".into()),
+        task: None,
+        outcome: None,
+    };
+    if !app.take_feedback(slug, held, true).await {
+        return (
+            StatusCode::CONFLICT,
+            "it couldn't go now; see why on the app",
+        )
+            .into_response();
+    }
+    StatusCode::ACCEPTED.into_response()
 }
 
 /// Send waiting feedback `id` to an agent now (`send`; 409 if it still can't go, kept with
