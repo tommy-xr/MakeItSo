@@ -853,7 +853,8 @@ mod tests {
     fn dev_tooling_serves_the_listeners_csp() {
         // `mis apps sdk` writes vite.ts, whose `vite preview` stands in for this listener.
         let vite = include_str!("../../mis-cli/sdk/vite.ts");
-        assert!(vite.contains(&format!("const CSP = \"{CSP}\";")), "{CSP}");
+        let csp = csp(&[]); // no MIS page to frame it
+        assert!(vite.contains(&format!("const CSP = \"{csp}\";")), "{csp}");
     }
 
     fn tile(slug: &str, title: &str, icon: Option<&str>) -> Tile {
