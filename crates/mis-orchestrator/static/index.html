@@ -3832,7 +3832,8 @@ async function loadSettings() {
   const ask = {};
   settingsAsked = ask;
   const res = await getJson('/api/settings', loadSettings);
-  if (!res) return {}; // retried; the fields stay as they were
+  // Retried: the fields stay disabled meanwhile, so the retry can't overwrite what was typed.
+  if (!res) { if (settingsAsked === ask) { settings = null; renderSettings(); } return {}; }
   const got = res.error ? res : { s: res.ok };
   if (settingsAsked !== ask) return got;
   settings = got;
@@ -4375,16 +4376,26 @@ function authHeaders() {
 const awayStatus = (status, type) => status >= 500 && /^text\/html/i.test(type || '');
 // net:end
 // GET `path`'s JSON: { ok } or { error: the server's reason }. Unreachable (the orchestrator restarting, a dropped
-// network): null, and `retry` runs once it is back, so a view keeps what it shows rather than an error that sticks.
-// The connection dot already says it's away.
-const RETRY_MS = 3000;
+// network): null, and `retry` runs once it is back, so a view keeps what it shows rather than an error that sticks;
+// the connection dot already says it's away. Unreachable RETRIES times while the socket is up: an error after all.
+const RETRY_MS = 3000, RETRIES = 3;
 const unreached = new Map(); // path -> its retry
+const misses = new Map(); // path -> times unreachable in a row while the socket was up
 let unreachedTimer = 0;
 async function getJson(path, retry) {
-  try {
-    const r = await fetch(path, { headers: authHeaders() });
-    if (!awayStatus(r.status, r.headers.get('content-type'))) return r.ok ? { ok: await r.json() } : { error: (await r.text()) || `error ${r.status}` };
-  } catch {}
+  let r = null;
+  try { r = await fetch(path, { headers: authHeaders() }); } catch {}
+  if (r && !awayStatus(r.status, r.headers.get('content-type'))) {
+    unreached.delete(path); // answered: an earlier failure's retry would only redo it
+    misses.delete(path);
+    if (!r.ok) return { error: (await r.text().catch(() => '')) || `error ${r.status}` };
+    try { return { ok: await r.json() }; } catch { return { error: 'unexpected reply' }; }
+  }
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    const n = (misses.get(path) || 0) + 1;
+    misses.set(path, n);
+    if (n > RETRIES) { misses.delete(path); return { error: 'couldn’t reach the orchestrator' }; }
+  }
   unreached.set(path, retry);
   // The socket still up (a blip, or it hasn't noticed yet): again shortly. Else its reopening does.
   if (!unreachedTimer) unreachedTimer = setTimeout(() => { unreachedTimer = 0; if (ws && ws.readyState === WebSocket.OPEN) retryUnreached(); }, RETRY_MS);
@@ -4504,6 +4515,7 @@ $('clear').onclick = (e) => {
   everOpen = false;
   readOnly = false;
   settingsAsked = null;
+  unreached.clear(); // they were this token's
   feed = [];
   connMsg = authNeeded ? 'token required' : 'disconnected';
   render();
