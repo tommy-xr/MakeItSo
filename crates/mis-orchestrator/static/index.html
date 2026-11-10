@@ -1056,7 +1056,7 @@ const live = new Map();
 const writingOf = (id) => live.get(id)?.text;
 // Photos and documents for the new task: photos downscaled here (phone shots are ~4 MB), uploaded on pick, sent as ids.
 // Each is { url: a photo's preview object URL, name: a document's, id: upload id once stored }.
-const MAX_SHOTS = 12, MAX_SIDE = 1600, MAX_DOC = 10 << 20;
+const MAX_SHOTS = 12, MAX_SIDE = 1600, MAX_DOC = 10 << 20, MAX_DOCS = 40 << 20; // MAX_DOCS: documents' bytes in all
 let shots = []; // the shown composer's (promptKey)
 const keptShots = new Map(); // another composer's draft key -> its photos, while that one isn't shown
 
@@ -4742,10 +4742,12 @@ async function shrink(file) {
   return new Promise((ok, no) => c.toBlob((b) => (b ? ok(b) : no(new Error('could not encode'))), 'image/jpeg', 0.85));
 }
 async function attach(file) {
-  const doc = refKind(file) === 'doc', shot = { url: '', name: doc ? file.name : '', id: null };
+  const doc = refKind(file) === 'doc', shot = { url: '', name: doc ? file.name : '', id: null, bytes: doc ? file.size : 0 };
+  const held = shots.reduce((n, x) => n + (x.bytes || 0), 0);
   shots.push(shot);
   try {
     if (doc && file.size > MAX_DOC) throw new Error(`files are limited to ${MAX_DOC >> 20} MB`);
+    if (held + shot.bytes > MAX_DOCS) throw new Error(`at most ${MAX_DOCS >> 20} MB of files`);
     const blob = doc ? file : await shrink(file);
     if (!doc) shot.url = URL.createObjectURL(blob);
     renderShots();
@@ -4831,7 +4833,7 @@ function renderAttached(ids) {
   const now = attached = { key, urls: [] };
   box.hidden = !ids.length;
   box.replaceChildren(...ids.map((id) => {
-    const img = el('img', { alt: 'attached photo' }), a = el('a', { target: '_blank', rel: 'noopener' }, img), box = el('div', { className: 'shot' }, a);
+    const img = el('img', { alt: 'attached photo' }), a = el('a', { target: '_blank', rel: 'noopener' }, img), chip = el('div', { className: 'shot' }, a);
     fetch(`/api/images/${id}`, { headers: authHeaders() }).then(async (r) => {
       if (!r.ok) { img.alt = 'photo gone'; return; }
       const url = URL.createObjectURL(await r.blob());
@@ -4840,11 +4842,11 @@ function renderAttached(ids) {
       a.href = url;
       if ((r.headers.get('content-type') || '').startsWith('image/')) { img.src = url; return; }
       const name = servedName(r.headers.get('content-disposition'));
-      box.className = 'shot doc';
-      box.title = name;
+      chip.className = 'shot doc';
+      chip.title = name;
       a.replaceChildren(el('b', {}, docExt(name) || 'file'), el('span', {}, name));
     }).catch(() => { if (attached === now) now.key = ''; });
-    return box;
+    return chip;
   }));
 }
 

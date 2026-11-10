@@ -227,9 +227,10 @@ pub fn write_files(dir: &Path, files: &[AttachedFile]) -> anyhow::Result<Vec<Str
 pub fn with_files(prompt: &str, paths: &[String]) -> String {
     match paths {
         [] => prompt.to_string(),
+        // One per line: names may hold commas and spaces.
         _ => format!(
-            "{prompt}\n\nAttached files: {} (read them)",
-            paths.join(", ")
+            "{prompt}\n\nAttached files (read them):\n{}",
+            paths.join("\n")
         ),
     }
 }
@@ -439,7 +440,7 @@ mod tests {
         assert_eq!(with_files("p", &[]), "p");
         assert_eq!(
             with_files("p", &["/t/a.pdf".into(), "/t/b.md".into()]),
-            "p\n\nAttached files: /t/a.pdf, /t/b.md (read them)"
+            "p\n\nAttached files (read them):\n/t/a.pdf\n/t/b.md"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

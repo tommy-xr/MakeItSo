@@ -440,7 +440,7 @@ fn directory_page(who: &str, tiles: &[Tile]) -> String {
 }
 
 /// `path` for a URL path: bytes outside `A-Za-z0-9-._~/` percent-encoded. `my icon.png` -> `my%20icon.png`.
-fn url_path(path: &str) -> String {
+pub(crate) fn url_path(path: &str) -> String {
     path.bytes()
         .map(|b| match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {

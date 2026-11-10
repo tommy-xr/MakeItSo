@@ -33,7 +33,7 @@ mod refs;
 pub use inventory::{InstalledApp, Inventory, Machine};
 pub use refs::{
     check_references, references_text, AttachedFile, DocKind, Reference, UploadKind, MAX_ATTACHED,
-    MAX_ATTACHED_BYTES, MAX_NAME_CHARS, MAX_REFERENCES,
+    MAX_ATTACHED_BYTES, MAX_NAME_BYTES, MAX_REFERENCES,
 };
 mod links;
 pub mod merge;

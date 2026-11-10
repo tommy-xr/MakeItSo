@@ -3004,17 +3004,9 @@ async fn image(
     }
 }
 
-/// `inline` with `name` as RFC 5987 `filename*`, every byte but unreserved ones escaped.
+/// `inline` with `name` as RFC 5987 `filename*`. A kept name holds no `/` (`images::clean_name`).
 fn disposition(name: &str) -> String {
-    let escaped: String = (name.bytes())
-        .map(
-            |b| match b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
-                true => (b as char).to_string(),
-                false => format!("%{b:02X}"),
-            },
-        )
-        .collect();
-    format!("inline; filename*=UTF-8''{escaped}")
+    format!("inline; filename*=UTF-8''{}", apps_http::url_path(name))
 }
 
 /// An evidence file, as stored: its sniffed type, never sniffed again by the

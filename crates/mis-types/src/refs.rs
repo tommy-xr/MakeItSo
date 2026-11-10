@@ -15,8 +15,8 @@ pub const MAX_REFERENCES: usize = 32;
 pub const MAX_URL_CHARS: usize = 2048;
 pub const MAX_LINK_TITLE_CHARS: usize = 200;
 pub const MAX_NOTE_CHARS: usize = 4000;
-/// Longest upload name kept, in characters.
-pub const MAX_NAME_CHARS: usize = 100;
+/// Longest upload name kept, in bytes: with a worker's `<uuid>-` prefix it stays a legal file name.
+pub const MAX_NAME_BYTES: usize = 120;
 
 /// A document accepted as a reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,8 +126,12 @@ pub fn check_references(refs: &[Reference]) -> Result<(), String> {
     for r in refs {
         match r {
             Reference::Link { url, title } => {
-                let web = url.starts_with("https://") || url.starts_with("http://");
-                if !web || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                let (scheme, rest) = url.split_once("://").unwrap_or_default();
+                let web = ["http", "https"]
+                    .iter()
+                    .any(|s| s.eq_ignore_ascii_case(scheme));
+                let host = !rest.is_empty() && !rest.starts_with('/');
+                if !(web && host) || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
                     return Err(format!("{url:?} isn't an http(s) link"));
                 }
                 if url.chars().count() > MAX_URL_CHARS {
@@ -144,6 +148,9 @@ pub fn check_references(refs: &[Reference]) -> Result<(), String> {
             Reference::Note { text } => {
                 if text.trim().is_empty() {
                     return Err("a note is empty".into());
+                }
+                if text.contains(|c: char| c.is_control() && c != '\n' && c != '\t') {
+                    return Err("a note has control characters".into());
                 }
                 if text.chars().count() > MAX_NOTE_CHARS {
                     return Err(format!("notes are at most {MAX_NOTE_CHARS} characters"));
@@ -221,10 +228,15 @@ mod tests {
             "ftp://x",
             "https://a b",
             "example.com",
+            "https://",
+            "https:///x",
         ] {
             assert!(check_references(&[link(bad)]).is_err(), "{bad}");
         }
         assert!(check_references(&[note("  \n")]).is_err());
+        assert!(check_references(&[note("a\x1b[31m")]).is_err());
+        assert_eq!(check_references(&[note("a\n\tb")]), Ok(()));
+        assert_eq!(check_references(&[link("HTTP://Example.com")]), Ok(()));
         let titled = Reference::Link {
             url: "https://x".into(),
             title: Some("two\nlines".into()),

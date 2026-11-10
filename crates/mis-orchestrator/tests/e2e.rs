@@ -3922,12 +3922,12 @@ async fn app_task_carries_its_references_to_the_agent() {
     assert_eq!(names, [(doc, "Chore list.pdf"), (md, "rules.md")]);
     assert_eq!(Base64::decode_vec(&files[0].data).unwrap(), pdf);
 
-    // The worker writes them beside the task's images and names them in its prompt.
+    // What the worker does with them: writes them beside the task's images, names them in its prompt.
     let task_dir = dir.join("worker-task");
     let paths = mis_agent::write_files(&task_dir, &files).unwrap();
     assert_eq!(std::fs::read(&paths[1]).unwrap(), rules);
     let prompt = mis_agent::with_files(&task.prompt, &paths);
-    let listed = format!("Attached files: {}, {} (read them)", paths[0], paths[1]);
+    let listed = format!("Attached files (read them):\n{}\n{}", paths[0], paths[1]);
     assert!(prompt.ends_with(&listed), "{prompt}");
     assert!(
         paths[0].ends_with(&format!("{doc}-Chore list.pdf")),

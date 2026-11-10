@@ -9,7 +9,7 @@ use anyhow::Context;
 use base64ct::{Base64, Encoding};
 use mis_types::{
     AttachedFile, DocKind, ImageFile, ImageKind, UploadKind, MAX_ATTACHED, MAX_ATTACHED_BYTES,
-    MAX_NAME_CHARS,
+    MAX_NAME_BYTES,
 };
 use uuid::Uuid;
 
@@ -45,7 +45,7 @@ pub fn validate(
 }
 
 /// `name` as kept for a `kind` upload: its last path segment, control characters dropped, at
-/// most `MAX_NAME_CHARS`, ending in the kind's extension. Blank: none.
+/// most `MAX_NAME_BYTES`, ending in the kind's extension. Blank: none.
 pub fn clean_name(name: &str, kind: UploadKind) -> Option<String> {
     let base = name.rsplit(['/', '\\']).next().unwrap_or_default();
     let base: String = base.chars().filter(|c| !c.is_control()).collect();
@@ -59,8 +59,12 @@ pub fn clean_name(name: &str, kind: UploadKind) -> Option<String> {
         true => &base[..base.len() - ext.len()],
         false => base,
     };
-    let room = MAX_NAME_CHARS - ext.chars().count();
-    Some(stem.chars().take(room).collect::<String>() + &ext)
+    let room = MAX_NAME_BYTES - ext.len();
+    let cut = (stem.char_indices().map(|(i, c)| i + c.len_utf8()))
+        .take_while(|end| *end <= room)
+        .last()
+        .unwrap_or(0);
+    Some(stem[..cut].to_string() + &ext)
 }
 
 /// Uploads for one task: at most `MAX_ATTACHED` of `MAX_ATTACHED_BYTES` in all, each one
@@ -253,8 +257,11 @@ mod tests {
         assert_eq!(clean_name("..pdf", pdf).as_deref(), Some("pdf.pdf"));
         assert_eq!(clean_name("a\nb\u{0}.pdf", pdf).as_deref(), Some("ab.pdf"));
         assert_eq!(clean_name(" / ", pdf), None);
-        let long = clean_name(&"é".repeat(300), pdf).unwrap();
-        assert_eq!(long.chars().count(), MAX_NAME_CHARS);
+        let long = clean_name(&"界".repeat(300), pdf).unwrap();
+        assert!(
+            long.len() <= MAX_NAME_BYTES && long.len() > MAX_NAME_BYTES - 3,
+            "{long}"
+        );
         assert!(long.ends_with(".pdf"));
     }
 

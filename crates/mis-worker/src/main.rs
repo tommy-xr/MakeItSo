@@ -408,8 +408,8 @@ async fn session(
     ev_tx: &mpsc::Sender<(TaskId, AgentEvent)>,
     c: &mut Conn,
 ) -> Result<Ended> {
-    // An assignment carries up to MAX_ATTACHED_BYTES of base64 uploads in one frame.
-    let room = Some(MAX_ATTACHED_BYTES * 4 / 3 + (1 << 20));
+    // An assignment carries up to MAX_ATTACHED_BYTES of base64 uploads in one frame, plus its prompt.
+    let room = Some(MAX_ATTACHED_BYTES * 4 / 3 + (4 << 20));
     let config = WebSocketConfig::default()
         .max_message_size(room)
         .max_frame_size(room);
@@ -943,7 +943,7 @@ async fn send_diff(
 async fn run(
     ctx: &Ctx,
     task: Task,
-    (images, files): Attached,
+    (images, docs): Attached,
     token: Option<String>,
     tx: &mpsc::Sender<(TaskId, AgentEvent)>,
     base: &Mutex<Option<DiffBase>>,
@@ -965,7 +965,7 @@ async fn run(
     // A session on this disk runs in its own folder, on its own model.
     let (cwd, model) = match &task.send_to {
         Some(to) => {
-            match session_cwd(ctx, &task, to, !images.is_empty() || !files.is_empty(), tx).await {
+            match session_cwd(ctx, &task, to, !images.is_empty() || !docs.is_empty(), tx).await {
                 Ok(Placed::Run(cwd, model)) => (Ok(cwd), model),
                 Ok(Placed::Delivered(ev)) => {
                     let _ = tx.send((id, ev)).await;
@@ -986,27 +986,18 @@ async fn run(
         }
     };
     let image_dir = image_dir(id);
-    let image_paths = match images.is_empty() {
-        true => vec![],
-        false => match mis_agent::write_images(&image_dir, &images) {
-            Ok(paths) => paths,
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&image_dir);
-                let _ = tx.send(fail(format!("attached images: {e:#}"))).await;
-                return;
-            }
-        },
+    let written = match images.is_empty() && docs.is_empty() {
+        true => Ok((vec![], vec![])),
+        false => mis_agent::write_images(&image_dir, &images)
+            .and_then(|i| Ok((i, mis_agent::write_files(&image_dir, &docs)?))),
     };
-    let file_paths = match files.is_empty() {
-        true => vec![],
-        false => match mis_agent::write_files(&image_dir, &files) {
-            Ok(paths) => paths,
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&image_dir);
-                let _ = tx.send(fail(format!("attached files: {e:#}"))).await;
-                return;
-            }
-        },
+    let (image_paths, file_paths) = match written {
+        Ok(paths) => paths,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&image_dir);
+            let _ = tx.send(fail(format!("attached files: {e:#}"))).await;
+            return;
+        }
     };
     let perms = ctx.approvals.permissions.lock().unwrap().clone();
     let perms = perms.map(|p| permissions::for_harness(&p, agent.name(), &ctx.inventory));
