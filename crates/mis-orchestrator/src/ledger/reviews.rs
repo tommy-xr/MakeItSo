@@ -22,11 +22,24 @@ impl Ledger {
         self.reviews.iter().find(|r| r.id == id)
     }
 
-    /// Add `review`. An app's newer draft replaces its undecided one.
-    pub fn open_review(&mut self, review: Review) {
+    /// Add `review`. An app's newer draft replaces its undecided one; if that was approved and
+    /// this is the same PR (its task's fix, proposed again), it is that fix, ready for the nod.
+    pub fn open_review(&mut self, mut review: Review) {
         if let ReviewKind::AppDraft { slug, .. } = &review.kind {
             let same =
                 |r: &Review| matches!(&r.kind, ReviewKind::AppDraft { slug: s, .. } if s == slug);
+            let approved = (self.reviews.iter())
+                .filter(|r| !r.state.finished() && same(r) && r.pr == review.pr)
+                .find_map(|old| match old.state {
+                    ReviewState::Approved { fixes } | ReviewState::FixReady { fixes, .. } => {
+                        Some((old.head.clone(), fixes))
+                    }
+                    _ => None,
+                });
+            if let Some((approved, fixes)) = approved {
+                review.state = ReviewState::FixReady { approved, fixes };
+                review.status = Some("a fix is ready to look at".into());
+            }
             self.reviews.retain(|r| r.state.finished() || !same(r));
         }
         self.reviews.push(review);
@@ -358,5 +371,18 @@ mod tests {
         l.open_review(new);
         assert!(l.review(old_id).is_none() && l.review(new_id).is_some());
         assert_eq!(l.reviews().len(), 2);
+        // Approved, then proposed again on the same PR (its task's fix): the fix waits for a nod.
+        l.approve_review(new_id).unwrap();
+        let fix = Review {
+            head: "c".repeat(40),
+            ..draft(4)
+        };
+        let fix_id = fix.id;
+        l.open_review(fix);
+        let approved = "a".repeat(40);
+        assert_eq!(
+            state(&l, fix_id),
+            ReviewState::FixReady { approved, fixes: 0 }
+        );
     }
 }
