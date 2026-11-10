@@ -21,7 +21,7 @@ const appsBlock = page.slice(page.indexOf('// apps:begin'), page.indexOf('// app
 const refsBlock = page.slice(page.indexOf('// refs:begin'), page.indexOf('// refs:end'));
 const ap = new Function(`${refsBlock}; ${appsBlock}; return { composerFor, appTaskBody, boardPath, boardKind, boardCounts, boardLine, cardLook, textItem, linkParts, photoName, slugify };`)();
 const rf = new Function(`${refsBlock}; return { refKind, docExt, servedName };`)();
-const nt = { ...new Function(`${notesBlock}; return { noteFront, noteAuthor, noteRows, noteDestGroups, noteDestLabel, noteSuggested, noteWhy, projectDir, projectActive, projectFiles, projectFind, repoHref };`)(), notePath: new Function(`${block}; return notePath;`)() };
+const nt = { ...new Function(`${notesBlock}; return { noteFront, noteAuthor, noteRows, noteDestGroups, noteDestLabel, noteSuggested, noteWhy, noteTops, projectOf, projectDir, projectActive, projectFiles, projectFind, repoHref };`)(), notePath: new Function(`${block}; return notePath;`)() };
 
 // Every tag in the output, e.g. ['p', 'a', 'code'].
 const tags = (html) => [...html.matchAll(/<([a-z0-9]+)/g)].map((m) => m[1]);
@@ -382,6 +382,8 @@ test('a note’s frontmatter, author and folder order', () => {
     e('inbox/z', 'dir'), e('inbox/old', 'dir'), e('inbox/old/2026-01-01.md'), e('inboxes/x.md')];
   assert.deepEqual(nt.noteRows(entries, 'inbox').map((x) => x.path),
     ['inbox/old', 'inbox/z', 'inbox/2026-11-08-b.md', 'inbox/2026-11-08-b-1.jpg', 'inbox/2026-11-06-a.md']);
+  // Top folders in their fixed order; projects/ is left to Projects.
+  assert.deepEqual(nt.noteTops([e('ai', 'dir'), e('projects', 'dir'), e('inbox', 'dir'), e('misc', 'dir'), e('areas', 'dir')]).map((x) => x.path), ['inbox', 'areas', 'ai']);
 });
 
 test('Move to… groups the server’s folders, projects by title', () => {
@@ -429,6 +431,9 @@ test('a project’s folder, files, name and repo links', () => {
   assert.deepEqual(files.own.map((x) => x.path), ['projects/make-it-so/docs', 'projects/make-it-so/plan.md']);
   assert.deepEqual(files.ai.map((x) => x.path), ['ai/projects/make-it-so/2026-11-09-review.md']);
   assert.deepEqual(nt.projectFiles(entries, old), { own: [], ai: [] });
+  // Only listed projects own their folders: `archive/2025/` isn't one, nor is `projects/make-it-sooner/`.
+  assert.deepEqual(['projects/make-it-so/plan.md', 'ai/projects/make-it-so/docs/a.md', 'archive/old/README.md', 'projects/make-it-so', 'inbox/a.md',
+    'archive/2025/x.md', 'projects/make-it-sooner/x.md'].map((p) => nt.projectOf([mis, old], p)?.id ?? null), ['make-it-so', 'make-it-so', 'old', null, null, null, null]);
   assert.equal(nt.repoHref('tommy-xr/MakeItSo'), 'https://github.com/tommy-xr/MakeItSo');
   for (const bad of ['MakeItSo', 'a/b/c', '../x', 'a/..', 'javascript:alert(1)', 'a/b?x', ' a/b', 'https://x.co/a']) {
     assert.equal(nt.repoHref(bad), null, bad);
