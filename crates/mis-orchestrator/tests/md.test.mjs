@@ -1,5 +1,6 @@
 // The page's pure renderers (index.html): markdown between `md:begin` and `md:end`, evidence helpers between `ev:begin`
-// and `ev:end`, diff helpers between `diff:begin` and `diff:end`, notes helpers between `notes:begin` and `notes:end`. Run: node --test crates/mis-orchestrator/tests
+// and `ev:end`, diff helpers between `diff:begin` and `diff:end`, notes helpers between `notes:begin` and `notes:end`,
+// the network check between `net:begin` and `net:end`. Run: node --test crates/mis-orchestrator/tests
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -12,6 +13,8 @@ const ev = new Function(`${evBlock}; return { ansi, better, change, fmtChange, t
 const diffBlock = page.slice(page.indexOf('// diff:begin'), page.indexOf('// diff:end'));
 const df = new Function(`${diffBlock}; return { patchRows, pathParts, diffOffer, prPrompt, pushPrompt };`)();
 const notesBlock = page.slice(page.indexOf('// notes:begin'), page.indexOf('// notes:end'));
+const netBlock = page.slice(page.indexOf('// net:begin'), page.indexOf('// net:end'));
+const awayStatus = new Function(`${netBlock}; return awayStatus;`)();
 const nt = { ...new Function(`${notesBlock}; return { noteFront, noteAuthor, noteRows, projectDir, projectActive, projectFiles, projectFind, repoHref };`)(), notePath: new Function(`${block}; return notePath;`)() };
 
 // Every tag in the output, e.g. ['p', 'a', 'code'].
@@ -396,4 +399,15 @@ test('a project’s folder, files, name and repo links', () => {
   for (const bad of ['MakeItSo', 'a/b/c', '../x', 'a/..', 'javascript:alert(1)', 'a/b?x', ' a/b', 'https://x.co/a']) {
     assert.equal(nt.repoHref(bad), null, bad);
   }
+});
+
+test('only a proxy page counts as the orchestrator being away', () => {
+  // Cloudflare's 502/530 while the orchestrator restarts.
+  assert.equal(awayStatus(502, 'text/html; charset=UTF-8'), true);
+  assert.equal(awayStatus(530, 'text/html'), true);
+  // The orchestrator's own errors (plain text) are real answers, shown.
+  assert.equal(awayStatus(503, 'text/plain; charset=utf-8'), false);
+  assert.equal(awayStatus(504, null), false);
+  assert.equal(awayStatus(404, 'text/html'), false);
+  assert.equal(awayStatus(200, 'application/json'), false);
 });
