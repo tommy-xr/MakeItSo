@@ -8,10 +8,9 @@ import { readFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { fileURLToPath } from 'node:url';
 
-// The apps listener's CSP, so `vite preview` (and shots) catch what it would block.
-const CSP =
-  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; " +
-  "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+// The apps listener's CSP, so `vite preview` (and shots) catch what it would block. One line: a
+// MakeItSo test checks it is the listener's.
+const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
 const SDK: Record<string, string> = { 'mis.js': 'text/javascript', 'mis-mock.js': 'text/javascript', 'mis.d.ts': 'text/plain' };
 

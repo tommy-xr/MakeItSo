@@ -775,6 +775,13 @@ fn serve(apps: &Apps, slug: &str, path: &str, m: &Member) -> Response {
 mod tests {
     use super::*;
 
+    #[test]
+    fn dev_tooling_serves_the_listeners_csp() {
+        // `mis apps sdk` writes vite.ts, whose `vite preview` stands in for this listener.
+        let vite = include_str!("../../mis-cli/sdk/vite.ts");
+        assert!(vite.contains(&format!("const CSP = \"{CSP}\";")), "{CSP}");
+    }
+
     fn tile(slug: &str, title: &str, icon: Option<&str>) -> Tile {
         Tile {
             slug: slug.into(),

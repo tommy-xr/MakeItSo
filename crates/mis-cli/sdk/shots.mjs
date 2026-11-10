@@ -23,7 +23,14 @@ export async function shots({ chromium, preview, ok = () => false }, steps) {
   const origin = new URL(url).origin;
   mkdirSync(out, { recursive: true });
 
-  const browser = await chromium.launch().catch(() => chromium.launch({ channel: 'chrome' }));
+  // No browser: stop the preview server too, or the process never exits.
+  const browser = await chromium
+    .launch()
+    .catch(() => chromium.launch({ channel: 'chrome' }))
+    .catch(async (e) => {
+      await server?.close();
+      throw e;
+    });
   const problems = [];
   const contexts = [];
 

@@ -59,7 +59,7 @@
     const isConflict = (e) => e instanceof MisError && e.status === 409;
     return {
       MisError,
-      me: via((m) => m.me),
+      me: async () => menu.saw(await (await ready).me()),
       records: {
         list,
         get: via((m) => m.records.get),
@@ -163,7 +163,7 @@
 .mis-pop a[aria-current=page]{font-weight:600}
 .mis-head{box-sizing:border-box;display:flex;align-items:center;gap:10px;max-width:560px;margin:0 auto;padding:calc(14px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right)) 6px calc(16px + env(safe-area-inset-left))}
 .mis-head h1{flex:1;min-width:0;margin:0;font-size:28px;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.mis-head .mis-back{padding-right:2px;color:inherit;font-size:30px;line-height:1;text-decoration:none}
+.mis-head .mis-back{padding-right:2px;color:var(--a);font-size:30px;line-height:1;text-decoration:none}
 .mis-head [hidden]{display:none}
 .mis-badge{padding:2px 10px;border-radius:99px;background:var(--l);color:var(--d);font-size:13px;white-space:nowrap}
 .mis-main{display:block;max-width:560px;margin:0 auto}
@@ -185,8 +185,17 @@
   // what became of their feedback, and Give feedback; above them the shell's menu sections.
   // Apps place its button in their header (`mis.menu.mount(el)`); else it floats top-right.
   function platformMenu() {
-    let btn = null, host = null, me = null, pop = null, items = [], gotMe;
-    const known = new Promise((r) => (gotMe = r));
+    let btn = null, dot = null, host = null, me = null, pop = null, items = [], loaded = false;
+    const watchers = [];
+    const showDot = () => { if (me?.drafted && !draft) btn.append(dot); else dot.remove(); };
+    // Every /me the page reads, the app's too: the latest says who is signed in (and their role).
+    const saw = (m) => {
+      if (!m) return m;
+      me = m;
+      for (const f of watchers) f(m);
+      if (btn) showDot(); else if (loaded) button();
+      return m;
+    };
     const mount = (el) => {
       if (!el) return; // a React ref also calls with null
       host = el;
@@ -200,28 +209,29 @@
         tag.href = `/a/${slug}/?draft=off`;
         document.body.append(tag);
       }
-      me = await globalThis.mis.me().catch(() => null);
-      gotMe(me);
-      if (!me && !items.length) return;
+      await globalThis.mis.me().catch(() => null);
+      loaded = true;
+      // No /me yet: a button only for the shell's sections; a later /me adds the rest.
+      if (me || items.length) button();
+    };
+    function button() {
       btn = make('button', 'mis-mb', '⋯');
       btn.type = 'button';
       btn.setAttribute('aria-label', 'App menu');
       btn.setAttribute('aria-expanded', 'false');
-      const dot = make('span', 'mis-dot');
-      const showDot = () => { if (me?.drafted && !draft) btn.append(dot); else dot.remove(); };
+      dot = make('span', 'mis-dot');
       showDot();
       // Fresh each time it opens: a draft or a feedback status may have changed. A tap while
       // open closes it.
       btn.onclick = async () => {
         if (pop) return pop.close();
-        me = (await globalThis.mis.me().catch(() => null)) || me;
-        showDot();
+        await globalThis.mis.me().catch(() => null);
         if (!pop) open();
       };
       if (host) return mount(host);
       // Not placed by the app: float, unless it places it soon after loading.
       setTimeout(() => { if (!host) { btn.classList.add('mis-float', 'mis-ui'); document.body.append(btn); } }, 800);
-    };
+    }
     function open() {
       const el = make('div', 'mis-pop mis-ui');
       el.setAttribute('role', 'menu');
@@ -324,8 +334,13 @@
         send.disabled = false;
       };
     }
-    // `me`: /me once loaded (null if it failed). `items`: the shell's menu sections, shown on open.
-    return { mount, start, me: known, set items(list) { items = list; } };
+    // `saw`: each /me read. `watch(f)`: f(me) now if known, and on each later one. `items`: the
+    // shell's menu sections, shown on open.
+    return {
+      mount, start, saw,
+      watch(f) { watchers.push(f); if (me) f(me); },
+      set items(list) { items = list; if (loaded && !btn && list.length) button(); },
+    };
   }
 
   // Shell core, pure. The section a hash names: `#/log/for/ann` -> {id: 'log', path: ['log',
@@ -395,7 +410,7 @@
     };
     addEventListener('hashchange', follow);
     menu.mount(slot);
-    menu.me.then((me) => (badge.hidden = me?.role !== 'viewer'));
+    menu.watch((me) => (badge.hidden = me.role !== 'viewer'));
     render();
     return {
       main,
