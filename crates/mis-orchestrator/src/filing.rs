@@ -2,36 +2,57 @@
 //! takes there, the frontmatter it gains and the commit saying so. Pure; [`crate::notes`]
 //! makes the move with `git`.
 
+use std::collections::BTreeMap;
+
 use mis_types::{NoteKind, NoteMove};
 
 /// The longest summary a filing writes.
 pub const MAX_SUMMARY_CHARS: usize = 200;
 
-/// Where a note may be filed: the folders directly under `projects/`, `areas/` and
-/// `resources/` among `dirs` (repo paths), and `archive`. Never `ai/`, which is the AI's.
-pub fn dests(dirs: &[String]) -> Vec<String> {
-    let one_down = |p: &&String| {
-        let mut parts = p.split('/');
-        let top = parts.next().unwrap_or_default();
-        ["projects", "areas", "resources"].contains(&top)
-            && parts.next().is_some()
-            && parts.next().is_none()
+/// HEAD's entries a filing looks at: repo path -> git mode.
+pub type Modes = BTreeMap<String, String>;
+
+/// A folder's git mode; a file's are [`FILES`]. Symlinks (`120000`) and submodules never move.
+const TREE: &str = "040000";
+const FILES: [&str; 2] = ["100644", "100755"];
+/// Folders whose folders a note may be filed in, besides `archive`.
+const PARENTS: [&str; 3] = ["projects", "areas", "resources"];
+
+/// Where a note may be filed, from HEAD's `modes` of [`PARENTS`], `archive` and what's
+/// directly in the first three: their folders, if they are folders too, and `archive` if
+/// it is one or absent. Never `ai/`, which is the AI's.
+pub fn dests(modes: &Modes) -> Vec<String> {
+    let tree = |p: &str| modes.get(p).is_some_and(|m| m == TREE);
+    let one_down = |p: &str| {
+        p.split_once('/')
+            .is_some_and(|(top, rest)| PARENTS.contains(&top) && tree(top) && !rest.contains('/'))
+            && tree(p)
             && crate::notes_view::allowed(p)
     };
-    let mut dests: Vec<String> = dirs.iter().filter(one_down).cloned().collect();
-    dests.push("archive".into());
+    let mut dests: Vec<String> = modes.keys().filter(|p| one_down(p)).cloned().collect();
+    if modes.get("archive").is_none_or(|m| m == TREE) {
+        dests.push("archive".into());
+    }
     dests.sort();
-    dests.dedup();
     dests
 }
 
-/// Why `m` can't be filed, before reading the repo: it names a note directly in `inbox/`,
-/// and its summary is short.
+/// Why `m` can't be filed, before reading the repo: it names a note directly in `inbox/`
+/// and a folder [`dests`] could hold, neither with control characters (they would forge
+/// commit trailers), and its summary is short.
 pub fn check(m: &NoteMove) -> Result<(), String> {
+    let plain = |p: &str| crate::notes_view::allowed(p) && !p.chars().any(char::is_control);
     let name = m.path.strip_prefix("inbox/").unwrap_or_default();
     let note = crate::notes_view::kind(name, false) == NoteKind::Md;
-    if !note || name.contains('/') || !crate::notes_view::allowed(&m.path) {
+    if !note || name.contains('/') || !plain(&m.path) {
         return Err("path must be inbox/<name>.md".into());
+    }
+    let folder = m
+        .dest
+        .split_once('/')
+        .is_some_and(|(top, rest)| PARENTS.contains(&top) && !rest.contains('/'));
+    if !(m.dest == "archive" || folder) || !plain(&m.dest) {
+        return Err("dest must be projects/<id>, areas/<id>, resources/<name> or archive".into());
     }
     if summary(m).is_some_and(|s| s.chars().count() > MAX_SUMMARY_CHARS) {
         return Err(format!(
@@ -59,26 +80,60 @@ pub struct Filing {
     pub message: String,
 }
 
-/// Filing `m` (a [`check`]ed note whose text is `md`) in `m.dest`. Its images are the
-/// `assets` its frontmatter lists that are in `inbox` (file names there). They keep the
-/// note's name unless `taken` (names in `dest`) uses it: then `-2`, `-3`, …, as captures
-/// are named. The frontmatter gains `summary:` and, filed in a project, `project: <id>`.
-pub fn plan(m: &NoteMove, md: &str, inbox: &[String], taken: &[String]) -> Result<Filing, String> {
+/// Filing `m` (a [`check`]ed note whose text is `md`) in `m.dest`. `inbox` is HEAD's
+/// `modes` of the inbox's files; `claimed` the pictures its other notes list; `taken` the
+/// names in `dest`, committed or not. The note's pictures are the images its frontmatter
+/// lists that are files beside it; one another note lists stops the move. All keep the
+/// note's name unless a name is taken: then `-2`, `-3`, …, as captures are named. The
+/// frontmatter gains `summary:` and, filed in a project, `project: <id>`.
+pub fn plan(
+    m: &NoteMove,
+    md: &str,
+    inbox: &Modes,
+    claimed: &[String],
+    taken: &[String],
+) -> Result<Filing, String> {
+    let file = |p: &str| inbox.get(p).is_some_and(|m| FILES.contains(&m.as_str()));
+    if !file(&m.path) {
+        return Err(format!("{} is not a file", m.path));
+    }
     let name = &m.path["inbox/".len()..];
     let (from, ext) = name.split_at(name.len() - ".md".len());
     let kept = crate::capture::parse(md);
-    let images: Vec<&String> = (kept.iter().flat_map(|k| &k.assets))
-        .filter(|a| a.as_str() != name && inbox.contains(a))
+    let picture = |a: &&String| {
+        crate::notes_view::kind(a, false) == NoteKind::Image
+            && !a.contains('/')
+            && !a.chars().any(char::is_control)
+            && file(&format!("inbox/{a}"))
+    };
+    let images: Vec<&String> = kept
+        .iter()
+        .flat_map(|k| &k.assets)
+        .filter(picture)
         .collect();
-    let to = crate::capture::free_stem(from, taken);
+    if let Some(a) = images.iter().find(|a| claimed.contains(a)) {
+        return Err(format!("another inbox note shows inbox/{a} too"));
+    }
+    let used = |n: &str| taken.iter().any(|t| t.eq_ignore_ascii_case(n));
+    // One not named after the note keeps its name, so may be taken.
+    if let Some(a) = images.iter().find(|a| !a.starts_with(from) && used(a)) {
+        return Err(format!("{}/{a} exists", m.dest));
+    }
+    let free = |s: &String| {
+        !crate::capture::taken(s, taken)
+            && !used(&format!("{s}{ext}"))
+            && !images
+                .iter()
+                .any(|a| used(&crate::notes::renamed(a, from, s)))
+    };
+    let to = std::iter::once(from.to_string())
+        .chain((2..).map(|n| format!("{from}-{n}")))
+        .find(free)
+        .expect("unbounded");
     let mut moves = vec![(m.path.clone(), format!("{}/{to}{ext}", m.dest))];
     let mut renames = Vec::new();
     for a in images {
         let b = crate::notes::renamed(a, from, &to);
-        // One not named after the note keeps its name, so may be taken.
-        if taken.iter().any(|t| t.eq_ignore_ascii_case(&b)) {
-            return Err(format!("{}/{b} exists", m.dest));
-        }
         moves.push((format!("inbox/{a}"), format!("{}/{b}", m.dest)));
         renames.push((a.as_str(), b));
     }
@@ -93,49 +148,67 @@ pub fn plan(m: &NoteMove, md: &str, inbox: &[String], taken: &[String]) -> Resul
         m.path, m.dest, moves[0].0, moves[0].1
     );
     Ok(Filing {
-        md: edit(md, &renames, &adds),
+        md: edit(md, &renames, &adds)?,
         moves,
         message,
     })
 }
 
-/// `md` with its frontmatter's image paths renamed and `adds` set (replacing those keys),
-/// as JSON strings, which YAML reads as strings. A note without frontmatter gets one. The
-/// text below it is the human's words: never touched.
-fn edit(md: &str, renames: &[(&str, String)], adds: &[(&str, &str)]) -> String {
+/// `md` with its frontmatter's image paths renamed and `adds` set, as JSON strings, which
+/// YAML reads as strings. A note without frontmatter gets one; one never closed is refused.
+/// Line endings are the note's. The text below is the human's words: never touched.
+fn edit(md: &str, renames: &[(&str, String)], adds: &[(&str, &str)]) -> Result<String, String> {
     if renames.is_empty() && adds.is_empty() {
-        return md.to_string();
+        return Ok(md.to_string());
     }
-    let (front, body) = split(md);
-    let mut front = front.unwrap_or_default().to_string();
-    for (a, b) in renames {
-        let line = |name: &str| format!("  - path: {name}\n");
-        front = front.replace(&line(a), &line(b));
-    }
+    let (lines, body, eol) = match crate::capture::front(md) {
+        Some(f) => (f.lines, &md[f.body..], f.eol),
+        None if md.starts_with("---\n") || md.starts_with("---\r\n") => {
+            return Err("its frontmatter has no closing ---".into());
+        }
+        None => ("", md, if md.contains("\r\n") { "\r\n" } else { "\n" }),
+    };
+    let renames = renames.iter().map(|(a, b)| (*a, b.as_str()));
+    let mut lines = crate::notes::rename_images(lines, eol, renames);
     for (key, value) in adds {
-        let own = format!("{key}:");
-        front = (front.lines())
-            .filter(|l| !l.starts_with(&own))
-            .map(|l| format!("{l}\n"))
-            .collect();
-        front += &format!(
-            "{key}: {}\n",
-            serde_json::to_string(value).expect("serializes")
-        );
+        lines = set(&lines, eol, key, value);
     }
-    format!("---\n{front}---\n{body}")
+    Ok(format!("---{eol}{lines}---{eol}{body}"))
 }
 
-/// `md`'s frontmatter lines (each ending in `\n`), if it has any, and the text after them.
-fn split(md: &str) -> (Option<&str>, &str) {
-    let Some(rest) = md.strip_prefix("---\n") else {
-        return (None, md);
+/// Frontmatter `lines` (each ending in `eol`) with `key: <value>` last, in place of any
+/// `key:` lines and the lines continuing them: indented, `- ` items, and blank lines
+/// before more of those. `summary: |` and its block go whole.
+fn set(lines: &str, eol: &str, key: &str, value: &str) -> String {
+    let own = |l: &str| {
+        l.strip_prefix(key)
+            .and_then(|r| r.strip_prefix(':'))
+            .is_some_and(|r| r.is_empty() || r.starts_with([' ', '\t', '\r', '\n']))
     };
-    match rest.find("\n---\n") {
-        Some(i) => (Some(&rest[..i + 1]), &rest[i + 5..]),
-        None if rest.ends_with("\n---") => (Some(&rest[..rest.len() - 3]), ""),
-        None => (None, md),
+    let more = |l: &str| {
+        let l = l.trim_end_matches(['\r', '\n']);
+        l.starts_with([' ', '\t']) || l == "-" || l.starts_with("- ")
+    };
+    let ls: Vec<&str> = lines.split_inclusive('\n').collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < ls.len() {
+        if !own(ls[i]) {
+            out += ls[i];
+            i += 1;
+            continue;
+        }
+        i += 1;
+        loop {
+            let next = (i..ls.len()).find(|&j| !ls[j].trim().is_empty());
+            match next {
+                Some(j) if more(ls[j]) => i = j + 1,
+                _ => break,
+            }
+        }
     }
+    let value = serde_json::to_string(value).expect("serializes");
+    out + &format!("{key}: {value}{eol}")
 }
 
 #[cfg(test)]
@@ -155,41 +228,64 @@ mod tests {
         n.iter().map(|s| s.to_string()).collect()
     }
 
+    /// Regular files at HEAD, by path.
+    fn files(n: &[&str]) -> Modes {
+        n.iter().map(|p| (p.to_string(), "100644".into())).collect()
+    }
+
+    fn modes(n: &[(&str, &str)]) -> Modes {
+        n.iter()
+            .map(|(p, m)| (p.to_string(), m.to_string()))
+            .collect()
+    }
+
     const CAPTURE: &str = "---\nschema: 1\nid: 00000000-0000-0000-0000-000000000001\n\
         captured: 2026-11-08T09:12:00Z\nvia: \"share\"\nproject: \"mis\"\nassets:\n  \
         - path: a-1.jpg\n    sha256: h\n  - path: a-2.png\n    sha256: h\n---\n\
         Body #mis\n  - path: a-1.jpg\nproject: body\n";
 
     #[test]
-    fn dests_are_folders_one_down_and_the_archive_never_ai() {
-        let dirs = names(&[
+    fn dests_are_real_folders_one_down_and_the_archive_never_ai() {
+        let got = dests(&modes(&[
+            ("projects", TREE),
+            ("areas", TREE),
+            ("resources", TREE),
+            ("projects/amf", TREE),
+            ("projects/mis", TREE),
+            ("projects/README.md", "100644"),
+            ("projects/link", "120000"),
+            ("projects/sub", "160000"),
+            ("areas/home", TREE),
+            ("resources/rust", TREE),
+            ("projects/.hidden", TREE),
+            ("archive", TREE),
+        ]));
+        let want = [
+            "archive",
+            "areas/home",
             "projects/amf",
             "projects/mis",
-            "projects/mis/docs",
-            "areas/home",
             "resources/rust",
-            "ai/projects/amf",
-            "archive/2025",
-            "projects/.hidden",
-            "inbox",
-        ]);
+        ];
+        assert_eq!(got, want);
         assert_eq!(
-            dests(&dirs),
-            [
-                "archive",
-                "areas/home",
-                "projects/amf",
-                "projects/mis",
-                "resources/rust"
-            ]
+            dests(&Modes::new()),
+            ["archive"],
+            "made when first filed in"
         );
-        assert_eq!(dests(&[]), ["archive"]);
+        // A link standing in for a folder, or its parent, offers nothing.
+        let links = modes(&[
+            ("archive", "120000"),
+            ("projects", "120000"),
+            ("projects/amf", TREE),
+        ]);
+        assert!(dests(&links).is_empty());
     }
 
     #[test]
-    fn only_a_note_directly_in_the_inbox_with_a_short_summary_is_filed() {
+    fn only_a_plain_inbox_note_a_real_folder_and_a_short_summary_pass() {
         assert_eq!(check(&mv("inbox/a.md", "archive", None)), Ok(()));
-        assert_eq!(check(&mv("inbox/A.MD", "archive", Some("  "))), Ok(()));
+        assert_eq!(check(&mv("inbox/A.MD", "projects/amf", Some("  "))), Ok(()));
         for path in [
             "inbox/a-1.jpg",
             "inbox/sub/a.md",
@@ -199,8 +295,22 @@ mod tests {
             "inbox/",
             "a.md",
             "",
+            "inbox/a\nMIS-Capture: x.md",
+            "inbox/a\r.md",
+            "inbox/a\u{1b}.md",
         ] {
-            assert!(check(&mv(path, "archive", None)).is_err(), "{path}");
+            assert!(check(&mv(path, "archive", None)).is_err(), "{path:?}");
+        }
+        for dest in [
+            "ai",
+            "ai/x",
+            "inbox",
+            "projects",
+            "projects/a/b",
+            "archive/2025",
+            "areas/a\nb",
+        ] {
+            assert!(check(&mv("inbox/a.md", dest, None)).is_err(), "{dest:?}");
         }
         let long = "x".repeat(MAX_SUMMARY_CHARS + 1);
         assert!(check(&mv("inbox/a.md", "archive", Some(&long))).is_err());
@@ -210,9 +320,9 @@ mod tests {
 
     #[test]
     fn a_capture_moves_with_its_images_under_its_own_name() {
-        let inbox = names(&["a.md", "a-1.jpg", "a-2.png", "b.md"]);
+        let inbox = files(&["inbox/a.md", "inbox/a-1.jpg", "inbox/a-2.png", "inbox/b.md"]);
         let m = mv("inbox/a.md", "areas/home", None);
-        let got = plan(&m, CAPTURE, &inbox, &names(&["boiler.md"])).unwrap();
+        let got = plan(&m, CAPTURE, &inbox, &[], &names(&["boiler.md"])).unwrap();
         assert_eq!(
             got.moves,
             [
@@ -228,16 +338,41 @@ mod tests {
              MIS-Filed: 00000000-0000-0000-0000-000000000001 inbox/a.md areas/home/a.md\n"
         );
         // An image the human deleted stays deleted.
-        let got = plan(&m, CAPTURE, &names(&["a.md", "a-2.png"]), &[]).unwrap();
+        let got = plan(
+            &m,
+            CAPTURE,
+            &files(&["inbox/a.md", "inbox/a-2.png"]),
+            &[],
+            &[],
+        )
+        .unwrap();
         assert_eq!(got.moves.len(), 2);
         assert_eq!(got.moves[1].0, "inbox/a-2.png");
     }
 
     #[test]
+    fn only_pictures_that_are_the_notes_own_files_go_with_it() {
+        let md = "---\nid: 00000000-0000-0000-0000-000000000001\ncaptured: 2026-11-08T09:12:00Z\n\
+                  assets:\n  - path: b.md\n  - path: ../x.jpg\n  - path: link.jpg\n  - path: a-1.jpg\n---\n";
+        let mut inbox = files(&["inbox/a.md", "inbox/b.md", "inbox/a-1.jpg"]);
+        inbox.insert("inbox/link.jpg".into(), "120000".into());
+        let m = mv("inbox/a.md", "archive", None);
+        let got = plan(&m, md, &inbox, &[], &[]).unwrap();
+        let from: Vec<&str> = got.moves.iter().map(|(f, _)| f.as_str()).collect();
+        assert_eq!(from, ["inbox/a.md", "inbox/a-1.jpg"]);
+        // Another note shows the same picture.
+        let claimed = names(&["a-1.jpg"]);
+        assert!(plan(&m, md, &inbox, &claimed, &[]).is_err());
+        // The note itself a link.
+        inbox.insert("inbox/a.md".into(), "120000".into());
+        assert!(plan(&m, md, &inbox, &[], &[]).is_err());
+    }
+
+    #[test]
     fn a_taken_name_gets_a_number_images_and_frontmatter_too() {
-        let inbox = names(&["a.md", "a-1.jpg", "a-2.png"]);
+        let inbox = files(&["inbox/a.md", "inbox/a-1.jpg", "inbox/a-2.png"]);
         let m = mv("inbox/a.md", "projects/amf", Some("Pure cores, by example"));
-        let got = plan(&m, CAPTURE, &inbox, &names(&["A.md", "README.md"])).unwrap();
+        let got = plan(&m, CAPTURE, &inbox, &[], &names(&["A.md", "README.md"])).unwrap();
         let to: Vec<&str> = got.moves.iter().map(|(_, t)| t.as_str()).collect();
         assert_eq!(
             to,
@@ -259,14 +394,25 @@ mod tests {
         );
         assert!(got.message.ends_with(" inbox/a.md projects/amf/a-2.md\n"));
         // An image of that name counts as taking it.
-        let got = plan(&m, CAPTURE, &inbox, &names(&["a-1.webp"])).unwrap();
+        let got = plan(&m, CAPTURE, &inbox, &[], &names(&["a-1.webp"])).unwrap();
         assert_eq!(got.moves[0].1, "projects/amf/a-2.md");
+        // Whole names count, dots and all.
+        let m = mv("inbox/v1.2-notes.md", "archive", None);
+        let got = plan(
+            &m,
+            "x",
+            &files(&["inbox/v1.2-notes.md"]),
+            &[],
+            &names(&["V1.2-notes.md"]),
+        );
+        assert_eq!(got.unwrap().moves[0].1, "archive/v1.2-notes-2.md");
     }
 
     #[test]
     fn a_humans_note_gets_frontmatter_only_when_it_needs_some() {
         let m = mv("inbox/Idea.md", "resources/rust", None);
-        let got = plan(&m, "# Idea\n\n---\nnot frontmatter\n", &[], &[]).unwrap();
+        let inbox = files(&["inbox/Idea.md"]);
+        let got = plan(&m, "# Idea\n\n---\nnot frontmatter\n", &inbox, &[], &[]).unwrap();
         assert_eq!(got.md, "# Idea\n\n---\nnot frontmatter\n");
         assert!(got
             .message
@@ -276,17 +422,37 @@ mod tests {
             "projects/amf",
             Some("A \"quoted\"\nthought"),
         );
-        let got = plan(&m, "# Idea\n", &[], &names(&["idea.md"])).unwrap();
+        let got = plan(&m, "# Idea\r\n", &inbox, &[], &names(&["idea.md"])).unwrap();
         assert_eq!(got.moves[0].1, "projects/amf/Idea-2.md", "any case");
         assert_eq!(
             got.md,
-            "---\nsummary: \"A \\\"quoted\\\"\\nthought\"\nproject: \"amf\"\n---\n# Idea\n"
+            "---\r\nsummary: \"A \\\"quoted\\\"\\nthought\"\r\nproject: \"amf\"\r\n---\r\n# Idea\r\n"
         );
-        // Frontmatter ending the file; a `title:` kept.
-        let got = plan(&m, "---\ntitle: x\n---", &[], &[]).unwrap();
+        // Frontmatter ending the file, or empty; a `title:` kept.
+        let got = plan(&m, "---\ntitle: x\n---", &inbox, &[], &[]).unwrap();
         assert_eq!(
             got.md,
             "---\ntitle: x\nsummary: \"A \\\"quoted\\\"\\nthought\"\nproject: \"amf\"\n---\n"
+        );
+        let got = plan(&m, "---\n---\nhi\n", &inbox, &[], &[]).unwrap();
+        assert!(got.md.starts_with("---\nsummary: ") && got.md.ends_with("\"amf\"\n---\nhi\n"));
+        // Never closed: refused, not guessed at.
+        assert!(plan(&m, "---\ntitle: x\nhi\n", &inbox, &[], &[]).is_err());
+    }
+
+    #[test]
+    fn a_replaced_key_takes_its_continuation_lines_with_it() {
+        let lines = "title: x\nsummary: |\n  old\n\n  text\nproject:\n  - a\n- b\n\ntags: [t]\n\
+                     project: \"twice\"\nnote: >\n  kept\n";
+        let got = set(&set(lines, "\n", "summary", "new"), "\n", "project", "amf");
+        assert_eq!(
+            got,
+            "title: x\n\ntags: [t]\nnote: >\n  kept\nsummary: \"new\"\nproject: \"amf\"\n"
+        );
+        // `projects:` is another key.
+        assert_eq!(
+            set("projects: [a]\n", "\n", "project", "b"),
+            "projects: [a]\nproject: \"b\"\n"
         );
     }
 
@@ -295,14 +461,14 @@ mod tests {
         let md = "---\nid: 00000000-0000-0000-0000-000000000001\ncaptured: \
                   2026-11-08T09:12:00Z\nassets:\n  - path: photo.jpg\n---\n";
         let m = mv("inbox/renamed.md", "archive", None);
-        let inbox = names(&["renamed.md", "photo.jpg"]);
-        let got = plan(&m, md, &inbox, &[]).unwrap();
+        let inbox = files(&["inbox/renamed.md", "inbox/photo.jpg"]);
+        let got = plan(&m, md, &inbox, &[], &[]).unwrap();
         assert_eq!(
             got.moves[1],
             ("inbox/photo.jpg".into(), "archive/photo.jpg".into())
         );
         assert_eq!(
-            plan(&m, md, &inbox, &names(&["Photo.JPG"])),
+            plan(&m, md, &inbox, &[], &names(&["Photo.JPG"])),
             Err("archive/photo.jpg exists".into())
         );
     }

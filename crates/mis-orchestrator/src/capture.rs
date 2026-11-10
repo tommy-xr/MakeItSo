@@ -147,7 +147,7 @@ fn first_link(s: &str) -> Option<String> {
         .map(Into::into)
 }
 
-fn sha256(bytes: &[u8]) -> String {
+pub(crate) fn sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -224,7 +224,7 @@ pub fn slug(text: Option<&str>, url: Option<&str>) -> String {
 /// Whether a file in `existing` already uses `stem`: `stem.md`, or an image
 /// `stem-1.jpg`. Also taken by `stem-2.jpg`, so `stem-2.md` never sits beside
 /// another capture's image of that name. Case-insensitive, like macOS file names.
-fn taken(stem: &str, existing: &[String]) -> bool {
+pub(crate) fn taken(stem: &str, existing: &[String]) -> bool {
     let stem = stem.to_ascii_lowercase();
     let stem = stem.as_str();
     existing.iter().any(|name| {
@@ -318,11 +318,48 @@ pub struct Kept {
     pub assets: Vec<String>,
 }
 
+/// A note's frontmatter, as [`front`] finds it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Front<'a> {
+    /// Its lines, each ending in `eol`.
+    pub lines: &'a str,
+    /// The opening line's ending: `\n` or `\r\n`.
+    pub eol: &'static str,
+    /// Where `lines` ends in the note, and where the text after the closing `---` starts.
+    pub end: usize,
+    pub body: usize,
+}
+
+/// `md`'s frontmatter: an opening `---` line, then lines up to a closing `---` line or a
+/// `---` ending the note. None if it has none, or nothing closes it.
+pub(crate) fn front(md: &str) -> Option<Front<'_>> {
+    let eol = ["\n", "\r\n"]
+        .into_iter()
+        .find(|e| md.starts_with(&format!("---{e}")))?;
+    let start = 3 + eol.len();
+    let rest = &md[start..];
+    let close = format!("---{eol}");
+    let (len, body) = if rest.starts_with(&close) || rest == "---" {
+        (0, (start + close.len()).min(md.len()))
+    } else if let Some(i) = rest.find(&format!("{eol}{close}")) {
+        (i + eol.len(), start + i + eol.len() + close.len())
+    } else if rest.ends_with(&format!("{eol}---")) {
+        (rest.len() - 3, md.len())
+    } else {
+        return None;
+    };
+    Some(Front {
+        lines: &rest[..len],
+        eol,
+        end: start + len,
+        body,
+    })
+}
+
 /// Read back a capture [`plan`] wrote; None if it isn't one.
 pub fn parse(md: &str) -> Option<Kept> {
-    let rest = md.strip_prefix("---\n")?;
-    let end = rest.find("\n---\n")?;
-    let (front, body) = (&rest[..end + 1], &rest[end + 5..]);
+    let f = front(md)?;
+    let (front, body) = (f.lines, &md[f.body..]);
     let (mut id, mut captured, mut url, mut shared) = (None, None, None, None);
     let (mut hashes, mut assets) = (Vec::new(), Vec::new());
     for line in front.lines() {
@@ -710,6 +747,28 @@ mod tests {
             &names(&["2026-11-08-foo.md"]),
         );
         assert_eq!(p.assets, ["2026-11-08-foo-2-1.jpg"]);
+    }
+
+    #[test]
+    fn frontmatter_is_found_with_either_line_ending_or_not_at_all() {
+        let f = front("---\nid: x\n---\nbody").unwrap();
+        assert_eq!((f.lines, f.eol, f.end, f.body), ("id: x\n", "\n", 10, 14));
+        let f = front("---\r\nid: x\r\n---\r\nbody").unwrap();
+        assert_eq!((f.lines, f.eol), ("id: x\r\n", "\r\n"));
+        assert_eq!(&"---\r\nid: x\r\n---\r\nbody"[f.body..], "body");
+        let f = front("---\n---\nbody").unwrap();
+        assert_eq!((f.lines, f.end, f.body), ("", 4, 8));
+        assert_eq!(front("---\nid: x\n---").unwrap().lines, "id: x\n");
+        assert_eq!(front("---\n---").unwrap().body, 7);
+        for none in [
+            "",
+            "id: x\n",
+            "---\nid: x\n",
+            "--- \nid: x\n---\n",
+            "---\nid: x\r\n---\r\n",
+        ] {
+            assert_eq!(front(none), None, "{none:?}");
+        }
     }
 
     #[test]

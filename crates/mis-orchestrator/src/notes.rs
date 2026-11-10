@@ -14,7 +14,6 @@ use std::time::{Duration, Instant};
 
 use mis_types::{NoteMove, NoteMoved, NotesSync, SyncState};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -113,22 +112,64 @@ pub(crate) fn renamed(asset: &str, from: &str, to: &str) -> String {
     }
 }
 
+/// Frontmatter `lines` (ending in `eol`) with each image line `  - path: <a>` naming `b`
+/// instead, for each (a, b) in `renames`.
+pub(crate) fn rename_images<'a>(
+    lines: &str,
+    eol: &str,
+    renames: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> String {
+    let line = |name: &str| format!("  - path: {name}{eol}");
+    (renames.into_iter()).fold(lines.to_string(), |f, (a, b)| f.replace(&line(a), &line(b)))
+}
+
 /// Receipt `r` (text `md`) written as `path`: the record's text, and each image as
 /// (receipt file name, repo path). Renamed images are renamed in the frontmatter too.
 pub fn record(md: &str, r: &Receipt, path: &str) -> (String, Vec<(String, String)>) {
     let name = path.strip_prefix(&format!("{INBOX}/")).unwrap_or(path);
     let (from, to) = (stem(&r.file), stem(name));
-    let images = (r.assets.iter())
-        .map(|a| (a.clone(), format!("{INBOX}/{}", renamed(a, from, to))))
+    let names: Vec<(&str, String)> = (r.assets.iter())
+        .map(|a| (a.as_str(), renamed(a, from, to)))
+        .collect();
+    let images = (names.iter())
+        .map(|(a, b)| (a.to_string(), format!("{INBOX}/{b}")))
         .collect();
     // Only the frontmatter: the text below it is the human's words.
-    let end = md.find("\n---\n").map_or(md.len(), |i| i + 1);
-    let mut front = md[..end].to_string();
-    for a in &r.assets {
-        let line = |name: &str| format!("  - path: {name}\n");
-        front = front.replace(&line(a), &line(&renamed(a, from, to)));
+    let (end, eol) = crate::capture::front(md).map_or((md.len(), "\n"), |f| (f.end, f.eol));
+    let renames = names.iter().map(|(a, b)| (*a, b.as_str()));
+    (rename_images(&md[..end], eol, renames) + &md[end..], images)
+}
+
+/// `.git/mis-writing` while a run writes or files, until it commits: what to put back if
+/// it is cut short.
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct Writing {
+    /// New paths, none there before: removed.
+    created: Vec<String>,
+    /// Paths moved away: restored from HEAD.
+    #[serde(default)]
+    moved: Vec<String>,
+}
+
+impl Writing {
+    /// A marker's text: JSON, or (older runs) one created path per line. Paths that aren't
+    /// under the shown folders, or hold control characters, are left out: never acted on.
+    fn parse(text: &str) -> Self {
+        let mut w = serde_json::from_str(text).unwrap_or_else(|_| Writing {
+            created: text.lines().map(Into::into).collect(),
+            moved: vec![],
+        });
+        let ok = |p: &String| {
+            let ok = crate::notes_view::allowed(p) && !p.chars().any(char::is_control);
+            if !ok {
+                tracing::warn!(path = ?p, "ignoring a path in {WRITING}");
+            }
+            ok
+        };
+        w.created.retain(ok);
+        w.moved.retain(ok);
+        w
     }
-    (front + &md[end..], images)
 }
 
 /// The commit message publishing `writes` (id, path).
@@ -190,21 +231,28 @@ fn state(pending: usize, run: &Result<bool, Failure>) -> SyncState {
 /// Why a note wasn't filed.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refused {
-    /// Not a folder to file in, or not text.
+    /// Not a note and folder [`crate::filing::check`] passes, or not text.
     Invalid(String),
-    /// Gone, changed since it was read, edited in the clone, or its image's name is taken.
+    /// Gone, changed since it was read, its folder gone, a symlink on its way, a picture
+    /// another note lists, or frontmatter it can't safely edit.
     Stale(String),
-    /// The clone couldn't be used: offline before its first clone, a conflict, git failing.
+    /// The clone couldn't be used: offline, a conflict, git failing.
     Failed(String),
 }
 
 impl From<Failure> for Refused {
     fn from(f: Failure) -> Self {
-        Self::Failed(f.why().to_string())
+        match f {
+            Failure::Offline(why) => {
+                Self::Failed(format!("offline; try again when connected ({why})"))
+            }
+            f => Self::Failed(f.why().to_string()),
+        }
     }
 }
 
-/// How a queued filing went: filed (pushed, or committed for a later run to push) or not.
+/// How a queued filing went: committed (pushed now, or by a later run if this push failed)
+/// or not.
 pub type Filed = Result<NoteMoved, Refused>;
 
 #[derive(Debug)]
@@ -263,6 +311,8 @@ pub struct Notes {
     kick: tokio::sync::Notify,
     /// Filings for the next run, each with whoever awaits it.
     moves: Mutex<Vec<(NoteMove, oneshot::Sender<Filed>)>>,
+    /// Where notes may be filed, as of the last run's HEAD.
+    dests: Mutex<Vec<String>>,
     /// Woken by each filing queued.
     queued: tokio::sync::Notify,
     after_capture: Duration,
@@ -284,6 +334,7 @@ impl Notes {
             arrived: AtomicUsize::new(0),
             kick: Default::default(),
             moves: Default::default(),
+            dests: Default::default(),
             queued: Default::default(),
             after_capture: AFTER_CAPTURE,
             every: EVERY,
@@ -304,6 +355,11 @@ impl Notes {
 
     pub fn status(&self) -> NotesSync {
         self.status.lock().unwrap().clone()
+    }
+
+    /// Where notes may be filed ([`crate::filing::dests`]) as of the last run's HEAD.
+    pub fn dests(&self) -> Vec<String> {
+        self.dests.lock().unwrap().clone()
     }
 
     /// A new capture was kept: count it and publish soon.
@@ -362,8 +418,10 @@ impl Notes {
         let (pending, run) = self.publish();
         // The publish pushes the filings' commits, or leaves them for a later run.
         for (path, tx) in filed {
-            let error = run.as_ref().err().map(|f| f.why().to_string());
-            let _ = tx.send(Ok(NoteMoved { path, error }));
+            let _ = tx.send(Ok(NoteMoved { path }));
+        }
+        if let Ok(modes) = self.dest_modes() {
+            *self.dests.lock().unwrap() = crate::filing::dests(&modes);
         }
         let mut s = self.status.lock().unwrap();
         // Captures kept mid-run may postdate the receipts it read. Counted before
@@ -549,108 +607,140 @@ impl Notes {
         self.fetch_rebase()
     }
 
-    /// File `m` in a commit of its own, left for [`Self::publish`] to push: the note's new
-    /// path. Offline, it files onto the clone as it is.
+    /// File `m` in a commit of its own, after catching the clone up, left for
+    /// [`Self::publish`] to push: the note's new path.
     fn file_now(&self, m: &NoteMove) -> Result<String, Refused> {
-        match self.sync() {
-            Err(Failure::Offline(_)) if self.clone.join(".git").exists() => {}
-            r => r?,
-        }
-        let inbox = self.names_in(INBOX)?;
-        if !inbox.iter().any(|n| format!("{INBOX}/{n}") == m.path) {
+        crate::filing::check(m).map_err(Refused::Invalid)?;
+        self.sync()?;
+        let inbox = self.modes(&[&format!("{INBOX}/")])?;
+        if !inbox.contains_key(&m.path) {
             return Err(Refused::Stale(format!("{} is gone", m.path)));
         }
-        let dirs = self.ls(true, &["projects/", "areas/", "resources/"])?;
-        if !crate::filing::dests(&dirs).contains(&m.dest) {
-            return Err(Refused::Invalid(format!(
-                "{} is not a folder to file in",
-                m.dest
-            )));
+        if !crate::filing::dests(&self.dest_modes()?).contains(&m.dest) {
+            let why = format!("{} is not a folder to file in", m.dest);
+            return Err(Refused::Stale(why));
         }
         let blob = self.git(&["cat-file", "blob", &format!("HEAD:{}", m.path)])?;
         let bytes = blob.check("cat-file", Failure::Other)?.stdout;
-        let hash: String = Sha256::digest(&bytes)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let hash = crate::capture::sha256(&bytes);
         if m.hash
             .as_ref()
             .is_some_and(|h| !h.eq_ignore_ascii_case(&hash))
         {
-            return Err(Refused::Stale(format!(
-                "{} changed since it was read",
-                m.path
-            )));
-        }
-        let md = String::from_utf8(bytes).map_err(|_| Refused::Invalid("not UTF-8".into()))?;
-        // What's in the folder, committed or not, so a filing never lands on a human's file.
-        let mut taken = self.names_in(&m.dest)?;
-        if let Ok(read) = std::fs::read_dir(self.clone.join(&m.dest)) {
-            taken.extend(
-                read.flatten()
-                    .map(|e| e.file_name().to_string_lossy().into_owned()),
-            );
-        }
-        let f = crate::filing::plan(m, &md, &inbox, &taken).map_err(Refused::Stale)?;
-        let sources: Vec<&str> = f.moves.iter().map(|(from, _)| from.as_str()).collect();
-        // A human's uncommitted edit would be carried along, or lost to the rewrite.
-        let status =
-            self.git(&[&["status", "--porcelain", "-z", "--"], sources.as_slice()].concat())?;
-        if !status.check("status", Failure::Other)?.stdout.is_empty() {
-            let why = format!(
-                "{} has uncommitted changes in {}",
-                m.path,
-                self.clone.display()
-            );
+            let why = format!("{} changed since it was read", m.path);
             return Err(Refused::Stale(why));
         }
-        let paths: Vec<&str> = (f.moves.iter())
-            .flat_map(|(from, to)| [from.as_str(), to.as_str()])
+        let md = String::from_utf8(bytes).map_err(|_| Refused::Invalid("not UTF-8".into()))?;
+        // The pictures the inbox's other notes list (read as the Notes view reads files).
+        let others = (inbox.keys()).filter(|p| *p != &m.path && p.ends_with(".md"));
+        let claimed: Vec<String> = others
+            .filter_map(|p| crate::apps::read_file(&self.clone, p))
+            .filter_map(|b| crate::capture::parse(&String::from_utf8_lossy(&b)))
+            .flat_map(|k| k.assets)
             .collect();
-        let marker = self.clone.join(".git").join(WRITING);
-        crate::push::write_private(&marker, paths.join("\n").as_bytes()).map_err(Failure::from)?;
+        // What's in the folder, committed or not, so a filing never lands on a human's file.
+        let pre = format!("{}/", m.dest);
+        let mut taken: Vec<String> = (self.modes(&[&pre])?.into_keys())
+            .map(|p| p[pre.len()..].to_string())
+            .collect();
+        if let Ok(read) = std::fs::read_dir(self.clone.join(&m.dest)) {
+            let names = read
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned());
+            taken.extend(names);
+        }
+        let f = crate::filing::plan(m, &md, &inbox, &claimed, &taken).map_err(Refused::Stale)?;
+        // HEAD's folders are real ones (see `dests`); so must the clone's be, and each new
+        // path is new, so nothing is written through a link or over a human's file.
+        let dirs = match m.dest.split_once('/') {
+            Some((top, _)) => vec![top, m.dest.as_str()],
+            None => vec![m.dest.as_str()],
+        };
+        for d in dirs {
+            match std::fs::symlink_metadata(self.clone.join(d)) {
+                Ok(meta) if !meta.is_dir() => {
+                    return Err(Refused::Stale(format!("{d} is not a folder in the clone")));
+                }
+                _ => {}
+            }
+        }
+        let created: Vec<String> = f.moves.iter().map(|(_, to)| to.clone()).collect();
+        self.absent(&created)
+            .map_err(|f| Refused::Stale(f.why().to_string()))?;
+        let marker = Writing {
+            created,
+            moved: f.moves.iter().map(|(from, _)| from.clone()).collect(),
+        };
+        self.mark(&marker)?;
         std::fs::create_dir_all(self.clone.join(&m.dest)).map_err(Failure::from)?;
         for (from, to) in &f.moves {
             self.git(&["mv", "--", from, to])?
                 .check("mv", Failure::Other)?;
         }
         if f.md != md {
-            std::fs::write(self.clone.join(&f.moves[0].1), &f.md).map_err(Failure::from)?;
+            let mut open = std::fs::OpenOptions::new();
+            open.write(true).truncate(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::custom_flags(&mut open, libc::O_NOFOLLOW);
+            let mut file = open
+                .open(self.clone.join(&f.moves[0].1))
+                .map_err(Failure::from)?;
+            std::io::Write::write_all(&mut file, f.md.as_bytes()).map_err(Failure::from)?;
         }
         // Only these paths, as the working tree has them.
+        let paths: Vec<&str> = (marker.created.iter().chain(&marker.moved))
+            .map(String::as_str)
+            .collect();
         let commit = [
             &["commit", "--quiet", "-m", &f.message, "--"],
             paths.as_slice(),
         ]
         .concat();
         self.git(&commit)?.check("commit", Failure::Other)?;
-        std::fs::remove_file(marker).map_err(Failure::from)?;
+        std::fs::remove_file(self.clone.join(".git").join(WRITING)).map_err(Failure::from)?;
         Ok(f.moves[0].1.clone())
     }
 
-    /// The names in HEAD's folder `dir`, e.g. `a.md` for `inbox/a.md`.
-    fn names_in(&self, dir: &str) -> Result<Vec<String>, Failure> {
-        let pre = format!("{dir}/");
-        let paths = self.ls(false, &[&pre])?;
-        Ok((paths.iter())
-            .map(|p| p.strip_prefix(&pre).unwrap_or(p).to_string())
-            .collect())
+    /// Ok if none of `paths` is in the clone (not even as a dangling link).
+    fn absent(&self, paths: &[String]) -> Result<(), Failure> {
+        match paths
+            .iter()
+            .find(|p| std::fs::symlink_metadata(self.clone.join(p)).is_ok())
+        {
+            Some(p) => Err(Failure::Other(format!("{p} exists"))),
+            None => Ok(()),
+        }
     }
 
-    /// HEAD's paths that are `paths` or directly in folders named `x/`; only folders if `folders`.
-    fn ls(&self, folders: bool, paths: &[&str]) -> Result<Vec<String>, Failure> {
-        let flags: &[&str] = if folders { &["-d"] } else { &[] };
-        let args = [
-            &["ls-tree", "-z", "--name-only"],
-            flags,
-            &["HEAD", "--"],
-            paths,
-        ]
-        .concat();
+    /// HEAD's modes [`crate::filing::dests`] reads: the folders and what's directly in
+    /// them (one `ls-tree` lists either, not both).
+    fn dest_modes(&self) -> Result<crate::filing::Modes, Failure> {
+        let mut modes = self.modes(&["projects", "areas", "resources", "archive"])?;
+        modes.extend(self.modes(&["projects/", "areas/", "resources/"])?);
+        Ok(modes)
+    }
+
+    /// Write the [`Writing`] marker.
+    fn mark(&self, w: &Writing) -> Result<(), Failure> {
+        let json = serde_json::to_vec(w).expect("serializes");
+        Ok(crate::push::write_private(
+            &self.clone.join(".git").join(WRITING),
+            &json,
+        )?)
+    }
+
+    /// HEAD's entries that are `paths`, or directly in the folders `x/` names: path -> git
+    /// mode, e.g. `040000` for a folder, `120000` for a symlink.
+    fn modes(&self, paths: &[&str]) -> Result<crate::filing::Modes, Failure> {
+        let args = [&["ls-tree", "-z", "HEAD", "--"], paths].concat();
         let ls = self.git(&args)?.check("ls-tree", Failure::Other)?;
+        // Each `<mode> <type> <object>\t<path>`.
         Ok((ls.stdout.split(|b| *b == 0))
-            .filter(|p| !p.is_empty())
-            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .filter_map(|e| {
+                let e = String::from_utf8_lossy(e);
+                let (meta, path) = e.split_once('\t')?;
+                Some((path.to_string(), meta.split(' ').next()?.to_string()))
+            })
             .collect())
     }
 
@@ -658,23 +748,33 @@ impl Notes {
     /// new ones unstaged and deleted, moved ones restored from HEAD.
     fn undo_writing(&self) -> Result<(), Failure> {
         let marker = self.clone.join(".git").join(WRITING);
-        let paths = match std::fs::read_to_string(&marker) {
+        let w = match std::fs::read_to_string(&marker) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            r => r?,
+            r => Writing::parse(&r?),
         };
-        let paths: Vec<&str> = paths.lines().filter(|p| !p.is_empty()).collect();
-        // No paths would mean the whole tree to `reset` and `clean`.
-        if !paths.is_empty() {
-            for cmd in [["reset", "-q"].as_slice(), &["clean", "-fq"]] {
-                let args: Vec<&str> = [cmd, &["--"], &paths].concat();
-                self.git(&args)?.check(cmd[0], Failure::Other)?;
-            }
-            let held = self.ls(false, &paths)?;
-            if !held.is_empty() {
-                let held: Vec<&str> = held.iter().map(String::as_str).collect();
-                let args = [&["checkout", "HEAD", "--"], held.as_slice()].concat();
-                self.git(&args)?.check("checkout", Failure::Other)?;
-            }
+        let all: Vec<&str> = (w.created.iter().chain(&w.moved))
+            .map(String::as_str)
+            .collect();
+        let created: Vec<&str> = w.created.iter().map(String::as_str).collect();
+        // No paths would mean the whole tree to `reset`, `clean` or `checkout`.
+        if !all.is_empty() {
+            let reset = [&["reset", "-q", "--"], all.as_slice()].concat();
+            self.git(&reset)?.check("reset", Failure::Other)?;
+        }
+        if !created.is_empty() {
+            let clean = [&["clean", "-fq", "--"], created.as_slice()].concat();
+            self.git(&clean)?.check("clean", Failure::Other)?;
+        }
+        // What HEAD has: a moved file, or one committed before the run stopped.
+        let held = if all.is_empty() {
+            Default::default()
+        } else {
+            self.modes(&all)?
+        };
+        if !held.is_empty() {
+            let held: Vec<&str> = held.keys().map(String::as_str).collect();
+            let args = [&["checkout", "HEAD", "--"], held.as_slice()].concat();
+            self.git(&args)?.check("checkout", Failure::Other)?;
         }
         std::fs::remove_file(marker)?;
         Ok(())
@@ -715,11 +815,7 @@ impl Notes {
     /// a new record never lands on a human's uncommitted one. Ids are read from the
     /// working tree: after a clean rebase or commit, its tracked files are HEAD's.
     fn scan(&self) -> Result<BTreeMap<String, Option<Uuid>>, Failure> {
-        let ls = self.git(&["ls-tree", "-z", "--name-only", "HEAD", &format!("{INBOX}/")])?;
-        let ls = ls.check("ls-tree", Failure::Other)?;
-        let paths = (ls.stdout.split(|b| *b == 0))
-            .filter(|p| !p.is_empty())
-            .map(|p| String::from_utf8_lossy(p).into_owned());
+        let paths = self.modes(&[&format!("{INBOX}/")])?.into_keys();
         let mut files: BTreeMap<String, Option<Uuid>> = paths
             .map(|p| {
                 let md = (p.ends_with(".md"))
@@ -760,9 +856,13 @@ impl Notes {
         if writes.is_empty() {
             return Ok(());
         }
+        let created: Vec<String> = files.iter().map(|(p, _)| p.clone()).collect();
+        self.absent(&created)?;
+        self.mark(&Writing {
+            created,
+            moved: vec![],
+        })?;
         let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
-        let marker = self.clone.join(".git").join(WRITING);
-        crate::push::write_private(&marker, paths.join("\n").as_bytes())?;
         std::fs::create_dir_all(self.clone.join(INBOX))?;
         // New files only: a name taken since `scan` fails the run rather than lose a file.
         let create = |to: &str| {
@@ -792,7 +892,7 @@ impl Notes {
         let commit: Vec<&str> =
             [&["commit", "--quiet", "-m", &msg, "--"], paths.as_slice()].concat();
         self.git(&commit)?.check("commit", Failure::Other)?;
-        std::fs::remove_file(marker)?;
+        std::fs::remove_file(self.clone.join(".git").join(WRITING))?;
         Ok(())
     }
 
@@ -1012,6 +1112,24 @@ mod tests {
         );
         assert_eq!(images[0], ("a-1.jpg".into(), "inbox/a-2-1.jpg".into()));
         assert_eq!(images[1], ("a-2.png".into(), "inbox/a-2-2.png".into()));
+    }
+
+    #[test]
+    fn a_marker_names_only_paths_recovery_may_touch() {
+        let w = Writing::parse(
+            r#"{"created":["inbox/a-2.md","README.md"],"moved":["inbox/a.md","inbox/b\nc.md"]}"#,
+        );
+        assert_eq!(
+            w,
+            Writing {
+                created: vec!["inbox/a-2.md".into()],
+                moved: vec!["inbox/a.md".into()],
+            }
+        );
+        // From an older run: created paths, one a line.
+        let w = Writing::parse("inbox/a.md\ninbox/a-1.jpg\n../x\ndraft.md");
+        assert_eq!(w.created, ["inbox/a.md", "inbox/a-1.jpg"]);
+        assert!(w.moved.is_empty());
     }
 
     #[test]

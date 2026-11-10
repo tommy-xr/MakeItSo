@@ -1834,13 +1834,19 @@ async fn notes_tree(
         let off = NotesTree {
             state: SyncState::Off,
             entries: vec![],
+            dests: vec![],
         };
         return Json(off).into_response();
     };
-    let state = notes.status().state;
+    let (state, dests) = (notes.status().state, notes.dests());
     let walk = tokio::task::spawn_blocking(move || notes_view::tree(notes.clone_dir()));
     let entries = walk.await.expect("walks");
-    Json(NotesTree { state, entries }).into_response()
+    Json(NotesTree {
+        state,
+        entries,
+        dests,
+    })
+    .into_response()
 }
 
 /// The notes clone's project records, for the Projects view. Auth as for the Notes view.
@@ -1908,8 +1914,8 @@ async fn notes_file(
 }
 
 /// File an inbox note in another folder: a commit the publisher makes and pushes. 200 with
-/// its new path; 202 if committed but not pushed (pushed on a later run); 409 if the note is
-/// gone or changed. Auth as for the tree.
+/// its new path; 409 if the note or folder is gone or changed, or it can't safely be moved;
+/// 503 offline or in conflict. Auth as for the tree.
 async fn notes_move(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -1930,13 +1936,7 @@ async fn notes_move(
         return (StatusCode::BAD_REQUEST, why).into_response();
     }
     match notes.file(m).await {
-        Ok(Ok(moved)) => {
-            let status = match moved.error {
-                None => StatusCode::OK,
-                Some(_) => StatusCode::ACCEPTED,
-            };
-            (status, Json(moved)).into_response()
-        }
+        Ok(Ok(moved)) => Json(moved).into_response(),
         Ok(Err(notes::Refused::Invalid(why))) => (StatusCode::BAD_REQUEST, why).into_response(),
         Ok(Err(notes::Refused::Stale(why))) => (StatusCode::CONFLICT, why).into_response(),
         Ok(Err(notes::Refused::Failed(why))) => {

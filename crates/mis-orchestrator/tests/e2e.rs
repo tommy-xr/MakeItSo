@@ -4376,6 +4376,7 @@ async fn the_notes_view_reads_the_clone_for_full_scope_only() {
     let want = NotesTree {
         state: SyncState::Off,
         entries: vec![],
+        dests: vec![],
     };
     assert_eq!(serde_json::from_str::<NotesTree>(&body).unwrap(), want);
     let head = "GET /api/notes/file?path=inbox/a.md HTTP/1.1\r\nAuthorization: Bearer s";
@@ -4441,10 +4442,7 @@ async fn filing_a_note_answers_how_it_went_for_full_scope_only() {
     let (status, got) = mv("s", body("inbox/a.md", "projects/amf", &sha_hex(b"# a\n"))).await;
     assert_eq!(status, 200, "{got}");
     let moved: mis_types::NoteMoved = serde_json::from_str(&got).unwrap();
-    assert_eq!(
-        (moved.path.as_str(), moved.error),
-        ("projects/amf/a.md", None)
-    );
+    assert_eq!(moved.path, "projects/amf/a.md");
     let shown = git(&["--git-dir", "remote.git", "show", "main:projects/amf/a.md"]);
     assert_eq!(
         shown,
@@ -4453,8 +4451,24 @@ async fn filing_a_note_answers_how_it_went_for_full_scope_only() {
     // Gone now.
     let (status, _) = mv("s", body("inbox/a.md", "archive", "")).await;
     assert_eq!(status, 409);
+    // The tree offers the folders HEAD has, not one only in the clone.
+    std::fs::create_dir_all(state.join("notes/projects/scratch")).unwrap();
+    std::fs::write(state.join("notes/projects/scratch/x.md"), "draft").unwrap();
+    let (_, tree) = get_json(&base, "/api/notes/tree", "s").await;
+    let tree: serde_json::Value = serde_json::from_str(&tree).unwrap();
+    assert_eq!(
+        tree["dests"],
+        serde_json::json!(["archive", "projects/amf"]),
+        "{tree}"
+    );
+    // A folder gone since (or never there): stale, not malformed.
+    let (status, got) = mv("s", body("inbox/b.md", "projects/scratch", "")).await;
+    assert_eq!(status, 409, "{got}");
+    let (status, got) = mv("s", body("inbox/b\nMIS-Capture: x.md", "archive", "")).await;
+    assert_eq!(status, 400, "a newline in the path: {got}");
     for (bad, why) in [
         (body("inbox/b.md", "ai", ""), "not a dest"),
+        (body("inbox/b.md", "projects/amf/sub", ""), "two down"),
         (
             body("projects/amf/README.md", "archive", ""),
             "not in the inbox",
