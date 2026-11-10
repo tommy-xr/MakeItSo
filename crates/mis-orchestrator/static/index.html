@@ -2408,10 +2408,12 @@ function renderCol(sec) {
     else if (got.state === 'off') body = [say('dim', 'Notes repo not configured (MIS_NOTES_REMOTE)')];
     else body = {
       notes: () => {
-        const dir = noteDir(), es = notesTree.entries, cut = dir.lastIndexOf('/');
-        if (!dir) return [rows(noteTops(es), (e) => noteRow(e, es), 'No notes yet', 'rows nlist')];
+        const dir = noteDir(), es = notesTree.entries, cut = dir.lastIndexOf('/'), r = route();
+        // With the folder's own page hidden (nothing open), its warnings show here.
+        const warn = r.view === 'notes' && r.id === dir ? noteWarnings(dir) : [];
+        if (!dir) return [...warn, rows(noteTops(es), (e) => noteRow(e, es), 'No notes yet', 'rows nlist')];
         return [secHead(noteLabel(dir), el('a', { href: cut < 0 ? '#notes' : noteHref(dir.slice(0, cut)) }, `‹ ${cut < 0 ? 'Notes' : noteLabel(dir.slice(0, cut))}`)),
-          rows(noteRows(es, dir), (e) => noteRow(e, es), 'Empty', 'rows nlist')];
+          ...warn, rows(noteRows(es, dir), (e) => noteRow(e, es), 'Empty', 'rows nlist')];
       },
       projects: projectList,
       routines: () => [rows(routines.list, (r) => el('li', {}, el('a', { href: `#routines/${encodeURIComponent(r.name)}` },
@@ -4614,6 +4616,9 @@ function noteText(src, dir) {
   }
   return text;
 }
+// Over a notes view of `path`: a repo offline or in conflict (the last copy shown), suggestions that couldn't be read.
+const noteWarnings = (path) => [['offline', 'conflict'].includes(notesTree.state) ? el('p', { className: 'dim' }, `Notes repo ${notesTree.state}: showing the last copy`) : '',
+  sugsError && /^inbox(\/[^/]+)?$/.test(path) ? el('p', { className: 'bad' }, `Couldn’t read suggestions: ${sugsError}`) : ''];
 function renderNotes(path) {
   if (!everOpen) return; // fetch once connected, with the token in place
   const cut = path.lastIndexOf('/'), dir = cut < 0 ? '' : path.slice(0, cut);
@@ -4640,8 +4645,7 @@ function renderNotes(path) {
   if (notesTree.error) return say('bad', notesTree.error);
   if (notesTree.state === 'off') return say('dim', 'Notes repo not configured (MIS_NOTES_REMOTE)');
   if (!entry) return say('dim', 'Not in the notes repo');
-  const stale = [['offline', 'conflict'].includes(notesTree.state) ? el('p', { className: 'dim' }, `Notes repo ${notesTree.state}: showing the last copy`) : '',
-    sugsError && /^inbox(\/[^/]+)?$/.test(path) ? el('p', { className: 'bad' }, `Couldn’t read suggestions: ${sugsError}`) : ''];
+  const stale = noteWarnings(path);
   if (entry.kind === 'dir') {
     const rows = path ? noteRows(notesTree.entries, path) : noteTops(notesTree.entries);
     const ul = el('ul', { className: 'rows nlist' }, ...rows.map((e) => noteRow(e, notesTree.entries)));
