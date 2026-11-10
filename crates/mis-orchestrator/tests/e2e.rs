@@ -6567,7 +6567,7 @@ async fn the_mis_page_frames_a_draft_and_its_feedback_continues_the_drafts_threa
     let auth = [("authorization", "Bearer s")];
     let change = serde_json::json!({"request": "A chart.", "slug": "demo", "change": true,
         "harness": "claude"});
-    // Its own script, and a chunk only it has (as one its script imports).
+    // Its own script, and a script (and the chunk it imports) only it has.
     let v2 = bundle(&[
         (
             "app.json",
@@ -6575,6 +6575,7 @@ async fn the_mis_page_frames_a_draft_and_its_feedback_continues_the_drafts_threa
         ),
         ("index.html", b"v2"),
         ("js/app.js", b"v2 js"),
+        ("js/main-2.js", b"import './chunk-2.js'"),
         ("js/chunk-2.js", b"v2 chunk"),
     ]);
     let (task, token) = app_task(&mis, &mut worker, &auth, change).await;
@@ -6604,13 +6605,24 @@ async fn the_mis_page_frames_a_draft_and_its_feedback_continues_the_drafts_threa
         app_get(&apps, "/a/demo/js/app.js", from_preview).await.2,
         "v2 js"
     );
-    // A chunk its script imports names no draft; only the draft has it.
-    let from_script = "\r\nSec-Fetch-Dest: script\r\nReferer: http://127.0.0.1/a/demo/js/app.js";
+    // A chunk a draft-only script imports names no draft; only the draft has it.
+    let from_draft = "\r\nSec-Fetch-Dest: script\r\nReferer: http://127.0.0.1/a/demo/js/main-2.js";
     assert_eq!(
-        app_get(&apps, "/a/demo/js/chunk-2.js", from_script).await.2,
+        app_get(&apps, "/a/demo/js/chunk-2.js", from_draft).await.2,
         "v2 chunk"
     );
-    assert_eq!(app_get(&apps, "/a/demo/js/chunk-2.js", "").await.0, 404);
+    // Asked by a live page or file, or by no file: never the draft's.
+    for by in [
+        "",
+        "\r\nSec-Fetch-Dest: script\r\nReferer: http://127.0.0.1/a/demo/js/app.js",
+        "\r\nSec-Fetch-Dest: script\r\nReferer: http://127.0.0.1/a/demo/",
+    ] {
+        assert_eq!(
+            app_get(&apps, "/a/demo/js/chunk-2.js", by).await.0,
+            404,
+            "{by}"
+        );
+    }
     // Opened normally, or navigated to from the preview: live.
     assert_eq!(app_get(&apps, "/a/demo/", "").await.2, "v1");
     let navigated = "\r\nSec-Fetch-Dest: iframe\r\nReferer: http://127.0.0.1/a/demo/?mis-preview=2";

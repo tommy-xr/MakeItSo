@@ -33,9 +33,9 @@ pub struct Member {
     pub role: AppRole,
     /// The owner is trying the app's draft, this release: its files and a copy of the records.
     pub draft: Option<u32>,
-    /// A file one of the app's pages loads, not a page: it may come from the draft when only the
-    /// draft has it (see `apps_http::draft_only`).
-    pub loaded: bool,
+    /// Not a page: a file one of the app's files asks for, this one (its Referer, under
+    /// `/a/<slug>/`). See `apps_http::draft_only`.
+    pub loaded_by: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,22 +101,28 @@ pub const PREVIEW_PARAM: &str = "mis-preview";
 /// in its `referer` when that is a page of `slug` (the files that page loads). Its API calls name
 /// the draft in [`DRAFT_HEADER`], as `mis.js` reads the parameter too.
 pub fn preview_of(query: Option<&str>, referer: Option<&str>, slug: &str) -> Option<u32> {
+    // As `URLSearchParams.get` in `mis.js` reads it (decoded, the first), so both agree.
     let param = |q: &str| {
-        (q.split('&').filter_map(|kv| kv.split_once('=')))
-            .find(|(k, _)| *k == PREVIEW_PARAM)
+        (form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == PREVIEW_PARAM))
             .and_then(|(_, v)| v.parse().ok())
     };
     let page = || {
-        let uri: axum::http::Uri = referer.filter(|r| within(r, slug))?.parse().ok()?;
+        let uri: axum::http::Uri = referer
+            .filter(|r| file_of(r, slug).is_some())?
+            .parse()
+            .ok()?;
         param(uri.query()?)
     };
     query.and_then(param).or_else(page)
 }
 
-/// Whether `url` (a Referer) is a page or file of app `slug`.
-pub fn within(url: &str, slug: &str) -> bool {
-    let uri = url.parse::<axum::http::Uri>();
-    uri.is_ok_and(|u| u.path().starts_with(&format!("/a/{slug}/")))
+/// The path within app `slug` of `url` (a Referer), e.g. `js/app.js`; `""` for its entry. None:
+/// not one of its pages or files.
+pub fn file_of(url: &str, slug: &str) -> Option<String> {
+    let uri = url.parse::<axum::http::Uri>().ok()?;
+    uri.path()
+        .strip_prefix(&format!("/a/{slug}/"))
+        .map(str::to_string)
 }
 
 /// The draft release `Cookie` header `cookies` names for `slug`, if any.
@@ -313,8 +319,19 @@ mod tests {
             None
         );
         assert_eq!(preview_of(Some("mis-preview=x"), None, "pool"), None);
-        assert!(
-            within("http://h/a/pool/js/app.js", "pool") && !within("http://h/a/pool2/", "pool")
+        assert_eq!(
+            file_of("http://h/a/pool/js/app.js", "pool").as_deref(),
+            Some("js/app.js")
+        );
+        assert_eq!(file_of("http://h/a/pool2/", "pool"), None);
+        // Read as `URLSearchParams.get` reads it: the first, decoded; a bare key is empty.
+        assert_eq!(
+            preview_of(Some("mis-preview&mis-preview=2"), None, "pool"),
+            None
+        );
+        assert_eq!(
+            preview_of(Some("mis%2Dpreview=&mis-preview=2"), None, "pool"),
+            None
         );
     }
 

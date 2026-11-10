@@ -316,7 +316,9 @@ async fn admit(
             .flatten()
             .or_else(|| app_access::cookie_draft(h(header::COOKIE.as_str()), slug)),
     };
-    let loaded = !api && referer.is_some_and(|r| app_access::within(r, slug));
+    let loaded_by = referer
+        .filter(|_| !api)
+        .and_then(|r| app_access::file_of(r, slug));
     // Read only when a draft is asked for.
     let current = asked.and_then(|_| apps.draft(slug)).map(|d| d.release);
     let draft = match app_access::draft_of(asked, api, role, current) {
@@ -335,7 +337,7 @@ async fn admit(
         subject,
         role,
         draft,
-        loaded,
+        loaded_by,
     });
     Ok(())
 }
@@ -814,15 +816,23 @@ async fn blocking(apps: Arc<Apps>, slug: String, path: String, m: Member) -> Res
 }
 
 /// `path` from the app's draft, for one who may try it, when the release served lacks it and
-/// one of the app's files asks (never a page): e.g. a chunk a preview's script imports, whose
-/// request names no draft. Content-hashed names (the SDK's build) make a changed file a new
-/// name, so a preview gets each draft file; an unhashed file both have comes from live.
+/// a file only the draft has asks (never a page, nor a live file): e.g. a chunk a preview's
+/// script imports, whose request names no draft. Content-hashed names (the SDK's build) make a
+/// changed file a new name, so a preview gets each draft file; an unhashed one both have, live's.
 fn draft_only(apps: &Apps, slug: &str, path: &str, m: &Member) -> Option<(String, Vec<u8>)> {
-    if !m.loaded || m.draft.is_some() || !app_access::may_try(m.role) || apps::reserved(path) {
+    let by = apps::clean_path(m.loaded_by.as_deref()?)?;
+    if m.draft.is_some() || !app_access::may_try(m.role) || apps::reserved(path) {
+        return None;
+    }
+    let draft = apps.release_at(slug, apps.draft(slug)?.release)?;
+    let live_has = |rel| {
+        apps.live(slug)
+            .is_some_and(|l| apps::read_file(&l.dir, rel).is_some())
+    };
+    if live_has(by) || apps::read_file(&draft.dir, by).is_none() {
         return None;
     }
     let rel = apps::clean_path(path)?;
-    let draft = apps.release_at(slug, apps.draft(slug)?.release)?;
     Some((rel.to_string(), apps::read_file(&draft.dir, rel)?))
 }
 
