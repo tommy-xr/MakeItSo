@@ -151,6 +151,8 @@ impl Ledger {
         l.live = saved.live.into_owned();
         l.bells = saved.bells.into_owned();
         l.reviews = saved.reviews.into_owned();
+        // Approved ones carry on merging when they can.
+        effects.extend(l.resume_reviews());
         let written = (l.tasks.iter())
             .filter(|t| t.status.finished())
             .map(|t| t.task.id)
@@ -191,6 +193,8 @@ impl Ledger {
         let (gone, kept): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.tasks).into_iter().partition(old);
         self.tasks = kept;
+        // Decided reviews go with their age, like tasks.
+        (self.reviews).retain(|r| !r.state.finished() || r.at >= cutoff);
         let gone: Vec<TaskId> = gone.iter().map(|t| t.task.id).collect();
         let effects = match gone.is_empty() {
             true => vec![],

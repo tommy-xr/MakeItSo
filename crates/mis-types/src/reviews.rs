@@ -31,6 +31,9 @@ pub struct Review {
     pub fixing: Option<String>,
     /// A checkout of its repo on the worker (`~/code/mis-notes`): the PR must be its origin's.
     pub cwd: String,
+    /// A worker is looking at it (and may merge it) right now; not saved.
+    #[serde(skip)]
+    pub assessing: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

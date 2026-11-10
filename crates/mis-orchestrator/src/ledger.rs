@@ -806,14 +806,22 @@ impl Ledger {
     /// The newest task in `task`'s app thread, for feedback to reply to. Err: one is still
     /// working (the next waits for it). None: no such task.
     pub fn thread_tip(&self, task: TaskId) -> Option<Result<TaskId, String>> {
-        let t = self.tasks.iter().find(|t| t.task.id == task)?;
-        let thread = t.bound.as_ref().map_or(task, |b| b.thread);
-        let mut tasks = (self.tasks.iter())
-            .filter(|t| t.task.id == task || t.bound.as_ref().is_some_and(|b| b.thread == thread));
-        if tasks.clone().any(|t| !t.status.finished()) {
-            return Some(Err("its draft's task is still working".into()));
+        let find = |id: TaskId| self.tasks.iter().find(|t| t.task.id == id);
+        // Up to its first task, then every reply below it (tasks are in order).
+        let mut root = find(task)?;
+        while let Some(up) = root.parent.and_then(find) {
+            root = up;
         }
-        tasks.next_back().map(|t| Ok(t.task.id))
+        let mut thread = vec![root];
+        for t in &self.tasks {
+            if t.parent.is_some_and(|p| thread.iter().any(|x| x.task.id == p)) {
+                thread.push(t);
+            }
+        }
+        if thread.iter().any(|t| !t.status.finished()) {
+            return Some(Err("its task is still working".into()));
+        }
+        thread.last().map(|t| Ok(t.task.id))
     }
 
     /// App `slug`'s tasks that haven't finished.

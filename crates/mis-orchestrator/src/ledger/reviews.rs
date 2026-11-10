@@ -68,6 +68,9 @@ impl Ledger {
         if r.state.finished() {
             return Err("already decided".into());
         }
+        if r.assessing {
+            return Err("it may be merging right now: try again in a moment".into());
+        }
         (r.state, r.status) = (ReviewState::Rejected, Some("rejected".into()));
         Ok(vec![Effect::ReviewDone { review: r.clone() }])
     }
@@ -77,6 +80,7 @@ impl Ledger {
         let Some(i) = self.reviews.iter().position(|r| r.id == id) else {
             return vec![];
         };
+        self.reviews[i].assessing = false;
         let ReviewState::Approved { fixes } = self.reviews[i].state else {
             return vec![]; // decided, or a fix waits for the owner, meanwhile
         };
@@ -91,46 +95,40 @@ impl Ledger {
                 r.status = Some(why);
                 return again;
             }
+            // An app's new commits need their own release: it waits for its task to propose
+            // them (which makes the fix ready) rather than merge code its draft doesn't hold.
+            Assessment::Moved { .. } if matches!(r.kind, ReviewKind::AppDraft { .. }) => {
+                r.status = Some("new commits: waiting for its task to propose them".into());
+                return again;
+            }
             Assessment::Moved { head } => {
                 let approved = std::mem::replace(&mut r.head, head);
                 r.state = ReviewState::FixReady { approved, fixes };
                 r.status = Some("a fix is ready to look at".into());
                 return vec![];
             }
-            Assessment::Refused { why } => {
-                (r.state, r.status) = (ReviewState::NeedsYou { why: why.clone() }, Some(why));
-                return vec![];
+            Assessment::Refused { why } => return needs_you(r, why),
+            Assessment::Failing { checks, log } => {
+                let why = format!("checks failed: {}", checks.join(", "));
+                (fix_request(r, &why, &log), why)
             }
-            Assessment::Failing { checks, log } => (
-                fix_request(
-                    &r.pr,
-                    &format!("checks failed: {}", checks.join(", ")),
-                    &log,
-                ),
-                format!("checks failed: {}", checks.join(", ")),
-            ),
-            Assessment::Conflict => (
-                fix_request(&r.pr, "it conflicts with its base branch", ""),
-                "it conflicts with its base branch".to_string(),
-            ),
+            Assessment::Conflict => {
+                let why = "it conflicts with its base branch".to_string();
+                (fix_request(r, &why, ""), why)
+            }
         };
-        // Once per head: the same failure waits for the task's fix rather than asking again.
-        if r.fixing.as_deref() == Some(r.head.as_str()) {
-            r.status = Some(format!("{why}; waiting for its task's fix"));
-            return again;
-        }
+        let asked_here = r.fixing.as_deref() == Some(r.head.as_str());
         let tip = r.task.and_then(|t| self.thread_tip(t));
         let r = &mut self.reviews[i];
         match tip {
-            _ if fixes >= MAX_FIX_ATTEMPTS => {
-                let why = format!("{why}, after {fixes} fixes");
-                (r.state, r.status) = (ReviewState::NeedsYou { why: why.clone() }, Some(why));
-                vec![]
+            // Asked once at this head: wait for the fix while its task works.
+            Some(Err(busy)) if asked_here => {
+                r.status = Some(format!("{why}; {busy}"));
+                again
             }
-            None => {
-                (r.state, r.status) = (ReviewState::NeedsYou { why: why.clone() }, Some(why));
-                vec![]
-            }
+            _ if asked_here => needs_you(r, format!("{why}; its task finished without a fix")),
+            _ if fixes >= MAX_FIX_ATTEMPTS => needs_you(r, format!("{why}, after {fixes} fixes")),
+            None => needs_you(r, why),
             Some(Err(busy)) => {
                 r.status = Some(format!("{why}; {busy}"));
                 again
@@ -150,16 +148,49 @@ impl Ledger {
                         effects.extend(again);
                         effects
                     }
-                    Err(e) => {
-                        let r = &mut self.reviews[i];
-                        let why = format!("{why}; couldn't ask its task: {e}");
-                        (r.state, r.status) =
-                            (ReviewState::NeedsYou { why: why.clone() }, Some(why));
-                        vec![]
-                    }
+                    Err(e) => needs_you(
+                        &mut self.reviews[i],
+                        format!("{why}; couldn't ask its task: {e}"),
+                    ),
                 }
             }
         }
+    }
+
+    /// A worker is looking at approved review `id`'s PR (and may merge it): no rejecting
+    /// it meanwhile. False: it isn't approved any more.
+    pub fn assessing(&mut self, id: Uuid) -> bool {
+        let r = self.reviews.iter_mut().find(|r| r.id == id);
+        let Some(r) = r.filter(|r| matches!(r.state, ReviewState::Approved { .. })) else {
+            return false;
+        };
+        r.assessing = true;
+        true
+    }
+
+    /// Merged review `id`'s app release didn't go live (`why`): publishing again retries it.
+    pub fn review_not_live(&mut self, id: Uuid, why: String) {
+        if let Some(r) = self.reviews.iter_mut().find(|r| r.id == id) {
+            needs_you(r, why);
+        }
+    }
+
+    /// What became of review `id` after it was decided, e.g. its PR couldn't be closed.
+    pub fn review_status(&mut self, id: Uuid, status: String) {
+        if let Some(r) = self.reviews.iter_mut().find(|r| r.id == id) {
+            r.status = Some(status);
+        }
+    }
+
+    /// Every approved review: looked at again (after a restart).
+    pub fn resume_reviews(&self) -> Vec<Effect> {
+        (self.reviews.iter())
+            .filter(|r| matches!(r.state, ReviewState::Approved { .. }))
+            .map(|r| Effect::AdvanceReview {
+                id: r.id,
+                after: Duration::ZERO,
+            })
+            .collect()
     }
 
     fn review_mut(&mut self, id: Uuid) -> Result<&mut Review, String> {
@@ -167,17 +198,28 @@ impl Ledger {
     }
 }
 
+/// `r` needs the owner: `why`. Nothing more to do on it until they act.
+fn needs_you(r: &mut Review, why: String) -> Vec<Effect> {
+    (r.state, r.status) = (ReviewState::NeedsYou { why: why.clone() }, Some(why));
+    vec![]
+}
+
 /// What the task is asked when its approved PR can't merge.
-fn fix_request(pr: &PrRef, problem: &str, log: &str) -> String {
+fn fix_request(r: &Review, problem: &str, log: &str) -> String {
     let log = match log.trim() {
         "" => String::new(),
         l => format!("\n\nThe failing check's log ends:\n\n```\n{l}\n```"),
     };
+    // An app's fix needs a release built from it, proposed as its draft again.
+    let then = match r.kind {
+        ReviewKind::AppDraft { .. } => "push, publish the new release and propose it again",
+        ReviewKind::Code => "push",
+    };
     format!(
         "Your PR {} was approved, but {problem}, so it can't merge.{log}\n\nFix it on the same \
-         branch and push; nothing else changes. It merges once it passes, after the owner looks \
-         at the fix.",
-        pr.url
+         branch, then {then}; nothing else changes. It merges once it passes, after the owner \
+         looks at the fix.",
+        r.pr.url
     )
 }
 
@@ -202,6 +244,7 @@ mod tests {
             status: None,
             fixing: None,
             cwd: "~/r".into(),
+            assessing: false,
         }
     }
 
@@ -229,10 +272,9 @@ mod tests {
         l.review(id).unwrap().state.clone()
     }
 
-    fn finish(l: &mut Ledger, task: TaskId) {
+    fn finish(l: &mut Ledger) {
         for t in l.tasks.iter_mut().filter(|t| !t.status.finished()) {
             t.status = TaskStatus::Done;
-            let _ = task;
         }
     }
 
@@ -305,7 +347,7 @@ mod tests {
         assert_eq!(l.review(id).unwrap().head, "b".repeat(40));
         // Two more rounds, then the owner.
         for round in 2..=3 {
-            finish(&mut l, task);
+            finish(&mut l);
             l.approve_review(id).unwrap();
             l.review_assessed(id, Assessment::Conflict);
             assert_eq!(state(&l, id), ReviewState::Approved { fixes: round });
@@ -316,7 +358,7 @@ mod tests {
                 },
             );
         }
-        finish(&mut l, task);
+        finish(&mut l);
         l.approve_review(id).unwrap();
         l.review_assessed(id, failing());
         assert!(

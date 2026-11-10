@@ -64,6 +64,7 @@ pub fn review(slug: &str, draft: &AppDraft, cwd: String) -> Option<Review> {
         status: None,
         fixing: None,
         cwd,
+        assessing: false,
     })
 }
 

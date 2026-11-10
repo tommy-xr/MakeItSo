@@ -377,9 +377,8 @@ pub fn assess(w: &Want, pr: &Pr, head: &str) -> Assess {
         });
     }
     if pr.is_draft {
-        return found(Assessment::Waiting {
-            why: "it is a draft PR".into(),
-        });
+        let why = "it is a draft PR: mark it ready".to_string();
+        return found(Assessment::Refused { why });
     }
     let checks = newest_checks(pr);
     let failing: Vec<String> = (checks.iter())
@@ -395,8 +394,14 @@ pub fn assess(w: &Want, pr: &Pr, head: &str) -> Assess {
     if let Err(why) = checks_settled(&checks) {
         return found(Assessment::Waiting { why });
     }
-    if pr.mergeable == "CONFLICTING" || pr.merge_state_status == "DIRTY" {
+    // Behind its base: its task can bring it up to date, as with a conflict.
+    let behind = matches!(pr.merge_state_status.as_str(), "DIRTY" | "BEHIND");
+    if pr.mergeable == "CONFLICTING" || behind {
         return found(Assessment::Conflict);
+    }
+    if pr.merge_state_status == "BLOCKED" {
+        let why = "GitHub blocks it (a required review or rule)".to_string();
+        return found(Assessment::Refused { why });
     }
     match ready(pr) {
         Ok(()) => Assess::Merge,
@@ -790,11 +795,22 @@ mod tests {
         );
         let conflict = pr(|v| v["mergeable"] = json!("CONFLICTING"));
         assert_eq!(assess(&w, &conflict, HEAD), found(Assessment::Conflict));
-        let waits: [Edit; 3] = [
-            |v| v["isDraft"] = json!(true),
+        let waits: [Edit; 2] = [
             |v| v["statusCheckRollup"][0]["status"] = json!("IN_PROGRESS"),
+            |v| v["mergeStateStatus"] = json!("UNKNOWN"),
+        ];
+        let behind = pr(|v| v["mergeStateStatus"] = json!("BEHIND"));
+        assert_eq!(assess(&w, &behind, HEAD), found(Assessment::Conflict));
+        let refused: [Edit; 2] = [
+            |v| v["isDraft"] = json!(true),
             |v| v["mergeStateStatus"] = json!("BLOCKED"),
         ];
+        for edit in refused {
+            assert!(matches!(
+                assess(&w, &pr(edit), HEAD),
+                Assess::Found(Assessment::Refused { .. })
+            ));
+        }
         for edit in waits {
             assert!(matches!(
                 assess(&w, &pr(edit), HEAD),

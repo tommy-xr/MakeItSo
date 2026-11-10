@@ -667,7 +667,8 @@ fn handle_incoming(
                                     let dir = dir.display().to_string();
                                     merge::assess_review(gh, &dir, &w, &head).await
                                 }
-                                Err(why) => Assessment::Refused {
+                                // Maybe another worker has it: look again later.
+                                Err(why) => Assessment::Waiting {
                                     why: format!("its checkout: {why}"),
                                 },
                             };

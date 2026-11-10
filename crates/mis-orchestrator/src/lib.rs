@@ -954,12 +954,15 @@ impl App {
     /// can (checked in code), and move the review on with what it found.
     async fn advance_review(&self, id: uuid::Uuid, after: Duration) {
         tokio::time::sleep(after).await;
-        let Some(r) = self.ledger().review(id).cloned() else {
-            return;
+        // Approved still, and no rejecting it while the worker may be merging.
+        let r = {
+            let mut l = self.ledger();
+            match l.assessing(id) {
+                true => l.review(id).cloned(),
+                false => None,
+            }
         };
-        if !matches!(r.state, ReviewState::Approved { .. }) {
-            return;
-        }
+        let Some(r) = r else { return };
         let worker = self.ledger().merge_worker(r.task);
         let found = match worker {
             None => Assessment::Waiting {
@@ -992,23 +995,25 @@ impl App {
         if let (ReviewKind::AppDraft { slug, release }, Some(apps)) = (&r.kind, self.apps.clone()) {
             let (slug, n, task, id) = (slug.clone(), *release, r.task, r.id);
             let done = tokio::task::spawn_blocking(move || {
-                let live = match merged {
-                    true => apps
-                        .activate(&slug, n, unix_ms())
-                        .map_err(|e| format!("{e:?}")),
-                    false => Ok(()),
-                };
-                let what = match (merged, &live) {
-                    (true, Ok(())) => format!("live as v{n}"),
-                    (true, Err(e)) => format!("merged, but making v{n} live failed: {e}"),
-                    (false, _) => "discarded".into(),
-                };
+                if merged {
+                    apps.activate(&slug, n, unix_ms())
+                        .map_err(|e| format!("{e:?}"))?;
+                }
+                // Gone only once live (or rejected): a release that didn't go live keeps its
+                // draft, and publishing again retries.
                 apps.end_draft(&slug, id);
+                let what = if merged {
+                    format!("live as v{n}")
+                } else {
+                    "discarded".into()
+                };
                 apps.settle_feedback(&slug, task, &what);
-                live
+                Ok::<(), String>(())
             });
             if let Ok(Err(e)) = done.await {
-                tracing::warn!("review {}: making it live: {e}", r.id);
+                let why = format!("merged, but making v{n} live failed: {e}");
+                tracing::warn!("review {}: {why}", r.id);
+                self.ledger().review_not_live(r.id, why);
             }
         }
         if !merged {
@@ -1025,9 +1030,14 @@ impl App {
                 }
                 None => Err("no worker is online".into()),
             };
-            if !matches!(closed, Ok(Answer::Done { result: Ok(_) })) {
-                tracing::warn!("review {}: closing {}: {closed:?}", r.id, r.pr.url);
-            }
+            let status = match closed {
+                Ok(Answer::Done { result: Ok(_) }) => "rejected; its PR is closed".to_string(),
+                Ok(Answer::Done { result: Err(why) }) | Err(why) => {
+                    format!("rejected; its PR couldn't be closed ({why}): close it on GitHub")
+                }
+                Ok(_) => "rejected; its PR couldn't be closed: close it on GitHub".into(),
+            };
+            self.ledger().review_status(r.id, status);
         }
     }
 
@@ -2062,9 +2072,12 @@ async fn propose_draft(
     let made = tokio::task::spawn_blocking(move || apps.propose(&s, &p, task, at));
     match made.await.expect("proposing doesn't panic") {
         Ok(d) => {
-            // Its review: what Publish approves.
-            let cwd = app.settings().map(|s| s.apps.repo).unwrap_or_default();
-            if let Some(r) = drafts::review(&slug, &d, cwd) {
+            // Its review: what Publish approves (made then, if settings can't be read now).
+            let review = app
+                .settings()
+                .ok()
+                .and_then(|s| drafts::review(&slug, &d, s.apps.repo));
+            if let Some(r) = review {
                 app.ledger().open_review(r);
             }
             (StatusCode::CREATED, Json(d)).into_response()
@@ -2212,9 +2225,9 @@ async fn decide_feedback(
 /// How long publishing a draft waits for its worker's `gh` to check and merge the PR.
 const MERGE_WAIT: Duration = Duration::from_secs(150);
 
-/// `{"id": draft}`: publish `slug`'s draft (merge its PR on a worker through the code-checked
-/// path, then make its release live; a PR that doesn't merge leaves nothing live) or discard
-/// it (the PR stays). Full scope, and the app's owner only. One decision or proposal at a time.
+/// `{"id": draft}`: publish `slug`'s draft, approving its review (202: its PR merges when it can,
+/// then the release goes live), or reject it (its PR is closed, the draft goes). Full scope,
+/// and the app's owner only. One decision or proposal at a time.
 async fn decide_draft(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -2247,7 +2260,10 @@ async fn decide_draft(
         return (StatusCode::CONFLICT, "that draft was replaced or decided").into_response();
     };
     // Publish approves its review: merge when it can, then live (see `review_done`).
-    let cwd = app.settings().map(|s| s.apps.repo).unwrap_or_default();
+    let cwd = match app.settings() {
+        Ok(s) => s.apps.repo,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
     let decided = app.transition(|l| {
         if l.review(id).is_none() {
             if let Some(r) = drafts::review(&slug, &draft, cwd) {
