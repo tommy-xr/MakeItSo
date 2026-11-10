@@ -218,7 +218,9 @@ mod tests {
 
     fn submit(l: &mut Ledger, harness: Option<&str>) -> TaskId {
         let harness = harness.map(String::from);
-        l.submit("do it".into(), None, harness, None, vec![]).0
+        l.submit("do it".into(), None, harness, None, vec![], None)
+            .unwrap()
+            .0
     }
 
     fn status_of(l: &Ledger, id: TaskId) -> TaskSummary {

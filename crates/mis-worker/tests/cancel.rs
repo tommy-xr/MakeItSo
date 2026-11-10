@@ -126,6 +126,7 @@ async fn submit(ws: &mut Ws, prompt: &str) -> TaskId {
         model: None,
         reply_to: None,
         images: vec![],
+        worker: None,
     };
     send(ws, &submit).await;
     loop {

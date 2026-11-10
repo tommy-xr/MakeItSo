@@ -191,7 +191,9 @@ mod tests {
     fn saved_tasks_come_back_once_the_dir_is_free() {
         let dir = temp_dir();
         let (mut store, mut ledger, _) = Store::open(&dir, NOW, 0).unwrap();
-        let (id, _) = ledger.submit("hi".into(), None, Some("claude".into()), None, vec![]);
+        let (id, _) = ledger
+            .submit("hi".into(), None, Some("claude".into()), None, vec![], None)
+            .unwrap();
         store.save(ledger.snapshot(store.written()));
         // The next orchestrator waits for this one to let go.
         let held = std::thread::spawn(move || {

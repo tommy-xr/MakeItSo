@@ -95,6 +95,7 @@ async fn deltas_reach_a_watching_client_batched_and_are_never_kept() {
         model: None,
         reply_to: None,
         images: vec![],
+        worker: None,
     };
     send(&mut client, &submit).await;
     let watch = async {

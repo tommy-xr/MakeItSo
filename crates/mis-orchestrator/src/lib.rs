@@ -2590,16 +2590,20 @@ async fn client_conn(mut sock: WebSocket, app: App, scope: Scope) {
                     };
                     send_json(&mut sock, &reply).await;
                 }
-                Some(ClientMsg::Submit { prompt, cwd, harness, model, reply_to: None, images }) => {
+                Some(ClientMsg::Submit { prompt, cwd, harness, model, reply_to: None, images, worker }) => {
                     let model = model.filter(|m| !m.trim().is_empty());
                     // A chosen model pins the default harness: the planner could pick
                     // one that doesn't know that model.
                     let unplanned = app.planner.is_none() || model.is_some();
                     let harness = harness.or_else(|| unplanned.then(|| "claude".into()));
-                    let reply = match app.check_images(&images) {
-                        Ok(()) => ServerMsg::Submitted {
-                            task: app.transition(|l| l.submit(prompt, cwd, harness, model, images)),
-                        },
+                    let task = app.check_images(&images).and_then(|()| {
+                        app.transition(|l| match l.submit(prompt, cwd, harness, model, images, worker) {
+                            Ok((task, effects)) => (Ok(task), effects),
+                            Err(why) => (Err(why), vec![]),
+                        })
+                    });
+                    let reply = match task {
+                        Ok(task) => ServerMsg::Submitted { task },
                         Err(message) => ServerMsg::Error { message },
                     };
                     send_json(&mut sock, &reply).await;

@@ -498,7 +498,16 @@ mod tests {
         let (mut l, w, s, task) = delivered(false);
         assert_eq!(status(&l, task).0, TaskStatus::Delivered);
         // The worker takes the next task meanwhile.
-        let (next, eff) = l.submit("other".into(), None, Some("claude".into()), None, vec![]);
+        let (next, eff) = l
+            .submit(
+                "other".into(),
+                None,
+                Some("claude".into()),
+                None,
+                vec![],
+                None,
+            )
+            .unwrap();
         assert!(matches!(&eff[..], [Effect::Assign { task, .. }] if task.id == next));
         // Not in the report yet, then in its conversation, then answered.
         let at = |l: &mut Ledger, d| l.live_sessions(w, 1, vec![open(s, d)]);
