@@ -87,7 +87,7 @@ own page.
   when a write fails ("You can only view this app." for a 403).
 - The frame is the SDK's: `mis.shell({title, sections: [{id, label, tab?}], onNavigate})` draws
   the header (the section's label, View only for viewers, the `⋯` platform menu), bottom tabs for
-  `tab: true` sections, and puts the others (Settings, Import) in the menu above its platform
+  `tab: true` sections (two or more), and puts the others (Settings, Import) in the menu above its platform
   items (signed in as, the draft to try, feedback, All apps). One section: just the header.
   Render into `shell.main` (React: `createRoot(shell.main)`); `shell.route` is `{id, path}` for
   `#/<id>/<more>` (an unknown hash is the first section, its path kept), and `onNavigate(route)`

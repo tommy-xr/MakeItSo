@@ -335,15 +335,17 @@
     return { id: (sections.find((x) => x.id === path[0]) || sections[0]).id, path };
   }
   // What the shell shows for options `s` on route `r`: the heading (the section's label; one
-  // section: the title; `heading` overrides), a back link, the tabs and the menu's sections.
+  // section: the title; `heading` overrides), a back link, the tabs (two or more `tab`
+  // sections) and the menu's sections (the rest; none for one section).
   function layout(s, r) {
     const many = s.sections.length > 1;
     const link = (x) => ({ label: x.label, href: `#/${x.id}`, current: x.id === r.id });
+    const tabbed = s.sections.filter((x) => x.tab).length > 1;
     return {
       heading: s.heading ?? (many ? s.sections.find((x) => x.id === r.id).label : s.title),
       back: s.back ?? null,
-      tabs: many ? s.sections.filter((x) => x.tab).map(link) : [],
-      items: many ? s.sections.filter((x) => !x.tab).map(link) : [],
+      tabs: tabbed ? s.sections.filter((x) => x.tab).map(link) : [],
+      items: many ? s.sections.filter((x) => !(tabbed && x.tab)).map(link) : [],
     };
   }
   const sectioned = (list) => {

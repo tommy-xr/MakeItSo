@@ -341,8 +341,11 @@ test('shell: tabs below, the other sections in the menu; one section is just a h
   assert.equal(at('home', { heading: null }).heading, 'Home');
   const one = layout({ title: 'Notes', sections: [{ id: 'notes', label: 'All notes', tab: true }] }, { id: 'notes', path: [] });
   assert.deepEqual(one, { heading: 'Notes', back: null, tabs: [], items: [] });
-  // No tab sections: a header and the menu.
-  assert.deepEqual(layout({ title: 'X', sections: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }, { id: 'a', path: [] }).tabs, []);
+  // Fewer than two tabs: no tab bar, every section in the menu.
+  for (const tab of [false, true]) {
+    const v = layout({ title: 'X', sections: [{ id: 'a', label: 'A', tab }, { id: 'b', label: 'B' }] }, { id: 'a', path: [] });
+    assert.deepEqual([v.tabs, v.items.map((i) => i.label)], [[], ['A', 'B']]);
+  }
 });
 
 test('mis.shell refuses sections it could not route to', () => {

@@ -140,7 +140,8 @@ declare namespace Mis {
     mount(el: Element | null): void;
   }
 
-  /** A screen of the app, at `#/<id>`. `tab`: in the bottom tab bar; else in the ⋯ menu. */
+  /** A screen of the app, at `#/<id>`. `tab`: in the bottom tab bar (when two or more are);
+   * else in the ⋯ menu. */
   interface Section {
     id: string;
     label: string;
@@ -185,7 +186,7 @@ declare namespace Mis {
     /**
      * The app's frame, appended to the body, once per page: a header (the section's label,
      * View only for viewers, the ⋯ menu), `main` for the content, and a bottom tab bar for `tab`
-     * sections; the other sections go in the menu above its platform items. One section: just
+     * sections (two or more); the other sections go in the menu above its platform items. One section: just
      * the header. Hash routes (`#/<id>`), light and dark, safe areas; the header takes the page's
      * colours and font, the tab bar and menu the --mis-menu-* variables (see Menu) plus
      * --mis-menu-line and --mis-menu-accent (the current tab).
