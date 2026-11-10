@@ -1,10 +1,12 @@
 //! Tasks that build or change an app (`+ App`, `Change…`): the prompt they run with. Pure.
 
-use mis_types::{guides, valid_slug, AppTask, WorkerId, SLUG_RULE};
+use mis_types::{
+    check_references, guides, references_text, valid_slug, AppTask, WorkerId, SLUG_RULE,
+};
 
 use crate::app_grant::Binding;
 
-/// What `t` asks for, then the apps guide. Err: why it can't be a task.
+/// What `t` asks for, its links and notes, then the apps guide. Err: why it can't be a task.
 pub fn prompt(t: &AppTask) -> Result<String, String> {
     let request = t.request.trim();
     if request.is_empty() {
@@ -20,10 +22,15 @@ pub fn prompt(t: &AppTask) -> Result<String, String> {
         (false, Some(s)) => format!("Build a new Make It So app, slug `{s}`."),
         (false, None) => "Build a new Make It So app; pick its slug.".into(),
     };
+    check_references(&t.references)?;
+    let refs = match references_text(&t.references) {
+        r if r.is_empty() => r,
+        r => format!("{r}\n\n"),
+    };
     let guide = guides::guide("apps").expect("the apps guide is compiled in");
     Ok(format!(
         "{what} This folder is a checkout of the apps repo. Follow the apps guide below to \
-         the end: a PR and a staged release, never live.\n\nRequest:\n{request}\n\n{guide}"
+         the end: a PR and a staged release, never live.\n\nRequest:\n{request}\n\n{refs}{guide}"
     ))
 }
 
@@ -73,6 +80,7 @@ mod tests {
             model: None,
             worker: None,
             images: vec![],
+            references: vec![],
         }
     }
 
@@ -110,6 +118,30 @@ mod tests {
         assert_eq!(machine(None, None, "demo-mac", online), Some(a));
         assert_eq!(machine(None, None, "laptop", online), None);
         assert_eq!(machine(None, None, "", [(a, "")]), None);
+    }
+
+    #[test]
+    fn links_and_notes_go_between_the_request_and_the_guide() {
+        let mut t = task("Chores for the kids.", None, false);
+        t.references = vec![
+            mis_types::Reference::Link {
+                url: "https://example.com/grid".into(),
+                title: None,
+            },
+            mis_types::Reference::Note {
+                text: "10 stars = $1".into(),
+            },
+        ];
+        let p = prompt(&t).unwrap();
+        assert!(p.contains(
+            "Request:\nChores for the kids.\n\nReferences:\n- Link: <https://example.com/grid>\n\
+             - Note:\n  > 10 stars = $1\n\n---\nname: apps\n"
+        ));
+        t.references.push(mis_types::Reference::Link {
+            url: "javascript:x".into(),
+            title: None,
+        });
+        assert!(prompt(&t).is_err());
     }
 
     #[test]

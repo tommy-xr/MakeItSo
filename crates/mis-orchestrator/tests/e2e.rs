@@ -2476,10 +2476,10 @@ async fn attached_image_reaches_the_agent_as_a_file() {
         images,
         worker: None,
     };
-    // A fifth image, or one never uploaded, is refused.
+    // A thirteenth upload, or one never uploaded, is refused.
     for (images, why) in [
-        (vec![id; 5], "at most 4 images"),
-        (vec![id, uuid::Uuid::new_v4()], "unknown image"),
+        (vec![id; 13], "at most 12 images and files"),
+        (vec![id, uuid::Uuid::new_v4()], "unknown upload"),
     ] {
         send(&mut client, &submit(images)).await;
         let ServerMsg::Error { message } = recv(&mut client).await else {
@@ -3801,44 +3801,139 @@ async fn app_tasks_and_feedback_run_on_the_settings_machine_and_wait_for_it() {
 }
 
 #[tokio::test]
-async fn app_task_carries_its_reference_images_to_the_agent() {
+async fn app_task_carries_its_references_to_the_agent() {
     use base64ct::{Base64, Encoding};
     let dir = image_dir();
     let store = mis_orchestrator::images::Images::open(dir.clone()).unwrap();
     let base = start_app(with_read_token().with_images(store)).await;
     let (_, mut worker) = join_as(&base).await;
+    let id_of = |body: &str| -> uuid::Uuid {
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        v["id"].as_str().unwrap().parse().unwrap()
+    };
     let sketch = jpeg();
-    let auth = "Authorization: Bearer s\r\nContent-Type: image/jpeg\r\n";
-    let (status, body) = upload(&base, auth, &sketch).await;
+    let auth = "Authorization: Bearer s\r\n";
+    let (status, body) = upload(
+        &base,
+        &format!("{auth}Content-Type: image/jpeg\r\n"),
+        &sketch,
+    )
+    .await;
     assert_eq!(status, 200, "{body}");
-    let id: uuid::Uuid = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
-    let body = |images: Vec<uuid::Uuid>| {
+    let id = id_of(&body);
+    // Documents go by the name they're uploaded with, then their bytes.
+    let pdf = b"%PDF-1.4\n1 0 obj".to_vec();
+    let rules = "# Rules\n10 stars = $1 ✓\n".as_bytes().to_vec();
+    let up = |name: &'static str, bytes: Vec<u8>| {
+        let base = base.clone();
+        async move {
+            let head = format!("POST /api/upload?name={name} HTTP/1.1\r\n{auth}");
+            let (status, _, body) = http(&base, head.trim_end(), &bytes).await;
+            (status, String::from_utf8(body).unwrap())
+        }
+    };
+    let (status, body) = up("Chore%20list.pdf", pdf.clone()).await;
+    assert_eq!(status, 200, "{body}");
+    let doc = id_of(&body);
+    let (status, body) = up("rules.md", rules.clone()).await;
+    assert_eq!(status, 200, "{body}");
+    let md = id_of(&body);
+    for (name, bytes) in [
+        ("x.pdf", b"<html>".to_vec()),
+        ("page.html", b"<p>".to_vec()),
+    ] {
+        let (status, body) = up(name, bytes).await;
+        assert_eq!(status, 415, "{name}: {body}");
+    }
+    // Served back as plain text, named, never as a page.
+    let (status, head, served) = http(
+        &base,
+        format!("GET /api/images/{md} HTTP/1.1\r\n{auth}").trim_end(),
+        b"",
+    )
+    .await;
+    assert_eq!((status, served), (200, rules.clone()));
+    assert!(
+        head.contains("content-type: text/plain; charset=utf-8"),
+        "{head}"
+    );
+    assert!(
+        head.contains("content-disposition: inline; filename*=UTF-8''rules.md"),
+        "{head}"
+    );
+    assert!(
+        head.contains("content-security-policy: default-src 'none'"),
+        "{head}"
+    );
+
+    let body = |images: Vec<uuid::Uuid>, refs: serde_json::Value| {
         serde_json::json!({ "request": "Track pool chlorine, laid out like this sketch.",
-            "slug": "pool", "harness": "claude", "images": images })
+            "slug": "pool", "harness": "claude", "images": images, "references": refs })
         .to_string()
     };
-
-    // As for a task: one never uploaded, or a fifth, is refused and starts nothing.
-    for (images, why) in [
-        (vec![uuid::Uuid::new_v4()], "unknown image"),
-        (vec![id; 5], "at most 4 images"),
+    let refs = serde_json::json!([
+        { "kind": "link", "url": "https://example.com/habit-grid", "title": "Habit grid" },
+        { "kind": "note", "text": "Stars for each chore.\nResets Monday." },
+    ]);
+    // As for a task: one never uploaded, a thirteenth, or a link that isn't one, is refused
+    // and starts nothing.
+    for (images, refs, why) in [
+        (vec![uuid::Uuid::new_v4()], refs.clone(), "unknown upload"),
+        (vec![id; 13], refs.clone(), "at most 12 images and files"),
+        (
+            vec![id],
+            serde_json::json!([{ "kind": "link", "url": "javascript:x" }]),
+            "http(s) link",
+        ),
     ] {
-        let (status, got) = post_json(&base, "/api/apps/tasks", "s", &body(images)).await;
+        let (status, got) = post_json(&base, "/api/apps/tasks", "s", &body(images, refs)).await;
         assert!(status == 400 && got.contains(why), "{status} {got}");
     }
-    let (status, created) = post_json(&base, "/api/apps/tasks", "s", &body(vec![id])).await;
+    let (status, created) = post_json(
+        &base,
+        "/api/apps/tasks",
+        "s",
+        &body(vec![id, doc, md], refs),
+    )
+    .await;
     assert_eq!(status, 201, "{created}");
-    let OrchMsg::Assign { task, images, .. } = recv(&mut worker).await else {
+    let OrchMsg::Assign {
+        task,
+        images,
+        files,
+        ..
+    } = recv(&mut worker).await
+    else {
         panic!("assign")
     };
-    assert!(task.prompt.contains("laid out like this sketch"));
+    assert!(
+        task.prompt.contains(
+            "laid out like this sketch.\n\nReferences:\n\
+         - Link: Habit grid <https://example.com/habit-grid>\n\
+         - Note:\n  > Stars for each chore.\n  > Resets Monday.\n\n"
+        ),
+        "{}",
+        task.prompt
+    );
     assert_eq!(images.len(), 1);
     assert_eq!(images[0].id, id);
     assert_eq!(Base64::decode_vec(&images[0].data).unwrap(), sketch);
+    let names: Vec<(uuid::Uuid, &str)> = files.iter().map(|f| (f.id, f.name.as_str())).collect();
+    assert_eq!(names, [(doc, "Chore list.pdf"), (md, "rules.md")]);
+    assert_eq!(Base64::decode_vec(&files[0].data).unwrap(), pdf);
+
+    // The worker writes them beside the task's images and names them in its prompt.
+    let task_dir = dir.join("worker-task");
+    let paths = mis_agent::write_files(&task_dir, &files).unwrap();
+    assert_eq!(std::fs::read(&paths[1]).unwrap(), rules);
+    let prompt = mis_agent::with_files(&task.prompt, &paths);
+    let listed = format!("Attached files: {}, {} (read them)", paths[0], paths[1]);
+    assert!(prompt.ends_with(&listed), "{prompt}");
+    assert!(
+        paths[0].ends_with(&format!("{doc}-Chore list.pdf")),
+        "{}",
+        paths[0]
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 

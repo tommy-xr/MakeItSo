@@ -1,40 +1,83 @@
-//! Uploaded images, kept as `<dir>/<uuid>.<ext>` until attached to a task,
-//! served back for thumbnails, and swept once a week old. The checks are pure;
-//! `Images` is the filesystem shell around them.
+//! Uploads (images and documents), kept as `<dir>/<uuid>.<ext>` (and `<uuid>.name`, the name
+//! it came with) until attached to a task, served back for thumbnails, and swept once a week
+//! old. The checks are pure; `Images` is the filesystem shell around them.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
 use base64ct::{Base64, Encoding};
-use mis_types::{ImageFile, ImageKind, MAX_IMAGES};
+use mis_types::{
+    AttachedFile, DocKind, ImageFile, ImageKind, UploadKind, MAX_ATTACHED, MAX_ATTACHED_BYTES,
+    MAX_NAME_CHARS,
+};
 use uuid::Uuid;
 
 /// Older images are deleted, attached or not.
 pub const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
 pub const SWEEP_EVERY: Duration = Duration::from_secs(3600);
 
-/// The upload's format: `content_type` must name an accepted one and `bytes`
-/// must start with its magic number.
-pub fn validate(content_type: Option<&str>, bytes: &[u8]) -> Result<ImageKind, String> {
-    let kind = content_type
-        .and_then(ImageKind::from_mime)
-        .ok_or("Content-Type must be image/jpeg, image/png, image/webp or image/gif")?;
-    match ImageKind::sniff(bytes) {
-        Some(k) if k == kind => Ok(kind),
-        _ => Err(format!("body is not {}", kind.mime())),
+/// The upload's format: an image `content_type` names, its bytes starting with that one's
+/// magic number; else a document `name`'s extension names, its bytes fitting it.
+pub fn validate(
+    content_type: Option<&str>,
+    name: Option<&str>,
+    bytes: &[u8],
+) -> Result<UploadKind, String> {
+    if let Some(kind) = content_type.and_then(ImageKind::from_mime) {
+        return match ImageKind::sniff(bytes) {
+            Some(k) if k == kind => Ok(UploadKind::Image(kind)),
+            _ => Err(format!("body is not {}", kind.mime())),
+        };
+    }
+    let Some(doc) = name.and_then(DocKind::from_name) else {
+        return Err(
+            "images are jpeg, png, webp or gif (by Content-Type); documents are \
+                    .pdf, .txt, .md, .csv or .json (by ?name=)"
+                .into(),
+        );
+    };
+    match doc.fits(bytes) {
+        true => Ok(UploadKind::Doc(doc)),
+        false if doc == DocKind::Pdf => Err("body is not a PDF".into()),
+        false => Err(format!("a .{} file is UTF-8 text", doc.ext())),
     }
 }
 
-/// Images for one task: at most `MAX_IMAGES`, each one `known`.
-pub fn check(ids: &[Uuid], known: impl Fn(Uuid) -> bool) -> Result<(), String> {
-    if ids.len() > MAX_IMAGES {
-        return Err(format!("at most {MAX_IMAGES} images per task"));
+/// `name` as kept for a `kind` upload: its last path segment, control characters dropped, at
+/// most `MAX_NAME_CHARS`, ending in the kind's extension. Blank: none.
+pub fn clean_name(name: &str, kind: UploadKind) -> Option<String> {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or_default();
+    let base: String = base.chars().filter(|c| !c.is_control()).collect();
+    let base = base.trim().trim_start_matches('.');
+    if base.is_empty() {
+        return None;
     }
-    match ids.iter().find(|id| !known(**id)) {
-        Some(id) => Err(format!("unknown image {id}; upload it first")),
-        None => Ok(()),
+    let ext = format!(".{}", kind.ext());
+    let has_ext = base.len() > ext.len() && base.to_ascii_lowercase().ends_with(&ext);
+    let stem = match has_ext {
+        true => &base[..base.len() - ext.len()],
+        false => base,
+    };
+    let room = MAX_NAME_CHARS - ext.chars().count();
+    Some(stem.chars().take(room).collect::<String>() + &ext)
+}
+
+/// Uploads for one task: at most `MAX_ATTACHED` of `MAX_ATTACHED_BYTES` in all, each one
+/// stored (`size`: its bytes, None if not).
+pub fn check(ids: &[Uuid], size: impl Fn(Uuid) -> Option<u64>) -> Result<(), String> {
+    if ids.len() > MAX_ATTACHED {
+        return Err(format!("at most {MAX_ATTACHED} images and files per task"));
     }
+    let mut total = 0;
+    for id in ids {
+        total += size(*id).ok_or_else(|| format!("unknown upload {id}; upload it first"))?;
+    }
+    if total > MAX_ATTACHED_BYTES as u64 {
+        let mb = MAX_ATTACHED_BYTES >> 20;
+        return Err(format!("at most {mb} MB of images and files per task"));
+    }
+    Ok(())
 }
 
 /// Files last modified more than `max_age` before `now`.
@@ -91,43 +134,67 @@ impl Images {
         &self.dir
     }
 
-    pub fn store(&self, kind: ImageKind, bytes: &[u8]) -> std::io::Result<Uuid> {
+    /// Keep `bytes` as a `kind` upload, named `name` (see [`clean_name`]) if given.
+    pub fn store(
+        &self,
+        kind: UploadKind,
+        bytes: &[u8],
+        name: Option<&str>,
+    ) -> std::io::Result<Uuid> {
         let id = Uuid::new_v4();
+        if let Some(name) = name.and_then(|n| clean_name(n, kind)) {
+            crate::push::write_private(&self.dir.join(format!("{id}.name")), name.as_bytes())?;
+        }
         crate::push::write_private(&self.path(id, kind), bytes)?;
         Ok(id)
     }
 
-    fn path(&self, id: Uuid, kind: ImageKind) -> PathBuf {
+    fn path(&self, id: Uuid, kind: UploadKind) -> PathBuf {
         self.dir.join(format!("{id}.{}", kind.ext()))
     }
 
-    /// Stored kind of image `id`, if it is still here.
-    pub fn find(&self, id: Uuid) -> Option<ImageKind> {
-        ImageKind::ALL
-            .into_iter()
-            .find(|k| self.path(id, *k).is_file())
+    /// Stored kind of upload `id`, if it is still here.
+    pub fn find(&self, id: Uuid) -> Option<UploadKind> {
+        UploadKind::all().find(|k| self.path(id, *k).is_file())
     }
 
-    pub fn read(&self, id: Uuid) -> Option<(ImageKind, Vec<u8>)> {
+    /// Upload `id`'s bytes on disk, if it is still here.
+    pub fn size(&self, id: Uuid) -> Option<u64> {
+        let kind = self.find(id)?;
+        Some(std::fs::metadata(self.path(id, kind)).ok()?.len())
+    }
+
+    /// The name upload `id` came with, else `<id>.<ext>`.
+    pub fn name(&self, id: Uuid, kind: UploadKind) -> String {
+        let named = std::fs::read_to_string(self.dir.join(format!("{id}.name")));
+        named.unwrap_or_else(|_| format!("{id}.{}", kind.ext()))
+    }
+
+    pub fn read(&self, id: Uuid) -> Option<(UploadKind, Vec<u8>)> {
         let kind = self.find(id)?;
         Some((kind, std::fs::read(self.path(id, kind)).ok()?))
     }
 
-    /// `ids` with their bytes, for a task's assignment. One gone since it was
-    /// attached (swept) is left out with a warning.
-    pub fn files(&self, ids: &[Uuid]) -> Vec<ImageFile> {
-        ids.iter()
-            .filter_map(|id| {
-                let Some((_, bytes)) = self.read(*id) else {
-                    tracing::warn!(%id, "attached image is gone; sending the task without it");
-                    return None;
-                };
-                Some(ImageFile {
+    /// `ids` with their bytes, for a task's assignment: its images, then its documents. One gone
+    /// since it was attached (swept) is left out with a warning.
+    pub fn files(&self, ids: &[Uuid]) -> (Vec<ImageFile>, Vec<AttachedFile>) {
+        let (mut images, mut docs) = (vec![], vec![]);
+        for id in ids {
+            let Some((kind, bytes)) = self.read(*id) else {
+                tracing::warn!(%id, "attached upload is gone; sending the task without it");
+                continue;
+            };
+            let data = Base64::encode_string(&bytes);
+            match kind {
+                UploadKind::Image(_) => images.push(ImageFile { id: *id, data }),
+                UploadKind::Doc(_) => docs.push(AttachedFile {
                     id: *id,
-                    data: Base64::encode_string(&bytes),
-                })
-            })
-            .collect()
+                    name: self.name(*id, kind),
+                    data,
+                }),
+            }
+        }
+        (images, docs)
     }
 
     /// Delete expired files; how many went.
@@ -144,22 +211,66 @@ mod tests {
 
     #[test]
     fn upload_needs_a_named_format_its_bytes_match() {
-        assert_eq!(validate(Some("image/jpeg"), JPEG), Ok(ImageKind::Jpeg));
-        assert!(validate(Some("image/png"), JPEG).is_err(), "header lies");
-        assert!(validate(None, JPEG).is_err());
-        assert!(validate(Some("image/svg+xml"), b"<svg").is_err());
-        assert!(validate(Some("image/jpeg"), b"<html>").is_err());
+        let jpeg = UploadKind::Image(ImageKind::Jpeg);
+        assert_eq!(validate(Some("image/jpeg"), None, JPEG), Ok(jpeg));
+        assert!(
+            validate(Some("image/png"), None, JPEG).is_err(),
+            "header lies"
+        );
+        assert!(validate(None, None, JPEG).is_err());
+        assert!(validate(Some("image/svg+xml"), None, b"<svg").is_err());
+        assert!(validate(Some("image/jpeg"), None, b"<html>").is_err());
+        // A document goes by its name, whatever the browser called it.
+        let pdf = validate(
+            Some("application/octet-stream"),
+            Some("Chores.pdf"),
+            b"%PDF-1.4",
+        );
+        assert_eq!(pdf, Ok(UploadKind::Doc(DocKind::Pdf)));
+        assert_eq!(
+            validate(None, Some("rules.md"), b"# Rules"),
+            Ok(UploadKind::Doc(DocKind::Markdown))
+        );
+        assert!(validate(None, Some("x.pdf"), b"<html>").is_err());
+        assert!(validate(None, Some("x.md"), b"\xFF\xD8\xFF").is_err());
+        assert!(validate(Some("text/html"), Some("page.html"), b"<p>").is_err());
+        // An image's Content-Type wins over a document name.
+        assert!(validate(Some("image/png"), Some("x.txt"), b"hello").is_err());
     }
 
     #[test]
-    fn task_images_are_capped_and_must_exist() {
-        let ids: Vec<Uuid> = (0..5).map(|_| Uuid::new_v4()).collect();
-        assert_eq!(check(&ids[..4], |_| true), Ok(()));
-        assert_eq!(check(&[], |_| false), Ok(()));
-        assert!(check(&ids, |_| true).unwrap_err().contains("at most 4"));
+    fn names_keep_their_last_segment_and_end_in_their_kind() {
+        let pdf = UploadKind::Doc(DocKind::Pdf);
+        assert_eq!(
+            clean_name("Chore list.pdf", pdf).as_deref(),
+            Some("Chore list.pdf")
+        );
+        assert_eq!(clean_name("C:\\x\\../a.PDF", pdf).as_deref(), Some("a.pdf"));
+        assert_eq!(
+            clean_name("../../etc/passwd", pdf).as_deref(),
+            Some("passwd.pdf")
+        );
+        assert_eq!(clean_name("..pdf", pdf).as_deref(), Some("pdf.pdf"));
+        assert_eq!(clean_name("a\nb\u{0}.pdf", pdf).as_deref(), Some("ab.pdf"));
+        assert_eq!(clean_name(" / ", pdf), None);
+        let long = clean_name(&"é".repeat(300), pdf).unwrap();
+        assert_eq!(long.chars().count(), MAX_NAME_CHARS);
+        assert!(long.ends_with(".pdf"));
+    }
+
+    #[test]
+    fn task_uploads_are_capped_in_number_and_bytes_and_must_exist() {
+        let ids: Vec<Uuid> = (0..=MAX_ATTACHED).map(|_| Uuid::new_v4()).collect();
+        let small = |_| Some(1);
+        assert_eq!(check(&ids[..MAX_ATTACHED], small), Ok(()));
+        assert_eq!(check(&[], |_| None), Ok(()));
+        assert!(check(&ids, small).unwrap_err().contains("at most 12"));
         let unknown = ids[2];
-        let err = check(&ids[..4], |id| id != unknown).unwrap_err();
+        let err = check(&ids[..4], |id| (id != unknown).then_some(1)).unwrap_err();
         assert!(err.contains(&unknown.to_string()), "{err}");
+        let half = (MAX_ATTACHED_BYTES / 2) as u64;
+        assert_eq!(check(&ids[..2], |_| Some(half)), Ok(()));
+        assert!(check(&ids[..3], |_| Some(half)).unwrap_err().contains("MB"));
     }
 
     #[test]
@@ -179,15 +290,32 @@ mod tests {
     fn stores_finds_and_sweeps() {
         let dir = std::env::temp_dir().join(format!("mis-images-test-{}", Uuid::new_v4()));
         let images = Images::open(dir.clone()).unwrap();
-        let id = images.store(ImageKind::Jpeg, JPEG).unwrap();
-        assert_eq!(images.read(id), Some((ImageKind::Jpeg, JPEG.to_vec())));
+        let jpeg = UploadKind::Image(ImageKind::Jpeg);
+        let id = images.store(jpeg, JPEG, None).unwrap();
+        let pdf = UploadKind::Doc(DocKind::Pdf);
+        let doc = images
+            .store(pdf, b"%PDF-1.4", Some("dir/Chores.pdf"))
+            .unwrap();
+        assert_eq!(images.read(id), Some((jpeg, JPEG.to_vec())));
+        assert_eq!((images.find(doc), images.size(doc)), (Some(pdf), Some(8)));
+        assert_eq!(images.name(doc, pdf), "Chores.pdf");
+        assert_eq!(images.name(id, jpeg), format!("{id}.jpg"));
         assert_eq!(images.find(Uuid::new_v4()), None);
-        let files = images.files(&[id, Uuid::new_v4()]);
-        assert_eq!(files.len(), 1, "a missing image is left out");
-        assert_eq!(Base64::decode_vec(&files[0].data).unwrap(), JPEG);
+        let (imgs, docs) = images.files(&[doc, id, Uuid::new_v4()]);
+        assert_eq!(
+            (imgs.len(), docs.len()),
+            (1, 1),
+            "a missing upload is left out"
+        );
+        assert_eq!(Base64::decode_vec(&imgs[0].data).unwrap(), JPEG);
+        assert_eq!((docs[0].id, docs[0].name.as_str()), (doc, "Chores.pdf"));
         assert_eq!(images.sweep(SystemTime::now()), 0);
-        assert_eq!(images.sweep(SystemTime::now() + MAX_AGE * 2), 1);
+        assert_eq!(
+            images.sweep(SystemTime::now() + MAX_AGE * 2),
+            3,
+            "the name goes too"
+        );
         assert_eq!(images.find(id), None);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

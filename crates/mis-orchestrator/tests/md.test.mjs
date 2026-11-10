@@ -1,6 +1,7 @@
 // The page's pure renderers (index.html): markdown between `md:begin` and `md:end`, evidence helpers between `ev:begin`
 // and `ev:end`, diff helpers between `diff:begin` and `diff:end`, notes helpers between `notes:begin` and `notes:end`,
-// the network check between `net:begin` and `net:end`, the app composer between `apps:begin` and `apps:end`.
+// the network check between `net:begin` and `net:end`, the app composer between `apps:begin` and `apps:end`, upload kinds
+// between `refs:begin` and `refs:end`.
 // Run: node --test crates/mis-orchestrator/tests
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -18,6 +19,8 @@ const netBlock = page.slice(page.indexOf('// net:begin'), page.indexOf('// net:e
 const awayStatus = new Function(`${netBlock}; return awayStatus;`)();
 const appsBlock = page.slice(page.indexOf('// apps:begin'), page.indexOf('// apps:end'));
 const ap = new Function(`${appsBlock}; return { composerFor, appTaskBody, draftNote };`)();
+const refsBlock = page.slice(page.indexOf('// refs:begin'), page.indexOf('// refs:end'));
+const rf = new Function(`${refsBlock}; return { refKind, docExt, servedName };`)();
 const nt = { ...new Function(`${notesBlock}; return { noteFront, noteAuthor, noteRows, noteDestGroups, noteDestLabel, noteSuggested, noteWhy, projectDir, projectActive, projectFiles, projectFind, repoHref };`)(), notePath: new Function(`${block}; return notePath;`)() };
 
 // Every tag in the output, e.g. ['p', 'a', 'code'].
@@ -467,4 +470,19 @@ test('beside a draft, the composer sends in-app feedback on it', () => {
   assert.deepEqual(ap.composerFor('build', 'pool', 'Pool', 2), { key: 'draft:app:pool', placeholder: 'What should change in draft v2?', label: 'feedback on Pool v2' });
   assert.deepEqual(ap.draftNote('Bars too thin.', 358, 600),
     { route: '/', selector: '', rect: { x: 0, y: 0, w: 358, h: 600 }, viewport: { w: 358, h: 600 }, note: 'Bars too thin.' });
+});
+
+test('images go by type and documents by the extensions the server takes', () => {
+  assert.equal(rf.refKind({ type: 'image/heic', name: 'IMG_1.HEIC' }), 'image');
+  assert.equal(rf.refKind({ type: '', name: 'Rules.MD' }), 'doc');
+  assert.equal(rf.refKind({ type: 'application/pdf', name: 'Chore list.pdf' }), 'doc');
+  for (const name of ['page.html', 'x.svg', 'pdf', 'archive.zip', '']) assert.equal(rf.refKind({ type: 'text/html', name }), null, name);
+  assert.equal(rf.docExt('a.tar.JSON'), 'json');
+});
+
+test('a served upload\'s name comes from its Content-Disposition', () => {
+  assert.equal(rf.servedName("inline; filename*=UTF-8''Chore%20list.pdf"), 'Chore list.pdf');
+  assert.equal(rf.servedName("inline; filename*=UTF-8''%E2%9C%93.md"), '✓.md');
+  assert.equal(rf.servedName("inline; filename*=UTF-8''%E2"), '');
+  assert.equal(rf.servedName(null), '');
 });

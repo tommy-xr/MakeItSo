@@ -130,6 +130,10 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .shot img { display: block; width: 100%; height: 100%; object-fit: cover; }
   .shot.busy img { opacity: .35; }
   .shot.busy::after { content: ""; position: absolute; inset: 0; margin: auto; width: 1.25rem; height: 1.25rem; border: 2px solid var(--accent); border-right-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; }
+  .shot.doc { display: grid; place-content: center; gap: .125rem; padding: .25rem; text-align: center; font-size: .6875rem; color: var(--dim); }
+  .shot.doc b { font: 600 .75rem var(--sans); color: var(--fg); text-transform: uppercase; }
+  .shot.doc span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 3.5rem; }
+  #shots-view .shot.doc a { display: grid; place-content: center; gap: .125rem; color: inherit; text-decoration: none; }
   .shot .x { position: absolute; top: .25rem; right: .25rem; width: 1.5rem; height: 1.5rem; min-height: 0; padding: 0; border-radius: 50%; background: rgba(0, 0, 0, .6); color: #fff; font: .75rem/1 var(--sans); }
   #shots-view { margin-top: .5rem; }
   /* Composer dock: pinned to the bottom of every view, inside the safe area; lifted by --kb over an iOS keyboard.
@@ -998,7 +1002,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
       <div id="opt-menu" role="group" hidden></div>
       <input id="model" aria-label="Other model" placeholder="Other model" autocapitalize="off" autocorrect="off" spellcheck="false" hidden>
     </div>
-    <div class="box"><button type="button" id="clip" class="clip" aria-label="Attach photos"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><input type="file" id="pick" accept="image/*" multiple hidden><textarea id="prompt" rows="1" aria-label="new task" placeholder="Start a task or ask anything" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button><button id="send" class="go" aria-label="Submit" title="Submit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button></div>
+    <div class="box"><button type="button" id="clip" class="clip" aria-label="Attach photos and files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><input type="file" id="pick" accept="image/*,.pdf,.txt,.md,.csv,.json" multiple hidden><textarea id="prompt" rows="1" aria-label="new task" placeholder="Start a task or ask anything" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button><button id="send" class="go" aria-label="Submit" title="Submit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button></div>
   </form>
   <form id="reply" class="composer" hidden>
     <div class="ctx"><p id="reply-error" class="bad" hidden></p></div>
@@ -1050,9 +1054,9 @@ const mine = new Set(); // tasks this page submitted; auto-read speaks only thes
 // text lands. `text` is null when a piece was missed (e.g. opened mid-reply): the block then shows once it lands.
 const live = new Map();
 const writingOf = (id) => live.get(id)?.text;
-// Photos for the new task: downscaled here (phone shots are ~4 MB), uploaded on pick, sent as ids.
-// Each is { url: preview object URL, id: upload id once stored }.
-const MAX_SHOTS = 4, MAX_SIDE = 1600;
+// Photos and documents for the new task: photos downscaled here (phone shots are ~4 MB), uploaded on pick, sent as ids.
+// Each is { url: a photo's preview object URL, name: a document's, id: upload id once stored }.
+const MAX_SHOTS = 12, MAX_SIDE = 1600, MAX_DOC = 10 << 20;
 let shots = []; // the shown composer's (promptKey)
 const keptShots = new Map(); // another composer's draft key -> its photos, while that one isn't shown
 
@@ -4676,6 +4680,18 @@ function authHeaders() {
   const token = store.get();
   try { return token ? { authorization: `Bearer ${token}` } : {}; } catch { return {}; }
 }
+// refs:begin. Pure. What an upload is: 'image', 'doc' (by extension, as the server checks), else null.
+// tests/md.test.mjs runs this block.
+const DOC_EXTS = ['pdf', 'txt', 'md', 'csv', 'json'];
+const docExt = (name) => { const m = /\.([^.]+)$/.exec(name || ''); return m && DOC_EXTS.includes(m[1].toLowerCase()) ? m[1].toLowerCase() : null; };
+const refKind = (file) => (file.type.startsWith('image/') ? 'image' : docExt(file.name) ? 'doc' : null);
+// The name in a `Content-Disposition: inline; filename*=UTF-8''<escaped>`, else ''.
+function servedName(disposition) {
+  const m = /filename\*=UTF-8''([^;]+)/i.exec(disposition || '');
+  try { return m ? decodeURIComponent(m[1]) : ''; } catch { return ''; }
+}
+// refs:end
+
 // net:begin. Pure. An HTML 5xx is a proxy's page saying the orchestrator is away (e.g. Cloudflare's 502 while it
 // restarts): the orchestrator's own errors are plain text. tests/md.test.mjs runs this block.
 const awayStatus = (status, type) => status >= 500 && /^text\/html/i.test(type || '');
@@ -4726,18 +4742,20 @@ async function shrink(file) {
   return new Promise((ok, no) => c.toBlob((b) => (b ? ok(b) : no(new Error('could not encode'))), 'image/jpeg', 0.85));
 }
 async function attach(file) {
-  const shot = { url: '', id: null };
+  const doc = refKind(file) === 'doc', shot = { url: '', name: doc ? file.name : '', id: null };
   shots.push(shot);
   try {
-    const blob = await shrink(file);
-    shot.url = URL.createObjectURL(blob);
+    if (doc && file.size > MAX_DOC) throw new Error(`files are limited to ${MAX_DOC >> 20} MB`);
+    const blob = doc ? file : await shrink(file);
+    if (!doc) shot.url = URL.createObjectURL(blob);
     renderShots();
-    const r = await fetch('/api/upload', { method: 'POST', headers: { ...authHeaders(), 'content-type': 'image/jpeg' }, body: blob });
+    const to = doc ? `/api/upload?name=${encodeURIComponent(file.name)}` : '/api/upload';
+    const r = await fetch(to, { method: 'POST', headers: { ...authHeaders(), 'content-type': doc ? 'application/octet-stream' : 'image/jpeg' }, body: blob });
     if (!r.ok) throw new Error((await r.text()) || r.statusText);
     shot.id = (await r.json()).id;
   } catch (e) {
     dropShot(shot);
-    flash(`photo not attached: ${e.message}`);
+    flash(`${doc ? file.name : 'photo'} not attached: ${e.message}`);
   }
   if (shots.includes(shot)) renderShots();
 }
@@ -4754,9 +4772,9 @@ function renderShots() {
   render();
 }
 function drawShots() {
-  $('shots').replaceChildren(...shots.filter((x) => x.url).map((x) => el('div', { className: `shot${x.id ? '' : ' busy'}` },
-    el('img', { src: x.url, alt: '' }),
-    el('button', { type: 'button', className: 'x', ariaLabel: 'Remove photo', onclick: () => dropShot(x) }, '✕'))));
+  $('shots').replaceChildren(...shots.filter((x) => x.url || x.name).map((x) => el('div', { className: `shot${x.id ? '' : ' busy'}${x.name ? ' doc' : ''}`, title: x.name },
+    ...(x.name ? [el('b', {}, docExt(x.name)), el('span', {}, x.name)] : [el('img', { src: x.url, alt: '' })]),
+    el('button', { type: 'button', className: 'x', ariaLabel: `Remove ${x.name || 'photo'}`, onclick: () => dropShot(x) }, '✕'))));
   $('shots').hidden = !$('shots').children.length;
 }
 $('clip').onclick = () => $('pick').click();
@@ -4764,16 +4782,16 @@ $('pick').onchange = () => {
   takeImages($('pick').files);
   $('pick').value = '';
 };
-// References for the new task or app: images dropped on its page or pasted into the field attach (up to
+// References for the new task or app: images and documents dropped on its page or pasted into the field attach (up to
 // MAX_SHOTS). Building an app, text or a link dropped off the field goes into it (on it, the field takes it itself).
 const composing = () => !$('dock').hidden && !$('new').hidden;
 function takeImages(files) {
   if (appSending) return; // what's sent is settled
   const a = route().view === 'build' && hosted && hosted.list && hosted.list.find((x) => x.slug === route().id);
   if (a && reviewing(a)) { flash('feedback on a draft takes no images'); return; }
-  const imgs = [...files].filter((f) => f.type.startsWith('image/')), room = MAX_SHOTS - shots.length;
-  if (imgs.length < files.length) flash('only images attach');
-  else if (imgs.length > room) flash(`at most ${MAX_SHOTS} images`);
+  const imgs = [...files].filter(refKind), room = MAX_SHOTS - shots.length;
+  if (imgs.length < files.length) flash(`only images and .${DOC_EXTS.join(', .')} files attach`);
+  else if (imgs.length > room) flash(`at most ${MAX_SHOTS} images and files`);
   for (const f of imgs.slice(0, Math.max(0, room))) attach(f);
   render();
 }
@@ -4801,9 +4819,9 @@ document.addEventListener('drop', (e) => {
 });
 $('prompt').addEventListener('paste', (e) => {
   const files = e.clipboardData ? e.clipboardData.files : [];
-  if ([...files].some((f) => f.type.startsWith('image/'))) { e.preventDefault(); takeImages(files); }
+  if ([...files].some(refKind)) { e.preventDefault(); takeImages(files); }
 });
-// The open task's photos, fetched with the token (an <img> can't send it) into object URLs that
+// The open task's photos and documents, fetched with the token (an <img> can't send it) into object URLs that
 // are revoked when another task's replace them. A network failure retries on the next render; a 404 doesn't.
 let attached = { key: '', urls: [] };
 function renderAttached(ids) {
@@ -4813,15 +4831,20 @@ function renderAttached(ids) {
   const now = attached = { key, urls: [] };
   box.hidden = !ids.length;
   box.replaceChildren(...ids.map((id) => {
-    const img = el('img', { alt: 'attached photo' }), a = el('a', { target: '_blank', rel: 'noopener' }, img);
+    const img = el('img', { alt: 'attached photo' }), a = el('a', { target: '_blank', rel: 'noopener' }, img), box = el('div', { className: 'shot' }, a);
     fetch(`/api/images/${id}`, { headers: authHeaders() }).then(async (r) => {
       if (!r.ok) { img.alt = 'photo gone'; return; }
       const url = URL.createObjectURL(await r.blob());
       if (attached !== now) { URL.revokeObjectURL(url); return; } // another task is open now
       now.urls.push(url);
-      img.src = a.href = url;
+      a.href = url;
+      if ((r.headers.get('content-type') || '').startsWith('image/')) { img.src = url; return; }
+      const name = servedName(r.headers.get('content-disposition'));
+      box.className = 'shot doc';
+      box.title = name;
+      a.replaceChildren(el('b', {}, docExt(name) || 'file'), el('span', {}, name));
     }).catch(() => { if (attached === now) now.key = ''; });
-    return el('div', { className: 'shot' }, a);
+    return box;
   }));
 }
 

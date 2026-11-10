@@ -33,9 +33,12 @@ pub struct AppTask {
     /// Only this worker runs it; None: any running `harness`.
     #[serde(default)]
     pub worker: Option<uuid::Uuid>,
-    /// References for the agent (`POST /api/upload` ids), as a task's images.
+    /// Uploads for the agent (`POST /api/upload` ids: images or documents), as a task's.
     #[serde(default)]
     pub images: Vec<uuid::Uuid>,
+    /// Links and notes for the agent, in its prompt.
+    #[serde(default)]
+    pub references: Vec<crate::Reference>,
 }
 
 /// An app as `GET /api/apps` lists it.

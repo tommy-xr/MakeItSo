@@ -413,14 +413,15 @@ impl App {
                     images,
                     token,
                 } => {
-                    let images = match (&self.images, images.is_empty()) {
+                    let (images, files) = match (&self.images, images.is_empty()) {
                         (Some(store), false) => store.files(&images),
-                        _ => vec![],
+                        _ => (vec![], vec![]),
                     };
                     if let Some(tx) = self.conns.lock().unwrap().get(&conn) {
                         let _ = tx.send(OrchMsg::Assign {
                             task,
                             images,
+                            files,
                             token,
                         });
                     }
@@ -674,12 +675,12 @@ impl App {
         }
     }
 
-    /// Images for a new task: Err says why they can't be attached.
+    /// Uploads for a new task: Err says why they can't be attached.
     fn check_images(&self, ids: &[uuid::Uuid]) -> Result<(), String> {
         match &self.images {
             _ if ids.is_empty() => Ok(()),
-            Some(store) => images::check(ids, |id| store.find(id).is_some()),
-            None => Err("image attachments are off".into()),
+            Some(store) => images::check(ids, |id| store.size(id)),
+            None => Err("attachments are off".into()),
         }
     }
 
@@ -1054,6 +1055,7 @@ impl App {
                     model: Some(s.apps.model),
                     worker: None,
                     images: vec![],
+                    references: vec![],
                 };
                 self.start_app_task(t, None).await
             }
@@ -1840,31 +1842,41 @@ async fn routine_action(
     }
 }
 
-/// Store one image (raw body) for a later `Submit`; replies `{"id": ..}`.
-/// Acting, so read-only tokens get 403.
+#[derive(serde::Deserialize)]
+struct UploadParams {
+    /// The file's name: a document's kind is its extension.
+    name: Option<String>,
+}
+
+/// Store one image or document (raw body; see [`images::validate`]) for a later `Submit`;
+/// replies `{"id": ..}`. Acting, so read-only tokens get 403.
 async fn upload(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    Params(params): Params<UploadParams>,
     body: axum::body::Body,
 ) -> Response {
     if let Err(refused) = app.admit_full(&headers, peer, "/api/upload").await {
         return refused.into_response();
     }
     let Some(store) = &app.images else {
-        let off = "image attachments are off";
+        let off = "attachments are off";
         return (StatusCode::SERVICE_UNAVAILABLE, off).into_response();
     };
     let Ok(bytes) = axum::body::to_bytes(body, MAX_IMAGE_BYTES).await else {
-        let why = format!("images are limited to {} MB", MAX_IMAGE_BYTES >> 20);
+        let why = format!("uploads are limited to {} MB", MAX_IMAGE_BYTES >> 20);
         return (StatusCode::PAYLOAD_TOO_LARGE, why).into_response();
     };
-    let content_type = headers.get(header::CONTENT_TYPE);
-    let kind = match images::validate(content_type.and_then(|v| v.to_str().ok()), &bytes) {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok());
+    let name = params.name.as_deref();
+    let kind = match images::validate(content_type, name, &bytes) {
         Ok(kind) => kind,
         Err(why) => return (StatusCode::UNSUPPORTED_MEDIA_TYPE, why).into_response(),
     };
-    match store.store(kind, &bytes) {
+    match store.store(kind, &bytes, name) {
         Ok(id) => Json(serde_json::json!({ "id": id })).into_response(),
         Err(e) => {
             tracing::warn!("storing image: {e}");
@@ -2960,7 +2972,8 @@ fn backup_refused(e: backups::BackupError) -> Response {
     }
 }
 
-/// An uploaded image, for thumbnails. `id` parses as a Uuid, so it can't name a path.
+/// An upload, for thumbnails, named in `Content-Disposition`. Never run as a page: text is
+/// served as plain text and nothing loads. `id` parses as a Uuid, so it can't name a path.
 async fn image(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -2970,17 +2983,38 @@ async fn image(
     if !app.admit(&headers, peer, "/api/images").await {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    match app.images.as_ref().and_then(|s| s.read(id)) {
+    let Some(store) = app.images.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match store.read(id) {
         Some((kind, bytes)) => (
             [
-                (header::CONTENT_TYPE, kind.mime()),
-                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                (header::CONTENT_TYPE, kind.mime().to_string()),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff".into()),
+                (header::CONTENT_SECURITY_POLICY, "default-src 'none'".into()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    disposition(&store.name(id, kind)),
+                ),
             ],
             bytes,
         )
             .into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// `inline` with `name` as RFC 5987 `filename*`, every byte but unreserved ones escaped.
+fn disposition(name: &str) -> String {
+    let escaped: String = (name.bytes())
+        .map(
+            |b| match b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                true => (b as char).to_string(),
+                false => format!("%{b:02X}"),
+            },
+        )
+        .collect();
+    format!("inline; filename*=UTF-8''{escaped}")
 }
 
 /// An evidence file, as stored: its sniffed type, never sniffed again by the
