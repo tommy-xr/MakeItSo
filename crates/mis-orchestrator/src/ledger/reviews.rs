@@ -55,7 +55,7 @@ impl Ledger {
             ReviewState::Approved { .. } => return Err("already approved".into()),
             ReviewState::Merged | ReviewState::Rejected => return Err("already decided".into()),
         };
-        r.status = Some("approved: merging when it can".into());
+        r.status = Some("looking at its checks".into());
         Ok(vec![Effect::AdvanceReview {
             id,
             after: Duration::ZERO,
