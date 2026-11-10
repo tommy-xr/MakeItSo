@@ -12,7 +12,7 @@ const ev = new Function(`${evBlock}; return { ansi, better, change, fmtChange, t
 const diffBlock = page.slice(page.indexOf('// diff:begin'), page.indexOf('// diff:end'));
 const df = new Function(`${diffBlock}; return { patchRows, pathParts, diffOffer, prPrompt, pushPrompt };`)();
 const notesBlock = page.slice(page.indexOf('// notes:begin'), page.indexOf('// notes:end'));
-const nt = { ...new Function(`${notesBlock}; return { noteFront, noteAuthor, noteRows, noteTops, noteProject, projectDir, projectActive, projectFiles, projectFind, repoHref };`)(), notePath: new Function(`${block}; return notePath;`)() };
+const nt = { ...new Function(`${notesBlock}; return { noteFront, noteAuthor, noteRows, noteTops, projectOf, projectDir, projectActive, projectFiles, projectFind, repoHref };`)(), notePath: new Function(`${block}; return notePath;`)() };
 
 // Every tag in the output, e.g. ['p', 'a', 'code'].
 const tags = (html) => [...html.matchAll(/<([a-z0-9]+)/g)].map((m) => m[1]);
@@ -394,8 +394,9 @@ test('a project’s folder, files, name and repo links', () => {
   assert.deepEqual(files.own.map((x) => x.path), ['projects/make-it-so/docs', 'projects/make-it-so/plan.md']);
   assert.deepEqual(files.ai.map((x) => x.path), ['ai/projects/make-it-so/2026-11-09-review.md']);
   assert.deepEqual(nt.projectFiles(entries, old), { own: [], ai: [] });
-  assert.deepEqual(['projects/make-it-so/plan.md', 'ai/projects/make-it-so/docs/a.md', 'archive/old/README.md', 'projects/make-it-so', 'inbox/a.md', 'ai/x.md']
-    .map(nt.noteProject), ['make-it-so', 'make-it-so', 'old', null, null, null]);
+  // Only listed projects own their folders: `archive/2025/` isn't one, nor is `projects/make-it-sooner/`.
+  assert.deepEqual(['projects/make-it-so/plan.md', 'ai/projects/make-it-so/docs/a.md', 'archive/old/README.md', 'projects/make-it-so', 'inbox/a.md',
+    'archive/2025/x.md', 'projects/make-it-sooner/x.md'].map((p) => nt.projectOf([mis, old], p)?.id ?? null), ['make-it-so', 'make-it-so', 'old', null, null, null, null]);
   assert.equal(nt.repoHref('tommy-xr/MakeItSo'), 'https://github.com/tommy-xr/MakeItSo');
   for (const bad of ['MakeItSo', 'a/b/c', '../x', 'a/..', 'javascript:alert(1)', 'a/b?x', ' a/b', 'https://x.co/a']) {
     assert.equal(nt.repoHref(bad), null, bad);

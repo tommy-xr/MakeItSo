@@ -1880,13 +1880,21 @@ const COLS = ['notes', 'projects', 'routines', 'apps', 'workers'];
 const homeOf = (view) => (view === 'machine' ? 'workers' : COLS.includes(view) ? view : null);
 // What a list opens (a task, session, worker, note or folder, project, routine, app), as against a list itself.
 const isItem = (r) => ['detail', 'session', 'machine'].includes(r.view) || (COLS.includes(r.view) && !!r.id);
-// On entering a view: an item takes its place from its history entry, else stamps it with the view it left
-// (its own section if that was none, e.g. Settings or a fresh load).
+// The page locate() last placed, as { hash, view }, unless a task or session: an item opened from it goes back there.
+// Null where a link sets `here` itself (the rail, a notification).
+let left = null;
+// On entering a view: an item takes its place from its history entry, else stamps it with the section it was opened from
+// (its own if none, e.g. Settings or a fresh load) and goes back to the page left (a worker's page, say), unless that was
+// one of its own kind (j/k from one routine to the next) or a task or session: then where that one went back to.
 function locate() {
   const r = route();
   if (!isItem(r)) here = { sec: r.view === 'list' ? r.id || 'home' : homeOf(r.view), back: location.hash || '#' };
   else if (history.state?.here) here = history.state.here;
-  else { if (!here.sec) here = { sec: homeOf(r.view), back: here.back }; history.replaceState({ here }, ''); }
+  else {
+    here = { sec: here.sec || homeOf(r.view), back: left && left.view !== r.view ? left.hash : here.back };
+    history.replaceState({ here }, '');
+  }
+  left = r.view === 'detail' || r.view === 'session' ? null : { hash: location.hash || '#', view: r.view };
 }
 // Wide desktop (75rem+, not Quest): the list stays up beside what it opened, or `#choose`; a session or task opened from
 // no list (a fresh load) shows Home's, or for a session, none.
@@ -1932,12 +1940,16 @@ function render() {
   $('send').disabled = $('send-reply').disabled = !live || !!pending;
   if (shots.some((x) => !x.id)) $('send').disabled = true; // photos still uploading
   $('clip').disabled = shots.length >= MAX_SHOTS || !!pending;
-  // Beside a list with nothing open: Select a … (a + form open atop Routines or Apps shows instead). Workers keeps its
+  // Beside a list with nothing open (or a Notes folder, listed there): Select a …. Instead: a + form open atop Routines or
+  // Apps, or a section with nothing to pick, whose page says why (no notes repo, how to add a routine). Workers keeps its
   // Notify me toggle under it.
-  const choosing = split && !isItem(r) && !(r.view === 'routines' && !$('routine-new').hidden) && !(r.view === 'apps' && !$('app-new').hidden);
+  const folder = r.view === 'notes' && notesTree?.entries?.some((e) => e.path === r.id && e.kind === 'dir');
+  const bare = !r.id && { notes: notesTree && !noteTops(notesTree.entries || []).length, projects: projects && !projects.projects?.length,
+    routines: routines && !routines.list?.length, apps: hosted && !hosted.list?.length }[r.view];
+  const choosing = split && (!isItem(r) || folder) && !bare && !(r.view === 'routines' && !$('routine-new').hidden) && !(r.view === 'apps' && !$('app-new').hidden);
   for (const v in views) $(v).hidden = !everOpen || (v === 'list' ? !split && r.view !== 'list' : v !== r.view || (choosing && v !== 'workers'));
   $('choose').hidden = !everOpen || !choosing;
-  $('choose').firstChild.textContent = CHOOSE[r.view === 'list' ? r.id : r.view] || 'Select a task, or start one below.';
+  $('choose').firstChild.textContent = folder ? 'Select a note.' : CHOOSE[r.view === 'list' ? r.id : r.view] || 'Select a task, or start one below.';
   // A conversation's back link returns to the view it was opened from.
   if (r.view === 'detail' || r.view === 'session') $(r.view).querySelector('.back').href = here.back;
   if (r.view !== 'detail' && r.view !== 'session') { follow.key = null; $('latest').hidden = true; if (detail) detail.sig = null; }
@@ -2201,13 +2213,14 @@ function listOf(sec, holds = true) {
 }
 const onHome = (th) => secRank(th.sec) < 2;
 // Whether list `sec` shows `h` (a task or session), in a row of its own, under a session's, or as Home's draft row; for
-// another section, whether what `h` opens is still there, as far as this page has read.
+// another section, whether `h` is one of its own (a worker, note or folder, project or a project's file, routine, app)
+// still listed, as far as this page has read.
 function shows(sec, h) {
   if (COLS.includes(sec)) {
-    const r = route(h), has = (got, list, f) => !got?.[list] || got[list].some(f);
-    return { detail: () => tasks.some((t) => t.id === r.id), machine: () => workers.some((w) => w.id === r.id), session: () => true,
-      notes: () => has(notesTree, 'entries', (e) => e.path === r.id), projects: () => !projects?.projects || !!projectFind(projects.projects, r.id),
-      routines: () => has(routines, 'list', (x) => x.name === r.id), apps: () => has(hosted, 'list', (a) => a.slug === r.id) }[r.view]?.() ?? false;
+    const r = route(h), has = (got, list, f) => !got?.[list] || got[list].some(f), note = () => has(notesTree, 'entries', (e) => e.path === r.id);
+    return { notes: r.view === 'notes' && note(), workers: r.view === 'machine' && workers.some((w) => w.id === r.id),
+      projects: r.view === 'projects' ? has(projects, 'projects', (p) => projectFind([p], r.id)) : r.view === 'notes' && note() && !!projectOf(projects?.projects || [], r.id),
+      routines: r.view === 'routines' && has(routines, 'list', (x) => x.name === r.id), apps: r.view === 'apps' && has(hosted, 'list', (a) => a.slug === r.id) }[sec];
   }
   const { fed, threads } = listOf(sec);
   return (sec === 'home' && appDrafts().some((a) => draftHref(a) === h)) || threads.some((th) => (sec !== 'home' || onHome(th)) && [th.root, ...th.replies].some((t) => `#task/${t.id}` === h))
@@ -2251,34 +2264,49 @@ function renderList() {
 }
 
 // A section's list came in: redraw it if it is beside the view.
-const relistCol = (sec) => { if (inSplit() && listSec() === sec) renderList(); };
-// Another section's list beside what it opens: Notes' folders, projects, routines, apps or workers, fetched if not yet.
-// The open one's row is marked: its own, the folder it is in, or the project a note opened from Projects is in.
+// A section's list came in: redraw if it is beside the view (whether Select a … shows may change too).
+const relistCol = (sec) => { if (inSplit() && listSec() === sec) render(); };
+// The folder Notes' list shows: the one open, or the open note's; '' (the top folders) at `#notes` or elsewhere.
+function noteDir() {
+  const r = route();
+  if (r.view !== 'notes' || !r.id) return '';
+  return notesTree?.entries?.find((e) => e.path === r.id)?.kind === 'dir' ? r.id : r.id.slice(0, Math.max(0, r.id.lastIndexOf('/')));
+}
+// Another section's list beside what it opens: a Notes folder (up to its parent, so j/k step its notes), projects,
+// routines, apps or workers, fetched if not yet. The open one's row is marked: its own, the folder it is in, or the
+// project a note is in.
 function renderCol(sec) {
   const now = Date.now() + skew, say = (cls, text) => el('p', { className: cls, style: 'padding: 1rem .375rem' }, text);
-  const [got, asked, load] = { notes: [notesTree, notesAsked, loadNotes], projects: [projects, projectsAsked, loadProjects],
-    routines: [routines, routinesAsked, loadRoutines], apps: [hosted, hostedAsked, loadApps], workers: [{}] }[sec];
   const rows = (list, row, none, cls = 'rows') => (list.length ? el('ul', { className: cls }, ...list.map(row)) : say('dim', none));
   let body;
-  if (!got) { if (!asked) load(); body = [el('div', { className: 'rows' }, skel())]; }
-  else if (got.error) body = [say('bad', got.error)];
-  else if (got.state === 'off') body = [say('dim', 'Notes repo not configured (MIS_NOTES_REMOTE)')];
-  else body = {
-    notes: () => [rows(noteTops(notesTree.entries), (e) => noteRow(e, notesTree.entries), 'No notes yet', 'rows nlist')],
-    projects: projectList,
-    routines: () => [rows(routines.list, (r) => el('li', {}, el('a', { href: `#routines/${encodeURIComponent(r.name)}` },
-      el('div', { className: 'r1' }, el('span', { className: `sd ${routineState(r) || 'never'}` }), el('span', { className: 'one' }, r.name), modeChip(r.mode)),
-      el('div', { className: 'r2 one' }, ...dots([r.trigger || r.file, nextText(r.next_at, now)])))), 'No routines yet')],
-    apps: () => [rows(hosted.list, (a) => el('li', {}, el('a', { href: `#apps/${encodeURIComponent(a.slug)}` },
-      el('div', { className: 'r1' }, el('span', { className: `sd ${a.active ? 'done' : 'never'}` }), el('span', { className: 'one' }, a.title)),
-      el('div', { className: 'r2 one' }, ...dots([a.slug, a.active ? `v${a.active} live` : 'not live', plural(a.releases.length, 'release')])))), 'No apps yet')],
-    workers: () => [rows(workers, (w) => { const run = runningOn(w.id); return el('li', {}, el('a', { href: `#worker/${w.id}` },
-      el('div', { className: 'r1' }, el('span', { className: `sd ${workerState(w)}` }), el('span', { className: 'one' }, w.info.hostname), chip(workerState(w))),
-      el('div', { className: 'r2 one' }, ...(run ? dots([clock(run), run.activity]) : [w.info.purpose || machineText(w)])))); }, 'No workers connected')],
-  }[sec]();
+  if (sec === 'workers') body = [rows(workers, (w) => { const run = runningOn(w.id); return el('li', {}, el('a', { href: `#worker/${w.id}` },
+    el('div', { className: 'r1' }, el('span', { className: `sd ${workerState(w)}` }), el('span', { className: 'one' }, w.info.hostname), chip(workerState(w))),
+    el('div', { className: 'r2 one' }, ...(run ? dots([clock(run), run.activity]) : [w.info.purpose || machineText(w)])))); }, 'No workers connected')];
+  else {
+    const [got, asked, load] = { notes: [notesTree, notesAsked, loadNotes], projects: [projects, projectsAsked, loadProjects],
+      routines: [routines, routinesAsked, loadRoutines], apps: [hosted, hostedAsked, loadApps] }[sec];
+    if (!got) { if (!asked) load(); body = [el('div', { className: 'rows' }, skel())]; }
+    else if (got.error) body = [say('bad', got.error)];
+    else if (got.state === 'off') body = [say('dim', 'Notes repo not configured (MIS_NOTES_REMOTE)')];
+    else body = {
+      notes: () => {
+        const dir = noteDir(), es = notesTree.entries, cut = dir.lastIndexOf('/');
+        if (!dir) return [rows(noteTops(es), (e) => noteRow(e, es), 'No notes yet', 'rows nlist')];
+        return [secHead(noteLabel(dir), el('a', { href: cut < 0 ? '#notes' : noteHref(dir.slice(0, cut)) }, `‹ ${cut < 0 ? 'Notes' : noteLabel(dir.slice(0, cut))}`)),
+          rows(noteRows(es, dir), (e) => noteRow(e, es), 'Empty', 'rows nlist')];
+      },
+      projects: projectList,
+      routines: () => [rows(routines.list, (r) => el('li', {}, el('a', { href: `#routines/${encodeURIComponent(r.name)}` },
+        el('div', { className: 'r1' }, el('span', { className: `sd ${routineState(r) || 'never'}` }), el('span', { className: 'one' }, r.name), modeChip(r.mode)),
+        el('div', { className: 'r2 one' }, ...dots([r.trigger || r.file, nextText(r.next_at, now)])))), 'No routines yet')],
+      apps: () => [rows(hosted.list, (a) => el('li', {}, el('a', { href: `#apps/${encodeURIComponent(a.slug)}` },
+        el('div', { className: 'r1' }, el('span', { className: `sd ${a.active ? 'done' : 'never'}` }), el('span', { className: 'one' }, a.title)),
+        el('div', { className: 'r2 one' }, ...dots([a.slug, a.active ? `v${a.active} live` : 'not live', plural(a.releases.length, 'release')])))), 'No apps yet')],
+    }[sec]();
+  }
   $('list').replaceChildren(...body);
-  const r = route(), proj = sec === 'projects' && r.view === 'notes' && noteProject(r.id), h = proj ? projectHref(proj) : location.hash;
-  const links = [...$('list').querySelectorAll('a[href^="#"]')];
+  const r = route(), proj = sec === 'projects' && r.view === 'notes' && projectOf(projects?.projects || [], r.id), h = proj ? projectHref(proj.id) : location.hash;
+  const links = [...$('list').querySelectorAll('.rows a[href^="#"]')];
   (links.find((a) => a.getAttribute('href') === h) || links.find((a) => h.startsWith(`${a.getAttribute('href')}/`)))?.setAttribute('aria-current', 'page');
 }
 
@@ -3290,7 +3318,7 @@ function capsLine(w) {
 const sessOpen = new Set(), sessLists = new Map(), sessAsked = new Map(); // id -> latest request, so a stale reply is dropped
 let showHeadless = false; // `claude -p` / `codex exec` runs: most sessions, rarely the ones wanted
 const folder = (p) => (p || '').split(/[\\/]/).filter(Boolean).pop() || '';
-const redrawWorkers = () => route().view === 'workers' && renderWorkers();
+const redrawWorkers = () => (route().view === 'workers' ? renderWorkers() : route().view === 'machine' && renderMachine(route().id));
 async function loadSessions(id) {
   const ask = {};
   sessAsked.set(id, ask);
@@ -3616,7 +3644,7 @@ function renderRoutines() {
   // Beside the list, only the one picked there (none under the + form).
   const one = inSplit() ? route().id : null, list = routines.list.filter((r) => one === null || r.name === one);
   $('routine-list').replaceChildren(...list.map((r) => routineRow(r, now)));
-  if (one && !list.length) $('routine-list').append(el('li', { className: 'dim' }, 'No such routine'));
+  if (one && !list.length && routines.list.length) $('routine-list').append(el('li', { className: 'dim' }, 'No such routine'));
   if (!routines.list.length) $('routine-list').append(el('li', { className: 'dim' }, `No routines yet: ${readOnly ? '' : 'tap + by Routines in the menu, or '}add a .md file to the orchestrator’s routines folder`));
   // A routine picked in the menu: scroll to it once.
   const pick = routineFocus && [...$('routine-list').children].find((li) => li.dataset.name === routineFocus);
@@ -3625,7 +3653,9 @@ function renderRoutines() {
 }
 
 // The menu's unfolded lists: one link per routine (to its row on Routines), app (live: out to it) and worker, with its status dot.
-let routineFocus = null; // routine to scroll to when Routines next renders
+let routineFocus = null, appFocus = null; // routine (app) to scroll to when Routines (Apps) next renders
+// Below the split, `#routines/<name>` and `#apps/<slug>` are the whole page, scrolled to that one (also on narrowing).
+function aim() { const r = route(); if (r.id && !isSplit(r)) { if (r.view === 'routines') routineFocus = r.id; if (r.view === 'apps') appFocus = r.id; } }
 function renderNav() {
   $('routine-add').hidden = $('app-add').hidden = $('nav-settings').hidden = readOnly;
   if (!$('menu').open && !railShown()) return;
@@ -3654,7 +3684,7 @@ function renderNav() {
   const off = notesTree?.state === 'off' || projects?.state === 'off';
   for (const id of ['nav-notes', 'nav-projects']) {
     const b = $('menu').querySelector(`[aria-controls=${id}]`);
-    b.hidden = off;
+    b.style.visibility = off ? 'hidden' : ''; // its room kept, so the row doesn't shift under a pointer
     $(id).hidden = off || b.getAttribute('aria-expanded') !== 'true';
   }
   // Projects: one link per active one.
@@ -3782,7 +3812,7 @@ function appRow(a, now) {
     el('div', { className: 'row' },
       el('button', { disabled: busy, onclick: () => activateApp(a.slug, ready.n) }, `Yes, make v${ready.n} live`),
       el('button', { type: 'button', onclick: () => ask(null) }, a.active ? `Keep v${a.active}` : 'Not yet')));
-  return el('li', { className: `app ${a.active ? 'done' : ''}` },
+  const li = el('li', { className: `app ${a.active ? 'done' : ''}` },
     el('div', { className: 'head' }, el('strong', {}, a.title),
       a.active && a.url ? el('a', { href: a.url, target: '_blank', rel: 'noopener' }, 'Open ↗') : ''),
     el('div', { className: 'sub dim' }, ...dots([a.slug, a.active ? `v${a.active} live` : 'not live', plural(a.releases.length, 'release')])),
@@ -3791,6 +3821,8 @@ function appRow(a, now) {
     a.draft ? draftCard(a, false) : '',
     appFeedback(a, busy),
     actions, confirm, appMembers(a, busy));
+  li.dataset.slug = a.slug;
+  return li;
 }
 // An app's draft: an agent's staged release, its PR and before/after shots. The owner publishes
 // (merge the PR, then live) or discards it, or asks its task for changes; others just see it.
@@ -3880,12 +3912,15 @@ function renderApps() {
   const now = Date.now() + skew;
   if ($('app-list').dataset.key === key) {
     for (const s of $('app-list').querySelectorAll('[data-at]')) s.textContent = ago(now - Number(s.dataset.at));
-    return;
+  } else {
+    $('app-list').replaceChildren(...list.map((a) => appRow(a, now)));
+    $('app-list').dataset.key = key;
+    if (!hosted.list.length) $('app-list').append(el('li', { className: 'dim' }, `No apps yet: ${readOnly ? '' : 'tap + by Apps in the menu, or '}publish one with mis apps publish <name> <folder>`));
+    else if (pick && !list.length) $('app-list').append(el('li', { className: 'dim' }, 'No such app'));
   }
-  $('app-list').replaceChildren(...list.map((a) => appRow(a, now)));
-  if (pick && !list.length) $('app-list').append(el('li', { className: 'dim' }, 'No such app'));
-  $('app-list').dataset.key = key;
-  if (!hosted.list.length) $('app-list').append(el('li', { className: 'dim' }, `No apps yet: ${readOnly ? '' : 'tap + by Apps in the menu, or '}publish one with mis apps publish <name> <folder>`));
+  // An app named in the hash (`#apps/<slug>` below the split): scroll to it once.
+  const at = appFocus && [...$('app-list').children].find((li) => li.dataset.slug === appFocus);
+  if (at) { appFocus = null; at.scrollIntoView({ block: 'center' }); }
 }
 
 // Settings (full access only), fetched each time the page opens. Its fields stay disabled until
@@ -3966,8 +4001,8 @@ function noteRows(entries, dir) {
 }
 // A project record's folder, its files and the AI's (`ai/` mirrors the repo), and the one named `slug` (id or alias, any case).
 const projectDir = (p) => `${p.archived ? 'archive' : 'projects'}/${p.id}`;
-// The project folder a path is in, its own or the AI's (`ai/projects/x/a.md`: `x`), else null.
-const noteProject = (path) => /^(?:ai\/)?(?:projects|archive)\/([^/]+)\//.exec(path)?.[1] ?? null;
+// The listed project whose folder, or the AI's mirror of it, holds `path` (`ai/projects/x/a.md`: x), else null.
+const projectOf = (list, path) => list.find((p) => [projectDir(p), `ai/${projectDir(p)}`].some((d) => path.startsWith(`${d}/`))) || null;
 const projectActive = (p) => !p.archived && p.status.toLowerCase() === 'active';
 function projectFiles(entries, p) {
   const dir = projectDir(p);
@@ -4024,7 +4059,7 @@ function noteImg(img, path) {
 }
 // A picture in its box; `href` (its own page) when shown inside a note.
 const noteFig = (path, href) => { const img = el('img', { alt: '' }), f = el(href ? 'a' : 'span', { className: 'nimg', ...(href ? { href } : {}) }, img); noteImg(img, path); return f; };
-const noteLabel = (path) => { const name = path.slice(path.lastIndexOf('/') + 1); return (NOTE_FOLDERS.find(([f]) => f === path) || [])[1] || name.replace(/\.md$/i, ''); };
+const noteLabel = (path) => { const name = path.slice(path.lastIndexOf('/') + 1); return (NOTE_FOLDERS.find(([f]) => f === path) || [])[1] || (path === 'projects' ? 'Projects' : name.replace(/\.md$/i, '')); };
 const noteSize = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 const NOTE_ICON = { dir: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z', md: 'M7 3h7l5 5v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM9 13h6M9 17h4', image: 'M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM3 16l5-5 5 5 3-3 5 5', other: 'M7 3h7l5 5v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z' };
 function noteRow(e, entries) {
@@ -4059,9 +4094,10 @@ function noteText(src, dir) {
 function renderNotes(path) {
   if (!everOpen) return; // fetch once connected, with the token in place
   const cut = path.lastIndexOf('/'), dir = cut < 0 ? '' : path.slice(0, cut);
-  // A project's file opened from Projects goes back to the project.
-  const proj = here.sec === 'projects' && noteProject(path);
-  $('notes').querySelector('.back').href = proj ? projectHref(proj) : !path ? '#' : dir ? noteHref(dir) : '#notes';
+  // A project's own file (or the AI's on it) goes back to the project; one deeper, to its folder.
+  if (!projects && !projectsAsked && /^(?:ai\/)?(?:projects|archive)\//.test(path)) loadProjects();
+  const proj = projects?.projects && projectOf(projects.projects, path), atTop = proj && [projectDir(proj), `ai/${projectDir(proj)}`].includes(dir);
+  $('notes').querySelector('.back').href = atTop ? projectHref(proj.id) : !path ? '#' : dir ? noteHref(dir) : '#notes';
   const entry = notesTree && notesTree.entries && (path ? notesTree.entries.find((e) => e.path === path) : { kind: 'dir', path: '' });
   if (entry && entry.kind === 'md' && (!noteShown || noteShown.path !== path)) loadNote(path);
   const got = entry && entry.kind === 'md' ? noteShown.got : null;
@@ -4108,6 +4144,7 @@ async function loadProjects() {
   if (projectsAsked !== ask) return;
   if (JSON.stringify(got) !== JSON.stringify(projects)) projects = got;
   if (route().view === 'projects') renderProjects(route().id);
+  if (route().view === 'notes') renderNotes(route().id); // its back link may go to a project
   relistCol('projects');
   renderNav();
 }
@@ -4243,6 +4280,8 @@ function renderMachine(id) {
     meter(disk === null ? 'disk —' : `disk ${free === null ? '' : `${Math.round(free)} GB free, `}${pct(disk)} used`, disk),
     meter(`cpu ${pct(cpu)}`, cpu),
     meter(`memory ${pct(mem)}`, mem),
+    // Beside Workers' list, which has no cards: their usage limits, sessions on disk and build.
+    ...(inSplit() ? [limitRows(w), sessionsLine(w), versionLine(w)] : []),
     el('h3', {}, 'Tasks on this worker'),
     mine);
 }
@@ -4565,7 +4604,7 @@ for (const f of [$('prompt'), $('reply-text')]) f.addEventListener('input', () =
 $('prompt').value = drafts.get('draft:new');
 // Leaving a view stops dictation into it and any readback.
 // A press's click has landed once the view changes: nothing left to hold for.
-window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); locate(); remember(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (route().view === 'apps' && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; if (route().view === 'notes') { noteShown = null; if (notesTree) loadNotes(); } if (route().view === 'projects') { if (projects) loadProjects(); if (notesTree && route().id) loadNotes(); } render(); };
+window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); locate(); remember(); aim(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (route().view === 'apps' && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; if (route().view === 'notes') { noteShown = null; if (notesTree) loadNotes(); } if (route().view === 'projects') { if (projects) loadProjects(); if (notesTree && route().id) loadNotes(); } render(); };
 setInterval(tick, 1000);
 
 // `#new`, a link into the page for a new task, is a list with the composer focused: Tasks from Tasks (or a task opened
@@ -4620,7 +4659,8 @@ function step(d) {
   const seen = new Set(), links = [...$('list').querySelectorAll('.rows a[href^="#"]')].filter((a) => !seen.has(a.getAttribute('href')) && seen.add(a.getAttribute('href')));
   const cur = split ? $('list').querySelector('a[aria-current]')?.getAttribute('href') ?? location.hash : document.activeElement?.getAttribute('href');
   const at = links.findIndex((a) => a.getAttribute('href') === cur);
-  const a = links[at < 0 ? 0 : Math.max(0, Math.min(links.length - 1, at + d))];
+  // None current (nothing open, or what is came from a link): j takes the first row, k the last.
+  const a = links[at < 0 ? (d > 0 ? 0 : links.length - 1) : Math.max(0, Math.min(links.length - 1, at + d))];
   if (!a || (at >= 0 && a === links[at])) return; // an end of the list
   settle(); // like a tap, a step holds the rows' order a moment, so stepping back finds the row just left
   a.scrollIntoView({ block: 'nearest' });
@@ -4679,8 +4719,9 @@ function deskMode() {
   if (railShown()) loadNav();
 }
 desk.addEventListener('change', deskMode);
-wide.addEventListener('change', () => { remember(); render(); });
+wide.addEventListener('change', () => { remember(); aim(); render(); });
 remember(); // a task or session open at load
+aim();
 $('list').addEventListener('scroll', settle);
 // + opens the new-routine form atop Routines; the orchestrator writes `<name>.md`, paused.
 function showNewRoutine(on) {
@@ -4709,8 +4750,9 @@ $('routine-new').onsubmit = async (e) => {
   if (why) { $('rn-error').textContent = why; $('rn-error').hidden = false; return; }
   $('routine-new').reset();
   showNewRoutine(false);
-  if (inSplit()) location.hash = `#routines/${encodeURIComponent(body.name)}`; else routineFocus = body.name;
+  if (!inSplit()) routineFocus = body.name;
   await loadRoutines();
+  if (inSplit()) location.hash = `#routines/${encodeURIComponent(body.name)}`; // once listed, so it shows at once
 };
 // + by Apps, or an app's Change…: a form atop Apps that starts a task building (`change` null) or
 // changing an app. Shown once Settings are read, with their harness and model.
@@ -4788,7 +4830,7 @@ for (const a of $('menu').querySelectorAll('nav a[data-view]')) a.addEventListen
   if (!h || !wide.matches || !isDesk()) return;
   if (!shows(sec, h)) { lastOpen[sec] = null; return; }
   e.preventDefault();
-  here = { sec, back: a.getAttribute('href') };
+  here = { sec, back: a.getAttribute('href') }; left = null;
   if (location.hash !== h) location.hash = h;
   else { history.replaceState({ here }, ''); remember(); render(); }
 });
@@ -4804,7 +4846,7 @@ $('menu').addEventListener('click', (e) => { if ((e.target === $('menu') && down
 // An unfolded list's link opens its item in that list's section (a worker in Workers), wherever the view was.
 $('menu').addEventListener('click', (e) => {
   const top = e.target.closest('.nsub a[href^="#"]')?.closest('.nsub').previousElementSibling.querySelector('a[data-view]');
-  if (top) here = { sec: top.dataset.view, back: top.getAttribute('href') };
+  if (top) { here = { sec: top.dataset.view, back: top.getAttribute('href') }; left = null; }
 });
 // Theme, per viewer: System follows the device; Dark or Light set `data-theme`, which the token blocks key on.
 const theme = {
@@ -4853,7 +4895,7 @@ function pushStart(key) {
   // A tapped notification for an open window: show its task or session here.
   navigator.serviceWorker.addEventListener('message', (e) => {
     const url = e.data && e.data.open && new URL(e.data.open);
-    if (url && url.origin === location.origin) { here = { sec: null, back: '#' }; location.hash = url.hash; } // as a deep link
+    if (url && url.origin === location.origin) { here = { sec: null, back: '#' }; left = null; location.hash = url.hash; } // as a deep link
   });
   navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready).then((reg) => {
     push.reg = reg;
