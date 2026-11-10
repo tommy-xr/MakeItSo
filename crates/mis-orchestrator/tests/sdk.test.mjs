@@ -264,6 +264,94 @@ test('mis.js in mock mode loads mis-mock.js beside it, with no server', async ()
   assert.equal(calls.length, 0);
 });
 
+// mis.js on the mock, as an app's dev server serves them (`mis apps sdk` writes both).
+function mocked(search = '?mock=1') {
+  const dir = mkdtempSync(join(tmpdir(), 'mis-sdk-'));
+  writeFileSync(join(dir, 'mis-mock.js'), file('mis-mock.mjs'));
+  writeFileSync(join(dir, 'package.json'), '{"type": "module"}');
+  return load(() => assert.fail('no fetch in mock mode'), search, pathToFileURL(join(dir, 'mis.js')).href).mis;
+}
+
+test('records.all follows cursors; createAll batches by 100 and skips ids already there', async () => {
+  const mis = mocked();
+  const rows = Array.from({ length: 250 }, (_, i) => ({ id: `r${String(i).padStart(3, '0')}`, data: { i } }));
+  // Two ids exist already, written elsewhere: in the first and the third batch.
+  await mis.mock.seed({ shared: { rows: [{ id: rows[5].id, data: 'theirs' }, { id: rows[220].id, data: 'theirs' }] } });
+  assert.deepEqual(await mis.records.createAll('shared', 'rows', rows), { added: 248, present: 2 });
+  const all = await mis.records.all('shared', 'rows', { order_by: ['i', 'desc'], limit: 30 });
+  assert.equal(all.length, 250);
+  assert.deepEqual([all[0].data.i, all.find((r) => r.id === 'r005').data], [249, 'theirs']);
+  // Sent again as is, each is a retry whose reply was lost: it landed. Changed, each is there.
+  assert.deepEqual(await mis.records.createAll('shared', 'rows', rows.slice(0, 3)), { added: 3, present: 0 });
+  const changed = rows.map((r) => ({ ...r, data: { i: -1 } }));
+  assert.deepEqual(await mis.records.createAll('shared', 'rows', changed), { added: 0, present: 250 });
+  assert.deepEqual(await mis.records.all('me', 'rows'), []);
+  // Anything but an id already there stops it.
+  await mis.mock.setRole('viewer');
+  await assert.rejects(mis.records.createAll('shared', 'rows', [{ id: 'new', data: 1 }]), (e) => e.status === 403);
+});
+
+test('isConflict and errorText read a refusal', async () => {
+  const { mis } = load(() => json(200, null));
+  const conflict = new mis.MisError(409, 'conflict', null);
+  assert.equal(mis.isConflict(conflict), true);
+  assert.equal(mis.isConflict(new mis.MisError(403, 'no')), false);
+  assert.equal(mis.isConflict(new Error('409')), false);
+  assert.equal(mis.errorText(new mis.MisError(403, "a viewer can't do that here")), 'You can only view this app.');
+  assert.equal(mis.errorText(new mis.MisError(413, 'too big')), 'Not saved: too big');
+  assert.equal(mis.errorText('offline'), 'Not saved: offline');
+});
+
+// The shell's pure core, as mis.js hands it to a test.
+function core() {
+  let got;
+  const g = { location: { pathname: '/a/demo/', search: '' }, document: { cookie: '' }, __misTest: (c) => (got = c) };
+  new Function('globalThis', 'location', 'document', src)(g, g.location, g.document);
+  return got;
+}
+
+test('shell: a hash names a section, else the first; the path stays', () => {
+  const { route } = core();
+  const sections = [{ id: 'log', label: 'Log', tab: true }, { id: 'history', label: 'History', tab: true }, { id: 'settings', label: 'Settings' }];
+  assert.deepEqual(route('', sections), { id: 'log', path: [] });
+  assert.deepEqual(route('#/', sections), { id: 'log', path: [] });
+  assert.deepEqual(route('#/history', sections), { id: 'history', path: ['history'] });
+  assert.deepEqual(route('#history', sections), { id: 'history', path: ['history'] });
+  assert.deepEqual(route('#/log/for/ann', sections), { id: 'log', path: ['log', 'for', 'ann'] });
+  assert.deepEqual(route('#/p/ann', sections), { id: 'log', path: ['p', 'ann'] });
+  assert.deepEqual(route('#/toString', sections), { id: 'log', path: ['toString'] });
+  // A viewer's sections, without log: its hash lands on the first they have.
+  assert.deepEqual(route('#/log', sections.slice(1)), { id: 'history', path: ['log'] });
+});
+
+test('shell: tabs below, the other sections in the menu; one section is just a header', () => {
+  const { layout } = core();
+  const sections = [{ id: 'home', label: 'Home', tab: true }, { id: 'log', label: 'Log', tab: true }, { id: 'settings', label: 'Settings' }];
+  const at = (id, more) => layout({ title: 'Budget', sections, ...more }, { id, path: [id] });
+  assert.deepEqual(at('log'), {
+    heading: 'Log',
+    back: null,
+    tabs: [{ label: 'Home', href: '#/home', current: false }, { label: 'Log', href: '#/log', current: true }],
+    items: [{ label: 'Settings', href: '#/settings', current: false }],
+  });
+  const settings = at('settings');
+  assert.equal(settings.heading, 'Settings');
+  assert.deepEqual([settings.tabs.some((t) => t.current), settings.items[0].current], [false, true]);
+  assert.deepEqual([at('home', { heading: 'Ann', back: '#/home' }).heading, at('home', { back: '#/home' }).back], ['Ann', '#/home']);
+  assert.equal(at('home', { heading: null }).heading, 'Home');
+  const one = layout({ title: 'Notes', sections: [{ id: 'notes', label: 'All notes', tab: true }] }, { id: 'notes', path: [] });
+  assert.deepEqual(one, { heading: 'Notes', back: null, tabs: [], items: [] });
+  // No tab sections: a header and the menu.
+  assert.deepEqual(layout({ title: 'X', sections: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] }, { id: 'a', path: [] }).tabs, []);
+});
+
+test('mis.shell refuses sections it could not route to', () => {
+  const { mis } = load(() => json(200, null));
+  for (const sections of [undefined, [], [{ id: 'a/b', label: 'A' }], [{ id: '', label: 'A' }], [{ id: 'a' }]]) {
+    assert.throws(() => mis.shell({ sections }), TypeError);
+  }
+});
+
 // The members of `interface name` in mis.d.ts.
 function members(name) {
   const dts = file('mis.d.ts').replace(/\r\n/g, '\n'); // Windows checkouts use CRLF
@@ -282,10 +370,13 @@ test('mis.d.ts declares exactly what mis.js and the mock define', async () => {
   assert.deepEqual(keys(mocked.mock), members('MockControls'));
   await assert.rejects(mocked.me()); // no mis-mock.js at /nowhere
   const m = createMock();
-  // The menu is the page's, not data: the mock has no part in it.
-  const top = members('Sdk').filter((k) => !['MisError', 'mock', 'menu'].includes(k));
+  // The page's parts and the helpers over the API are mis.js's alone, on the mock or the server.
+  const own = ['MisError', 'mock', 'menu', 'shell', 'isConflict', 'errorText', 'all', 'createAll'];
+  const top = members('Sdk').filter((k) => !own.includes(k));
   assert.deepEqual(keys(m), [...top, ...members('MockControls')].sort());
-  assert.deepEqual(keys(m.records), members('Records'));
+  assert.deepEqual(keys(m.records), members('Records').filter((k) => !own.includes(k)));
+  assert.deepEqual(members('Shell'), ['main', 'update']); // and the readonly route
+  assert.deepEqual(members('ShellOptions'), ['back', 'heading', 'onNavigate', 'sections', 'title']);
   const err = new mis.MisError(409, 'conflict', null, 2);
   assert.deepEqual([err.name, err.status, err.current, err.index], ['MisError', 409, null, 2]);
   assert.deepEqual(members('MisError'), ['current', 'index', 'name', 'status']);

@@ -116,8 +116,9 @@ declare namespace Mis {
     batch(ops: Op[]): Promise<(Envelope | null)[]>;
     /** Every record `list` finds, following cursors to the end. */
     all<T = unknown>(space: Space, collection: string, q?: Omit<Query, 'cursor'>): Promise<Envelope<T>[]>;
-    /** Creates each row (rev 0), 100 to a batch; ids already there are skipped, so a retry or a
-     * re-import writes nothing twice. `added` were written, `present` were there. */
+    /** Creates each row (rev 0), 100 to a batch, so a retry or a re-import writes nothing twice:
+     * `present` counts ids already there (skipped), `added` the rest (with a retry whose reply was
+     * lost: the same data, by you). */
     createAll(space: Space, collection: string, rows: { id: string; data: unknown }[]): Promise<{ added: number; present: number }>;
   }
 
