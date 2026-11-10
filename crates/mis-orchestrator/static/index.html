@@ -4078,7 +4078,7 @@ function forgetNotes() {
   notesTree = notesAsked = noteShown = notesDrawn = projects = projectsAsked = projectsDrawn = null;
   noteSugs = sugsAsked = null; // summaries quote notes
   sugsError = '';
-  sugsTries = 0;
+  sugsTries = sugsStale = 0;
   noteFiles = {};
   noteMove = { path: '' };
   clearTimeout(sugsTimer);
@@ -4102,8 +4102,9 @@ async function loadNotes() {
 }
 // Where the server suggests each inbox note goes, and which it is still asking about:
 // { pending: [path], notes: { path: { hash, dest, summary, error? } } }. Fetched with the tree, and every 10s while the
-// inbox or an inbox note shown has one pending. A failed read says so, and is tried again after 5, 10, 20 and 40s.
-let noteSugs = null, sugsAsked = null, sugsTimer = 0, sugsError = '', sugsTries = 0;
+// inbox or an inbox note shown has one pending; after a 409, up to 3 times more while a shown one is out of date (its
+// new one may be made between two reads). A failed read says so, and is tried again after 5, 10, 20 and 40s.
+let noteSugs = null, sugsAsked = null, sugsTimer = 0, sugsError = '', sugsTries = 0, sugsStale = 0;
 const sugOf = (path) => (noteSugs ? noteSugs.notes[path] : undefined);
 const sugPending = (path) => !!noteSugs && noteSugs.pending.includes(path);
 const sugsLater = (ms) => { if (!sugsTimer) sugsTimer = setTimeout(() => { sugsTimer = 0; if (route().view === 'notes') loadSuggestions(); }, ms); };
@@ -4123,8 +4124,9 @@ async function loadSuggestions() {
   else if (sugsTries <= 4) sugsLater(5000 * 2 ** (sugsTries - 1));
 }
 function pollSuggestions() {
-  const r = route();
-  if (r.view === 'notes' && ((notesTree && notesTree.entries) || []).some((e) => isInboxNote(e) && (r.id === 'inbox' || r.id === e.path) && sugPending(e.path))) sugsLater(10000);
+  const r = route(), shown = r.view === 'notes' ? ((notesTree && notesTree.entries) || []).filter((e) => isInboxNote(e) && (r.id === 'inbox' || r.id === e.path)) : [];
+  if (shown.some((e) => sugPending(e.path))) sugsLater(10000);
+  else if (sugsStale > 0 && shown.some((e) => sugStale(e.path))) { sugsStale--; sugsLater(10000); }
 }
 const isInboxNote = (e) => e.kind === 'md' && /^inbox\/[^/]+$/.test(e.path);
 // Whether `path`'s suggestion is out of date: refused (409), or made for other bytes than shown. The server makes a
@@ -4189,6 +4191,7 @@ async function moveNote(path, dest, summary, hash) {
     return loadNotes();
   }
   if (r.status === 409) {
+    sugsStale = 3;
     notesTree = noteShown = null;
     return loadNotes();
   }
@@ -4208,7 +4211,7 @@ async function fileNote(path, s) {
     noteFiles = rest; // drawn again so a row the tree couldn't drop (it wasn't read) doesn't stay Filing…
   } else noteFiles = { ...noteFiles, [path]: { error: noteWhy(path, r.error), status: r.status, hash: s.hash } };
   if (route().view === 'notes') renderNotes(route().id);
-  if (r.status === 409) loadNotes();
+  if (r.status === 409) { sugsStale = 3; loadNotes(); }
 }
 // Fills `img` with repo image `path` through the evidence file cache, keyed by size too so a changed picture is
 // fetched again; one that can't be had (or isn't a picture by name) marks its box.
