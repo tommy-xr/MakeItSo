@@ -18,8 +18,8 @@ live. Nothing you do goes live.
    Never commit to `main`, never force-push.
 2. New app: from the worktree's root, `mis apps new <slug>` (copies `apps/_template`; slug:
    `a-z 0-9 -`, up to 32), then `cd apps/<slug> && npm install`. Read its README. A change:
-   work in `apps/<slug>/`. Every app shares `apps/_sdk/` (SDK, `records.ts` helpers, the vite
-   plugin, the Playwright harness); `npm run sdk` refreshes its SDK files.
+   work in `apps/<slug>/`. Every app shares `apps/_sdk/`, written by `mis apps sdk` (the SDK, the
+   vite plugin, the Playwright harness, `VERSION`): never edit it; `npm run sdk` regenerates it.
 3. Replace the template's sample `items` with the app's own model and screens (see Layout).
    Update the app's README (data model, commands).
 4. `npm run verify` until it passes (see Verify), looking at every shot it writes.
@@ -59,8 +59,8 @@ shot at the same route and viewport, publish, and propose again: it replaces the
   what domain functions return and call the store. Keep both thin: logic in either moves to
   `src/domain/`.
 - `src/mock-seed.ts`: invented sample data for mock mode and shots.
-- Generic helpers (listing every page, batched creates, conflict checks) are in
-  `apps/_sdk/records.ts`; use them, and add new generic ones there, not per app.
+- Generic helpers are in the SDK (below); use them. One every app would need belongs in the SDK,
+  not an app: write it in the app for now and say so in your report.
 
 ## SDK
 
@@ -81,12 +81,23 @@ own page.
   `viewer` reads only: give viewers a read-only UI, and show a 403 as "you can only view".
 - `records.batch(ops)`: up to 100 ops, each id once, all or nothing; a refusal carries `index`.
   Use it for imports and anything that must land together.
-- The platform menu (`⋯`: signed in as, All apps; for owners and editors the app's draft to
-  try, their feedback's status and Give feedback) belongs to the SDK. Place it at the right of
-  your header: `mis.menu.mount(el)` (React: a `ref` on an empty `<span>`); unplaced, it floats
-  top-right. Leave it neutral; to match the app, set `--mis-menu-fg`/`--mis-menu-bg` (its
-  button), `--mis-menu-surface`/`--mis-menu-text` (the menu) and `--mis-menu-dot`. Keep that
-  corner free.
+- `mis.records.all(space, collection, q)`: every page of a query. `mis.records.createAll(space,
+  collection, [{id, data}])`: create-only in batches of 100, skipping ids already there
+  (`{added, present}`): imports. `mis.isConflict(e)`: a 409. `mis.errorText(e)`: what to show
+  when a write fails ("You can only view this app." for a 403).
+- The frame is the SDK's: `mis.shell({title, sections: [{id, label, tab?}], onNavigate})` draws
+  the header (the section's label, View only for viewers, the `⋯` platform menu), bottom tabs for
+  `tab: true` sections, and puts the others (Settings, Import) in the menu above its platform
+  items (signed in as, the draft to try, feedback, All apps). One section: just the header.
+  Render into `shell.main` (React: `createRoot(shell.main)`); `shell.route` is `{id, path}` for
+  `#/<id>/<more>` (an unknown hash is the first section, its path kept), and `onNavigate(route)`
+  runs on each change. `shell.update({sections, heading, back})`: different sections per role
+  (they may move the route), a heading of the screen's own (a person's name) and a `‹` link
+  back. Don't draw a header, tab bar or View only badge of your own. The header takes the page's
+  font and colours; to match the app, set `--mis-menu-surface`/`--mis-menu-text` (tab bar and
+  menu), `--mis-menu-line` (borders), `--mis-menu-accent` (current tab), `--mis-menu-dot`.
+  Leave it neutral otherwise. An app with a header of its own places the menu with
+  `mis.menu.mount(el)`; unplaced, it floats top-right.
 - `records.list(space, collection, q)`: `where` with `eq`/`gt`/`gte`/`lt`/`lte` (a bound matches
   only values of its JSON type), one `order_by`, `limit` up to 100; follow `cursor` to the end.
 
@@ -105,7 +116,8 @@ own page.
 
 ## Verify
 
-`npm run verify` must pass before any publish or PR: type-check, vitest, build, then a
+`npm run verify` must pass before any publish or PR: `apps/_sdk` matches the `mis` on PATH
+(`mis apps sdk --check`; skipped without one), type-check, vitest, build, then a
 Playwright smoke in mock mode (`?mock=1`, in memory, the listener's CSP) that drives every
 screen and flow at 390 px light and dark, writes screenshots to `shots/` (gitignored) and fails
 on console errors, CSP violations and HTTP errors. It needs Chrome or
@@ -114,7 +126,8 @@ on console errors, CSP violations and HTTP errors. It needs Chrome or
 - Playwright is your eyes: open the shots and look at them after every change, as the owner
   would on a phone; fix what looks wrong even when verify passes.
 - Extend the app's `scripts/shots.mjs` (on the `apps/_sdk/shots.mjs` harness) for each new
-  screen and flow, including the viewer UI (`&role=viewer`).
+  screen and flow, including the viewer UI (`&role=viewer`) and the menu's sections (open
+  `App menu`, then the item).
 - Against a real orchestrator only on a throwaway one: clean env, temp state dir AND temp
   routines dir (the default routines dir is the owner's real one), ports of its own, no updates:
 
