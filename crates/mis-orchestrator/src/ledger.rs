@@ -838,8 +838,9 @@ impl Ledger {
 
     /// Queue an app task: `prompt` as is (no planner), in `cwd` on `harness`, on `worker`
     /// only if given, with `images`, bound to `bound`'s app (its `thread` becomes this task) with a token
-    /// of its own. It never merges: the user approves its PR. Err if no worker runs
-    /// `harness` (it would wait for good), or `worker` is offline or doesn't run it.
+    /// of its own. It never merges: the user approves its PR. It waits while `worker` is busy or
+    /// offline. Err if no worker runs `harness` (it would wait for good), or `worker` never
+    /// connected or doesn't run it.
     #[allow(clippy::too_many_arguments)] // a task's fields, plus the worker and its app
     pub fn submit_app_task(
         &mut self,
@@ -873,12 +874,31 @@ impl Ledger {
             thread: id,
             ..bound
         });
-        let mut effects = match worker {
-            Some(wid) => self.enqueue_entry_pinned(wid, entry)?.1,
-            None => self.enqueue(entry).1,
-        };
+        if let Some(wid) = worker {
+            self.runs(wid, &entry.task.harness)?;
+            entry.pin = Some(wid);
+        }
+        let (_, mut effects) = self.enqueue(entry);
         effects.push(Effect::Broadcast(self.status()));
         Ok((id, effects))
+    }
+
+    /// Err unless `wid` ran `harness` when it last connected: a task may wait for it.
+    fn runs(&self, wid: WorkerId, harness: &str) -> Result<(), String> {
+        let info = (self.seen.get(&wid))
+            .ok_or_else(|| format!("unknown worker {}", &wid.to_string()[..8]))?;
+        match info.harnesses.iter().any(|h| h == harness) {
+            true => Ok(()),
+            false => Err(format!("{} doesn't run {harness}", self.host(wid))),
+        }
+    }
+
+    /// Online workers running `harness`: id and hostname.
+    pub fn online_hosts(&self, harness: &str) -> Vec<(WorkerId, String)> {
+        (self.workers.iter())
+            .filter(|(_, w)| w.conn.is_some() && w.info.harnesses.iter().any(|h| h == harness))
+            .map(|(id, w)| (*id, w.info.hostname.clone()))
+            .collect()
     }
 
     /// The unfinished app task whose token is `token`, and its thread's binding.
@@ -1039,10 +1059,13 @@ impl Ledger {
                     merge,
                     ..p.task.clone()
                 };
-                match p.pin {
-                    Some(wid) => self.enqueue_entry_pinned(wid, entry(task, images))?,
-                    None => self.enqueue(entry(task, images)),
+                // Pinned: it waits for that machine while offline.
+                let mut e = entry(task, images);
+                if let Some(wid) = p.pin {
+                    self.runs(wid, &e.task.harness)?;
+                    e.pin = Some(wid);
                 }
+                self.enqueue(e)
             }
             _ => {
                 let prompt = reply_context(&p.task.prompt, p.summary.as_deref(), &text, false);
@@ -2290,6 +2313,12 @@ mod tests {
         let (r, _) = l.reply(plain, "merge".into(), vec![], false).unwrap();
         let r = l.tasks.iter().find(|t| t.task.id == r).unwrap();
         assert!(!r.app && r.task.merge == MergeRule::Any);
+        // Its machine offline: the next waits for it.
+        finish(&mut l, again, None);
+        l.disconnect(wid, 1);
+        let (later, _) = l.reply(again, "and a title".into(), vec![], false).unwrap();
+        let t = l.tasks.iter().find(|t| t.task.id == later).unwrap();
+        assert_eq!((t.status, t.pin), (TaskStatus::Queued, Some(wid)));
     }
 
     #[test]

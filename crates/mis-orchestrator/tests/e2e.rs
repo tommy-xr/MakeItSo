@@ -3531,21 +3531,30 @@ async fn unplanned_tasks_run_the_saved_default_harness() {
 
 /// A worker running claude, joined with the full token `s`.
 async fn join_as(base: &str) -> (WorkerId, Ws) {
+    let id = WorkerId::new_v4();
+    (id, join_host(base, id, "w").await)
+}
+
+/// [`join_as`] worker `id`, on machine `host`.
+async fn join_host(base: &str, id: WorkerId, host: &str) -> Ws {
     let mut req = format!("{base}/ws/worker").into_client_request().unwrap();
     req.headers_mut()
         .insert("authorization", "Bearer s".parse().unwrap());
     let (mut ws, _) = connect_async(req).await.unwrap();
-    let id = WorkerId::new_v4();
+    let info = WorkerInfo {
+        hostname: host.into(),
+        ..info("claude")
+    };
     let hello = WorkerMsg::Hello {
         id,
-        info: info("claude"),
+        info,
         running: vec![],
     };
     send(&mut ws, &hello).await;
     let OrchMsg::Welcome { .. } = recv(&mut ws).await else {
         panic!("welcome")
     };
-    (id, ws)
+    ws
 }
 
 #[tokio::test]
@@ -3676,11 +3685,120 @@ async fn change_app_task_runs_only_on_the_picked_worker() {
     };
     assert_ne!(next.id, task.id);
 
-    // A worker that isn't connected can't be picked.
+    // A worker that never connected can't be picked.
     let gone = serde_json::json!({ "request": "x", "slug": "pool", "change": true,
         "harness": "claude", "worker": WorkerId::new_v4() });
     let (status, why) = post_json(&base, "/api/apps/tasks", "s", &gone.to_string()).await;
-    assert!(status == 400 && why.contains("offline"), "{status} {why}");
+    assert!(
+        status == 400 && why.contains("unknown worker"),
+        "{status} {why}"
+    );
+}
+
+/// `worker` gets no task for a while.
+async fn idle(worker: &mut Ws) {
+    let got = tokio::time::timeout(std::time::Duration::from_millis(200), recv(worker));
+    if let Ok(OrchMsg::Assign { task, .. }) = got.await {
+        panic!("it got {}", task.prompt);
+    }
+}
+
+#[tokio::test]
+async fn app_tasks_and_feedback_run_on_the_settings_machine_and_wait_for_it() {
+    let state = std::env::temp_dir().join(format!("mis-e2e-app-machine-{}", uuid::Uuid::new_v4()));
+    let app = with_read_token()
+        .with_ledger_dir(state.clone())
+        .with_host("demo-mac".into());
+    let dev = mis_orchestrator::apps_http::Auth {
+        dev: true,
+        ..Default::default()
+    };
+    let (mis, apps, dir) = live_demo(app, dev).await;
+    // `studio` has the apps repo; `demo-mac`, the orchestrator's own host, is idle too.
+    let studio = WorkerId::new_v4();
+    let mut a = join_host(&mis, studio, "studio").await;
+    let mut b = join_host(&mis, WorkerId::new_v4(), "demo-mac").await;
+    let mut s = Settings::default();
+    s.apps.worker = Some(studio);
+    let set = serde_json::to_string(&s).unwrap();
+    assert_eq!(post_json(&mis, "/api/settings", "s", &set).await.0, 204);
+
+    // `+ App` / `Change…` picking no machine: the settings' one.
+    let body = r#"{"request":"Add a pH chart.","slug":"demo","change":true,"harness":"claude"}"#;
+    let (status, reply) = post_json(&mis, "/api/apps/tasks", "s", body).await;
+    assert_eq!(status, 201, "{reply}");
+    let OrchMsg::Assign { task, .. } = recv(&mut a).await else {
+        panic!("assign")
+    };
+    idle(&mut b).await;
+    let done = AgentEvent::Finished {
+        ok: true,
+        summary: None,
+    };
+    let event = done.clone();
+    send(
+        &mut a,
+        &WorkerMsg::Event {
+            task: task.id,
+            event,
+        },
+    )
+    .await;
+
+    // It's offline: feedback waits for it, saying so, though `demo-mac` is idle.
+    a.close(None).await.unwrap();
+    let (mut client, _) = connect_async(client_req(&mis, &[("authorization", "Bearer s")]))
+        .await
+        .unwrap();
+    let status = async |client: &mut Ws| {
+        send(client, &ClientMsg::Status).await;
+        let ServerMsg::Status { workers, tasks, .. } = recv(client).await else {
+            panic!("status")
+        };
+        (workers, tasks)
+    };
+    while (status(&mut client).await.0.iter()).any(|w| w.id == studio && w.online) {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let editor = "\r\nX-Mis-Dev-Role: editor";
+    let path = "/a/demo/api/v1/feedback";
+    let sent = app_post(&apps, path, editor, &feedback_body("Show pH too.")).await;
+    assert_eq!(sent.0, 202);
+    let waiting = loop {
+        let (_, tasks) = status(&mut client).await;
+        if let Some(t) = tasks.into_iter().find(|t| t.status == TaskStatus::Queued) {
+            break t;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert_eq!(waiting.activity, "waiting for studio");
+    idle(&mut b).await;
+    let mut a = join_host(&mis, studio, "studio").await;
+    let OrchMsg::Assign { task, .. } = recv(&mut a).await else {
+        panic!("assign")
+    };
+    assert_eq!(task.id, waiting.id);
+    assert!(task.prompt.contains("> Show pH too."), "{}", task.prompt);
+    let event = done;
+    send(
+        &mut a,
+        &WorkerMsg::Event {
+            task: task.id,
+            event,
+        },
+    )
+    .await;
+
+    // None set: the worker on the orchestrator's host.
+    assert_eq!(post_json(&mis, "/api/settings", "s", "{}").await.0, 204);
+    let (status, reply) = post_json(&mis, "/api/apps/tasks", "s", body).await;
+    assert_eq!(status, 201, "{reply}");
+    let OrchMsg::Assign { .. } = recv(&mut b).await else {
+        panic!("assign")
+    };
+    idle(&mut a).await;
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(state);
 }
 
 #[tokio::test]

@@ -933,6 +933,8 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
     <label for="st-harness">Harness</label><select id="st-harness"><option>claude</option><option>codex</option></select>
     <label for="st-model">Model</label><input id="st-model" placeholder="e.g. opus" autocomplete="off" autocapitalize="off" spellcheck="false" required>
     <label for="st-repo">Apps repo on the worker</label><input id="st-repo" placeholder="e.g. ~/code/mis-notes" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+    <label for="st-worker">Machine</label><select id="st-worker"><option value="">Auto</option></select>
+    <p class="dim">Auto: the worker on this orchestrator’s machine if online when a task starts, else any. Tasks wait for their machine while it’s offline.</p>
     <p id="st-msg" hidden></p>
     <div class="row"><button>Save</button></div>
   </fieldset></form>
@@ -3896,21 +3898,32 @@ async function loadSettings() {
   const got = res.error ? res : { s: res.ok };
   if (settingsAsked !== ask) return got;
   settings = got;
-  if (got.s) { $('st-default').value = got.s.default_harness || ''; $('st-harness').value = got.s.apps.harness; $('st-model').value = got.s.apps.model; $('st-repo').value = got.s.apps.repo; }
+  if (got.s) { $('st-default').value = got.s.default_harness || ''; $('st-harness').value = got.s.apps.harness; $('st-model').value = got.s.apps.model; $('st-repo').value = got.s.apps.repo; fillMachines(got.s.apps.worker || ''); }
   settingsMsg(got.error || '', true);
   renderSettings();
   if (route().view === 'build') render(); // its composer's harness and model
   return got;
 }
 function settingsMsg(text, bad) { $('st-msg').textContent = text; $('st-msg').hidden = !text; $('st-msg').className = bad ? 'bad' : 'dim'; }
+// Settings' apps machine: Auto, each worker, and `saved` (an id; default: the one shown) though it has left.
+function fillMachines(saved) {
+  const sel = $('st-worker'), v = saved === undefined ? sel.value : saved;
+  const opts = workers.map((w) => [w.id, workerName(w) + (w.online ? '' : ' · offline')]);
+  if (v && !workers.some((w) => w.id === v)) opts.push([v, `${short(v)} · offline`]);
+  const key = JSON.stringify(opts); // unchanged, an open list stays open
+  if (sel.dataset.key !== key) sel.replaceChildren(el('option', { value: '' }, 'Auto'), ...opts.map(([value, text]) => el('option', { value }, text)));
+  sel.dataset.key = key;
+  sel.value = v;
+}
 function renderSettings() {
   if (!everOpen) return; // fetch once connected, with the token in place
   if (!settingsAsked) loadSettings();
+  fillMachines();
   $('settings-form').firstElementChild.disabled = settingsBusy || !(settings && settings.s);
 }
 $('settings-form').onsubmit = async (e) => {
   e.preventDefault();
-  const body = { default_harness: $('st-default').value || null, apps: { harness: $('st-harness').value, model: $('st-model').value, repo: $('st-repo').value } };
+  const body = { default_harness: $('st-default').value || null, apps: { harness: $('st-harness').value, model: $('st-model').value, repo: $('st-repo').value, worker: $('st-worker').value || null } };
   settingsBusy = true;
   renderSettings();
   let why = '';
