@@ -41,7 +41,9 @@ live. Nothing you do goes live.
    publish a new release and propose it again; it replaces the draft. Once the owner
    publishes, the PR merges when its checks pass; if they fail or it conflicts, a reply here
    quotes the failure: fix it on the same branch and push (the owner approves the fix).
-8. Report the PR URL, the release number and what the owner should try.
+8. Report the PR URL, the release number and what the owner should try. With `report_evidence`,
+   report `npm run verify` (a test, its result) and the PR (a link): the task page shows them
+   under the draft's Publish and shots.
 
 ## Feedback tasks
 
