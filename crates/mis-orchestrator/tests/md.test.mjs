@@ -18,7 +18,7 @@ const netBlock = page.slice(page.indexOf('// net:begin'), page.indexOf('// net:e
 const awayStatus = new Function(`${netBlock}; return awayStatus;`)();
 const appsBlock = page.slice(page.indexOf('// apps:begin'), page.indexOf('// apps:end'));
 const ap = new Function(`${appsBlock}; return { composerFor, appTaskBody, draftNote };`)();
-const nt = { ...new Function(`${notesBlock}; return { noteFront, noteAuthor, noteRows, noteDests, projectDir, projectActive, projectFiles, projectFind, repoHref };`)(), notePath: new Function(`${block}; return notePath;`)() };
+const nt = { ...new Function(`${notesBlock}; return { noteFront, noteAuthor, noteRows, noteDestGroups, projectDir, projectActive, projectFiles, projectFind, repoHref };`)(), notePath: new Function(`${block}; return notePath;`)() };
 
 // Every tag in the output, e.g. ['p', 'a', 'code'].
 const tags = (html) => [...html.matchAll(/<([a-z0-9]+)/g)].map((m) => m[1]);
@@ -381,12 +381,14 @@ test('a note’s frontmatter, author and folder order', () => {
     ['inbox/old', 'inbox/z', 'inbox/2026-11-08-b.md', 'inbox/2026-11-08-b-1.jpg', 'inbox/2026-11-06-a.md']);
 });
 
-test('an inbox note moves to a folder one down in projects, areas or resources, or the archive; never ai', () => {
-  const d = (path, kind = 'dir') => ({ path, kind, size: 0 });
-  const entries = [d('projects'), d('projects/mis'), d('projects/amf'), d('projects/mis/docs'), d('areas/home'), d('areas/health.md', 'md'),
-    d('resources/rust'), d('ai/projects/mis'), d('ai/x'), d('archive/2025'), d('inbox/sub')];
-  assert.deepEqual(nt.noteDests(entries), ['archive', 'areas/home', 'projects/amf', 'projects/mis', 'resources/rust']);
-  assert.deepEqual(nt.noteDests([]), ['archive']);
+test('Move to… groups the server’s folders, projects by title', () => {
+  const dests = ['archive', 'areas/home', 'projects/garden', 'projects/mis', 'projects/zed', 'resources/rust'];
+  const list = [{ id: 'mis', title: 'Make It So', archived: false }, { id: 'garden', title: 'Garden', archived: false }, { id: 'zed', title: 'Old', archived: true }];
+  assert.deepEqual(nt.noteDestGroups(dests, list), [
+    ['Projects', [['projects/garden', 'Garden'], ['projects/mis', 'Make It So'], ['projects/zed', 'zed']]],
+    ['Areas', [['areas/home', 'home']]], ['Resources', [['resources/rust', 'rust']]], ['Archive', [['archive', 'Archive']]]]);
+  assert.deepEqual(nt.noteDestGroups(['projects/mis'], null), [['Projects', [['projects/mis', 'mis']]]], 'titles not in yet; no archive offered');
+  assert.deepEqual(nt.noteDestGroups([], []), []);
 });
 
 test('a project’s folder, files, name and repo links', () => {
