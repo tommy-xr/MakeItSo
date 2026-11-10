@@ -105,7 +105,10 @@ pub fn preview_of(query: Option<&str>, referer: Option<&str>, slug: &str) -> Opt
     };
     let page = || {
         let uri: axum::http::Uri = referer?.parse().ok()?;
-        uri.path().starts_with(&format!("/a/{slug}/")).then(|| param(uri.query()?)).flatten()
+        uri.path()
+            .starts_with(&format!("/a/{slug}/"))
+            .then(|| param(uri.query()?))
+            .flatten()
     };
     query.and_then(param).or_else(page)
 }
@@ -288,6 +291,22 @@ pub fn app_of(path: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_preview_is_its_url_and_the_files_its_page_loads() {
+        assert_eq!(preview_of(Some("mis-preview=2"), None, "pool"), Some(2));
+        assert_eq!(preview_of(Some("x=1&mis-preview=3"), None, "pool"), Some(3));
+        let page = Some("https://home.example.com/a/pool/?mis-preview=2#/log");
+        assert_eq!(preview_of(None, page, "pool"), Some(2));
+        // Another app's page, no parameter, or not a number: live.
+        assert_eq!(preview_of(None, page, "chores"), None);
+        assert_eq!(
+            preview_of(None, Some("https://home.example.com/a/pool/"), "pool"),
+            None
+        );
+        assert_eq!(preview_of(Some("mis-preview=x"), None, "pool"), None);
+    }
+
     use super::*;
 
     #[test]

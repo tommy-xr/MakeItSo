@@ -6567,9 +6567,19 @@ async fn the_mis_page_frames_a_draft_and_its_feedback_continues_the_drafts_threa
     let auth = [("authorization", "Bearer s")];
     let change = serde_json::json!({"request": "A chart.", "slug": "demo", "change": true,
         "harness": "claude"});
+    // Its own script, and a chunk only it has (as one its script imports).
+    let v2 = bundle(&[
+        (
+            "app.json",
+            br#"{"title":"Demo","clients":{"web":"index.html"}}"#,
+        ),
+        ("index.html", b"v2"),
+        ("js/app.js", b"v2 js"),
+        ("js/chunk-2.js", b"v2 chunk"),
+    ]);
     let (task, token) = app_task(&mis, &mut worker, &auth, change).await;
     assert_eq!(
-        publish(&mis, "/api/apps/demo/releases", &token, &demo("v2"))
+        publish(&mis, "/api/apps/demo/releases", &token, &v2)
             .await
             .0,
         201
@@ -6582,6 +6592,33 @@ async fn the_mis_page_frames_a_draft_and_its_feedback_continues_the_drafts_threa
         201
     );
     finish_seen(&mis, &mut worker, task.id).await;
+
+    // Previewed by URL: the draft at `?mis-preview=2` and the files that page loads, with no
+    // cookie, so the app opened normally stays live.
+    let (status, head, page) = app_get(&apps, "/a/demo/?mis-preview=2", "").await;
+    assert_eq!((status, page.as_str()), (200, "v2"));
+    assert!(!head.to_ascii_lowercase().contains("set-cookie"), "{head}");
+    let from_preview = "\r\nReferer: http://127.0.0.1/a/demo/?mis-preview=2";
+    assert_eq!(
+        app_get(&apps, "/a/demo/js/app.js", from_preview).await.2,
+        "v2 js"
+    );
+    assert_eq!(
+        app_get(&apps, "/a/demo/js/chunk-2.js", "").await.2,
+        "v2 chunk"
+    );
+    assert_eq!(app_get(&apps, "/a/demo/", "").await.2, "v1");
+    assert_eq!(
+        app_get(&apps, "/a/demo/js/app.js", "").await.2,
+        "console.log(1)"
+    );
+    // Its writes (mis.js names the draft from the URL) land in the draft's copy only.
+    let in_preview = "\r\nX-Mis-Draft: 2";
+    let put = put_op("shared", "r1", 0, serde_json::json!({"ppm": 2.4}));
+    assert_eq!(app_post(&apps, MUTATIONS, in_preview, &put).await.0, 200);
+    let read = "/a/demo/api/v1/records/shared/notes/r1?missing=null";
+    assert_eq!(app_get(&apps, read, "").await.2, "null");
+    assert!(app_get(&apps, read, in_preview).await.2.contains("2.4"));
 
     // Asked beside the preview: as in-app feedback on the draft, back to the task that made it.
     let path = "/api/apps/demo/feedback/new";
