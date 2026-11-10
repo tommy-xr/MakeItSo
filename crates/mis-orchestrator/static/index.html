@@ -205,6 +205,11 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .nchips .chip { margin: 0; }
   .nchips a { min-width: 0; max-width: 100%; color: var(--link); font-size: .8125rem; text-decoration: none; }
   .chip.by-ai { --t: var(--t-run); --tf: var(--f-run); } .chip.by-capture { --t: var(--t-warn); --tf: var(--warn); } .chip.by-you { --t: var(--t-ok); --tf: var(--ok); }
+  /* An inbox note's Move to…: the folder, then Move; 44px tall. */
+  .nmove { display: flex; gap: .5rem; margin: .875rem 0 0; }
+  .nmove select { flex: 1; min-width: 0; min-height: 2.75rem; font-size: 1rem; }
+  .nmove button { flex: none; min-height: 2.75rem; }
+  @media (min-width: 40rem) { .nmove select { flex: 0 1 22rem; } }
   .nbody { margin: 0 0 1rem; font: .9375rem/1.55 var(--sans); overflow-wrap: anywhere; }
   .nimg { position: relative; display: block; min-height: 4rem; margin: 0 0 .75rem; border-radius: .75rem; overflow: hidden; background: var(--raised); }
   .nimg img { display: block; max-width: 100%; height: auto; margin: 0 auto; }
@@ -4001,6 +4006,14 @@ function projectFind(list, slug) {
   const s = slug.toLowerCase(), is = (n) => n.toLowerCase() === s;
   return list.find((p) => is(p.id) || p.aliases.some(is)) || null;
 }
+// Move to…'s choices: the server's `dests` as [group, [[dest, label]]], projects by title (from `list`, the records).
+function noteDestGroups(dests, list) {
+  const under = (top) => dests.filter((d) => d.startsWith(`${top}/`)).map((d) => [d, d.slice(top.length + 1)]);
+  const title = ([d, id]) => [d, ((list || []).find((p) => !p.archived && p.id === id) || {}).title || id];
+  const projects = under('projects').map(title).sort((a, b) => a[1].localeCompare(b[1]));
+  return [['Projects', projects], ['Areas', under('areas')], ['Resources', under('resources')],
+    ['Archive', dests.includes('archive') ? [['archive', 'Archive']] : []]].filter(([, ds]) => ds.length);
+}
 // A GitHub `owner/repo`'s page; null for anything else.
 const repoHref = (r) => (/^[\w.-]+\/[\w.-]+$/.test(r) && !/(^|\/)\.\.?($|\/)/.test(r) ? `https://github.com/${r}` : null);
 // notes:end
@@ -4031,8 +4044,47 @@ function loadNote(path) {
   const shown = { path, got: null };
   noteShown = shown;
   fetch(`/api/notes/file?path=${encodeURIComponent(path)}`, { headers: authHeaders() }).then(async (r) => {
-    shown.got = r.ok ? { text: await r.text() } : { error: r.status === 404 ? 'Not in the notes repo' : r.status === 415 ? 'Can’t show this file' : (await r.text()) || `error ${r.status}` };
+    if (!r.ok) return void (shown.got = { error: r.status === 404 ? 'Not in the notes repo' : r.status === 415 ? 'Can’t show this file' : (await r.text()) || `error ${r.status}` });
+    // Its sha256 goes with a move, so a note changed since it was shown isn't filed.
+    const bytes = await r.arrayBuffer(), digest = crypto.subtle && new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    shown.got = { text: new TextDecoder().decode(bytes), hash: digest ? [...digest].map((b) => b.toString(16).padStart(2, '0')).join('') : undefined };
   }, () => { shown.got = { error: 'couldn’t reach the orchestrator' }; }).then(() => { if (noteShown === shown && route().view === 'notes') renderNotes(route().id); });
+}
+// The open inbox note's Move to…: the folder picked, and whether a move is under way or why it failed.
+let noteMove = { path: '', dest: '', busy: false, error: '' };
+function noteMover(path, hash) {
+  if (noteMove.path !== path) noteMove = { path, dest: '', busy: false, error: '' };
+  if (!projects && !projectsAsked) loadProjects(); // for project titles
+  const m = noteMove, go = el('button', { disabled: m.busy || !m.dest }, m.busy ? 'Moving…' : 'Move');
+  const groups = noteDestGroups(notesTree.dests || [], projects && projects.projects);
+  const pick = el('select', { ariaLabel: 'Move to', disabled: m.busy, onchange: () => { m.dest = pick.value; go.disabled = !m.dest; } },
+    el('option', { value: '' }, 'Move to…'), ...groups.map(([label, ds]) => el('optgroup', { label }, ...ds.map(([d, text]) => el('option', { value: d, selected: d === m.dest }, text)))));
+  const form = el('form', { className: 'nmove', onsubmit: (e) => { e.preventDefault(); moveNote(path, m.dest, hash); } }, pick, go);
+  return el('div', {}, form, m.error ? el('p', { className: 'r2 bad' }, m.error) : '');
+}
+// Files the note in `dest`, then opens it there (in place of the inbox entry, which is gone). On 409 (gone or changed
+// since shown) the tree and note are read again, so what's shown is current.
+async function moveNote(path, dest, hash) {
+  noteMove = { path, dest, busy: true, error: '' };
+  renderNotes(route().id);
+  let error;
+  try {
+    const r = await fetch('/api/notes/move', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ path, dest, hash }) });
+    if (r.ok) {
+      const moved = await r.json();
+      notesTree = null;
+      location.replace(noteHref(moved.path));
+      return loadNotes();
+    }
+    error = (await r.text()) || `error ${r.status}`;
+    if (r.status === 409) {
+      noteMove = { path, dest, busy: false, error };
+      notesTree = noteShown = null;
+      return loadNotes();
+    }
+  } catch { error = 'couldn’t reach the orchestrator'; }
+  noteMove = { path, dest, busy: false, error };
+  if (route().view === 'notes') renderNotes(route().id);
 }
 // Fills `img` with repo image `path` through the evidence file cache, keyed by size too so a changed picture is
 // fetched again; one that can't be had (or isn't a picture by name) marks its box.
@@ -4083,7 +4135,7 @@ function renderNotes(path) {
   const entry = notesTree && notesTree.entries && (path ? notesTree.entries.find((e) => e.path === path) : { kind: 'dir', path: '' });
   if (entry && entry.kind === 'md' && (!noteShown || noteShown.path !== path)) loadNote(path);
   const got = entry && entry.kind === 'md' ? noteShown.got : null;
-  const drawn = [path, notesTree, got];
+  const drawn = [path, notesTree, got, noteMove, projects];
   if (notesDrawn && drawn.every((x, i) => x === notesDrawn[i])) return;
   notesDrawn = drawn;
   const body = $('notes-body'), front = got && got.text !== undefined ? noteFront(got.text) : null;
@@ -4108,7 +4160,8 @@ function renderNotes(path) {
   if (got.error) return say('bad', got.error);
   const text = noteText(front.body, dir);
   const assets = (Array.isArray(front.meta.assets) ? front.meta.assets : []).map((a) => notePath(dir, String(a))).filter(Boolean);
-  body.replaceChildren(stale, noteChips(path, front.meta), text, ...assets.map((a) => noteFig(a, noteHref(a))));
+  const mover = /^inbox\/[^/]+$/.test(path) && !readOnly ? noteMover(path, got.hash) : '';
+  body.replaceChildren(stale, mover, noteChips(path, front.meta), text, ...assets.map((a) => noteFig(a, noteHref(a))));
 }
 
 // The notes repo's project records, fetched on open and on each move within Projects.
@@ -4124,6 +4177,7 @@ async function loadProjects() {
   const got = res.error ? res : res.ok;
   if (JSON.stringify(got) !== JSON.stringify(projects)) projects = got;
   if (route().view === 'projects') renderProjects(route().id);
+  if (route().view === 'notes') renderNotes(route().id); // Move to…'s project titles
   renderNav();
 }
 // Rows of files, linking into the Notes view; skeleton until the tree is in.

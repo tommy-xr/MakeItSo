@@ -1,7 +1,8 @@
 //! Publishes capture receipts (`<state>/captures/inbox/`) as records in a clone of the
 //! notes repo (`inbox/`), by capture id: each is written once, then left to the human,
 //! who may edit, rename, file or delete it. Choosing what to write is pure ([`plan`],
-//! [`record`]); [`Notes`] is the `git` shell around it.
+//! [`record`]); [`Notes`] is the `git` shell around it, and also files inbox notes
+//! ([`Notes::file`], laid out by [`crate::filing`]), so all its `git` runs one at a time.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -11,8 +12,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use mis_types::{NotesSync, SyncState};
+use mis_types::{NoteMove, NoteMoved, NotesSync, SyncState};
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 /// Where records go in the repo.
@@ -103,11 +105,33 @@ fn stem(file: &str) -> &str {
 }
 
 /// `asset` of a receipt named `from` renamed for `to`: `a-1.jpg` -> `a-2-1.jpg`.
-fn renamed(asset: &str, from: &str, to: &str) -> String {
+pub(crate) fn renamed(asset: &str, from: &str, to: &str) -> String {
     match asset.strip_prefix(from) {
         Some(rest) => format!("{to}{rest}"),
         None => asset.to_string(),
     }
+}
+
+/// Frontmatter `lines` (ending in `eol`) with each image line `  - path: <a>` naming `b`
+/// instead, for each (a, b) in `renames`. Each line is renamed once: `a.jpg` -> `a-2.jpg`
+/// never then follows `a-2.jpg` -> `a-2-2.jpg`.
+pub(crate) fn rename_images<'a>(
+    lines: &str,
+    eol: &str,
+    renames: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> String {
+    let renames: BTreeMap<&str, &str> = renames.into_iter().collect();
+    (lines.split_inclusive('\n'))
+        .map(|l| {
+            let name = l
+                .strip_prefix("  - path: ")
+                .and_then(|n| n.strip_suffix(eol));
+            match name.and_then(|n| renames.get(n)) {
+                Some(b) => format!("  - path: {b}{eol}"),
+                None => l.to_string(),
+            }
+        })
+        .collect()
 }
 
 /// Receipt `r` (text `md`) written as `path`: the record's text, and each image as
@@ -115,17 +139,16 @@ fn renamed(asset: &str, from: &str, to: &str) -> String {
 pub fn record(md: &str, r: &Receipt, path: &str) -> (String, Vec<(String, String)>) {
     let name = path.strip_prefix(&format!("{INBOX}/")).unwrap_or(path);
     let (from, to) = (stem(&r.file), stem(name));
-    let images = (r.assets.iter())
-        .map(|a| (a.clone(), format!("{INBOX}/{}", renamed(a, from, to))))
+    let names: Vec<(&str, String)> = (r.assets.iter())
+        .map(|a| (a.as_str(), renamed(a, from, to)))
+        .collect();
+    let images = (names.iter())
+        .map(|(a, b)| (a.to_string(), format!("{INBOX}/{b}")))
         .collect();
     // Only the frontmatter: the text below it is the human's words.
-    let end = md.find("\n---\n").map_or(md.len(), |i| i + 1);
-    let mut front = md[..end].to_string();
-    for a in &r.assets {
-        let line = |name: &str| format!("  - path: {name}\n");
-        front = front.replace(&line(a), &line(&renamed(a, from, to)));
-    }
-    (front + &md[end..], images)
+    let (end, eol) = crate::capture::front(md).map_or((md.len(), "\n"), |f| (f.end, f.eol));
+    let renames = names.iter().map(|(a, b)| (*a, b.as_str()));
+    (rename_images(&md[..end], eol, renames) + &md[end..], images)
 }
 
 /// The commit message publishing `writes` (id, path).
@@ -184,6 +207,34 @@ fn state(pending: usize, run: &Result<bool, Failure>) -> SyncState {
     }
 }
 
+/// Why a note wasn't filed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// Not a note and folder [`crate::filing::check`] passes, or not text.
+    Invalid(String),
+    /// Gone, changed since it was read, too large, its folder gone, a symlink or a file
+    /// the clone doesn't track in its way, a picture another note lists, or frontmatter it
+    /// can't safely edit.
+    Stale(String),
+    /// The clone couldn't be used: offline, a conflict, git failing.
+    Failed(String),
+}
+
+impl From<Failure> for Refused {
+    fn from(f: Failure) -> Self {
+        match f {
+            Failure::Offline(why) => {
+                Self::Failed(format!("offline; try again when connected ({why})"))
+            }
+            f => Self::Failed(f.why().to_string()),
+        }
+    }
+}
+
+/// How a queued filing went: committed (pushed now, or by a later run if this push failed)
+/// or not.
+pub type Filed = Result<NoteMoved, Refused>;
+
 #[derive(Debug)]
 enum Failure {
     /// The remote couldn't be reached.
@@ -238,6 +289,12 @@ pub struct Notes {
     arrived: AtomicUsize,
     /// Woken by each new capture.
     kick: tokio::sync::Notify,
+    /// Filings for the next run, each with whoever awaits it.
+    moves: Mutex<Vec<(NoteMove, oneshot::Sender<Filed>)>>,
+    /// Where notes may be filed, as of the last run's HEAD.
+    dests: Mutex<Vec<String>>,
+    /// Woken by each filing queued.
+    queued: tokio::sync::Notify,
     after_capture: Duration,
     every: Duration,
 }
@@ -256,6 +313,9 @@ impl Notes {
             }),
             arrived: AtomicUsize::new(0),
             kick: Default::default(),
+            moves: Default::default(),
+            dests: Default::default(),
+            queued: Default::default(),
             after_capture: AFTER_CAPTURE,
             every: EVERY,
         }
@@ -277,6 +337,11 @@ impl Notes {
         self.status.lock().unwrap().clone()
     }
 
+    /// Where notes may be filed ([`crate::filing::dests`]) as of the last run's HEAD.
+    pub fn dests(&self) -> Vec<String> {
+        self.dests.lock().unwrap().clone()
+    }
+
     /// A new capture was kept: count it and publish soon.
     pub fn captured(&self) {
         let mut s = self.status.lock().unwrap();
@@ -289,25 +354,55 @@ impl Notes {
         self.kick.notify_one();
     }
 
-    /// Publish at start, `after_capture` after each capture, and every `every`. The only
-    /// caller of [`Self::run`], so runs never overlap.
+    /// File `m` ([`crate::filing::check`]ed) on the next run, which starts now.
+    pub fn file(&self, m: NoteMove) -> oneshot::Receiver<Filed> {
+        let (tx, rx) = oneshot::channel();
+        self.moves.lock().unwrap().push((m, tx));
+        self.queued.notify_one();
+        rx
+    }
+
+    /// Publish at start, `after_capture` after each capture, every `every`, and at once
+    /// when a filing is queued. The only caller of [`Self::run`], so runs never overlap.
     pub async fn publish_loop(self: std::sync::Arc<Self>) {
         let mut every = tokio::time::interval(self.every);
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 _ = every.tick() => {}
-                _ = self.kick.notified() => tokio::time::sleep(self.after_capture).await,
+                _ = self.queued.notified() => {}
+                _ = self.kick.notified() => tokio::select! {
+                    _ = tokio::time::sleep(self.after_capture) => {}
+                    _ = self.queued.notified() => {}
+                },
             }
             let notes = self.clone();
             let _ = tokio::task::spawn_blocking(move || notes.run()).await;
         }
     }
 
-    /// One publish (blocking: runs `git`), then the status it leaves.
+    /// The queued filings, then one publish (blocking: runs `git`), then the status it leaves.
     pub fn run(&self) -> NotesSync {
+        let moves = std::mem::take(&mut *self.moves.lock().unwrap());
+        let mut filed = Vec::new();
+        for (m, tx) in moves {
+            match self.file_now(&m) {
+                Ok(path) => filed.push((path, tx)),
+                Err(r) => {
+                    tracing::warn!(path = %m.path, dest = %m.dest, "filing a note: {r:?}");
+                    let _ = tx.send(Err(r));
+                }
+            }
+        }
         let before = self.arrived.load(Ordering::SeqCst);
         let (pending, run) = self.publish();
+        // The publish pushes the filings' commits, or leaves them for a later run.
+        for (path, tx) in filed {
+            let _ = tx.send(Ok(NoteMoved { path }));
+        }
+        if let Ok(modes) = self.dest_modes() {
+            *self.dests.lock().unwrap() = crate::filing::dests(&modes);
+        }
         let mut s = self.status.lock().unwrap();
         // Captures kept mid-run may postdate the receipts it read. Counted before
         // reading them, so at worst one is counted twice until the next run.
@@ -344,8 +439,9 @@ impl Notes {
         };
         let pending = unpublished(&map);
         if pending == 0 {
-            // Nothing to publish; still catch the clone up, which the Notes view reads.
-            return (Some(0), self.sync().map(|()| false));
+            // Nothing to publish; still catch the clone up, which the Notes view reads, and
+            // push what an offline run committed (a filing).
+            return (Some(0), self.sync().and_then(|()| self.push(|| Ok(()))));
         }
         match self.publish_new(&receipts, &mut map) {
             Ok(pushed) => (Some(unpublished(&map)), Ok(pushed)),
@@ -389,36 +485,14 @@ impl Notes {
     /// then record it in `map` and save that. Ok(true): it pushed.
     fn publish_new(&self, receipts: &[Receipt], map: &mut Map) -> Result<bool, Failure> {
         self.sync()?;
-        let mut retries = 0;
-        let (actions, pushed) = loop {
+        let mut actions = Vec::new();
+        let pushed = self.push(|| {
             // Published per history counts as published, map or not.
             let mut known = self.history()?;
             known.extend(map.iter().map(|(id, p)| (*id, p.clone())));
-            let actions = plan(receipts, &known, &self.scan()?);
-            self.commit(receipts, &actions)?;
-            let ahead = self.git(&["rev-list", "--count", &format!("origin/{BRANCH}..HEAD")])?;
-            if ahead.check("rev-list", Failure::Other)?.text() == "0" {
-                break (actions, false);
-            }
-            let to = format!("HEAD:refs/heads/{BRANCH}");
-            let push = self.git(&["push", "--porcelain", "origin", &to])?;
-            if push.ok {
-                break (actions, true);
-            }
-            if !raced(&String::from_utf8_lossy(&push.stdout)) {
-                return Err(Failure::Offline(format!("push: {}", push.stderr.trim())));
-            }
-            if retries == PUSH_RETRIES {
-                let why = format!(
-                    "push refused after {PUSH_RETRIES} retries: {}",
-                    push.stderr.trim()
-                );
-                return Err(Failure::Other(why));
-            }
-            retries += 1;
-            // Someone pushed first: replay onto theirs and try again.
-            self.fetch_rebase()?;
-        };
+            actions = plan(receipts, &known, &self.scan()?);
+            self.commit(receipts, &actions)
+        })?;
         // HEAD is the remote's now: what its history published, plus what was adopted.
         for (id, p) in self.history()? {
             map.entry(id).or_insert(p);
@@ -437,6 +511,37 @@ impl Notes {
             tracing::info!(%commit, "published captures to the notes repo");
         }
         Ok(pushed)
+    }
+
+    /// `commit`, then push HEAD if that leaves it ahead of the remote. If someone pushed
+    /// first, rebase onto theirs and do both again, up to [`PUSH_RETRIES`] times. Ok(true):
+    /// it pushed.
+    fn push(&self, mut commit: impl FnMut() -> Result<(), Failure>) -> Result<bool, Failure> {
+        let mut retries = 0;
+        loop {
+            commit()?;
+            let ahead = self.git(&["rev-list", "--count", &format!("origin/{BRANCH}..HEAD")])?;
+            if ahead.check("rev-list", Failure::Other)?.text() == "0" {
+                return Ok(false);
+            }
+            let to = format!("HEAD:refs/heads/{BRANCH}");
+            let push = self.git(&["push", "--porcelain", "origin", &to])?;
+            if push.ok {
+                return Ok(true);
+            }
+            if !raced(&String::from_utf8_lossy(&push.stdout)) {
+                return Err(Failure::Offline(format!("push: {}", push.stderr.trim())));
+            }
+            if retries == PUSH_RETRIES {
+                let why = format!(
+                    "push refused after {PUSH_RETRIES} retries: {}",
+                    push.stderr.trim()
+                );
+                return Err(Failure::Other(why));
+            }
+            retries += 1;
+            self.fetch_rebase()?;
+        }
     }
 
     /// Clone if needed, point at the configured remote, remove what an interrupted run
@@ -480,6 +585,194 @@ impl Notes {
         set.check("remote set-url", Failure::Other)?;
         self.undo_writing()?;
         self.fetch_rebase()
+    }
+
+    /// File `m` in a commit of its own, built from HEAD without touching the working tree,
+    /// then fast-forwarded onto (git refuses if that would overwrite a file it doesn't
+    /// track), left for [`Self::publish`] to push: the note's new path.
+    fn file_now(&self, m: &NoteMove) -> Result<String, Refused> {
+        crate::filing::check(m).map_err(Refused::Invalid)?;
+        self.sync()?;
+        let inbox = self.modes(&[&format!("{INBOX}/")])?;
+        if !inbox.contains_key(&m.path) {
+            return Err(Refused::Stale(format!("{} is gone", m.path)));
+        }
+        if !crate::filing::dests(&self.dest_modes()?).contains(&m.dest) {
+            let why = format!("{} is not a folder to file in", m.dest);
+            return Err(Refused::Stale(why));
+        }
+        // The page hashed the clean tree's bytes as the Notes view serves them (HEAD's blob
+        // may differ by an `eol` or smudge filter), which stops at `MAX_BYTES`.
+        let Some(shown) = crate::apps::read_file(&self.clone, &m.path) else {
+            return Err(Refused::Stale(format!("{} can't be read", m.path)));
+        };
+        if shown.len() as u64 >= crate::apps::MAX_BYTES {
+            let mib = crate::apps::MAX_BYTES >> 20;
+            return Err(Refused::Stale(format!("{} is over {mib} MiB", m.path)));
+        }
+        let hash = crate::capture::sha256(&shown);
+        if m.hash
+            .as_ref()
+            .is_some_and(|h| !h.eq_ignore_ascii_case(&hash))
+        {
+            let why = format!("{} changed since it was read", m.path);
+            return Err(Refused::Stale(why));
+        }
+        let blob = self.git(&["cat-file", "blob", &format!("HEAD:{}", m.path)])?;
+        let blob = blob.check("cat-file", Failure::Other)?.stdout;
+        let md = String::from_utf8(blob).map_err(|_| Refused::Invalid("not UTF-8".into()))?;
+        // The pictures the inbox's other notes list (read as the Notes view reads files).
+        let note = |p: &&String| crate::notes_view::kind(p, false) == mis_types::NoteKind::Md;
+        let others = (inbox.keys()).filter(|p| *p != &m.path).filter(note);
+        let claimed: Vec<String> = others
+            .filter_map(|p| crate::apps::read_file(&self.clone, p))
+            .flat_map(|b| {
+                let md = String::from_utf8_lossy(&b);
+                crate::capture::front(&md).map_or(vec![], |f| crate::capture::assets(f.lines))
+            })
+            .collect();
+        // What's in the folder, committed or not, so a filing never lands on a human's file.
+        let pre = format!("{}/", m.dest);
+        let mut taken: Vec<String> = (self.modes(&[&pre])?.into_keys())
+            .map(|p| p[pre.len()..].to_string())
+            .collect();
+        if let Ok(read) = std::fs::read_dir(self.clone.join(&m.dest)) {
+            let names = read
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned());
+            taken.extend(names);
+        }
+        let f = crate::filing::plan(m, &md, &inbox, &claimed, &taken).map_err(Refused::Stale)?;
+        // Early, with a clear reason; the fast-forward refuses anyway.
+        let created: Vec<String> = f.moves.iter().map(|(_, to)| to.clone()).collect();
+        self.absent(&created)
+            .map_err(|f| Refused::Stale(f.why().to_string()))?;
+        // Git's attributes for a moved file must be its source's, or the checkout converts
+        // it (line endings, a filter) and leaves the clone dirty.
+        let paths: Vec<&str> = (f.moves.iter())
+            .flat_map(|(from, to)| [from.as_str(), to.as_str()])
+            .collect();
+        let check = [
+            &["check-attr", "-z", "text", "eol", "filter", "--"],
+            paths.as_slice(),
+        ];
+        let attrs = self
+            .git(&check.concat())?
+            .check("check-attr", Failure::Other)?;
+        // `<path> NUL <attribute> NUL <value> NUL`, per path and attribute.
+        let attrs: BTreeMap<(String, String), String> = (attrs.stdout.split(|b| *b == 0))
+            .map(|f| String::from_utf8_lossy(f).into_owned())
+            .collect::<Vec<_>>()
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|[path, attr, value]| ((path.clone(), attr.clone()), value.clone()))
+            .collect();
+        let differ = |(from, to): &&(String, String)| {
+            ["text", "eol", "filter"].iter().any(|a| {
+                attrs.get(&(from.clone(), a.to_string())) != attrs.get(&(to.clone(), a.to_string()))
+            })
+        };
+        if let Some((from, to)) = f.moves.iter().find(differ) {
+            let why = format!("{to} converts line endings differently from {from}");
+            return Err(Refused::Stale(why));
+        }
+        let commit = self.commit_filing(&f, &inbox)?;
+        // Never over an ignored file either.
+        let ff = [
+            "merge",
+            "--ff-only",
+            "--no-overwrite-ignore",
+            "--quiet",
+            &commit,
+        ];
+        let merge = self.git(&ff)?;
+        if !merge.ok {
+            return Err(Refused::Stale(format!("merge: {}", merge.stderr.trim())));
+        }
+        Ok(f.moves[0].1.clone())
+    }
+
+    /// Filing `f` as a commit on HEAD, built in an index of its own: the working tree and
+    /// its index are untouched, so a run cut short leaves only an unreferenced commit.
+    /// `inbox` gives the moved files' modes.
+    fn commit_filing(
+        &self,
+        f: &crate::filing::Filing,
+        inbox: &crate::filing::Modes,
+    ) -> Result<String, Failure> {
+        // In a folder of this run's own, removed however it ends, so nothing an earlier run
+        // left (a lock) is in the way. Paths relative to the clone, where git runs.
+        let dir = format!(".git/mis-filing-{}", Uuid::new_v4());
+        std::fs::create_dir(self.clone.join(&dir))?;
+        struct Remove(PathBuf);
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _remove = Remove(self.clone.join(&dir));
+        let (index, note) = (format!("{dir}/index"), format!("{dir}/note"));
+        let git = |args: &[&str]| -> Result<String, Failure> {
+            let mut out = run_git(&self.clone, args, GIT_DEADLINE, Some(Path::new(&index)))?;
+            out.stderr = out.stderr.replace(&self.remote, "<remote>");
+            Ok(out.check(args[0], Failure::Other)?.text())
+        };
+        git(&["read-tree", "HEAD"])?;
+        let sources: Vec<&str> = f.moves.iter().map(|(from, _)| from.as_str()).collect();
+        git(&[
+            &["update-index", "--force-remove", "--"],
+            sources.as_slice(),
+        ]
+        .concat())?;
+        // The note as edited, byte for byte; its pictures as HEAD has them.
+        crate::push::write_private(&self.clone.join(&note), f.md.as_bytes())?;
+        let mut blobs = vec![git(&["hash-object", "-w", "--no-filters", "--", &note])?];
+        for (from, _) in &f.moves[1..] {
+            blobs.push(git(&["rev-parse", "--verify", &format!("HEAD:{from}")])?);
+        }
+        for ((from, to), blob) in f.moves.iter().zip(&blobs) {
+            let entry = format!("{},{blob},{to}", inbox[from]);
+            git(&["update-index", "--add", "--cacheinfo", &entry])?;
+        }
+        let tree = git(&["write-tree"])?;
+        git(&["commit-tree", &tree, "-p", "HEAD", "-m", &f.message])
+    }
+
+    /// Ok if none of `paths` is in the clone (not even as a dangling link, or a file where
+    /// one of its folders would be).
+    fn absent(&self, paths: &[String]) -> Result<(), Failure> {
+        let gone = |p: &&String| {
+            let at = std::fs::symlink_metadata(self.clone.join(p));
+            at.is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+        };
+        match paths.iter().find(|p| !gone(p)) {
+            Some(p) => Err(Failure::Other(format!("{p} exists"))),
+            None => Ok(()),
+        }
+    }
+
+    /// HEAD's modes [`crate::filing::dests`] reads: the folders and what's directly in
+    /// them (one `ls-tree` lists either, not both).
+    fn dest_modes(&self) -> Result<crate::filing::Modes, Failure> {
+        let mut modes = self.modes(&["projects", "areas", "resources", "archive"])?;
+        modes.extend(self.modes(&["projects/", "areas/", "resources/"])?);
+        Ok(modes)
+    }
+
+    /// HEAD's entries that are `paths`, or directly in the folders `x/` names: path -> git
+    /// mode, e.g. `040000` for a folder, `120000` for a symlink.
+    fn modes(&self, paths: &[&str]) -> Result<crate::filing::Modes, Failure> {
+        let args = [&["ls-tree", "-z", "HEAD", "--"], paths].concat();
+        let ls = self.git(&args)?.check("ls-tree", Failure::Other)?;
+        // Each `<mode> <type> <object>\t<path>`.
+        Ok((ls.stdout.split(|b| *b == 0))
+            .filter_map(|e| {
+                let e = String::from_utf8_lossy(e);
+                let (meta, path) = e.split_once('\t')?;
+                Some((path.to_string(), meta.split(' ').next()?.to_string()))
+            })
+            .collect())
     }
 
     /// Unstage and delete the files a run cut short was writing, unless it committed them.
@@ -536,11 +829,7 @@ impl Notes {
     /// a new record never lands on a human's uncommitted one. Ids are read from the
     /// working tree: after a clean rebase or commit, its tracked files are HEAD's.
     fn scan(&self) -> Result<BTreeMap<String, Option<Uuid>>, Failure> {
-        let ls = self.git(&["ls-tree", "-z", "--name-only", "HEAD", &format!("{INBOX}/")])?;
-        let ls = ls.check("ls-tree", Failure::Other)?;
-        let paths = (ls.stdout.split(|b| *b == 0))
-            .filter(|p| !p.is_empty())
-            .map(|p| String::from_utf8_lossy(p).into_owned());
+        let paths = self.modes(&[&format!("{INBOX}/")])?.into_keys();
         let mut files: BTreeMap<String, Option<Uuid>> = paths
             .map(|p| {
                 let md = (p.ends_with(".md"))
@@ -623,7 +912,7 @@ impl Notes {
 
     /// `git args` in `dir`, with the remote's URL kept out of what it says.
     fn git_in(&self, dir: &Path, args: &[&str]) -> Result<Out, Failure> {
-        let mut out = run_git(dir, args, GIT_DEADLINE)?;
+        let mut out = run_git(dir, args, GIT_DEADLINE, None)?;
         out.stderr = out.stderr.replace(&self.remote, "<remote>");
         Ok(out)
     }
@@ -632,7 +921,12 @@ impl Notes {
 /// `git args` in `dir`, never waiting on a person: no prompts, askpass, editors, hooks or
 /// signing, and killed (with whatever it started) after `deadline`. Commits are Make It
 /// So's; the user's own git config (the credential helper) still applies.
-fn run_git(dir: &Path, args: &[&str], deadline: Duration) -> std::io::Result<Out> {
+fn run_git(
+    dir: &Path,
+    args: &[&str],
+    deadline: Duration,
+    index: Option<&Path>,
+) -> std::io::Result<Out> {
     let mut cmd = Command::new("git");
     cmd.current_dir(dir)
         .args([
@@ -667,6 +961,9 @@ fn run_git(dir: &Path, args: &[&str], deadline: Duration) -> std::io::Result<Out
     // Its own process group, so the deadline also kills ssh and credential helpers.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    if let Some(index) = index {
+        cmd.env("GIT_INDEX_FILE", index);
+    }
     let mut child = cmd.spawn()?;
     let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
     let start = Instant::now();
@@ -904,7 +1201,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let start = Instant::now();
         let hang = ["-c", "alias.hang=!sleep 30", "hang"];
-        let out = run_git(&dir, &hang, Duration::from_millis(300)).unwrap();
+        let out = run_git(&dir, &hang, Duration::from_millis(300), None).unwrap();
         assert!(!out.ok);
         assert_eq!(out.stderr, "timed out after 0.3s");
         // The readers saw EOF, so `sleep` (git's grandchild) died too.
@@ -916,7 +1213,7 @@ mod tests {
         // Git exits at once but leaves something holding its output open.
         let start = Instant::now();
         let linger = ["-c", "alias.linger=!sleep 30 & exit 0", "linger"];
-        let out = run_git(&dir, &linger, Duration::from_millis(300)).unwrap();
+        let out = run_git(&dir, &linger, Duration::from_millis(300), None).unwrap();
         assert_eq!(
             (out.ok, out.stderr.as_str()),
             (false, "timed out after 0.3s")
@@ -926,7 +1223,7 @@ mod tests {
             "{:?}",
             start.elapsed()
         );
-        let ok = run_git(&dir, &["--version"], GIT_DEADLINE).unwrap();
+        let ok = run_git(&dir, &["--version"], GIT_DEADLINE, None).unwrap();
         assert!(
             ok.ok && ok.text().starts_with("git version"),
             "{}",

@@ -1,5 +1,5 @@
-//! The notes repo: publishing captures to it (`GET /api/notes/sync`) and reading it (`GET
-//! /api/notes/tree`, `GET /api/projects`).
+//! The notes repo: publishing captures to it (`GET /api/notes/sync`), reading it (`GET
+//! /api/notes/tree`, `GET /api/projects`) and filing its inbox (`POST /api/notes/move`).
 
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +63,9 @@ pub struct NotesTree {
     /// `off`: no notes remote configured.
     pub state: SyncState,
     pub entries: Vec<NoteEntry>,
+    /// Where an inbox note may be filed (`POST /api/notes/move`), as of the last sync.
+    #[serde(default)]
+    pub dests: Vec<String>,
 }
 
 /// A project record in the notes repo: `projects/<id>/README.md`, or `archive/<id>/README.md`
@@ -101,4 +104,29 @@ pub struct Projects {
     pub state: SyncState,
     pub projects: Vec<Project>,
     pub errors: Vec<ProjectError>,
+}
+
+/// `POST /api/notes/move`: file an inbox note, with its images, in another folder.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NoteMove {
+    /// The note, e.g. `inbox/2026-11-08-foo.md`.
+    pub path: String,
+    /// One of [`NotesTree::dests`]: `projects/<id>`, `areas/<id>`, `resources/<name>` or
+    /// `archive`.
+    pub dest: String,
+    /// Written to its frontmatter as `summary:`.
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// sha256 (hex) of the note as read: refused if it has changed since.
+    #[serde(default)]
+    pub hash: Option<String>,
+}
+
+/// What `POST /api/notes/move` did: committed, and pushed unless the push failed (a later
+/// run pushes it).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NoteMoved {
+    /// The note's new path, e.g. `projects/amf/2026-11-08-foo.md`.
+    pub path: String,
 }

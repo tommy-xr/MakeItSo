@@ -35,6 +35,7 @@ pub mod drafts;
 pub mod email;
 pub mod evidence;
 pub mod feedback;
+pub mod filing;
 pub mod images;
 pub mod ledger;
 pub mod note;
@@ -1321,6 +1322,7 @@ pub fn router(app: App) -> Router {
         .route("/api/notes/sync", get(notes_sync))
         .route("/api/notes/tree", get(notes_tree))
         .route("/api/notes/file", get(notes_file))
+        .route("/api/notes/move", post(notes_move))
         .route("/api/projects", get(projects_list))
         .route("/api/images/{id}", get(image))
         .route("/api/evidence/{id}", get(evidence_file))
@@ -1844,13 +1846,19 @@ async fn notes_tree(
         let off = NotesTree {
             state: SyncState::Off,
             entries: vec![],
+            dests: vec![],
         };
         return Json(off).into_response();
     };
-    let state = notes.status().state;
+    let (state, dests) = (notes.status().state, notes.dests());
     let walk = tokio::task::spawn_blocking(move || notes_view::tree(notes.clone_dir()));
     let entries = walk.await.expect("walks");
-    Json(NotesTree { state, entries }).into_response()
+    Json(NotesTree {
+        state,
+        entries,
+        dests,
+    })
+    .into_response()
 }
 
 /// The notes clone's project records, for the Projects view. Auth as for the Notes view.
@@ -1914,6 +1922,39 @@ async fn notes_file(
             .into_response(),
         Err(notes_view::Refused::NotFound) => StatusCode::NOT_FOUND.into_response(),
         Err(notes_view::Refused::Unsupported) => StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response(),
+    }
+}
+
+/// File an inbox note in another folder: a commit the publisher makes and pushes. 200 with
+/// its new path; 409 if the note or folder is gone or changed, or it can't safely be moved;
+/// 503 offline or in conflict. Auth as for the tree.
+async fn notes_move(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/notes/move").await {
+        return refused.into_response();
+    }
+    let Some(notes) = app.notes.clone() else {
+        return (StatusCode::NOT_FOUND, "notes are off").into_response();
+    };
+    let m = match serde_json::from_slice::<mis_types::NoteMove>(&body) {
+        Ok(m) => m,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    if let Err(why) = filing::check(&m) {
+        return (StatusCode::BAD_REQUEST, why).into_response();
+    }
+    match notes.file(m).await {
+        Ok(Ok(moved)) => Json(moved).into_response(),
+        Ok(Err(notes::Refused::Invalid(why))) => (StatusCode::BAD_REQUEST, why).into_response(),
+        Ok(Err(notes::Refused::Stale(why))) => (StatusCode::CONFLICT, why).into_response(),
+        Ok(Err(notes::Refused::Failed(why))) => {
+            (StatusCode::SERVICE_UNAVAILABLE, why).into_response()
+        }
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "publisher stopped").into_response(),
     }
 }
 
