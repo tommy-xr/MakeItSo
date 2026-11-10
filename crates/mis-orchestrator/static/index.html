@@ -3477,6 +3477,13 @@ function renderNav() {
   const folders = ns ? NOTE_FOLDERS.filter(([f]) => ns.some((e) => e.path === f)) : [];
   fillNav($('nav-notes'), !notesTree ? [['Loading…']] : notesTree.error ? [[notesTree.error]] : notesTree.state === 'off' ? [['Not configured']]
     : !folders.length ? [['No notes yet']] : folders.map(([f, label]) => [noteHref(f), null, label, f === 'inbox' && inbox ? String(inbox) : '']));
+  // No notes remote has nothing to unfold: Notes and Projects (read from the same repo) drop their chevron and list.
+  const off = notesTree?.state === 'off' || projects?.state === 'off';
+  for (const id of ['nav-notes', 'nav-projects']) {
+    const b = $('menu').querySelector(`[aria-controls=${id}]`);
+    b.hidden = off;
+    $(id).hidden = off || b.getAttribute('aria-expanded') !== 'true';
+  }
   // Projects: one link per active one.
   const active = projects && projects.projects && projects.projects.filter(projectActive);
   fillNav($('nav-projects'), !projects ? [['Loading…']] : projects.error ? [[projects.error]] : projects.state === 'off' ? [['Not configured']]
@@ -4479,10 +4486,13 @@ for (const b of $('menu').querySelectorAll('.ngrp button[aria-controls]')) b.onc
   if (open && b.getAttribute('aria-controls') === 'nav-apps') loadApps();
   if (open && b.getAttribute('aria-controls') === 'nav-notes') loadNotes();
   if (open && b.getAttribute('aria-controls') === 'nav-projects') loadProjects();
+  try { localStorage.setItem('mis-nav-open', JSON.stringify([...$('menu').querySelectorAll('.ngrp [aria-expanded=true]')].map((x) => x.getAttribute('aria-controls')))); } catch {}
 };
 $('menu').addEventListener('close', () => $('menu-btn').setAttribute('aria-expanded', String(railShown())));
-// The rail opens with Notes and Workers unfolded: short lists, and Workers carries what's running.
-if (isDesk()) for (const id of ['nav-notes', 'nav-workers']) $('menu').querySelector(`[aria-controls=${id}]`).click();
+// The lists unfold as last left; the first time, the rail has Notes and Workers unfolded: short lists, and Workers carries what's running.
+let navOpen = null;
+try { navOpen = JSON.parse(localStorage.getItem('mis-nav-open')); } catch {}
+for (const id of Array.isArray(navOpen) ? navOpen : isDesk() ? ['nav-notes', 'nav-workers'] : []) $('menu').querySelector(`.ngrp [aria-controls="${CSS.escape(id)}"]`)?.click();
 $('menu-btn').setAttribute('aria-expanded', String(railShown()));
 $('menu-close').onclick = () => $('menu').close();
 let downOnBackdrop = false;
