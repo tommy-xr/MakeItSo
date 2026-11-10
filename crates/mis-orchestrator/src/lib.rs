@@ -118,6 +118,8 @@ pub struct App {
     drafter: Option<Arc<dyn Agent>>,
     /// Suggests where inbox notes go ([`file_suggest`]). None: no suggestions.
     suggester: Option<Arc<dyn Agent>>,
+    /// Notes the suggestion pass under way has still to ask about; empty between passes.
+    suggesting: Arc<Mutex<std::collections::BTreeSet<String>>>,
     /// A worker silent (no Hello/Stats) this long is treated as disconnected.
     stale_after: Duration,
     /// How often to check for silent workers.
@@ -183,6 +185,7 @@ impl App {
             summary_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             drafter: None,
             suggester: None,
+            suggesting: Default::default(),
             // Two missed beats plus slack for network jitter.
             stale_after: 2 * STATS_INTERVAL + Duration::from_secs(5),
             tick_every: Duration::from_secs(5),
@@ -584,18 +587,20 @@ impl App {
             notes.ran().await;
             self.suggest(&notes, agent.as_ref(), &file, &mut store)
                 .await;
+            // However it ended: nothing more is asked until the next run.
+            self.suggesting.lock().unwrap().clear();
         }
     }
 
-    /// One pass over [`file_suggest::pending`]. A failed call (offline, logged out, timed
-    /// out) stores nothing; [`SUGGEST_FAILURES`] in a row end the pass, the rest wait for
-    /// the next run.
+    /// One pass over [`file_suggest::pending`], listed in `suggesting` until each is asked
+    /// about. A failed call (offline, logged out, timed out) stores nothing;
+    /// [`SUGGEST_FAILURES`] in a row end the pass, the rest wait for the next run.
     async fn suggest(
         &self,
         notes: &notes::Notes,
         agent: &dyn Agent,
         file: &std::path::Path,
-        store: &mut mis_types::NoteSuggestions,
+        store: &mut file_suggest::Store,
     ) {
         let Some(inbox) = notes.inbox() else {
             return;
@@ -608,6 +613,7 @@ impl App {
         if store.len() != before {
             save_suggestions(file, store);
         }
+        *self.suggesting.lock().unwrap() = todo.iter().map(|n| n.path.clone()).collect();
         let mut failed = 0;
         for note in todo {
             let mut reply = Err("no reply".to_string());
@@ -642,6 +648,8 @@ impl App {
                     }
                 }
             }
+            // Only once saved (or skipped): a reader sees it pending or suggested.
+            self.suggesting.lock().unwrap().remove(&note.path);
         }
     }
 
@@ -1921,7 +1929,7 @@ async fn notes_sync(
 
 /// `<state>/captures/suggestions.json`; empty if absent or unreadable (suggestions are
 /// remade as needed).
-fn load_suggestions(file: &std::path::Path) -> mis_types::NoteSuggestions {
+fn load_suggestions(file: &std::path::Path) -> file_suggest::Store {
     match std::fs::read(file) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
         r => (r.map_err(|e| e.to_string()))
@@ -1934,7 +1942,7 @@ fn load_suggestions(file: &std::path::Path) -> mis_types::NoteSuggestions {
 }
 
 /// Write `store` to `file` whole, or not at all.
-fn save_suggestions(file: &std::path::Path, store: &mis_types::NoteSuggestions) {
+fn save_suggestions(file: &std::path::Path, store: &file_suggest::Store) {
     let json = serde_json::to_vec_pretty(store).expect("serializes");
     let saved = (file.parent().map_or(Ok(()), std::fs::create_dir_all))
         .and_then(|()| push::write_private(file, &json));
@@ -1957,10 +1965,13 @@ async fn notes_suggestions(
         return refused.into_response();
     }
     let Some(file) = app.notes.as_ref().map(|n| n.suggestions_file()) else {
-        return Json(mis_types::NoteSuggestions::new()).into_response();
+        return Json(mis_types::NoteSuggestions::default()).into_response();
     };
+    // Pending first: a note leaves it only once saved, so it is in one or the other.
+    let pending = app.suggesting.lock().unwrap().iter().cloned().collect();
     let read = tokio::task::spawn_blocking(move || load_suggestions(&file));
-    Json(read.await.expect("reads")).into_response()
+    let notes = read.await.expect("reads");
+    Json(mis_types::NoteSuggestions { pending, notes }).into_response()
 }
 
 /// The notes clone's shown folders, for the Notes view. Full scope only: notes are the

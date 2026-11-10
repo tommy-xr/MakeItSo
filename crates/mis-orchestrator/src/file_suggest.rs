@@ -2,9 +2,9 @@
 //! reply held to the folders [`crate::filing::dests`] allows. Pure; the App runs the model
 //! after each publisher run and keeps the answers in `<state>/captures/suggestions.json`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use mis_types::{NoteSuggestion, NoteSuggestions, Project};
+use mis_types::{NoteSuggestion, Project};
 use serde::Deserialize;
 
 use crate::filing::MAX_SUMMARY_CHARS;
@@ -15,6 +15,9 @@ pub const MAX_NOTE_BYTES: usize = 4096;
 pub const MAX_NOTES: usize = 50;
 /// The dest when no folder fits, or the reply named none of them.
 pub const NONE: &str = "none";
+
+/// `<state>/captures/suggestions.json`: inbox note path -> its suggestion.
+pub type Store = BTreeMap<String, NoteSuggestion>;
 
 /// An inbox note at HEAD.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,7 +200,7 @@ fn folders(dests: &[Dest]) -> String {
 /// The inbox's newest notes that need a suggestion, after dropping from `store` the paths
 /// no longer in the inbox. A suggestion holds while its note's hash does, and its folder is
 /// still one of `dests` (for [`NONE`]: while the folders are the ones it chose from).
-pub fn pending<'a>(store: &mut NoteSuggestions, inbox: &'a Inbox, dests: &[Dest]) -> Vec<&'a Note> {
+pub fn pending<'a>(store: &mut Store, inbox: &'a Inbox, dests: &[Dest]) -> Vec<&'a Note> {
     store.retain(|path, _| inbox.paths.contains(path));
     let now = folders(dests);
     let holds = |s: &NoteSuggestion| match s.dest.as_str() {
@@ -364,7 +367,7 @@ mod tests {
             error: None,
             folders: folders(&d),
         };
-        let mut store: NoteSuggestions = [
+        let mut store: Store = [
             ("inbox/a.md".to_string(), made("1")),
             ("inbox/b.md".into(), made("1")),
             ("inbox/old.md".into(), made("1")),
@@ -405,7 +408,7 @@ mod tests {
         };
         let asks = |dest: &str, made_from: &[Dest], now: &[Dest]| {
             let s = suggestion(&a, reply(dest), made_from, 1);
-            let mut store: NoteSuggestions = [(a.path.clone(), s)].into();
+            let mut store: Store = [(a.path.clone(), s)].into();
             !pending(&mut store, &inbox, now).is_empty()
         };
         let fewer = &d[1..];

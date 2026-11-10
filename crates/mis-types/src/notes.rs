@@ -134,8 +134,16 @@ pub struct NoteMoved {
     pub path: String,
 }
 
-/// `GET /api/notes/suggestions`: inbox note path -> where it might go.
-pub type NoteSuggestions = BTreeMap<String, NoteSuggestion>;
+/// `GET /api/notes/suggestions`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct NoteSuggestions {
+    /// Inbox notes a suggestion is still to be asked for, in the pass under way. A note in
+    /// neither this nor `notes` gets none until it changes (or the next publisher run).
+    pub pending: Vec<String>,
+    /// Inbox note path -> where it might go.
+    pub notes: BTreeMap<String, NoteSuggestion>,
+}
 
 /// Where an inbox note might be filed, as a model proposed from its text.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

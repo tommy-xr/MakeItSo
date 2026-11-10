@@ -4749,8 +4749,9 @@ async fn projects_are_read_from_the_notes_clone_for_full_scope_only() {
 
 /// Suggester stub, by the note's text: `#fail` fails (as a logged-out claude would),
 /// `#offlist` names a folder that isn't one, `#home` goes to `areas/home`, anything else to
-/// `projects/amf` (fenced, as models sometimes reply). Keeps each note it was asked about.
-struct FakeSuggester(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+/// `projects/amf` (fenced, as models sometimes reply). Keeps each prompt, then answers once
+/// its gate has a permit.
+struct FakeSuggester(Prompts, std::sync::Arc<tokio::sync::Semaphore>);
 impl mis_agent::Agent for FakeSuggester {
     fn name(&self) -> &'static str {
         "fake"
@@ -4767,6 +4768,7 @@ impl mis_agent::Agent for FakeSuggester {
     ) -> mis_agent::BoxFut<'a> {
         Box::pin(async move {
             self.0.lock().unwrap().push(prompt.to_string());
+            drop(self.1.acquire().await.unwrap());
             let note = prompt.split_once("Note:\n").unwrap().1;
             let (ok, reply) = match note {
                 n if n.contains("#fail") => (false, "not logged in"),
@@ -4853,11 +4855,21 @@ impl NotesRemote {
     /// An app on the publisher for `name`, with a [`FakeSuggester`]: its URL, state dir and
     /// the prompts it was given.
     async fn suggesting(&self, name: &str) -> (String, std::path::PathBuf, Prompts) {
+        let open = tokio::sync::Semaphore::new(tokio::sync::Semaphore::MAX_PERMITS);
+        self.gated(name, std::sync::Arc::new(open)).await
+    }
+
+    /// As [`Self::suggesting`], each answer waiting for a permit of `gate`.
+    async fn gated(
+        &self,
+        name: &str,
+        gate: std::sync::Arc<tokio::sync::Semaphore>,
+    ) -> (String, std::path::PathBuf, Prompts) {
         let (notes, state) = self.notes(name);
         let prompts = Prompts::default();
+        let fake = FakeSuggester(prompts.clone(), gate);
         let app = capturing(&state).with_notes(notes);
-        let base =
-            start_app(app.with_suggester(std::sync::Arc::new(FakeSuggester(prompts.clone()))));
+        let base = start_app(app.with_suggester(std::sync::Arc::new(fake)));
         (base.await, state, prompts)
     }
 }
@@ -4879,22 +4891,53 @@ fn asked(prompts: &Prompts, text: &str) -> usize {
         .count()
 }
 
+type Suggested = std::collections::BTreeMap<String, NoteSuggestion>;
+
+/// `GET /api/notes/suggestions`, which must say what is pending.
 async fn suggestions(base: &str) -> NoteSuggestions {
     let (status, body) = get_json(base, "/api/notes/suggestions", "s").await;
     assert_eq!(status, 200, "{body}");
-    serde_json::from_str(&body).unwrap()
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v["pending"].is_array(), "{body}");
+    serde_json::from_value(v).unwrap()
 }
 
 /// The suggestions once `done` holds of them (10 s at most).
-async fn until(base: &str, done: impl Fn(&NoteSuggestions) -> bool) -> NoteSuggestions {
+async fn until(base: &str, done: impl Fn(&Suggested) -> bool) -> Suggested {
     for _ in 0..100 {
-        let s = suggestions(base).await;
+        let s = suggestions(base).await.notes;
         if done(&s) {
             return s;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     panic!("{:?}", suggestions(base).await);
+}
+
+/// What's pending once a pass is under way and its first note asked about (10 s at most).
+async fn asking(base: &str, prompts: &Prompts) -> Vec<String> {
+    for _ in 0..100 {
+        if !prompts.lock().unwrap().is_empty() {
+            return suggestions(base).await.pending;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("never asked");
+}
+
+/// sha256 hex of `path` as the Notes view serves it (what a filing checks).
+async fn served(base: &str, path: &str) -> String {
+    let head = format!("GET /api/notes/file?path={path} HTTP/1.1\r\nAuthorization: Bearer s");
+    let (status, _, body) = http(base, &head, b"").await;
+    assert_eq!(status, 200, "{path}");
+    sha_hex(&body)
+}
+
+/// Sorted inbox paths for these names.
+fn inbox(names: &[&str]) -> Vec<String> {
+    let mut paths: Vec<String> = names.iter().map(|n| format!("inbox/{n}.md")).collect();
+    paths.sort();
+    paths
 }
 
 #[tokio::test]
@@ -4906,7 +4949,12 @@ async fn inbox_notes_get_a_suggestion_per_text_held_to_the_folders() {
     let a = &s["inbox/a.md"];
     assert_eq!(
         (a.dest.as_str(), a.summary.as_str(), &a.hash, &a.error),
-        ("projects/amf", "First", &sha_hex(b"# a\n"), &None)
+        (
+            "projects/amf",
+            "First",
+            &served(&base, "inbox/a.md").await,
+            &None
+        )
     );
     let first = prompts.lock().unwrap()[0].clone();
     assert!(
@@ -4922,7 +4970,7 @@ async fn inbox_notes_get_a_suggestion_per_text_held_to_the_folders() {
         s.contains_key("inbox/b.md") && s["inbox/a.md"].summary == "Second"
     })
     .await;
-    assert_eq!(s["inbox/a.md"].hash, sha_hex(b"# a v2\n"));
+    assert_eq!(s["inbox/a.md"].hash, served(&base, "inbox/a.md").await);
     let b = &s["inbox/b.md"];
     assert_eq!((b.dest.as_str(), b.summary.as_str()), ("none", "Off"));
     let why = b.error.as_deref().unwrap();
@@ -4935,10 +4983,7 @@ async fn inbox_notes_get_a_suggestion_per_text_held_to_the_folders() {
     r.push("filed");
     let s = until(&base, |s| !s.contains_key("inbox/b.md")).await;
     let saved = std::fs::read(state.join("captures/suggestions.json")).unwrap();
-    assert_eq!(
-        serde_json::from_slice::<NoteSuggestions>(&saved).unwrap(),
-        s
-    );
+    assert_eq!(serde_json::from_slice::<Suggested>(&saved).unwrap(), s);
     // Summaries quote notes: full scope only.
     for (token, want) in [("r", 403), ("c", 401)] {
         let (status, _) = get_json(&base, "/api/notes/suggestions", token).await;
@@ -4955,11 +5000,14 @@ async fn inbox_notes_get_a_suggestion_per_text_held_to_the_folders() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(suggestions(&base).await, NoteSuggestions::new());
+    let none = r#"{"pending":[],"notes":{}}"#;
+    let got = get_json(&base, "/api/notes/suggestions", "s").await;
+    assert_eq!(got, (200, none.into()), "nothing pending either");
     assert!(!quiet.join("captures/suggestions.json").exists());
     // No notes remote: none either.
     let off = start_app(capturing(&r.dir.join("off"))).await;
-    assert_eq!(suggestions(&off).await, NoteSuggestions::new());
+    let got = get_json(&off, "/api/notes/suggestions", "s").await;
+    assert_eq!(got, (200, none.into()));
 }
 
 #[tokio::test]
@@ -4970,6 +5018,9 @@ async fn a_failing_note_neither_holds_up_older_ones_nor_is_kept() {
     let (base, _, prompts) = r.suggesting("state").await;
     let s = until(&base, |s| s.contains_key("inbox/a.md")).await;
     assert!(!s.contains_key("inbox/c.md"), "{s:?}");
+    // The pass over, c (failed, skipped) isn't pending: it waits for the next run.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(suggestions(&base).await.pending, Vec::<String>::new());
     // Two failures in a row end the pass (likely logged out): b, after them, waits.
     r.write("inbox/d.md", "#fail d\n");
     r.write("inbox/e.md", "#fail e\n");
@@ -4978,10 +5029,44 @@ async fn a_failing_note_neither_holds_up_older_ones_nor_is_kept() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(asked(&prompts, "#fail e") > 0 && asked(&prompts, "#fail d") > 0);
     assert_eq!(asked(&prompts, "# b"), 0);
+    // A pass that stops early leaves nothing pending (between passes, runs a second apart).
+    let mut idle = false;
+    for _ in 0..50 {
+        idle = suggestions(&base).await.pending.is_empty();
+        if idle {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(idle, "{:?}", suggestions(&base).await.pending);
     assert_eq!(
-        suggestions(&base).await.keys().collect::<Vec<_>>(),
+        suggestions(&base).await.notes.keys().collect::<Vec<_>>(),
         ["inbox/a.md"]
     );
+}
+
+#[tokio::test]
+async fn notes_are_pending_while_asked_about_and_only_the_newest_50() {
+    // 51 notes: n00 is the oldest by name.
+    let names: Vec<String> = (0..51).map(|i| format!("n{i:02}")).collect();
+    let files: Vec<(String, String)> = (names.iter())
+        .map(|n| (format!("inbox/{n}.md"), format!("# {n}\n")))
+        .collect();
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    let r = NotesRemote::new(&files);
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    let (base, _, prompts) = r.gated("state", gate.clone()).await;
+    // The first call is held: all 50 are pending, n50 (asked about) too; n00 never is.
+    let newest: Vec<&str> = names[1..].iter().map(String::as_str).collect();
+    assert_eq!(asking(&base, &prompts).await, inbox(&newest));
+    assert!(suggestions(&base).await.notes.is_empty());
+    gate.add_permits(1);
+    let s = until(&base, |s| s.len() == 50).await;
+    assert!(!s.contains_key("inbox/n00.md"));
+    assert_eq!(suggestions(&base).await.pending, Vec::<String>::new());
 }
 
 #[tokio::test]
