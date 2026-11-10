@@ -1025,7 +1025,8 @@ const writingOf = (id) => live.get(id)?.text;
 // Photos for the new task: downscaled here (phone shots are ~4 MB), uploaded on pick, sent as ids.
 // Each is { url: preview object URL, id: upload id once stored }.
 const MAX_SHOTS = 4, MAX_SIDE = 1600;
-let shots = [];
+let shots = []; // the shown composer's (promptKey)
+const keptShots = new Map(); // another composer's draft key -> its photos, while that one isn't shown
 
 // Composer text kept across reloads and drops until the server takes it: `draft:new`, and
 // `draft:reply:<task id>` per thread (the newest DRAFT_REPLIES), as { text, at }.
@@ -1932,7 +1933,8 @@ function render() {
   // Sending needs a socket and no submit in flight; drafts stay in their fields meanwhile.
   $('send').disabled = $('send-reply').disabled = !live || !!pending || appSending;
   if (shots.some((x) => !x.id)) $('send').disabled = true; // photos still uploading
-  $('clip').disabled = shots.length >= MAX_SHOTS || !!pending;
+  $('clip').disabled = shots.length >= MAX_SHOTS || !!pending || appSending;
+  $('prompt').readOnly = appSending;
   for (const v in views) $(v).hidden = !everOpen || (v !== r.view && !(split && v === 'list'));
   $('choose').hidden = !everOpen || !split || r.view !== 'list';
   $('choose').firstChild.textContent = r.id === 'sessions' ? 'Select a session, or start a task below.' : 'Select a task, or start one below.';
@@ -3651,7 +3653,7 @@ async function setMember(slug, email, role) {
 }
 // Who an app is shared with; full access can share it and, after a confirm, stop sharing.
 function appMembers(a, busy) {
-  const askRemove = (who) => { memberAsk = who; renderApps(); };
+  const askRemove = (who) => { memberAsk = who; render(); };
   const rows = a.members.map((m) => {
     const asking = memberAsk && memberAsk[0] === a.slug && memberAsk[1] === m.email;
     return el('li', {},
@@ -3676,7 +3678,7 @@ function appMembers(a, busy) {
 // POST `body` to `path` for app `slug` (`done` once it went), then reload apps; a failure shows on the app.
 async function appPost(slug, path, body, done) {
   appBusy = slug;
-  renderApps();
+  render();
   try {
     const r = await fetch(path, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
     if (r.ok) { appErr.delete(slug); if (done) done(); } else appErr.set(slug, (await r.text()) || `error ${r.status}`);
@@ -3711,7 +3713,7 @@ function appRow(a, now, alone) {
   // A draft's release is published through the draft, not made live bare.
   const ready = newest && newest.n > (a.active || 0) && !(a.draft && a.draft.release === newest.n) ? newest : null;
   const busy = appBusy === a.slug, asking = appAsk === a.slug && ready, err = appErr.get(a.slug);
-  const ask = (slug) => { appAsk = slug; renderApps(); };
+  const ask = (slug) => { appAsk = slug; render(); };
   const actions = readOnly ? '' : el('div', { className: 'row' },
     ready ? el('button', { type: 'button', disabled: busy || asking, onclick: () => ask(a.slug) }, `Make v${ready.n} live`) : '',
     alone ? '' : el('button', { type: 'button', onclick: () => { wantNew = true; location.hash = `#apps/${a.slug}`; } }, 'Change…'));
@@ -3842,7 +3844,7 @@ function renderBuild(slug) {
   const ul = $('build-app'), a = slug && hosted && hosted.list && hosted.list.find((x) => x.slug === slug);
   $('build-head').replaceChildren(el('div', { className: 'ttl' }, el('span', {}, slug ? (a ? a.title : slug) : 'New app')));
   $('build-hint').hidden = !!slug;
-  $('refs').disabled = shots.length >= MAX_SHOTS;
+  $('refs').disabled = shots.length >= MAX_SHOTS || appSending;
   if (!slug) { delete ul.dataset.key; ul.replaceChildren(); return; }
   if (a) { drawApps(ul, [a], true); return; }
   delete ul.dataset.key;
@@ -4238,7 +4240,7 @@ function onMessage(msg) {
       // Taken: its draft goes, unless typed on since.
       if (drafts.get(p.key).trim() === p.text) drafts.set(p.key, '');
       if (p.key !== 'draft:new') location.hash = `#task/${msg.task}`;
-      else clearShots();
+      else clearShotsOf(p.key);
       refreshSoon();
       break;
     }
@@ -4484,26 +4486,31 @@ async function attach(file) {
 function dropShot(shot) {
   if (shot.url) URL.revokeObjectURL(shot.url);
   shots = shots.filter((x) => x !== shot);
+  for (const [k, l] of keptShots) keptShots.set(k, l.filter((x) => x !== shot));
   renderShots();
 }
-function clearShots() { for (const x of shots) dropShot(x); }
+// The photos of the composer whose draft key is `key`, shown or not.
+function clearShotsOf(key) { for (const x of key === promptKey ? shots : keptShots.get(key) || []) dropShot(x); }
 function renderShots() {
+  drawShots();
+  render();
+}
+function drawShots() {
   $('shots').replaceChildren(...shots.filter((x) => x.url).map((x) => el('div', { className: `shot${x.id ? '' : ' busy'}` },
     el('img', { src: x.url, alt: '' }),
     el('button', { type: 'button', className: 'x', ariaLabel: 'Remove photo', onclick: () => dropShot(x) }, '✕'))));
   $('shots').hidden = !$('shots').children.length;
-  render();
 }
 $('clip').onclick = () => $('pick').click();
 $('pick').onchange = () => {
-  for (const f of [...$('pick').files].slice(0, MAX_SHOTS - shots.length)) attach(f);
+  takeImages($('pick').files);
   $('pick').value = '';
-  render();
 };
 // References for the new task or app: images dropped on its page or pasted into the field attach (up to
-// MAX_SHOTS); text or a link dropped off the field goes into it (on it, the field takes it itself).
+// MAX_SHOTS). Building an app, text or a link dropped off the field goes into it (on it, the field takes it itself).
 const composing = () => !$('dock').hidden && !$('new').hidden;
 function takeImages(files) {
+  if (appSending) return; // what's sent is settled
   const imgs = [...files].filter((f) => f.type.startsWith('image/')), room = MAX_SHOTS - shots.length;
   if (imgs.length < files.length) flash('only images attach');
   else if (imgs.length > room) flash(`at most ${MAX_SHOTS} images`);
@@ -4523,7 +4530,8 @@ document.addEventListener('drop', (e) => {
   const dt = e.dataTransfer;
   if (dt.files.length) { e.preventDefault(); takeImages(dt.files); return; }
   if (e.target.closest('input, textarea')) return;
-  e.preventDefault();
+  e.preventDefault(); // else a dropped link opens in place of the page
+  if (route().view !== 'build') return;
   const text = dt.getData('text/plain').trim(), f = $('prompt');
   if (!text) return;
   f.value = f.value.trim() ? `${f.value.trimEnd()}\n${text}` : text;
@@ -4592,7 +4600,7 @@ async function startApp(request, slug) {
   if (why) { flash(`error: ${why}`); render(); return; }
   drafts.set(key, '');
   if (promptKey === key) $('prompt').value = '';
-  clearShots();
+  clearShotsOf(key);
   here = { sec: null, back: slug ? `#apps/${slug}` : '#apps' }; // its page's back link
   location.hash = `#task/${task}`;
 }
@@ -4679,7 +4687,15 @@ function appDefaults() {
 function composeFor(r) {
   const a = r.view === 'build' && r.id && hosted && hosted.list && hosted.list.find((x) => x.slug === r.id);
   const c = composerFor(r.view, r.id, a && a.title);
-  if (c.key !== promptKey) { promptKey = c.key; $('prompt').value = drafts.get(c.key); }
+  if (c.key !== promptKey) {
+    keptShots.set(promptKey, shots);
+    shots = keptShots.get(c.key) || [];
+    keptShots.delete(c.key);
+    promptKey = c.key;
+    // Its text, unless it was just sent (storage keeps it until Submitted, for a send that fails).
+    $('prompt').value = pending && pending.key === c.key ? '' : drafts.get(c.key);
+    drawShots();
+  }
   $('prompt').placeholder = c.placeholder;
   $('prompt').setAttribute('aria-label', c.label);
   const want = r.view === 'build' ? appPick : taskPick, filled = appDefaults();
@@ -4726,7 +4742,7 @@ function optLabel() {
   };
   chip('worker', 'Machine', w ? workerName(w) : 'Any machine', w ? [stateDot(w)] : [], w && !w.online ? ' · offline' : '');
   $('o-worker').classList.toggle('off', !!w && !w.online);
-  chip('harness', 'Harness', pick.harness || 'Auto');
+  chip('harness', 'Harness', pick.harness || (pick === appPick ? appTaskBody('', null, pick, settings && settings.s && settings.s.apps, []).harness : 'Auto'));
   chip('model', 'Model', pick.model || 'Default model');
 }
 optLabel();
@@ -4759,10 +4775,11 @@ function showOpts(k) {
 function choose(k, value) {
   const was = { harness: pick.harness, listed: pickModels().includes(pick.model) };
   pick[k] = value;
-  if (pick === appPick) appChosen ||= k !== 'worker';
+  if (pick === appPick) appChosen = true;
   else if (k === 'harness') harnessChosen = true;
   else followDefault();
-  if (pick.harness && !pickHarnesses().includes(pick.harness)) pick.harness = ''; // the new machine doesn't run it
+  // The new machine doesn't run it: Auto, or for an app (which has no Auto) one it runs.
+  if (pick.harness && !pickHarnesses().includes(pick.harness)) pick.harness = pick === appPick ? pickHarnesses()[0] || '' : '';
   // A model belongs to its harness; one picked from a machine's list goes with a machine that doesn't list it.
   if (pick.harness !== was.harness || (k === 'worker' && was.listed && !pickModels().includes(pick.model))) pick.model = '';
   optLabel();

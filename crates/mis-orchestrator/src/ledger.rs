@@ -840,6 +840,7 @@ impl Ledger {
     /// only if given, with `images`, bound to `bound`'s app (its `thread` becomes this task) with a token
     /// of its own. It never merges: the user approves its PR. Err if no worker runs
     /// `harness` (it would wait for good), or `worker` is offline or doesn't run it.
+    #[allow(clippy::too_many_arguments)] // a task's fields, plus the worker and its app
     pub fn submit_app_task(
         &mut self,
         prompt: String,
