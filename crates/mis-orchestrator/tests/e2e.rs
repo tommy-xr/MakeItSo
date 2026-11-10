@@ -6598,20 +6598,29 @@ async fn the_mis_page_frames_a_draft_and_its_feedback_continues_the_drafts_threa
     let (status, head, page) = app_get(&apps, "/a/demo/?mis-preview=2", "").await;
     assert_eq!((status, page.as_str()), (200, "v2"));
     assert!(!head.to_ascii_lowercase().contains("set-cookie"), "{head}");
-    let from_preview = "\r\nReferer: http://127.0.0.1/a/demo/?mis-preview=2";
+    let from_preview =
+        "\r\nSec-Fetch-Dest: script\r\nReferer: http://127.0.0.1/a/demo/?mis-preview=2";
     assert_eq!(
         app_get(&apps, "/a/demo/js/app.js", from_preview).await.2,
         "v2 js"
     );
+    // A chunk its script imports names no draft; only the draft has it.
+    let from_script = "\r\nSec-Fetch-Dest: script\r\nReferer: http://127.0.0.1/a/demo/js/app.js";
     assert_eq!(
-        app_get(&apps, "/a/demo/js/chunk-2.js", "").await.2,
+        app_get(&apps, "/a/demo/js/chunk-2.js", from_script).await.2,
         "v2 chunk"
     );
+    assert_eq!(app_get(&apps, "/a/demo/js/chunk-2.js", "").await.0, 404);
+    // Opened normally, or navigated to from the preview: live.
     assert_eq!(app_get(&apps, "/a/demo/", "").await.2, "v1");
+    let navigated = "\r\nSec-Fetch-Dest: iframe\r\nReferer: http://127.0.0.1/a/demo/?mis-preview=2";
+    assert_eq!(app_get(&apps, "/a/demo/", navigated).await.2, "v1");
     assert_eq!(
         app_get(&apps, "/a/demo/js/app.js", "").await.2,
         "console.log(1)"
     );
+    // A preview of a draft that isn't the current one: as Try it.
+    assert_eq!(app_get(&apps, "/a/demo/?mis-preview=1", "").await.0, 404);
     // Its writes (mis.js names the draft from the URL) land in the draft's copy only.
     let in_preview = "\r\nX-Mis-Draft: 2";
     let put = put_op("shared", "r1", 0, serde_json::json!({"ppm": 2.4}));

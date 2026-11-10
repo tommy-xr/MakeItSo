@@ -33,6 +33,9 @@ pub struct Member {
     pub role: AppRole,
     /// The owner is trying the app's draft, this release: its files and a copy of the records.
     pub draft: Option<u32>,
+    /// A file one of the app's pages loads, not a page: it may come from the draft when only the
+    /// draft has it (see `apps_http::draft_only`).
+    pub loaded: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,13 +107,16 @@ pub fn preview_of(query: Option<&str>, referer: Option<&str>, slug: &str) -> Opt
             .and_then(|(_, v)| v.parse().ok())
     };
     let page = || {
-        let uri: axum::http::Uri = referer?.parse().ok()?;
-        uri.path()
-            .starts_with(&format!("/a/{slug}/"))
-            .then(|| param(uri.query()?))
-            .flatten()
+        let uri: axum::http::Uri = referer.filter(|r| within(r, slug))?.parse().ok()?;
+        param(uri.query()?)
     };
     query.and_then(param).or_else(page)
+}
+
+/// Whether `url` (a Referer) is a page or file of app `slug`.
+pub fn within(url: &str, slug: &str) -> bool {
+    let uri = url.parse::<axum::http::Uri>();
+    uri.is_ok_and(|u| u.path().starts_with(&format!("/a/{slug}/")))
 }
 
 /// The draft release `Cookie` header `cookies` names for `slug`, if any.
@@ -292,6 +298,8 @@ pub fn app_of(path: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
 
+    use super::*;
+
     #[test]
     fn a_preview_is_its_url_and_the_files_its_page_loads() {
         assert_eq!(preview_of(Some("mis-preview=2"), None, "pool"), Some(2));
@@ -305,9 +313,10 @@ mod tests {
             None
         );
         assert_eq!(preview_of(Some("mis-preview=x"), None, "pool"), None);
+        assert!(
+            within("http://h/a/pool/js/app.js", "pool") && !within("http://h/a/pool2/", "pool")
+        );
     }
-
-    use super::*;
 
     #[test]
     fn owners_and_editors_try_the_current_draft_named_by_its_cookie() {

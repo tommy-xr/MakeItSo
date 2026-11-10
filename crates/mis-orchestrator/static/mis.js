@@ -110,7 +110,7 @@
   const slug = location.pathname.split('/')[2];
   // Set by the apps listener when an owner or editor tries the app's draft; or a preview's URL
   // (`?mis-preview=<n>`, framed by the MIS page), which stores nothing.
-  const draft = mocked ? undefined : (new RegExp(`(?:^|; )mis-draft-${slug}=(\\d+)`).exec(document.cookie || '') || [])[1] || params.get('mis-preview') || undefined;
+  const draft = mocked ? undefined : params.get('mis-preview') || (new RegExp(`(?:^|; )mis-draft-${slug}=(\\d+)`).exec(document.cookie || '') || [])[1];
   const menu = platformMenu();
   if (mocked) {
     const src = new URL('mis-mock.js', document.currentScript.src);
