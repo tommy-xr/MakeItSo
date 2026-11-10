@@ -148,19 +148,31 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .box .go { flex: none; display: grid; place-items: center; width: 2.5rem; height: 2.5rem; min-height: 0; padding: 0; border-radius: 50%; }
   .go svg { width: 1.125rem; height: 1.125rem; }
   button.go:disabled { opacity: .35; }
-  /* Above the pill: the harness chip, a reply's error, a session's delivery note. */
+  /* Above the pill: where a new task runs, a reply's error, a session's delivery note. */
   .ctx { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .75rem; margin: 0 .25rem .5rem; font-size: .8125rem; overflow-wrap: anywhere; }
   .ctx p { flex: 1 1 10rem; margin: 0; }
   .ctx:not(:has(> :not([hidden]))) { display: none; }
-  /* Harness/model chip; its ::after widens the tap target. The popover opens above it. */
-  #opt { position: relative; max-width: 100%; min-height: 0; height: 1.75rem; padding: 0 .625rem; border-radius: 999px; background: var(--raised); color: var(--soft); font: 500 .75rem/1 var(--sans); }
-  #opt span { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-  #opt::after { content: ""; position: absolute; inset: -.5rem -.25rem; }
-  #opt[aria-expanded=true] { color: var(--fg); background: var(--seg-on); }
-  #opts { position: absolute; z-index: 1; left: 0; bottom: calc(100% + .375rem); display: grid; gap: .5rem; width: min(20rem, 100%); box-sizing: border-box; padding: .625rem; border-radius: 1rem; background: var(--card); box-shadow: var(--shadow); animation: rise .15s ease-out; }
+  /* Machine › harness › model: one row of chips that shrink (ellipsis) to fit a phone; ::after widens each tap target.
+     A chip opens its menu above the row. */
+  #opts { display: flex; align-items: center; gap: .25rem; min-width: 0; max-width: 100%; color: var(--faint); font-size: .75rem; }
+  .optc { position: relative; display: flex; align-items: center; gap: .375rem; flex: 0 1 auto; min-width: 2.5rem; min-height: 0; height: 1.75rem; padding: 0 .625rem; border-radius: 999px; background: var(--raised); color: var(--soft); font: 500 .75rem/1 var(--sans); }
+  .optc .v { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  #o-harness { flex: none; } /* short names (Auto, claude, codex): the machine and model give way instead */
+  #o-model { min-width: 6.75rem; } /* room for e.g. `gpt-5-codex ▾` before the machine gives way */
+  .optc .off { flex: none; }
+  .optc::after { content: ""; position: absolute; inset: -.5rem -.125rem; }
+  .optc[aria-expanded=true] { color: var(--fg); background: var(--seg-on); }
+  #opt-menu { position: absolute; z-index: 1; bottom: calc(100% + .375rem); display: grid; min-width: 10rem; max-width: min(20rem, 100%); box-sizing: border-box; padding: .375rem; border-radius: 1rem; background: var(--card); box-shadow: var(--shadow); animation: rise .15s ease-out; }
+  #opt-menu .oi { display: flex; align-items: center; gap: .625rem; min-height: 2.5rem; padding: 0 .75rem; border-radius: .625rem; background: none; color: var(--fg2); font: 400 .9375rem var(--sans); text-align: left; }
+  #opt-menu .oi:hover { background: var(--hover); }
+  #opt-menu .oi[aria-pressed=true] { color: var(--fg); font-weight: 600; }
+  #opt-menu .oi[aria-pressed=true]::after { content: "✓"; margin-left: auto; padding-left: .75rem; color: var(--accent); }
+  /* A machine that is offline (or left) dims and says so; "Any machine" keeps the dots' column. */
+  .optc.off, #opt-menu .off { color: var(--dim); }
+  #opt-menu .off { font-size: .8125rem; font-weight: 400; }
+  .sd.none { visibility: hidden; }
   /* 16px: iOS zooms the page into smaller fields. */
-  #opts select, #opts input { font-size: 1rem; }
-  #opts input { min-height: 2.5rem; padding: 0 .75rem; width: 100%; }
+  #model { min-height: 2.5rem; margin-top: .25rem; padding: 0 .75rem; width: 100%; font-size: 1rem; }
   @keyframes rise { from { opacity: 0; transform: translateY(.25rem); } }
   /* Menu: a sheet from the left over a dimmed page; Escape, a backdrop tap or ✕ close it. */
   #menu { inset: 0; margin: 0 auto 0 0; width: min(18rem, 86vw); max-width: none; height: 100%; max-height: none; padding: 0; border: 0; color: var(--fg); background: var(--card); box-shadow: 12px 0 40px rgba(0, 0, 0, .3); }
@@ -943,11 +955,11 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   <form id="new" class="composer">
     <div id="shots" class="shots" hidden></div>
     <div class="ctx">
-      <button type="button" id="opt" aria-expanded="false" aria-controls="opts"><span>Auto · any machine ▾</span></button>
-      <div id="opts" role="group" aria-label="Harness and model" hidden>
-        <select id="harness" aria-label="harness"><option value="">Auto</option></select>
-        <input id="model" aria-label="model" placeholder="Model (optional)" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <div id="opts" role="group" aria-label="Where it runs">
+        <button type="button" id="o-worker" class="optc" aria-expanded="false" aria-controls="opt-menu"></button><span aria-hidden="true">›</span><button type="button" id="o-harness" class="optc" aria-expanded="false" aria-controls="opt-menu"></button><span aria-hidden="true">›</span><button type="button" id="o-model" class="optc" aria-expanded="false" aria-controls="opt-menu"></button>
       </div>
+      <div id="opt-menu" role="group" hidden></div>
+      <input id="model" aria-label="Other model" placeholder="Other model" autocapitalize="off" autocorrect="off" spellcheck="false" hidden>
     </div>
     <div class="box"><button type="button" id="clip" class="clip" aria-label="Attach photos"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><input type="file" id="pick" accept="image/*" multiple hidden><textarea id="prompt" rows="1" aria-label="new task" placeholder="Start a task or ask anything" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button><button id="send" class="go" aria-label="Submit" title="Submit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button></div>
   </form>
@@ -4091,10 +4103,10 @@ function onMessage(msg) {
       if (num(msg.now_ms) !== null) skew = msg.now_ms - Date.now();
       // The server's order is unstable; sort so rows don't jump on refresh.
       workers = [...msg.workers].sort((a, b) => a.info.hostname.localeCompare(b.info.hostname) || a.id.localeCompare(b.id));
-      const harnesses = [...new Set(msg.workers.flatMap((w) => w.info.harnesses))].sort();
-      const sel = $('harness'), keep = sel.value;
-      sel.replaceChildren(el('option', { value: '' }, 'Auto'), ...harnesses.map((h) => el('option', { value: h }, h)));
-      sel.value = harnesses.includes(keep) ? keep : '';
+      // The chosen machine as now seen; one that left stays chosen, offline (its task waits for it).
+      if (pick.worker) pick.worker = workers.find((w) => w.id === pick.worker.id) || { ...pick.worker, online: false, busy: false };
+      // A harness no longer offered goes back to Auto, and its model with it.
+      if (pick.harness && !pickHarnesses().includes(pick.harness)) pick.harness = pick.model = '';
       optLabel();
       break;
     }
@@ -4367,7 +4379,7 @@ $('new').onsubmit = (e) => {
   const prompt = $('prompt').value.trim();
   if (!prompt || pending) return;
   pending = { key: 'draft:new', text: prompt };
-  send({ type: 'submit', prompt, cwd: null, harness: $('harness').value || null, model: $('model').value.trim() || null, images: shots.map((x) => x.id) });
+  send({ type: 'submit', prompt, cwd: null, harness: pick.harness || null, model: pick.model || null, worker: pick.worker ? pick.worker.id : null, images: shots.map((x) => x.id) });
   $('prompt').value = '';
   render();
 };
@@ -4434,14 +4446,90 @@ for (const f of composerFields) {
   });
 }
 
-// Harness and model behind one chip: `Auto · any machine ▾`, `codex ▾`, `claude · opus ▾`; a popover holds the fields.
-function optLabel() { $('opt').firstChild.textContent = `${[$('harness').value || 'Auto', $('model').value.trim() || (!$('harness').value && 'any machine')].filter(Boolean).join(' · ')} ▾`; }
-function showOpts(on) { $('opts').hidden = !on; $('opt').setAttribute('aria-expanded', String(on)); }
-$('opt').onclick = () => { const on = $('opts').hidden; showOpts(on); if (on) $('harness').focus(); };
-$('harness').addEventListener('change', optLabel);
-$('model').addEventListener('input', optLabel);
-document.addEventListener('pointerdown', (e) => { if (!$('opts').hidden && !e.target.closest('#opts, #opt')) showOpts(false); });
-$('new').addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('opts').hidden) { e.preventDefault(); showOpts(false); $('opt').focus(); } });
+// Where a new task runs, as chips `Any machine ▾ › Auto ▾ › Default model ▾`, each opening a list above them.
+// Unset is the default: any machine, Auto (the planner picks the harness), the harness's own model. Kept until reload.
+// `worker` is the chosen machine's summary as last seen, so one that goes offline or leaves stays chosen.
+const pick = { worker: null, harness: '', model: '' };
+let menuFor = ''; // the chip whose list is open: 'worker', 'harness', 'model' or ''
+const modelField = $('model'); // moves into the model list, so it's held here
+// Hostname, plus its id's start where two workers share one (as the planner names them): `mac-1a2b3c4d`.
+const workerName = (w) => w.info.hostname + (workers.some((x) => x.id !== w.id && x.info.hostname === w.info.hostname) ? `-${w.id.slice(0, 8)}` : '');
+// The chosen machine, else every machine: their harnesses, and the models they list for the harness
+// (under Auto, the one a model makes the server run: claude, or on a chosen machine without it, its first).
+const pickFrom = () => (pick.worker ? [pick.worker] : workers);
+const pickHarnesses = () => [...new Set(pickFrom().flatMap((w) => w.info.harnesses))].sort();
+const autoHarness = () => (!pick.worker || pick.worker.info.harnesses.includes('claude') ? 'claude' : pick.worker.info.harnesses[0]);
+const pickModels = () => [...new Set(pickFrom().flatMap((w) => w.info.models[pick.harness || autoHarness()] || []))];
+// A worker's status dot, its state as text; without a worker, an empty one keeping the column.
+function stateDot(w) {
+  const state = w ? workerState(w) : '';
+  const d = el('span', { className: `sd ${state || 'none'}`, title: state });
+  if (state) { d.setAttribute('role', 'img'); d.setAttribute('aria-label', state); } else d.setAttribute('aria-hidden', 'true');
+  return d;
+}
+function optLabel() {
+  const w = pick.worker;
+  // `pre` and `post` sit outside the truncated text: a dot, and " · offline" kept in view.
+  const chip = (k, name, text, pre = [], post = '') => {
+    $(`o-${k}`).replaceChildren(...pre, el('span', { className: 'v' }, text), ...(post ? [el('span', { className: 'off' }, post)] : []), ' ▾');
+    $(`o-${k}`).setAttribute('aria-label', `${name}: ${text}${post}`);
+  };
+  chip('worker', 'Machine', w ? workerName(w) : 'Any machine', w ? [stateDot(w)] : [], w && !w.online ? ' · offline' : '');
+  $('o-worker').classList.toggle('off', !!w && !w.online);
+  chip('harness', 'Harness', pick.harness || 'Auto');
+  chip('model', 'Model', pick.model || 'Default model');
+}
+optLabel();
+// Open chip `k`'s list (falsy: close it): toggle buttons, the chosen one pressed. Model's ends in a field for one not listed.
+function showOpts(k) {
+  menuFor = k || '';
+  for (const c of ['worker', 'harness', 'model']) $(`o-${c}`).setAttribute('aria-expanded', String(c === menuFor));
+  const m = $('opt-menu');
+  m.hidden = !menuFor;
+  if (!menuFor) return;
+  const on = (value) => (k === 'worker' ? (pick.worker && pick.worker.id) === (value && value.id) : pick[k] === value);
+  const item = (value, text, ...kids) => {
+    const b = el('button', { type: 'button', className: 'oi', onclick: () => choose(k, value) }, ...kids.slice(0, 1), el('span', { className: 'one' }, text), ...kids.slice(1));
+    b.setAttribute('aria-pressed', String(on(value)));
+    return b;
+  };
+  const gone = pick.worker && !workers.some((w) => w.id === pick.worker.id) ? [pick.worker] : [];
+  const machine = (w) => item(w, workerName(w), stateDot(w), ...(w.online ? [] : [el('span', { className: 'off' }, 'offline')]));
+  const listed = pickModels();
+  m.setAttribute('aria-label', { worker: 'Machine', harness: 'Harness', model: 'Model' }[k]);
+  m.replaceChildren(...(k === 'worker' ? [item(null, 'Any machine', stateDot()), ...[...workers, ...gone].map(machine)]
+    : k === 'harness' ? [item('', 'Auto'), ...pickHarnesses().map((h) => item(h, h))]
+    : [item('', 'Default model'), ...listed.map((x) => item(x, x)), modelField]));
+  modelField.hidden = k !== 'model';
+  modelField.value = listed.includes(pick.model) ? '' : pick.model;
+  const chip = $(`o-${k}`);
+  m.style.left = `${Math.max(0, Math.min(chip.offsetLeft, m.offsetParent.clientWidth - m.offsetWidth))}px`;
+  (m.querySelector('[aria-pressed=true]') || modelField).focus();
+}
+function choose(k, value) {
+  const was = { harness: pick.harness, listed: pickModels().includes(pick.model) };
+  pick[k] = value;
+  if (pick.harness && !pickHarnesses().includes(pick.harness)) pick.harness = ''; // the new machine doesn't run it
+  // A model belongs to its harness; one picked from a machine's list goes with a machine that doesn't list it.
+  if (pick.harness !== was.harness || (k === 'worker' && was.listed && !pickModels().includes(pick.model))) pick.model = '';
+  optLabel();
+  showOpts('');
+  $(`o-${k}`).focus();
+}
+for (const k of ['worker', 'harness', 'model']) $(`o-${k}`).onclick = () => showOpts(menuFor === k ? '' : k);
+modelField.addEventListener('input', () => {
+  pick.model = modelField.value.trim();
+  for (const b of $('opt-menu').querySelectorAll('.oi')) b.setAttribute('aria-pressed', 'false');
+  optLabel();
+});
+// Enter in the field takes the model typed, not the form.
+modelField.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); choose('model', pick.model); } });
+// A tap elsewhere, or Tab out of the list and chips, closes it; Esc too, back to its chip.
+document.addEventListener('pointerdown', (e) => { if (menuFor && !e.target.closest('#opt-menu, #opts')) showOpts(''); });
+// Focus leaving to nowhere closes it only once the list is out of view (the composer hid), not on a tap inside.
+for (const g of [$('opt-menu'), $('opts')]) g.addEventListener('focusout', (e) => { if (menuFor && (e.relatedTarget ? !e.relatedTarget.closest('#opt-menu, #opts') : !$('opt-menu').offsetParent)) showOpts(''); });
+window.addEventListener('hashchange', () => showOpts('')); // another view: its shortcuts work again
+$('new').addEventListener('keydown', (e) => { if (e.key === 'Escape' && menuFor) { e.preventDefault(); const k = menuFor; showOpts(''); $(`o-${k}`).focus(); } });
 
 // Keyboard shortcuts: c a new task, j/k the next/previous task, Esc back (or out of a field), Cmd/Ctrl+B the menu.
 const mac = /Mac|iPhone|iPad/.test(navigator.platform); // Cmd+B there; Ctrl+B moves the cursor in a field
@@ -4475,7 +4563,7 @@ document.addEventListener('keydown', (e) => {
     if (back) { e.preventDefault(); location.hash = back.getAttribute('href'); }
     return;
   }
-  if (field || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (field || menuFor || e.metaKey || e.ctrlKey || e.altKey) return; // keys in an open chip list stay there
   if (e.key === 'c') { e.preventDefault(); if (route().view === 'list') { wantNew = true; render(); } else location.hash = '#new'; } // Home: no extra history entry
   else if (e.key === 'j' || e.key === 'k') { e.preventDefault(); step(e.key === 'j' ? 1 : -1); }
 });

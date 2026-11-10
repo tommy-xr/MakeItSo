@@ -121,6 +121,7 @@ async fn run(client: &mut Ws, reply_to: Option<TaskId>) -> TaskSummary {
         model: None,
         reply_to,
         images: vec![],
+        worker: None,
     };
     send(client, &submit).await;
     let wait = async {

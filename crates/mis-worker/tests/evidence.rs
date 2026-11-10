@@ -131,6 +131,7 @@ async fn attached_files_are_stored_listed_and_served_inert() {
         model: None,
         reply_to: None,
         images: vec![],
+        worker: None,
     };
     send(&mut client, &submit).await;
     // Finished arrives as an event; then ask for the task's status.

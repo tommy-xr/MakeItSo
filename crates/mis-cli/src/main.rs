@@ -1281,6 +1281,7 @@ async fn run(args: Args) -> Result<Option<TaskSummary>> {
                     model: model.clone(),
                     reply_to: None,
                     images: vec![],
+                    worker: None,
                 },
             )
             .await?;
@@ -1320,6 +1321,7 @@ async fn run(args: Args) -> Result<Option<TaskSummary>> {
                     model: None,
                     reply_to: Some(parent),
                     images: vec![],
+                    worker: None,
                 },
             )
             .await?;

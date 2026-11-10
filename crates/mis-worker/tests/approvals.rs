@@ -113,6 +113,7 @@ async fn run(decision: Decision) -> (TaskSummary, Approval) {
         model: None,
         reply_to: None,
         images: vec![],
+        worker: None,
     };
     send(&mut client, &submit).await;
     let task = loop {

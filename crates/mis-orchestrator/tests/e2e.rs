@@ -112,6 +112,7 @@ async fn submit_assign_finish() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -207,6 +208,7 @@ async fn model_reaches_worker_and_status() {
                 model: model.map(String::from),
                 reply_to: None,
                 images: vec![],
+                worker: None,
             },
         )
         .await;
@@ -268,6 +270,7 @@ async fn harness_mismatch_stays_queued() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -279,6 +282,44 @@ async fn harness_mismatch_stays_queued() {
         panic!()
     };
     assert_eq!(tasks[0].status, TaskStatus::Queued);
+}
+
+#[tokio::test]
+async fn submit_to_a_chosen_worker_runs_only_there() {
+    let base = start().await;
+    let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let mut wa = join(&base, a, "claude", vec![]).await;
+    let mut wb = join(&base, b, "claude", vec![]).await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    let submit = |harness: Option<&str>| ClientMsg::Submit {
+        prompt: "hi".into(),
+        cwd: None,
+        harness: harness.map(Into::into),
+        model: None,
+        reply_to: None,
+        images: vec![],
+        worker: Some(b),
+    };
+    send(&mut client, &submit(None)).await;
+    let ServerMsg::Submitted { task } = recv(&mut client).await else {
+        panic!()
+    };
+    let OrchMsg::Assign { task: got, .. } = recv(&mut wb).await else {
+        panic!()
+    };
+    assert_eq!(got.id, task);
+    let idle = tokio::time::timeout(std::time::Duration::from_millis(300), wa.next()).await;
+    assert!(idle.is_err(), "the other worker got {idle:?}");
+    // A harness the chosen worker doesn't run is refused, not queued.
+    send(&mut client, &submit(Some("codex"))).await;
+    let ServerMsg::Error { message } = recv(&mut client).await else {
+        panic!()
+    };
+    // Both are named `w`: it is told apart by its id.
+    assert_eq!(
+        message,
+        format!("w-{} doesn't run codex", &b.to_string()[..8])
+    );
 }
 
 #[tokio::test]
@@ -297,6 +338,7 @@ async fn worker_disconnect_fails_task_and_notifies() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -341,6 +383,7 @@ async fn events_from_wrong_worker_are_ignored() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -457,6 +500,7 @@ async fn read_token_sees_but_cannot_submit() {
         model: None,
         reply_to: None,
         images: vec![],
+        worker: None,
     };
     send(&mut client, &submit).await;
     let reply: ServerMsg = recv(&mut client).await;
@@ -708,6 +752,7 @@ async fn reconnect_keeps_reported_task_and_fails_unreported() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -804,6 +849,7 @@ async fn disconnect_then_reconnect_within_grace_keeps_task() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -848,6 +894,7 @@ async fn disconnect_then_reconnect_within_grace_keeps_task() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -875,6 +922,7 @@ async fn show_returns_transcript() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -960,6 +1008,7 @@ async fn status_shows_activity_tokens_and_timing() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -1060,6 +1109,7 @@ async fn planner_routes_to_codex_and_streams_its_output() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -1134,6 +1184,7 @@ async fn planner_answers_trivial_question_without_a_worker() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -1321,6 +1372,7 @@ async fn out_of_usage_worker_waits_until_its_limit_lifts() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -1394,6 +1446,7 @@ async fn finished_task_gets_summary_but_planner_answer_does_not() {
         model: None,
         reply_to: None,
         images: vec![],
+        worker: None,
     };
     send(&mut client, &submit(None)).await;
     let ServerMsg::Submitted { task: answered } = recv(&mut client).await else {
@@ -1460,6 +1513,7 @@ async fn status_event_sets_activity_and_is_kept() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -1511,6 +1565,7 @@ async fn pr_link_in_agent_text_reaches_status_and_show() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -1567,6 +1622,7 @@ async fn reported_evidence_reaches_status_and_show() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -1694,6 +1750,7 @@ async fn mcp_lists_tools_and_shows_a_finished_task() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -1773,6 +1830,7 @@ async fn reply(client: &mut Ws, parent: TaskId, text: &str) -> TaskId {
             model: None,
             reply_to: Some(parent),
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -1799,6 +1857,7 @@ async fn reply_resumes_the_session_on_the_same_worker() {
             model: Some("haiku".into()),
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -1915,6 +1974,7 @@ async fn reply_to_a_planner_answer_is_planned_with_context() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -1956,6 +2016,7 @@ async fn pr_status_reaches_status_and_show_and_refresh_reaches_the_worker() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         },
     )
     .await;
@@ -2033,6 +2094,7 @@ async fn failed_and_unread_tasks_need_attention_until_seen() {
             model: None,
             reply_to: None,
             images: vec![],
+            worker: None,
         };
         send(&mut client, &submit).await;
         let ServerMsg::Submitted { task } = recv(&mut client).await else {
@@ -2156,6 +2218,7 @@ async fn fail_task(client: &mut Ws, worker: &mut Ws, prompt: &str) -> TaskId {
         model: None,
         reply_to: None,
         images: vec![],
+        worker: None,
     };
     send(client, &submit).await;
     let ServerMsg::Submitted { task } = recv(client).await else {
@@ -2411,6 +2474,7 @@ async fn attached_image_reaches_the_agent_as_a_file() {
         model: None,
         reply_to: None,
         images,
+        worker: None,
     };
     // A fifth image, or one never uploaded, is refused.
     for (images, why) in [
@@ -2539,6 +2603,7 @@ async fn submit_claude(client: &mut Ws, worker: &mut Ws, prompt: &str) -> TaskId
         model: None,
         reply_to: None,
         images: vec![],
+        worker: None,
     };
     send(client, &submit).await;
     let ServerMsg::Submitted { task } = recv(client).await else {
@@ -2796,6 +2861,7 @@ async fn planner_routes_to_the_named_worker() {
         model: None,
         reply_to: None,
         images: vec![],
+        worker: None,
     };
     send(&mut client, &submit).await;
     let ServerMsg::Submitted { task } = recv(&mut client).await else {
@@ -2966,6 +3032,7 @@ async fn workers_learn_the_version_and_a_pending_update_takes_no_tasks() {
         model: None,
         reply_to: None,
         images: vec![],
+        worker: None,
     };
     send(&mut client, &submit).await;
     let ServerMsg::Submitted { task } = recv(&mut client).await else {

@@ -459,6 +459,10 @@ pub enum ClientMsg {
         /// Uploaded images (`POST /api/upload` ids) to attach, at most `MAX_IMAGES`.
         #[serde(default)]
         images: Vec<Uuid>,
+        /// Run only on this worker, waiting while it is offline; None = any. Ignored
+        /// with `reply_to`: a reply stays on its thread's worker.
+        #[serde(default)]
+        worker: Option<WorkerId>,
     },
     /// Stream all task events from now on.
     Subscribe,
@@ -1146,7 +1150,9 @@ mod tests {
         let submit: ClientMsg =
             serde_json::from_str(r#"{"type":"submit","prompt":"p","cwd":null,"harness":null}"#)
                 .unwrap();
-        assert!(matches!(submit, ClientMsg::Submit { images, .. } if images.is_empty()));
+        assert!(
+            matches!(submit, ClientMsg::Submit { images, worker, .. } if images.is_empty() && worker.is_none())
+        );
         let assign: OrchMsg = serde_json::from_str(
             r#"{"type":"assign","task":{"id":"00000000-0000-0000-0000-000000000000",
                 "prompt":"p","cwd":null,"harness":"claude"}}"#,
