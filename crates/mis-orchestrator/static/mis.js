@@ -84,7 +84,6 @@
   } else {
     globalThis.mis = front(Promise.resolve(client(`/a/${slug}/api/v1/`, draft)));
   }
-  if (typeof document === 'object' && document.addEventListener) onBody(() => menu.start());
 
   // `fn` once the page's body exists.
   function onBody(fn) {
@@ -288,4 +287,7 @@
     }
     return parts.join(' > ');
   }
+
+  // Last: everything it uses is defined by now.
+  if (typeof document === 'object' && document.addEventListener) onBody(() => menu.start());
 })();
