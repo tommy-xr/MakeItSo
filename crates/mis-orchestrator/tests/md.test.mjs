@@ -1,6 +1,7 @@
 // The page's pure renderers (index.html): markdown between `md:begin` and `md:end`, evidence helpers between `ev:begin`
 // and `ev:end`, diff helpers between `diff:begin` and `diff:end`, notes helpers between `notes:begin` and `notes:end`,
-// the network check between `net:begin` and `net:end`. Run: node --test crates/mis-orchestrator/tests
+// the network check between `net:begin` and `net:end`, the app composer between `apps:begin` and `apps:end`.
+// Run: node --test crates/mis-orchestrator/tests
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -15,6 +16,8 @@ const df = new Function(`${diffBlock}; return { patchRows, pathParts, diffOffer,
 const notesBlock = page.slice(page.indexOf('// notes:begin'), page.indexOf('// notes:end'));
 const netBlock = page.slice(page.indexOf('// net:begin'), page.indexOf('// net:end'));
 const awayStatus = new Function(`${netBlock}; return awayStatus;`)();
+const appsBlock = page.slice(page.indexOf('// apps:begin'), page.indexOf('// apps:end'));
+const ap = new Function(`${appsBlock}; return { composerFor, appTaskBody };`)();
 const nt = { ...new Function(`${notesBlock}; return { noteFront, noteAuthor, noteRows, projectDir, projectActive, projectFiles, projectFind, repoHref };`)(), notePath: new Function(`${block}; return notePath;`)() };
 
 // Every tag in the output, e.g. ['p', 'a', 'code'].
@@ -410,4 +413,24 @@ test('only a proxy page counts as the orchestrator being away', () => {
   assert.equal(awayStatus(504, null), false);
   assert.equal(awayStatus(404, 'text/html'), false);
   assert.equal(awayStatus(200, 'application/json'), false);
+});
+
+test('the composer builds or changes an app on the apps view, each with its own draft', () => {
+  assert.equal(ap.composerFor('list', null).key, 'draft:new');
+  assert.equal(ap.composerFor('apps', null).placeholder, 'Start a task or ask anything');
+  const made = ap.composerFor('build', null);
+  assert.equal(made.key, 'draft:app');
+  assert.match(made.placeholder, /^Create an app: what should it do\?/);
+  assert.deepEqual(ap.composerFor('build', 'pool', 'Pool'), { key: 'draft:app:pool', placeholder: 'Change Pool: what should change?', label: 'change Pool' });
+  assert.equal(ap.composerFor('build', 'pool').placeholder, 'Change pool: what should change?');
+});
+
+test('an app task runs where the chips say, else on Settings\' apps harness, with its images', () => {
+  const apps = { harness: 'codex', model: 'gpt-5-codex', repo: '~/apps' };
+  const img = '00000000-0000-4000-8000-000000000001';
+  assert.deepEqual(ap.appTaskBody('Track chlorine.', null, { worker: null, harness: '', model: '' }, apps, [img]),
+    { request: 'Track chlorine.', slug: null, change: false, harness: 'codex', model: null, worker: null, images: [img] });
+  assert.deepEqual(ap.appTaskBody('Add pH.', 'pool', { worker: { id: 'w1' }, harness: 'claude', model: 'opus' }, apps, []),
+    { request: 'Add pH.', slug: 'pool', change: true, harness: 'claude', model: 'opus', worker: 'w1', images: [] });
+  assert.equal(ap.appTaskBody('x', null, { worker: null, harness: '', model: '' }, null, []).harness, 'claude'); // Settings unread
 });
