@@ -408,8 +408,8 @@ async fn session(
     ev_tx: &mpsc::Sender<(TaskId, AgentEvent)>,
     c: &mut Conn,
 ) -> Result<Ended> {
-    // An assignment carries up to MAX_IMAGES base64 images in one frame.
-    let room = Some(MAX_IMAGES * MAX_IMAGE_BYTES * 4 / 3 + (1 << 20));
+    // An assignment carries up to MAX_ATTACHED_BYTES of base64 uploads in one frame, plus its prompt.
+    let room = Some(MAX_ATTACHED_BYTES * 4 / 3 + (4 << 20));
     let config = WebSocketConfig::default()
         .max_message_size(room)
         .max_frame_size(room);
@@ -575,6 +575,7 @@ fn handle_incoming(
             Ok(OrchMsg::Assign {
                 task,
                 images,
+                files,
                 token,
             }) => {
                 if !c.running.insert(task.id) {
@@ -586,9 +587,9 @@ fn handle_incoming(
                 c.cancels.insert(task.id, cancel);
                 let ctx = ctx.clone();
                 let tx = ev_tx.clone();
-                tokio::spawn(
-                    async move { run_task(&ctx, task, images, token, tx, cancelled).await },
-                );
+                tokio::spawn(async move {
+                    run_task(&ctx, task, (images, files), token, tx, cancelled).await
+                });
             }
             Ok(OrchMsg::Cancel { task }) => match c.cancels.remove(&task) {
                 Some(cancel) => {
@@ -832,7 +833,8 @@ async fn deliver_open(
     }
     if images {
         return fail(
-            "images can't go into a session open in a terminal; send the text alone".into(),
+            "images and files can't go into a session open in a terminal; send the text alone"
+                .into(),
         );
     }
     let started = AgentEvent::Started {
@@ -884,17 +886,17 @@ fn session_state(harness: &str, id: uuid::Uuid) -> std::result::Result<SessionSt
 async fn run_task(
     ctx: &Ctx,
     task: Task,
-    images: Vec<ImageFile>,
+    attached: Attached,
     token: Option<String>,
     tx: mpsc::Sender<(TaskId, AgentEvent)>,
     cancelled: oneshot::Receiver<()>,
 ) {
     let id = task.id;
-    let had_images = !images.is_empty();
+    let had_images = !attached.0.is_empty() || !attached.1.is_empty();
     // Where it started in its repo, until its diff is sent.
     let base = Mutex::new(None);
     let cancelled = tokio::select! {
-        () = run(ctx, task, images, token, &tx, &base) => false,
+        () = run(ctx, task, attached, token, &tx, &base) => false,
         // Err: the sender is gone, so no cancel can come; let the run finish.
         Ok(()) = cancelled => true,
     };
@@ -909,7 +911,10 @@ async fn run_task(
     }
 }
 
-/// Attached images live in a dir of their own until the task ends. No shared
+/// A task's attached images and documents.
+type Attached = (Vec<ImageFile>, Vec<AttachedFile>);
+
+/// Attached images and documents live in a dir of their own until the task ends. No shared
 /// parent: on a multi-user /tmp another user's would lock us out.
 fn image_dir(id: TaskId) -> PathBuf {
     std::env::temp_dir().join(format!("mis-task-{id}"))
@@ -938,7 +943,7 @@ async fn send_diff(
 async fn run(
     ctx: &Ctx,
     task: Task,
-    images: Vec<ImageFile>,
+    (images, docs): Attached,
     token: Option<String>,
     tx: &mpsc::Sender<(TaskId, AgentEvent)>,
     base: &Mutex<Option<DiffBase>>,
@@ -959,14 +964,16 @@ async fn run(
     };
     // A session on this disk runs in its own folder, on its own model.
     let (cwd, model) = match &task.send_to {
-        Some(to) => match session_cwd(ctx, &task, to, !images.is_empty(), tx).await {
-            Ok(Placed::Run(cwd, model)) => (Ok(cwd), model),
-            Ok(Placed::Delivered(ev)) => {
-                let _ = tx.send((id, ev)).await;
-                return;
+        Some(to) => {
+            match session_cwd(ctx, &task, to, !images.is_empty() || !docs.is_empty(), tx).await {
+                Ok(Placed::Run(cwd, model)) => (Ok(cwd), model),
+                Ok(Placed::Delivered(ev)) => {
+                    let _ = tx.send((id, ev)).await;
+                    return;
+                }
+                Err(why) => (Err(why), None),
             }
-            Err(why) => (Err(why), None),
-        },
+        }
         None => (roots::resolve_cwd(&ctx.roots, task.cwd.as_deref()), None),
     };
     let model = task.model.clone().or(model);
@@ -979,16 +986,18 @@ async fn run(
         }
     };
     let image_dir = image_dir(id);
-    let image_paths = match images.is_empty() {
-        true => vec![],
-        false => match mis_agent::write_images(&image_dir, &images) {
-            Ok(paths) => paths,
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&image_dir);
-                let _ = tx.send(fail(format!("attached images: {e:#}"))).await;
-                return;
-            }
-        },
+    let written = match images.is_empty() && docs.is_empty() {
+        true => Ok((vec![], vec![])),
+        false => mis_agent::write_images(&image_dir, &images)
+            .and_then(|i| Ok((i, mis_agent::write_files(&image_dir, &docs)?))),
+    };
+    let (image_paths, file_paths) = match written {
+        Ok(paths) => paths,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&image_dir);
+            let _ = tx.send(fail(format!("attached files: {e:#}"))).await;
+            return;
+        }
     };
     let perms = ctx.approvals.permissions.lock().unwrap().clone();
     let perms = perms.map(|p| permissions::for_harness(&p, agent.name(), &ctx.inventory));
@@ -1026,6 +1035,7 @@ async fn run(
             &mcp::machine_hint(&ctx.inventory, agent.name()),
         ),
     };
+    let prompt = mis_agent::with_files(&prompt, &file_paths);
     // A message to the user's own session changes their repo, not the task's.
     if task.send_to.is_none() {
         *base.lock().unwrap() =

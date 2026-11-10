@@ -4,7 +4,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
-use mis_types::{AgentEvent, ImageFile, ImageKind, LimitWindow, Permissions, TaskId};
+use mis_types::{AgentEvent, AttachedFile, ImageFile, ImageKind, LimitWindow, Permissions, TaskId};
 use tokio::sync::mpsc;
 
 pub mod claude;
@@ -170,11 +170,9 @@ fn kill_tree(pid: u32) {
     }
 }
 
-/// Decode `images` into `dir` (created, owner-only) as `<id>.<ext>`; their
-/// absolute paths, in order. Err on bytes that aren't base64 of an accepted image.
-pub fn write_images(dir: &Path, images: &[ImageFile]) -> anyhow::Result<Vec<String>> {
+/// Create `dir`, owner-only; its absolute path.
+fn owner_dir(dir: &Path) -> anyhow::Result<PathBuf> {
     use anyhow::Context;
-    use base64ct::{Base64, Encoding};
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -182,7 +180,15 @@ pub fn write_images(dir: &Path, images: &[ImageFile]) -> anyhow::Result<Vec<Stri
     builder
         .create(dir)
         .with_context(|| format!("creating {}", dir.display()))?;
-    let dir = std::path::absolute(dir)?;
+    Ok(std::path::absolute(dir)?)
+}
+
+/// Decode `images` into `dir` (created, owner-only) as `<id>.<ext>`; their
+/// absolute paths, in order. Err on bytes that aren't base64 of an accepted image.
+pub fn write_images(dir: &Path, images: &[ImageFile]) -> anyhow::Result<Vec<String>> {
+    use anyhow::Context;
+    use base64ct::{Base64, Encoding};
+    let dir = owner_dir(dir)?;
     images
         .iter()
         .map(|img| {
@@ -195,6 +201,38 @@ pub fn write_images(dir: &Path, images: &[ImageFile]) -> anyhow::Result<Vec<Stri
             Ok(path.display().to_string())
         })
         .collect()
+}
+
+/// Decode `files` into `dir` (created, owner-only) as `<id>-<name>`; their absolute paths, in
+/// order. Err on a name that isn't one plain file name, or data that isn't base64.
+pub fn write_files(dir: &Path, files: &[AttachedFile]) -> anyhow::Result<Vec<String>> {
+    use anyhow::Context;
+    use base64ct::{Base64, Encoding};
+    let dir = owner_dir(dir)?;
+    files
+        .iter()
+        .map(|f| {
+            let plain = Path::new(&f.name).file_name() == Some(f.name.as_ref());
+            anyhow::ensure!(plain && !f.name.starts_with('.'), "file {}: bad name", f.id);
+            let bytes =
+                Base64::decode_vec(&f.data).map_err(|e| anyhow::anyhow!("file {}: {e}", f.id))?;
+            let path = dir.join(format!("{}-{}", f.id, f.name));
+            std::fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
+            Ok(path.display().to_string())
+        })
+        .collect()
+}
+
+/// `prompt`, naming the attached files at `paths` for the agent to read.
+pub fn with_files(prompt: &str, paths: &[String]) -> String {
+    match paths {
+        [] => prompt.to_string(),
+        // One per line: names may hold commas and spaces.
+        _ => format!(
+            "{prompt}\n\nAttached files (read them):\n{}",
+            paths.join("\n")
+        ),
+    }
 }
 
 /// Agents whose CLI is on PATH.
@@ -378,5 +416,32 @@ mod tests {
         };
         assert!(write_images(&dir, &[garbage]).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn writes_files_under_their_names_and_the_prompt_lists_them() {
+        let dir = std::env::temp_dir().join(format!("mis-agent-test-{}", uuid::Uuid::new_v4()));
+        let ok = AttachedFile {
+            id: uuid::Uuid::new_v4(),
+            name: "Chore list.pdf".into(),
+            data: Base64::encode_string(b"%PDF-1.4"),
+        };
+        let paths = write_files(&dir, std::slice::from_ref(&ok)).unwrap();
+        let want = dir.join(format!("{}-Chore list.pdf", ok.id));
+        assert_eq!(paths, [want.display().to_string()]);
+        assert_eq!(std::fs::read(&want).unwrap(), b"%PDF-1.4");
+        for name in ["../x.pdf", "a/b.md", ".env", ""] {
+            let bad = AttachedFile {
+                name: name.into(),
+                ..ok.clone()
+            };
+            assert!(write_files(&dir, &[bad]).is_err(), "{name}");
+        }
+        assert_eq!(with_files("p", &[]), "p");
+        assert_eq!(
+            with_files("p", &["/t/a.pdf".into(), "/t/b.md".into()]),
+            "p\n\nAttached files (read them):\n/t/a.pdf\n/t/b.md"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

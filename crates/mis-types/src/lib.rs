@@ -29,7 +29,12 @@ pub use evidence::{Evidence, EvidenceDraft, TaskResult};
 mod image;
 mod inventory;
 pub use image::{ImageFile, ImageKind, MAX_IMAGES, MAX_IMAGE_BYTES};
+mod refs;
 pub use inventory::{InstalledApp, Inventory, Machine};
+pub use refs::{
+    check_references, references_text, AttachedFile, DocKind, Reference, UploadKind, MAX_ATTACHED,
+    MAX_ATTACHED_BYTES, MAX_NAME_BYTES, MAX_REFERENCES,
+};
 mod links;
 pub mod merge;
 mod notes;
@@ -416,6 +421,9 @@ pub enum OrchMsg {
         /// The task's attached images, in the order the user attached them.
         #[serde(default)]
         images: Vec<ImageFile>,
+        /// Its attached documents, in that order.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<AttachedFile>,
         /// An app task's own credential, for its agent as `MIS_TOKEN`: it only stages
         /// releases of that app, and stops working when the task ends.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -460,7 +468,7 @@ pub enum ClientMsg {
         /// one; `cwd`/`harness`/`model` are then taken from it.
         #[serde(default)]
         reply_to: Option<TaskId>,
-        /// Uploaded images (`POST /api/upload` ids) to attach, at most `MAX_IMAGES`.
+        /// Uploads (`POST /api/upload` ids: images or documents) to attach, at most `MAX_ATTACHED`.
         #[serde(default)]
         images: Vec<Uuid>,
         /// Run only on this worker, waiting while it is offline; None = any. Ignored
@@ -630,7 +638,7 @@ pub struct TaskSummary {
     /// Approvals its agent waits on, oldest first; empty unless running.
     #[serde(default)]
     pub approvals: Vec<Approval>,
-    /// Attached images, served at `/api/images/<id>`.
+    /// Attached uploads (images or documents), served at `/api/images/<id>`.
     #[serde(default)]
     pub images: Vec<Uuid>,
     /// The routine this task is a run of.
