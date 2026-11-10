@@ -828,8 +828,17 @@ fn filing_never_goes_through_a_symlink() {
     std::os::unix::fs::symlink(&outside, clone.join("archive")).unwrap();
     let got = w.file(&notes, &md, "archive", None);
     assert!(got.is_err(), "{got:?}");
-    // A project folder that is a link.
+    // A folder HEAD has, swapped for a link in the clone only.
     std::fs::remove_file(clone.join("archive")).unwrap();
+    w.folders(&["areas/home/boiler.md"]);
+    notes.run();
+    std::fs::remove_dir_all(clone.join("areas/home")).unwrap();
+    std::os::unix::fs::symlink(&outside, clone.join("areas/home")).unwrap();
+    let got = w.file(&notes, &md, "areas/home", None);
+    assert!(got.is_err(), "{got:?}");
+    std::fs::remove_file(clone.join("areas/home")).unwrap();
+    git(&clone, &["checkout", "--", "areas/home"]);
+    // A project folder that is a link.
     symlink(&w, "projects/amf", "../../outside");
     let got = w.file(&notes, &md, "projects/amf", None);
     assert!(got.is_err(), "{got:?}");
@@ -938,90 +947,6 @@ fn frontmatter_keeps_its_line_endings_and_loses_no_lines() {
 }
 
 #[test]
-fn a_cut_short_run_removes_only_files_it_would_have_made() {
-    let w = World::new();
-    w.capture("first", &[]);
-    let notes = w.notes();
-    notes.run();
-    // A marker naming a human's file outside the shown folders (as a newline in a name would).
-    let clone = w.state.join("notes");
-    std::fs::write(clone.join("draft.md"), "mine").unwrap();
-    std::fs::write(clone.join(".git/mis-writing"), "inbox/x.md\ndraft.md").unwrap();
-    let s = notes.run();
-    assert_eq!((s.state, &s.last_error), (Idle, &None));
-    assert_eq!(
-        std::fs::read_to_string(clone.join("draft.md")).unwrap(),
-        "mine"
-    );
-    assert!(!clone.join(".git/mis-writing").exists());
-}
-
-#[test]
-fn a_filing_cut_short_is_put_back() {
-    let w = World::new();
-    let a = w.capture("cut short", &[JPEG]);
-    let notes = w.notes();
-    notes.run();
-    w.folders(&["projects/amf/README.md"]);
-    notes.run();
-    // As if a run stopped after moving the files, before committing.
-    let clone = w.state.join("notes");
-    let (md, jpg) = (
-        format!("inbox/{}", a.file),
-        format!("inbox/{}", image_of(&a.file)),
-    );
-    let (to_md, to_jpg) = (
-        format!("projects/amf/{}", a.file),
-        format!("projects/amf/{}", image_of(&a.file)),
-    );
-    git(&clone, &["mv", "--", &md, &to_md]);
-    git(&clone, &["mv", "--", &jpg, &to_jpg]);
-    std::fs::write(clone.join(&to_md), "half rewritten").unwrap();
-    std::fs::write(
-        clone.join(".git/mis-writing"),
-        serde_json::json!({ "created": [&to_md, &to_jpg], "moved": [&md, &jpg] }).to_string(),
-    )
-    .unwrap();
-    let s = notes.run();
-    assert_eq!((s.state, &s.last_error), (Idle, &None));
-    assert_eq!(std::fs::read(clone.join(&md)).unwrap(), w.receipt(&a.file));
-    assert_eq!(std::fs::read(clone.join(&jpg)).unwrap(), JPEG);
-    assert!(!clone.join(&to_md).exists() && !clone.join(&to_jpg).exists());
-    assert_eq!(git(&clone, &["status", "--porcelain"]), "");
-    assert!(!clone.join(".git/mis-writing").exists());
-}
-
-#[test]
-fn a_failed_move_leaves_recovery_no_claim_on_its_destination() {
-    use std::os::unix::fs::PermissionsExt;
-    let w = World::new();
-    let a = w.capture("the move fails", &[]);
-    let notes = w.notes();
-    notes.run();
-    w.folders(&["archive/2025/retro.md"]);
-    notes.run();
-    let clone = w.state.join("notes");
-    let archive = clone.join("archive");
-    let mode = |m| std::fs::set_permissions(&archive, std::fs::Permissions::from_mode(m)).unwrap();
-    // `git mv` fails; an unreadable map stops the run before it recovers.
-    mode(0o555);
-    let map = w.state.join("captures/published.json");
-    std::fs::write(&map, "not json").unwrap();
-    assert!(w
-        .file(&notes, &format!("inbox/{}", a.file), "archive", None)
-        .is_err());
-    mode(0o755);
-    // A human's file at that name since: never the run's to remove.
-    std::fs::write(archive.join(&a.file), "mine").unwrap();
-    std::fs::remove_file(&map).unwrap();
-    notes.run();
-    assert_eq!(
-        std::fs::read_to_string(archive.join(&a.file)).unwrap(),
-        "mine"
-    );
-}
-
-#[test]
 fn a_picture_any_other_note_lists_stays() {
     let w = World::new();
     let a = w.capture("shared picture", &[JPEG]);
@@ -1062,22 +987,90 @@ fn a_note_checked_out_with_crlf_is_hashed_as_the_view_reads_it() {
 }
 
 #[test]
-fn recovery_after_a_filing_committed_keeps_an_edit_to_the_filed_note() {
+fn a_file_the_clone_doesnt_track_in_the_way_stops_the_filing() {
     let w = World::new();
-    let a = w.capture("filed, then edited", &[]);
+    let a = w.capture("in the way", &[]);
     let notes = w.notes();
     notes.run();
-    w.folders(&["archive/2025/retro.md"]);
-    let from = format!("inbox/{}", a.file);
-    let got = w.file(&notes, &from, "archive", None).unwrap();
-    // As if it stopped after committing, before removing its marker; then an edit.
+    // `archive` isn't in HEAD; a human's file of that name is in the clone.
     let clone = w.state.join("notes");
-    let marker = serde_json::json!({ "created": [&got.path], "moved": [&from] });
-    std::fs::write(clone.join(".git/mis-writing"), marker.to_string()).unwrap();
-    std::fs::write(clone.join(&got.path), "my edit").unwrap();
-    notes.run();
+    std::fs::write(clone.join("archive"), "mine").unwrap();
+    let head = git(&clone, &["rev-parse", "HEAD"]);
+    let got = w.file(&notes, &format!("inbox/{}", a.file), "archive", None);
+    let Err(Refused::Stale(why)) = got else {
+        panic!("{got:?}")
+    };
+    assert!(why.starts_with("merge:"), "{why}");
     assert_eq!(
-        std::fs::read_to_string(clone.join(&got.path)).unwrap(),
-        "my edit"
+        std::fs::read_to_string(clone.join("archive")).unwrap(),
+        "mine"
     );
+    assert_eq!(
+        git(&clone, &["rev-parse", "HEAD"]),
+        head,
+        "nothing committed"
+    );
+    assert!(clone.join(format!("inbox/{}", a.file)).exists());
+    assert_eq!(git(&clone, &["status", "--porcelain"]), "?? archive");
+}
+
+#[test]
+fn a_filing_cut_short_before_it_lands_changes_nothing() {
+    let w = World::new();
+    let a = w.capture("cut short", &[JPEG]);
+    let notes = w.notes();
+    notes.run();
+    w.folders(&["projects/amf/README.md"]);
+    notes.run();
+    // What a run stopped between `commit-tree` and the merge leaves: its index, its note,
+    // an unreferenced commit.
+    let clone = w.state.join("notes");
+    std::fs::write(clone.join(".git/mis-filing-index"), "garbage").unwrap();
+    std::fs::write(clone.join(".git/mis-filed"), "half").unwrap();
+    let tree = git(&clone, &["rev-parse", "HEAD^{tree}"]);
+    let who = [
+        "-c",
+        "user.name=Make It So",
+        "-c",
+        "user.email=mis@localhost",
+    ];
+    git(
+        &clone,
+        &[&who[..], &["commit-tree", &tree, "-p", "HEAD", "-m", "x"]].concat(),
+    );
+    let head = w.head();
+    let s = notes.run();
+    assert_eq!((s.state, &s.last_error), (Idle, &None));
+    assert_eq!(w.head(), head, "nothing pushed");
+    assert_eq!(git(&clone, &["status", "--porcelain"]), "");
+    // And the next filing is whole.
+    let md = format!("inbox/{}", a.file);
+    let got = w.file(&notes, &md, "projects/amf", None).unwrap();
+    let files = w.files();
+    assert!(files.contains(&got.path) && !files.contains(&md));
+    assert!(files.contains(&format!("projects/amf/{}", image_of(&a.file))));
+    assert!(
+        !clone.join(".git/mis-filing-index").exists() && !clone.join(".git/mis-filed").exists()
+    );
+}
+
+#[test]
+fn a_note_too_large_to_hash_as_shown_is_refused_not_cut() {
+    let w = World::new();
+    let notes = w.notes();
+    w.human_pull();
+    let big = format!("---\ntitle: big\n---\n{}", "x".repeat(20 << 20));
+    std::fs::write(w.human.join("inbox/big.md"), &big).unwrap();
+    std::fs::create_dir_all(w.human.join("archive")).unwrap();
+    std::fs::write(w.human.join("archive/.keep"), "").unwrap();
+    w.human_commit("a big note");
+    notes.run();
+    let head = w.head();
+    let got = w.file(&notes, "inbox/big.md", "archive", None);
+    let Err(Refused::Stale(why)) = got else {
+        panic!("{got:?}")
+    };
+    assert!(why.ends_with("is over 20 MiB"), "{why}");
+    assert_eq!(w.head(), head);
+    assert_eq!(w.show("inbox/big.md").len(), big.len());
 }

@@ -140,40 +140,6 @@ pub fn record(md: &str, r: &Receipt, path: &str) -> (String, Vec<(String, String
     (rename_images(&md[..end], eol, renames) + &md[end..], images)
 }
 
-/// `.git/mis-writing` while a run writes or files, until it commits: what to put back if
-/// it is cut short.
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-struct Writing {
-    /// New paths, none there before: removed.
-    created: Vec<String>,
-    /// Paths moved away: restored from HEAD.
-    #[serde(default)]
-    moved: Vec<String>,
-}
-
-impl Writing {
-    /// A marker's text: JSON, or (older runs) one created path per line. Only capture runs
-    /// wrote those, so their lines are created paths, recovered as before: removed, never
-    /// restored. Paths that aren't under the shown folders, or hold control characters, are
-    /// left out (a capture never wrote one): never acted on.
-    fn parse(text: &str) -> Self {
-        let mut w = serde_json::from_str(text).unwrap_or_else(|_| Writing {
-            created: text.lines().map(Into::into).collect(),
-            moved: vec![],
-        });
-        let ok = |p: &String| {
-            let ok = crate::notes_view::allowed(p) && !p.chars().any(char::is_control);
-            if !ok {
-                tracing::warn!(path = ?p, "ignoring a path in {WRITING}");
-            }
-            ok
-        };
-        w.created.retain(ok);
-        w.moved.retain(ok);
-        w
-    }
-}
-
 /// The commit message publishing `writes` (id, path).
 fn message(writes: &[(Uuid, &str)]) -> String {
     let n = writes.len();
@@ -235,8 +201,9 @@ fn state(pending: usize, run: &Result<bool, Failure>) -> SyncState {
 pub enum Refused {
     /// Not a note and folder [`crate::filing::check`] passes, or not text.
     Invalid(String),
-    /// Gone, changed since it was read, its folder gone, a symlink on its way, a picture
-    /// another note lists, or frontmatter it can't safely edit.
+    /// Gone, changed since it was read, too large, its folder gone, a symlink or a file
+    /// the clone doesn't track in its way, a picture another note lists, or frontmatter it
+    /// can't safely edit.
     Stale(String),
     /// The clone couldn't be used: offline, a conflict, git failing.
     Failed(String),
@@ -609,8 +576,9 @@ impl Notes {
         self.fetch_rebase()
     }
 
-    /// File `m` in a commit of its own, after catching the clone up, left for
-    /// [`Self::publish`] to push: the note's new path.
+    /// File `m` in a commit of its own, built from HEAD without touching the working tree,
+    /// then fast-forwarded onto (git refuses if that would overwrite a file it doesn't
+    /// track), left for [`Self::publish`] to push: the note's new path.
     fn file_now(&self, m: &NoteMove) -> Result<String, Refused> {
         crate::filing::check(m).map_err(Refused::Invalid)?;
         self.sync()?;
@@ -622,12 +590,16 @@ impl Notes {
             let why = format!("{} is not a folder to file in", m.dest);
             return Err(Refused::Stale(why));
         }
-        // The clean tree's bytes, as the view read them (HEAD's blob may differ, by an
-        // `eol` or smudge filter), and as they're rewritten.
-        let Some(bytes) = crate::apps::read_file(&self.clone, &m.path) else {
+        // The page hashed the clean tree's bytes as the Notes view serves them (HEAD's blob
+        // may differ by an `eol` or smudge filter), which stops at `MAX_BYTES`.
+        let Some(shown) = crate::apps::read_file(&self.clone, &m.path) else {
             return Err(Refused::Stale(format!("{} can't be read", m.path)));
         };
-        let hash = crate::capture::sha256(&bytes);
+        if shown.len() as u64 >= crate::apps::MAX_BYTES {
+            let mib = crate::apps::MAX_BYTES >> 20;
+            return Err(Refused::Stale(format!("{} is over {mib} MiB", m.path)));
+        }
+        let hash = crate::capture::sha256(&shown);
         if m.hash
             .as_ref()
             .is_some_and(|h| !h.eq_ignore_ascii_case(&hash))
@@ -635,7 +607,9 @@ impl Notes {
             let why = format!("{} changed since it was read", m.path);
             return Err(Refused::Stale(why));
         }
-        let md = String::from_utf8(bytes).map_err(|_| Refused::Invalid("not UTF-8".into()))?;
+        let blob = self.git(&["cat-file", "blob", &format!("HEAD:{}", m.path)])?;
+        let blob = blob.check("cat-file", Failure::Other)?.stdout;
+        let md = String::from_utf8(blob).map_err(|_| Refused::Invalid("not UTF-8".into()))?;
         // The pictures the inbox's other notes list (read as the Notes view reads files).
         let note = |p: &&String| crate::notes_view::kind(p, false) == mis_types::NoteKind::Md;
         let others = (inbox.keys()).filter(|p| *p != &m.path).filter(note);
@@ -658,61 +632,55 @@ impl Notes {
             taken.extend(names);
         }
         let f = crate::filing::plan(m, &md, &inbox, &claimed, &taken).map_err(Refused::Stale)?;
-        // HEAD's folders are real ones (see `dests`); so must the clone's be, and each new
-        // path is new, so nothing is written through a link or over a human's file.
-        let dirs = match m.dest.split_once('/') {
-            Some((top, _)) => vec![top, m.dest.as_str()],
-            None => vec![m.dest.as_str()],
-        };
-        for d in dirs {
-            match std::fs::symlink_metadata(self.clone.join(d)) {
-                Ok(meta) if !meta.is_dir() => {
-                    return Err(Refused::Stale(format!("{d} is not a folder in the clone")));
-                }
-                _ => {}
-            }
-        }
+        // Early, with a clear reason; the fast-forward refuses anyway.
         let created: Vec<String> = f.moves.iter().map(|(_, to)| to.clone()).collect();
         self.absent(&created)
             .map_err(|f| Refused::Stale(f.why().to_string()))?;
-        let mut marker = Writing {
-            created,
-            moved: f.moves.iter().map(|(from, _)| from.clone()).collect(),
-        };
-        self.mark(&marker)?;
-        std::fs::create_dir_all(self.clone.join(&m.dest)).map_err(Failure::from)?;
-        for (i, (from, to)) in f.moves.iter().enumerate() {
-            let mv = self.git(&["mv", "--", from, to])?;
-            if !mv.ok {
-                // Only what moved is the run's: a file now at `to` may be a human's.
-                marker.created.truncate(i);
-                marker.moved.truncate(i);
-                self.mark(&marker)?;
-                return Err(mv.check("mv", Failure::Other).err().expect("failed").into());
-            }
+        let commit = self.commit_filing(&f, &inbox)?;
+        let merge = self.git(&["merge", "--ff-only", "--quiet", &commit])?;
+        if !merge.ok {
+            return Err(Refused::Stale(format!("merge: {}", merge.stderr.trim())));
         }
-        if f.md != md {
-            let mut open = std::fs::OpenOptions::new();
-            open.write(true).truncate(true);
-            #[cfg(unix)]
-            std::os::unix::fs::OpenOptionsExt::custom_flags(&mut open, libc::O_NOFOLLOW);
-            let mut file = open
-                .open(self.clone.join(&f.moves[0].1))
-                .map_err(Failure::from)?;
-            std::io::Write::write_all(&mut file, f.md.as_bytes()).map_err(Failure::from)?;
-        }
-        // Only these paths, as the working tree has them.
-        let paths: Vec<&str> = (marker.created.iter().chain(&marker.moved))
-            .map(String::as_str)
-            .collect();
-        let commit = [
-            &["commit", "--quiet", "-m", &f.message, "--"],
-            paths.as_slice(),
-        ]
-        .concat();
-        self.git(&commit)?.check("commit", Failure::Other)?;
-        std::fs::remove_file(self.clone.join(".git").join(WRITING)).map_err(Failure::from)?;
         Ok(f.moves[0].1.clone())
+    }
+
+    /// Filing `f` as a commit on HEAD, built in an index of its own: the working tree and
+    /// its index are untouched, so a run cut short leaves only an unreferenced commit.
+    /// `inbox` gives the moved files' modes.
+    fn commit_filing(
+        &self,
+        f: &crate::filing::Filing,
+        inbox: &crate::filing::Modes,
+    ) -> Result<String, Failure> {
+        // Relative to the clone, where git runs.
+        let (index, note) = (".git/mis-filing-index", ".git/mis-filed");
+        let git = |args: &[&str]| -> Result<String, Failure> {
+            let mut out = run_git(&self.clone, args, GIT_DEADLINE, Some(Path::new(index)))?;
+            out.stderr = out.stderr.replace(&self.remote, "<remote>");
+            Ok(out.check(args[0], Failure::Other)?.text())
+        };
+        git(&["read-tree", "HEAD"])?;
+        let sources: Vec<&str> = f.moves.iter().map(|(from, _)| from.as_str()).collect();
+        git(&[
+            &["update-index", "--force-remove", "--"],
+            sources.as_slice(),
+        ]
+        .concat())?;
+        // The note as edited, byte for byte; its pictures as HEAD has them.
+        crate::push::write_private(&self.clone.join(note), f.md.as_bytes())?;
+        let mut blobs = vec![git(&["hash-object", "-w", "--no-filters", "--", note])?];
+        for (from, _) in &f.moves[1..] {
+            blobs.push(git(&["rev-parse", "--verify", &format!("HEAD:{from}")])?);
+        }
+        for ((from, to), blob) in f.moves.iter().zip(&blobs) {
+            let entry = format!("{},{blob},{to}", inbox[from]);
+            git(&["update-index", "--add", "--cacheinfo", &entry])?;
+        }
+        let tree = git(&["write-tree"])?;
+        let commit = git(&["commit-tree", &tree, "-p", "HEAD", "-m", &f.message])?;
+        let _ = std::fs::remove_file(self.clone.join(index));
+        let _ = std::fs::remove_file(self.clone.join(note));
+        Ok(commit)
     }
 
     /// Ok if none of `paths` is in the clone (not even as a dangling link).
@@ -734,15 +702,6 @@ impl Notes {
         Ok(modes)
     }
 
-    /// Write the [`Writing`] marker.
-    fn mark(&self, w: &Writing) -> Result<(), Failure> {
-        let json = serde_json::to_vec(w).expect("serializes");
-        Ok(crate::push::write_private(
-            &self.clone.join(".git").join(WRITING),
-            &json,
-        )?)
-    }
-
     /// HEAD's entries that are `paths`, or directly in the folders `x/` names: path -> git
     /// mode, e.g. `040000` for a folder, `120000` for a symlink.
     fn modes(&self, paths: &[&str]) -> Result<crate::filing::Modes, Failure> {
@@ -758,39 +717,20 @@ impl Notes {
             .collect())
     }
 
-    /// Put back the files a run cut short was writing or filing, unless it committed them:
-    /// new ones unstaged and deleted, moved ones restored from HEAD.
+    /// Unstage and delete the files a run cut short was writing, unless it committed them.
     fn undo_writing(&self) -> Result<(), Failure> {
         let marker = self.clone.join(".git").join(WRITING);
-        let w = match std::fs::read_to_string(&marker) {
+        let paths = match std::fs::read_to_string(&marker) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            r => Writing::parse(&r?),
+            r => r?,
         };
-        let all: Vec<&str> = (w.created.iter().chain(&w.moved))
-            .map(String::as_str)
-            .collect();
-        let created: Vec<&str> = w.created.iter().map(String::as_str).collect();
-        // No paths would mean the whole tree to `reset`, `clean` or `checkout`.
-        if !all.is_empty() {
-            let reset = [&["reset", "-q", "--"], all.as_slice()].concat();
-            self.git(&reset)?.check("reset", Failure::Other)?;
-        }
-        if !created.is_empty() {
-            let clean = [&["clean", "-fq", "--"], created.as_slice()].concat();
-            self.git(&clean)?.check("clean", Failure::Other)?;
-        }
-        // A moved file HEAD still has (not one committed before the run stopped). Never a
-        // created path: HEAD having it means it was committed, and may be edited since.
-        let moved: Vec<&str> = w.moved.iter().map(String::as_str).collect();
-        let held = if moved.is_empty() {
-            Default::default()
-        } else {
-            self.modes(&moved)?
-        };
-        if !held.is_empty() {
-            let held: Vec<&str> = held.keys().map(String::as_str).collect();
-            let args = [&["checkout", "HEAD", "--"], held.as_slice()].concat();
-            self.git(&args)?.check("checkout", Failure::Other)?;
+        let paths: Vec<&str> = paths.lines().filter(|p| !p.is_empty()).collect();
+        // No paths would mean the whole tree to `reset` and `clean`.
+        if !paths.is_empty() {
+            for cmd in [["reset", "-q"].as_slice(), &["clean", "-fq"]] {
+                let args: Vec<&str> = [cmd, &["--"], &paths].concat();
+                self.git(&args)?.check(cmd[0], Failure::Other)?;
+            }
         }
         std::fs::remove_file(marker)?;
         Ok(())
@@ -872,45 +812,25 @@ impl Notes {
         if writes.is_empty() {
             return Ok(());
         }
-        let created: Vec<String> = files.iter().map(|(p, _)| p.clone()).collect();
-        self.absent(&created)?;
-        self.mark(&Writing {
-            created,
-            moved: vec![],
-        })?;
         let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        let marker = self.clone.join(".git").join(WRITING);
+        crate::push::write_private(&marker, paths.join("\n").as_bytes())?;
         std::fs::create_dir_all(self.clone.join(INBOX))?;
-        // New files only: a name taken since `scan` fails the run rather than lose a file,
-        // and the marker then names only the files this run made.
-        let mut made = Vec::new();
-        let mut create = |to: &str| {
-            let file = (std::fs::OpenOptions::new())
+        // New files only: a name taken since `scan` fails the run rather than lose a file.
+        let create = |to: &str| {
+            std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(self.clone.join(to));
-            if file.is_ok() {
-                made.push(to.to_string());
-            }
-            file
+                .open(self.clone.join(to))
         };
-        let wrote = (|| -> std::io::Result<()> {
-            for (to, from) in &files {
-                if let Some(from) = from {
-                    let mut src = std::fs::File::open(self.receipts.join(from))?;
-                    std::io::copy(&mut src, &mut create(to)?)?;
-                }
+        for (to, from) in &files {
+            if let Some(from) = from {
+                let mut src = std::fs::File::open(self.receipts.join(from))?;
+                std::io::copy(&mut src, &mut create(to)?)?;
             }
-            for (_, _, path, md) in &writes {
-                std::io::Write::write_all(&mut create(path)?, md.as_bytes())?;
-            }
-            Ok(())
-        })();
-        if let Err(e) = wrote {
-            self.mark(&Writing {
-                created: made,
-                moved: vec![],
-            })?;
-            return Err(e.into());
+        }
+        for (_, _, path, md) in &writes {
+            std::io::Write::write_all(&mut create(path)?, md.as_bytes())?;
         }
         let add: Vec<&str> = [&["add", "--"], paths.as_slice()].concat();
         self.git(&add)?.check("add", Failure::Other)?;
@@ -924,7 +844,7 @@ impl Notes {
         let commit: Vec<&str> =
             [&["commit", "--quiet", "-m", &msg, "--"], paths.as_slice()].concat();
         self.git(&commit)?.check("commit", Failure::Other)?;
-        std::fs::remove_file(self.clone.join(".git").join(WRITING))?;
+        std::fs::remove_file(marker)?;
         Ok(())
     }
 
@@ -934,7 +854,7 @@ impl Notes {
 
     /// `git args` in `dir`, with the remote's URL kept out of what it says.
     fn git_in(&self, dir: &Path, args: &[&str]) -> Result<Out, Failure> {
-        let mut out = run_git(dir, args, GIT_DEADLINE)?;
+        let mut out = run_git(dir, args, GIT_DEADLINE, None)?;
         out.stderr = out.stderr.replace(&self.remote, "<remote>");
         Ok(out)
     }
@@ -943,7 +863,12 @@ impl Notes {
 /// `git args` in `dir`, never waiting on a person: no prompts, askpass, editors, hooks or
 /// signing, and killed (with whatever it started) after `deadline`. Commits are Make It
 /// So's; the user's own git config (the credential helper) still applies.
-fn run_git(dir: &Path, args: &[&str], deadline: Duration) -> std::io::Result<Out> {
+fn run_git(
+    dir: &Path,
+    args: &[&str],
+    deadline: Duration,
+    index: Option<&Path>,
+) -> std::io::Result<Out> {
     let mut cmd = Command::new("git");
     cmd.current_dir(dir)
         .args([
@@ -978,6 +903,9 @@ fn run_git(dir: &Path, args: &[&str], deadline: Duration) -> std::io::Result<Out
     // Its own process group, so the deadline also kills ssh and credential helpers.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    if let Some(index) = index {
+        cmd.env("GIT_INDEX_FILE", index);
+    }
     let mut child = cmd.spawn()?;
     let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
     let start = Instant::now();
@@ -1147,24 +1075,6 @@ mod tests {
     }
 
     #[test]
-    fn a_marker_names_only_paths_recovery_may_touch() {
-        let w = Writing::parse(
-            r#"{"created":["inbox/a-2.md","README.md"],"moved":["inbox/a.md","inbox/b\nc.md"]}"#,
-        );
-        assert_eq!(
-            w,
-            Writing {
-                created: vec!["inbox/a-2.md".into()],
-                moved: vec!["inbox/a.md".into()],
-            }
-        );
-        // From an older run: created paths, one a line.
-        let w = Writing::parse("inbox/a.md\ninbox/a-1.jpg\n../x\ndraft.md");
-        assert_eq!(w.created, ["inbox/a.md", "inbox/a-1.jpg"]);
-        assert!(w.moved.is_empty());
-    }
-
-    #[test]
     fn history_names_what_each_commit_published() {
         let msg = message(&[(id(1), "inbox/a.md"), (id(2), "inbox/b-2.md")]);
         assert_eq!(
@@ -1233,7 +1143,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let start = Instant::now();
         let hang = ["-c", "alias.hang=!sleep 30", "hang"];
-        let out = run_git(&dir, &hang, Duration::from_millis(300)).unwrap();
+        let out = run_git(&dir, &hang, Duration::from_millis(300), None).unwrap();
         assert!(!out.ok);
         assert_eq!(out.stderr, "timed out after 0.3s");
         // The readers saw EOF, so `sleep` (git's grandchild) died too.
@@ -1245,7 +1155,7 @@ mod tests {
         // Git exits at once but leaves something holding its output open.
         let start = Instant::now();
         let linger = ["-c", "alias.linger=!sleep 30 & exit 0", "linger"];
-        let out = run_git(&dir, &linger, Duration::from_millis(300)).unwrap();
+        let out = run_git(&dir, &linger, Duration::from_millis(300), None).unwrap();
         assert_eq!(
             (out.ok, out.stderr.as_str()),
             (false, "timed out after 0.3s")
@@ -1255,7 +1165,7 @@ mod tests {
             "{:?}",
             start.elapsed()
         );
-        let ok = run_git(&dir, &["--version"], GIT_DEADLINE).unwrap();
+        let ok = run_git(&dir, &["--version"], GIT_DEADLINE, None).unwrap();
         assert!(
             ok.ok && ok.text().starts_with("git version"),
             "{}",
