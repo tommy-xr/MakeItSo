@@ -724,15 +724,16 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
     .pi.live .pk { border: 1.5px solid var(--run); background: conic-gradient(var(--run) 0 50%, transparent 0); }
   }
   /* Desktop (64rem+, not Quest): one sticky header row across the top; the menu is a rail on the left (the closed
-     dialog shown in place; ☰ hides it); views, composer, Latest and toasts centre in the room beside it, 48rem wide. */
+     dialog shown in place; ☰ hides it); views, composer, Latest and toasts centre in the room beside it, 48rem wide.
+     Wide (75rem+, `.split`): Home's list is a column of its own beside the open task, or beside a prompt to pick one. */
   #nav-need { display: none; margin-left: auto; font-size: .8125rem; font-weight: 600; }
   @media (min-width: 64rem) {
-    :root:not(.vr) { --rail: 16rem; --head: calc(3.5rem + env(safe-area-inset-top, 0px)); scroll-padding-top: var(--head); }
+    :root:not(.vr) { --rail: 16rem; --list: 0px; --side: calc(var(--rail) + var(--list)); --head: calc(3.5rem + env(safe-area-inset-top, 0px)); scroll-padding-top: var(--head); }
     :root.rail-off:not(.vr) { --rail: 0px; }
-    :root:not(.vr) body { max-width: none; padding-left: calc(var(--rail) + var(--pad)); }
-    :root:not(.vr) body > :is(main, #auth, #skel) { max-width: calc(48rem - 2 * var(--pad)); margin-inline: auto; }
+    :root:not(.vr) body { max-width: none; padding-left: calc(var(--side) + var(--pad)); }
+    :root:not(.vr) body > :is(main, #auth, #skel, #choose) { max-width: calc(48rem - 2 * var(--pad)); margin-inline: auto; }
     :root:not(.vr) .strip { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; gap: .625rem; box-sizing: border-box; height: var(--head);
-      margin: 0 calc(-1 * var(--pad)) .25rem calc(-1 * (var(--rail) + var(--pad))); padding: env(safe-area-inset-top, 0px) var(--pad) 0 .75rem; background: var(--bg); border-bottom: 1px solid var(--sep); }
+      margin: 0 calc(-1 * var(--pad)) .25rem calc(-1 * (var(--side) + var(--pad))); padding: env(safe-area-inset-top, 0px) var(--pad) 0 .75rem; background: var(--bg); border-bottom: 1px solid var(--sep); }
     /* The two rows' items join one flex row: ☰ logo title · dot ticker update · gauges · needs-you. */
     :root:not(.vr) .strip :is(.top, .status) { display: contents; }
     :root:not(.vr) #menu-btn { margin-right: 0; }
@@ -749,10 +750,22 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
     :root:not(.vr) #menu .sheet-top { display: none; }
     :root:not(.vr) #nav-need:not([hidden]) { display: inline; }
     :root:not(.vr) .chead { top: var(--head); }
-    :root:not(.vr) #dock { left: var(--rail); }
+    :root:not(.vr) #dock { left: var(--side); }
     :root:not(.vr) .composer { max-width: calc(48rem - 2 * var(--pad)); }
-    :root:not(.vr) :is(#latest, #toast) { left: calc(50% + var(--rail) / 2); }
-    :root:not(.vr) #toast { max-width: calc(100vw - var(--rail) - 2rem); }
+    :root:not(.vr) :is(#latest, #toast) { left: calc(50% + var(--side) / 2); }
+    :root:not(.vr) #toast { max-width: calc(100vw - var(--side) - 2rem); }
+  }
+  @media (min-width: 75rem) {
+    :root.split:not(.vr) { --list: 26rem; }
+    /* The list scrolls in its own column; the window still scrolls the task, so following a reply works as before. */
+    :root.split:not(.vr) body > #list { position: fixed; z-index: 1; inset: var(--head) auto 0 var(--rail); box-sizing: border-box; width: var(--list); max-width: none; margin: 0;
+      padding: 0 var(--pad) 1.5rem; overflow-y: auto; overscroll-behavior: contain; border-right: 1px solid var(--sep); }
+    :root.split:not(.vr) #list .rows a[aria-current] { background: var(--bubble); box-shadow: inset 3px 0 var(--accent); }
+    :root.split:not(.vr) #detail .chead .back { display: none; }
+    #choose { padding-top: 30svh; text-align: center; }
+    .newtask { display: flex; align-items: center; justify-content: center; gap: .375rem; margin: .75rem 0 0; min-height: 2.5rem; border-radius: .75rem;
+      background: var(--card); color: var(--fg); font-weight: 500; text-decoration: none; }
+    @media (hover: hover) { .newtask:hover { background: var(--hover); } }
   }
   /* VR panels: bigger type, secondary text pulled toward the foreground. */
   html.vr { font-size: 22px; --dim: color-mix(in srgb, var(--fg) 85%, var(--bg)); }
@@ -813,6 +826,8 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
 <div id="skel" class="rows skel" aria-busy="true" aria-label="Loading"><i></i><i></i><i></i><i></i><i></i><i></i></div>
 
 <main id="list" hidden></main>
+
+<p id="choose" class="dim" hidden>Select a task, or start one below.</p>
 
 <main id="detail" hidden>
   <div class="chead"><a href="#" class="back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a><div id="task-head"></div></div>
@@ -1804,8 +1819,22 @@ function route() {
   return { view: { '#workers': 'workers', '#routines': 'routines', '#apps': 'apps', '#settings': 'settings' }[location.hash] || 'list' };
 }
 
+// Wide desktop (75rem+, not Quest): Home's list stays up beside the open task (or `#choose` when none is).
+const wide = matchMedia('(min-width: 75rem)');
+const isSplit = (view) => wide.matches && isDesk() && (view === 'list' || view === 'detail');
+const inSplit = () => document.documentElement.classList.contains('split'); // as render() last laid out
+// The finished task last opened beside the list, and the attention it had: its row keeps its place until another is
+// opened or Home is left, rather than leaving Needs you the moment opening it marks it seen. { id, attention } or null.
+let kept = null;
+// A task's attention for placing its row: its own, else the kept one's.
+const att = (t) => (ATTENTION[t.attention] || kept?.id !== t.id ? t.attention : kept.attention);
+
 function render() {
-  const r = route();
+  const r = route(), split = everOpen && isSplit(r.view);
+  document.documentElement.classList.toggle('split', split);
+  const open = split && r.view === 'detail' && tasks.find((t) => t.id === r.id);
+  if (open) kept = { id: open.id, attention: ATTENTION[open.attention] ? open.attention : kept?.id === open.id && isFinished(open) ? kept.attention : null };
+  else if (!split || r.view !== 'list') kept = null;
   const live = ws && ws.readyState === WebSocket.OPEN;
   const views = { list: renderList, detail: renderDetail, routines: renderRoutines, apps: renderApps, settings: renderSettings, notes: renderNotes, projects: renderProjects, workers: renderWorkers, machine: renderMachine, session: renderSession };
   $('auth').hidden = live || !authNeeded || !!store.get();
@@ -1823,7 +1852,8 @@ function render() {
   $('send').disabled = $('send-reply').disabled = !live || !!pending;
   if (shots.some((x) => !x.id)) $('send').disabled = true; // photos still uploading
   $('clip').disabled = shots.length >= MAX_SHOTS || !!pending;
-  for (const v in views) $(v).hidden = !everOpen || v !== r.view;
+  for (const v in views) $(v).hidden = !everOpen || (v !== r.view && !(split && v === 'list'));
+  $('choose').hidden = !everOpen || !split || r.view !== 'list';
   // A conversation's back link returns to the view it was opened from.
   if (r.view === 'detail' || r.view === 'session') $(r.view).querySelector('.back').href = from;
   else from = location.hash || '#';
@@ -1837,6 +1867,7 @@ function render() {
   $('clear').hidden = !store.get();
   renderNav();
   views[r.view](r.id);
+  if (split && r.view === 'detail') renderList();
   fitAll();
   if (wantNew && !$('dock').hidden) { wantNew = false; $('prompt').focus(); }
 }
@@ -1847,7 +1878,7 @@ const placement = (t) => [t.harness, t.model, t.worker && hostOf(t.worker)].filt
 // Why a task needs the user, most urgent first: [rank, label].
 const ATTENTION = { approval: [-1, 'needs you: approval'], failed: [0, 'needs you'], limited: [1, 'needs you: usage limit'], unread: [2, 'needs you: unread'] };
 // Needs you, then working, then the rest.
-const rank = (t) => ATTENTION[t.attention]?.[0] ?? (['planning', 'queued', 'running'].includes(t.status) || awaited(t) ? 3 : 4);
+const rank = (t) => ATTENTION[att(t)]?.[0] ?? (['planning', 'queued', 'running'].includes(t.status) || awaited(t) ? 3 : 4);
 // Delivered into a session and followed there for its answer (a day).
 const awaited = (t) => t.status === 'delivered' && Date.now() + skew - (t.finished_at || 0) < 864e5;
 // Threads, each followed by its replies (oldest first), nested: [depth, task]. A thread ranks as its
@@ -1892,7 +1923,7 @@ const SETTLE_MS = 1500, CLICK_MS = 500;
 const presses = new Set(), shown = new Map(); // pointers down on a list; each list's ids as last shown
 let clickTimer = 0, settleTimer = 0;
 const frozen = () => presses.size > 0 || clickTimer !== 0;
-const onList = () => ['list', 'machine'].includes(route().view);
+const onList = () => ['list', 'machine'].includes(route().view) || inSplit();
 function relist() { if (!frozen() && onList()) render(); }
 function settle() {
   if (!onList()) return; // a scroll elsewhere doesn't hold the list met on return
@@ -1915,7 +1946,7 @@ window.addEventListener('pointercancel', lift, true);
 const liftAll = () => { if (presses.size) { presses.clear(); relist(); } };
 for (const type of ['contextmenu', 'dragstart', 'blur']) window.addEventListener(type, liftAll);
 document.addEventListener('visibilitychange', liftAll);
-window.addEventListener('scroll', settle);
+window.addEventListener('scroll', () => { if (!inSplit()) settle(); }); // split: the window scrolls the task, not the list
 // `threaded(list)`, kept in its last shown order (under `key`) while the lists settle.
 function heldRows(key, list) {
   let rows = threaded(list);
@@ -1970,7 +2001,7 @@ const STUCK = new Set(['approval', 'failed', 'limited']);
 const secRank = (s) => (s === 'need' ? 0 : s === 'flight' ? 1 : 2);
 // Threads ({ root, replies }) with their section: `need`, `flight`, or `day:<y-m-d>` for finished ones; Home's order.
 function homeThreads(list, listed) {
-  const visible = list.filter((t) => !(listed.has(t.id) && !STUCK.has(t.attention)));
+  const visible = list.filter((t) => !(listed.has(t.id) && !STUCK.has(att(t))));
   const ids = new Set(visible.map((t) => t.id)), at = new Map(visible.map((t, i) => [t.id, i]));
   const all = (t) => visible.filter((r) => r.parent === t.id).flatMap((r) => [r, ...all(r)]);
   return visible.filter((t) => !t.parent || !ids.has(t.parent)).map((root) => {
@@ -2024,7 +2055,7 @@ function taskRow(t, now, reply) {
 function threadRows(th, now) {
   const first = taskRow(th.root, now);
   if (!th.replies.length) return [first];
-  const open = repliesOpen.has(th.root.id), n = th.replies.length;
+  const open = repliesOpen.has(th.root.id) || (inSplit() && th.replies.some((r) => location.hash === `#task/${r.id}`)), n = th.replies.length;
   const lead = th.replies.reduce((a, t) => (rank(t) <= rank(a) ? t : a));
   const said = (lead.result && lead.result.headline) || snippet(lead.summary) || (isFinished(lead) ? lead.status : lead.activity || lead.status);
   const more = el('button', { type: 'button', className: 'more' }, statusDot(lead), el('span', { className: 'one' }, `↳ ${n} repl${n === 1 ? 'y' : 'ies'} · ${said}`));
@@ -2086,8 +2117,10 @@ function renderList() {
   const body = keys.map((k) => [secHead(label(k)), el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []), ...groups.get(k).flatMap((th) => threadRows(th, now)))]);
   const liveAt = keys.filter((k) => secRank(k) < 2).length;
   if (sessions.length) body.splice(liveAt, 0, [secHead('Live sessions', el('a', { href: '#workers' }, 'All sessions')), el('ul', { className: 'rows' }, ...sessions.map((s) => liveRow(s, now)))]);
-  $('list').replaceChildren(...body.flat());
-  if (!body.length) $('list').append(el('p', { className: 'dim', style: 'padding: 1rem .375rem' }, 'No tasks yet. Start one below.'));
+  $('list').replaceChildren(...(inSplit() ? [el('a', { href: '#new', className: 'newtask' }, '+ New task')] : []), ...body.flat());
+  // The open task's links (its row, or its message under a live session), beside the list when wide.
+  if (route().view === 'detail') for (const a of $('list').querySelectorAll(`a[href="${location.hash}"]`)) a.setAttribute('aria-current', 'page');
+  if (!body.length) $('list').append(el('p', { className: 'dim', style: 'padding: 1rem .375rem' }, inSplit() ? 'No tasks yet.' : 'No tasks yet. Start one below.'));
 }
 
 const KIND = { pr: 'PR', commit: 'commit', ci_run: 'CI', issue: 'issue', url: 'link', test: 'test', note: 'note' };
@@ -2816,7 +2849,7 @@ function paint() {
     if (!text) continue;
     const rows = document.querySelectorAll(`[data-live="${id}"]`);
     for (const n of rows) n.textContent = lastLine(text);
-    if (view === 'list' && !rows.length && fresh.has(id)) redraw = true;
+    if ((view === 'list' || inSplit()) && !rows.length && fresh.has(id)) redraw = true;
     if (view !== 'detail' || !detail || !detail.ready || detail.id !== id) continue;
     const body = $('task-convo').querySelector(':scope > .msg.streaming > .body');
     if (!body) { redraw = redraw || fresh.has(id); continue; }
@@ -4308,6 +4341,8 @@ function deskMode() {
   if (railShown()) loadNav();
 }
 desk.addEventListener('change', deskMode);
+wide.addEventListener('change', () => render());
+$('list').addEventListener('scroll', settle);
 // + opens the new-routine form atop Routines; the orchestrator writes `<name>.md`, paused.
 function showNewRoutine(on) {
   $('routine-new').hidden = !on;
