@@ -4047,8 +4047,9 @@ async fn a_capture_is_published_to_the_notes_repo_soon_after() {
         "waits a moment"
     );
     let mut s = s;
-    for _ in 0..100 {
-        if s.last_push.is_some() {
+    // A capture kept mid-run may be counted twice until the next run: wait for that too.
+    for _ in 0..300 {
+        if s.last_push.is_some() && s.state == SyncState::Idle {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -4218,7 +4219,7 @@ async fn the_notes_view_reads_the_clone_for_full_scope_only() {
     assert_eq!(serde_json::from_str::<NotesTree>(&body).unwrap(), want);
     let head = "GET /api/notes/file?path=inbox/a.md HTTP/1.1\r\nAuthorization: Bearer s";
     assert_eq!(http(&off, head, b"").await.0, 404);
-    // The running app may still hold files in it (Windows refuses to delete them).
+    // The first run's `git fetch` may still be in the clone (Windows won't delete it).
     let _ = std::fs::remove_dir_all(dir);
 }
 
