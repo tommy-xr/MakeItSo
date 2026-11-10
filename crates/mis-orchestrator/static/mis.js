@@ -16,9 +16,11 @@
     }
   }
 
-  // The HTTP API under `base` (`/a/<slug>/api/v1/`). GET and POST only.
-  function client(base) {
+  // The HTTP API under `base` (`/a/<slug>/api/v1/`). GET and POST only. A page loaded as a
+  // draft names it on every call, so it never reads or writes live data once the draft is gone.
+  function client(base, draft) {
     const call = async (path, init) => {
+      if (draft) init = { ...init, headers: { ...init?.headers, 'X-Mis-Draft': draft } };
       const res = await fetch(base + path, init);
       if (res.ok) return res.json();
       if (res.status === 409) {
@@ -75,6 +77,23 @@
     globalThis.mis = { ...front(ready), mock: { seed: via('seed'), setRole: via('setRole') } };
   } else {
     const slug = location.pathname.split('/')[2];
-    globalThis.mis = front(Promise.resolve(client(`/a/${slug}/api/v1/`)));
+    // Set by the apps listener when an owner or editor tries the app's draft.
+    const draft = (new RegExp(`(?:^|; )mis-draft-${slug}=(\\d+)`).exec(document.cookie || '') || [])[1];
+    globalThis.mis = front(Promise.resolve(client(`/a/${slug}/api/v1/`, draft)));
+    if (draft) draftBadge(slug, draft);
+  }
+
+  // Trying a draft (on a copy of the records): say so, with a way back to the live app.
+  function draftBadge(slug, draft) {
+    const show = () => {
+      const a = document.createElement('a');
+      a.href = `/a/${slug}/?draft=off`;
+      a.textContent = `Draft v${draft} · test data · exit`;
+      Object.assign(a.style, { position: 'fixed', left: '8px', bottom: 'calc(8px + env(safe-area-inset-bottom))', zIndex: 2147483647,
+        padding: '4px 10px', borderRadius: '999px', background: '#f5a524', color: '#000', font: '600 12px/1.5 system-ui, sans-serif',
+        textDecoration: 'none', boxShadow: '0 1px 4px rgba(0,0,0,.3)' });
+      document.body.append(a);
+    };
+    if (document.body) show(); else document.addEventListener('DOMContentLoaded', show);
   }
 })();

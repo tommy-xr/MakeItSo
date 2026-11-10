@@ -567,11 +567,7 @@ impl Apps {
 
     /// `slug`'s live release, if it has one.
     pub fn live(&self, slug: &str) -> Option<Live> {
-        let n = self.active_n(slug)?;
-        Some(Live {
-            dir: self.releases_dir(slug).join(n.to_string()),
-            manifest: self.release_manifest(slug, n)?,
-        })
+        self.release_at(slug, self.active_n(slug)?)
     }
 
     /// `slug`'s members. Missing: shared with no one. Unreadable: also no one (fail closed).
@@ -656,6 +652,7 @@ impl Apps {
                     crate::push::write_private(&tmp.join(name), &b)?;
                 }
             }
+            self.records.close(&Self::draft_store(slug));
             match std::fs::remove_dir_all(app.join(DRAFT)) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
                 _ => {}
@@ -667,6 +664,47 @@ impl Apps {
             return Err(DraftError::Io(format!("{e:#}")));
         }
         Ok(draft)
+    }
+
+    /// Where the draft of `slug` keeps its records ([`Records`] key): a throwaway copy, so trying
+    /// it never writes the app's own.
+    pub fn draft_store(slug: &str) -> String {
+        format!("{slug}/{DRAFT}")
+    }
+
+    /// `f` on draft `n`'s records ([`Records`] key), copied from `slug`'s own (a fresh snapshot)
+    /// on first use; a new app's start empty. The lock is held throughout, so the draft can't
+    /// be replaced or dropped mid-call. Err: `n` isn't the draft any more.
+    pub fn in_draft<T>(
+        &self,
+        slug: &str,
+        n: u32,
+        f: impl FnOnce(&str) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let _held = self.lock.lock().unwrap();
+        anyhow::ensure!(
+            self.draft(slug).is_some_and(|d| d.release == n),
+            "v{n} of {slug} is no longer its draft"
+        );
+        f(&self.fork_draft(slug)?)
+    }
+
+    /// The draft's records key, forked from `slug`'s first if need be (lock held).
+    fn fork_draft(&self, slug: &str) -> anyhow::Result<String> {
+        let key = Self::draft_store(slug);
+        if !self.records.has(&key) && self.records.has(slug) {
+            let db = self.records.db(slug)?;
+            backups::copy_whole(&db.lock().unwrap(), &self.records.file(&key))?;
+        }
+        Ok(key)
+    }
+
+    /// Release `n` of `slug`: its folder and manifest.
+    pub fn release_at(&self, slug: &str, n: u32) -> Option<Live> {
+        Some(Live {
+            dir: self.releases_dir(slug).join(n.to_string()),
+            manifest: self.release_manifest(slug, n)?,
+        })
     }
 
     /// `slug`'s draft, if it has one.
@@ -687,6 +725,7 @@ impl Apps {
         if self.draft(slug).is_none_or(|d| d.id != id) {
             return false;
         }
+        self.records.close(&Self::draft_store(slug));
         std::fs::remove_dir_all(self.dir.join(slug).join(DRAFT)).is_ok()
     }
 

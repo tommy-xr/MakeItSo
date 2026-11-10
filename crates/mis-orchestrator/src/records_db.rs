@@ -52,9 +52,19 @@ impl Records {
         }
     }
 
+    /// Forget `slug`'s open connection (its folder is going away): the next use opens afresh.
+    pub fn close(&self, slug: &str) {
+        self.open.lock().unwrap().remove(slug);
+    }
+
     /// Whether `slug` has a database yet.
     pub fn has(&self, slug: &str) -> bool {
-        self.dir.join(slug).join("data.sqlite").exists()
+        self.file(slug).exists()
+    }
+
+    /// `slug`'s database file.
+    pub fn file(&self, slug: &str) -> PathBuf {
+        self.dir.join(slug).join("data.sqlite")
     }
 
     /// `slug`'s database (a [`crate::apps::valid_slug`] whose folder exists); its lock
@@ -64,7 +74,7 @@ impl Records {
         if let Some(db) = open.get(slug) {
             return Ok(db.clone());
         }
-        let path = self.dir.join(slug).join("data.sqlite");
+        let path = self.file(slug);
         // Made 0600 before SQLite opens it; its -wal and -shm files take the same mode.
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create(true).truncate(false);

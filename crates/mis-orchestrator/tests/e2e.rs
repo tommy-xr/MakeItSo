@@ -6107,3 +6107,121 @@ async fn an_app_task_proposes_a_draft_that_only_the_owner_publishes_or_discards(
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn owners_and_editors_try_a_draft_on_a_copy_of_the_records_that_goes_with_it() {
+    let dev = mis_orchestrator::apps_http::Auth {
+        dev: true,
+        ..Default::default()
+    };
+    let (mis, apps, dir) = live_demo(with_read_token(), dev).await;
+    let op = |id: &str| put_op("shared", id, 0, serde_json::json!({"n": 1}));
+    assert_eq!(app_post(&apps, MUTATIONS, "", &op("real")).await.0, 200);
+    assert_eq!(
+        publish(&mis, "/api/apps/demo/releases", "s", &demo("v2"))
+            .await
+            .0,
+        201
+    );
+    let propose = r#"{"release":2,"pr":"https://github.com/o/r/pull/1","head":"d68ea1f8a9b4b0890914ce16e5539e480e68c07b"}"#;
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/draft", "s", propose)
+            .await
+            .0,
+        201
+    );
+
+    // Owners and editors are told of it and get in, for the current draft only; viewers never.
+    let (editor, viewer) = ("\r\nX-Mis-Dev-Role: editor", "\r\nX-Mis-Dev-Role: viewer");
+    let me = "/a/demo/api/v1/me";
+    assert!(app_get(&apps, me, editor)
+        .await
+        .2
+        .contains(r#""drafted":2"#));
+    assert!(!app_get(&apps, me, viewer).await.2.contains("drafted"));
+    assert_eq!(app_get(&apps, "/a/demo/?draft=2", viewer).await.0, 404);
+    assert_eq!(app_get(&apps, "/a/demo/?draft=2", editor).await.0, 303);
+    assert_eq!(app_get(&apps, "/a/demo/?draft=3", "").await.0, 404);
+    let (status, head, _) =
+        app_get(&apps, "/a/demo/?draft=2", "\r\nCookie: mis-draft-demo=1").await;
+    assert_eq!(status, 303, "{head}");
+    assert!(
+        head.contains("set-cookie: mis-draft-demo=2; Path=/a/demo/"),
+        "{head}"
+    );
+    assert!(!head.contains("Max-Age=0"), "{head}");
+    // Pages go by the cookie, the API by the header the page's mis.js sends.
+    let (page, api) = ("\r\nCookie: mis-draft-demo=2", "\r\nX-Mis-Draft: 2");
+
+    // In it: the draft's page and a copy of the records; writes stay in the copy.
+    assert_eq!(app_get(&apps, "/a/demo/", page).await.2, "v2");
+    assert_eq!(app_get(&apps, "/a/demo/", "").await.2, "v1");
+    assert!(app_get(&apps, me, api).await.2.contains(r#""draft":2"#));
+    let editor_write = format!("{api}{editor}");
+    assert_eq!(
+        app_post(&apps, MUTATIONS, &editor_write, &op("by-editor"))
+            .await
+            .0,
+        200
+    );
+    let by_editor = "/a/demo/api/v1/records/shared/notes/by-editor";
+    assert_eq!(
+        app_get(&apps, by_editor, "").await.0,
+        404,
+        "an editor's draft write stays in the copy"
+    );
+    let one = "/a/demo/api/v1/records/shared/notes/real";
+    assert_eq!(
+        app_get(&apps, one, api).await.0,
+        200,
+        "the copy has the real record"
+    );
+    assert_eq!(app_post(&apps, MUTATIONS, api, &op("trial")).await.0, 200);
+    let trial = "/a/demo/api/v1/records/shared/notes/trial";
+    assert_eq!(app_get(&apps, trial, api).await.0, 200);
+    assert_eq!(
+        app_get(&apps, trial, "").await.0,
+        404,
+        "never in the real records"
+    );
+    // A viewer: the live page; the API refuses rather than serve live data.
+    assert_eq!(
+        app_get(&apps, "/a/demo/", &format!("{page}{viewer}"))
+            .await
+            .2,
+        "v1"
+    );
+    assert_eq!(app_get(&apps, me, &format!("{api}{viewer}")).await.0, 409);
+
+    // Discarded: a page left open can't write anywhere; its cookie is dropped on reload.
+    let (_, list) = get_json(&mis, "/api/apps", "s").await;
+    let list: Vec<AppView> = serde_json::from_str(&list).unwrap();
+    let discard = format!(r#"{{"id":"{}"}}"#, list[0].draft.as_ref().unwrap().id);
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/draft/discard", "s", &discard)
+            .await
+            .0,
+        204
+    );
+    let (status, why) = app_post(&apps, MUTATIONS, api, &op("late")).await;
+    assert!(status == 409 && why.contains("reload"), "{status} {why}");
+    let late = "/a/demo/api/v1/records/shared/notes/late";
+    assert_eq!(app_get(&apps, late, "").await.0, 404);
+    let (_, head, body) = app_get(&apps, "/a/demo/", page).await;
+    assert_eq!(body, "v1");
+    assert!(head.contains("set-cookie: mis-draft-demo=;"), "{head}");
+    assert!(!dir.join("demo/draft").exists());
+    // A new draft starts from a fresh copy.
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/draft", "s", propose)
+            .await
+            .0,
+        201
+    );
+    assert_eq!(app_get(&apps, "/a/demo/?draft=2", "").await.0, 303);
+    assert_eq!(app_get(&apps, trial, api).await.0, 404);
+    let (status, head, _) = app_get(&apps, "/a/demo/?draft=off", page).await;
+    assert!(status == 303 && head.contains("Max-Age=0"), "{head}");
+    // Windows: the app's records are still open.
+    let _ = std::fs::remove_dir_all(dir);
+}
