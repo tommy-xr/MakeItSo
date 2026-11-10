@@ -8,7 +8,8 @@ use uuid::Uuid;
 use super::{Effect, Ledger};
 use crate::routine::{self, Def, Routine, State};
 
-/// Harness for routines that don't name one, as for unplanned tasks.
+/// Harness for routines that don't name one. Not Settings' default harness: that is for tasks
+/// people start, and a routine's file should run the same whatever it says.
 const DEFAULT_HARNESS: &str = "claude";
 
 impl Ledger {

@@ -541,6 +541,9 @@ pub struct Ledger {
     /// Unix millis of the transition in progress, set by the shell before each
     /// one; only stamped on tasks for display.
     pub now_ms: u64,
+    /// Settings' default harness (`prefer` in [`plan::default_harness`]): a task naming none
+    /// runs it, planned or not, where the fleet runs it. Not saved here: the settings file is.
+    default_harness: Option<String>,
     workers: HashMap<WorkerId, Worker>,
     usage: HashMap<WorkerId, Usage>,
     /// Each worker's inventory when its purpose was last saved (or first seen):
@@ -586,7 +589,14 @@ impl Ledger {
             tasks: self.tasks.iter().map(|t| self.summary(t)).collect(),
             now_ms: Some(self.now_ms),
             update: self.update.clone(),
+            default_harness: self.default_harness.clone(),
         }
+    }
+
+    /// Settings' default harness is now `h`: every client's composer follows it.
+    pub fn set_default_harness(&mut self, h: Option<String>) -> Vec<Effect> {
+        self.default_harness = h;
+        vec![Effect::Broadcast(self.status())]
     }
 
     /// Tasks a restart would interrupt: running on a worker, or being planned here.
@@ -713,7 +723,7 @@ impl Ledger {
 
     /// [`Self::submit`], on `worker` only if given: the task waits while it is busy, offline or
     /// gone (it may come back). Without a harness it is planned (among `worker`'s), unless
-    /// `unplanned`: then it runs claude, or on `worker`, claude if it runs it, else its first.
+    /// `unplanned`: then it runs [`plan::unplanned_harness`] among the fleet's, or `worker`'s.
     /// Err if `worker` never connected, runs no harness, or doesn't run `harness`.
     #[allow(clippy::too_many_arguments)] // submit's, plus the worker and whether to plan
     pub fn submit_to(
@@ -726,16 +736,22 @@ impl Ledger {
         worker: Option<WorkerId>,
         unplanned: bool,
     ) -> Result<(TaskId, Vec<Effect>), String> {
+        let prefer = self.default_harness.as_deref();
         let harness = match worker {
-            None => harness.or_else(|| unplanned.then(|| "claude".into())),
+            // `known_fleet` is never empty.
+            None => harness.or_else(|| {
+                let fleet = self.known_fleet();
+                (unplanned.then(|| plan::unplanned_harness(&fleet, model.as_deref(), prefer)))
+                    .flatten()
+            }),
             Some(wid) => {
                 // As it last connected: one that has left keeps what it ran.
-                let runs = (self.seen.get(&wid).map(|i| &i.harnesses))
+                let runs = (self.seen.get(&wid).map(|i| fleet_of([i])))
                     .ok_or_else(|| format!("unknown worker {}", &wid.to_string()[..8]))?;
-                let first = (plan::default_harness(runs))
+                let first = (plan::unplanned_harness(&runs, model.as_deref(), prefer))
                     .ok_or_else(|| format!("{} runs no harness", self.host(wid)))?;
                 let harness = harness.or_else(|| unplanned.then_some(first));
-                if let Some(h) = harness.as_ref().filter(|h| !runs.contains(h)) {
+                if let Some(h) = harness.as_ref().filter(|h| !runs.contains_key(*h)) {
                     return Err(format!("{} doesn't run {h}", self.host(wid)));
                 }
                 harness
@@ -766,8 +782,17 @@ impl Ledger {
             ),
             None => (self.fleet(), self.cards()),
         };
-        let plan_prompt =
-            planning.then(|| plan::prompt(&prompt, images.len(), pin.is_some(), &fleet, &offered));
+        let prefer = self.default_harness.as_deref();
+        let plan_prompt = planning.then(|| {
+            plan::prompt(
+                &prompt,
+                images.len(),
+                pin.is_some(),
+                &fleet,
+                &offered,
+                prefer,
+            )
+        });
         let mut entry = TaskEntry::new(
             Task {
                 id,
@@ -1321,6 +1346,7 @@ impl Ledger {
         let chosen = self.tasks[i].pin.and_then(|wid| self.seen.get(&wid));
         let fleet = chosen.map_or_else(|| self.known_fleet(), |info| fleet_of([info]));
         let now = self.now_ms;
+        let prefer = self.default_harness.clone();
         let t = &mut self.tasks[i];
         if t.status != TaskStatus::Planning {
             return vec![];
@@ -1337,7 +1363,7 @@ impl Ledger {
                 let plan = match (ok, summary) {
                     (true, Some(reply)) => {
                         let cards = t.pin.is_none().then_some(&t.offered[..]);
-                        plan::parse(&reply, &t.task.prompt, &fleet, cards)
+                        plan::parse(&reply, &t.task.prompt, &fleet, cards, prefer.as_deref())
                     }
                     (_, summary) => Err(summary.unwrap_or_else(|| "planner failed".into())),
                 };
@@ -2578,6 +2604,46 @@ mod tests {
             };
             assert_eq!((task.id, task.harness.as_str()), (t, want));
         }
+    }
+
+    #[test]
+    fn unplanned_runs_the_default_harness_where_the_worker_runs_it() {
+        let mut l = Ledger {
+            default_harness: Some("codex".into()),
+            ..Ledger::default()
+        };
+        let (mac, box_) = (Uuid::new_v4(), Uuid::new_v4());
+        l.connect(mac, info(), &[], 1, T0);
+        l.connect(box_, linux(), &[], 2, T0);
+        // Any machine, or one that runs it: the default; one that doesn't: claude.
+        for (wid, want) in [
+            (None, "codex"),
+            (Some(box_), "codex"),
+            (Some(mac), "claude"),
+        ] {
+            let r = l.submit_to("t".into(), None, None, None, vec![], wid, true);
+            let t = r.unwrap().0;
+            assert_eq!(status_of(&l, t).harness, want, "{wid:?}");
+        }
+        // A model goes to a harness that lists it: sonnet is claude's.
+        let sonnet = Some("sonnet".to_string());
+        let r = l.submit_to("m".into(), None, None, sonnet, vec![], None, true);
+        assert_eq!(status_of(&l, r.unwrap().0).harness, "claude");
+        // Planned, the planner defaults to it.
+        let (p, eff) = (l.submit_to("p".into(), None, None, None, vec![], None, false)).unwrap();
+        assert_eq!(task_status(&l, p), TaskStatus::Planning);
+        let [Effect::Plan { prompt, .. }] = &eff[..] else {
+            panic!("{eff:?}")
+        };
+        assert!(prompt.contains("otherwise pick codex"), "{prompt}");
+        // No worker runs it: claude, not a task queued for good.
+        let mut l = Ledger {
+            default_harness: Some("codex".into()),
+            ..Ledger::default()
+        };
+        l.connect(mac, info(), &[], 1, T0);
+        let r = l.submit_to("c".into(), None, None, None, vec![], None, true);
+        assert_eq!(status_of(&l, r.unwrap().0).harness, "claude");
     }
 
     #[test]

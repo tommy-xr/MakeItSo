@@ -56,7 +56,8 @@ struct Args {
         value_delimiter = ','
     )]
     allowed_origins: Vec<String>,
-    /// Don't plan with the local `claude` CLI; tasks without --harness run on claude as-is.
+    /// Don't plan with the local `claude` CLI; tasks without --harness run as-is on the default
+    /// harness (Settings; claude unset).
     #[arg(long)]
     no_planner: bool,
     /// Model the planner itself runs on.
@@ -487,7 +488,7 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
     if args.no_planner {
-        tracing::info!("planner off; tasks without --harness run on claude");
+        tracing::info!("planner off; tasks without --harness run on the default harness");
     } else if mis_agent::which("claude") {
         tracing::info!(model = %args.planner_model, "planner: local claude (tool-less)");
         app = app.with_planner(one_shot_claude(
@@ -496,7 +497,9 @@ async fn main() -> anyhow::Result<()> {
         ));
         app = app.with_drafter(one_shot_claude(&args.planner_model, &[]));
     } else {
-        tracing::warn!("no `claude` on PATH: planner off; tasks without --harness run on claude");
+        tracing::warn!(
+            "no `claude` on PATH: planner off; tasks without --harness run on the default harness"
+        );
     }
     if !args.no_summary && mis_agent::which("claude") {
         tracing::info!(model = %args.summary_model, "summaries: local claude (tool-less)");

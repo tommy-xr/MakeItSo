@@ -814,6 +814,9 @@ pub enum ServerMsg {
         now_ms: Option<u64>,
         #[serde(default)]
         update: Update,
+        /// `Settings::default_harness`, so composers follow it as it changes.
+        #[serde(default)]
+        default_harness: Option<String>,
     },
     Submitted {
         task: TaskId,
