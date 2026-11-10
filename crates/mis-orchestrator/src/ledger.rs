@@ -705,9 +705,10 @@ impl Ledger {
         self.submit_on(prompt, cwd, harness, model, images, None)
     }
 
-    /// [`Self::submit`] for worker `wid` only: it waits while `wid` is busy or offline.
-    /// Without a harness it is planned among `wid`'s, unless `unplanned`: then it runs
-    /// claude if `wid` does, else `wid`'s first. Err if `wid` is unknown or lacks the harness.
+    /// [`Self::submit`] for worker `wid` only: it waits while `wid` is busy or offline, even
+    /// once it has left (its harnesses are then checked when it is back). Without a harness
+    /// it is planned among `wid`'s, unless `unplanned`: then it runs claude if `wid` does, else
+    /// `wid`'s first. Err if `wid` never connected, or doesn't run the harness.
     #[allow(clippy::too_many_arguments)] // submit's, plus the worker and whether to plan
     pub fn submit_to(
         &mut self,
@@ -719,8 +720,14 @@ impl Ledger {
         wid: WorkerId,
         unplanned: bool,
     ) -> Result<(TaskId, Vec<Effect>), String> {
-        let w = (self.workers.get(&wid))
-            .ok_or_else(|| format!("unknown worker {}", &wid.to_string()[..8]))?;
+        let Some(w) = self.workers.get(&wid) else {
+            // `noted` outlives a worker: one that left may come back.
+            if !self.noted.contains_key(&wid) {
+                return Err(format!("unknown worker {}", &wid.to_string()[..8]));
+            }
+            let harness = harness.or_else(|| unplanned.then(|| "claude".into()));
+            return Ok(self.submit_on(prompt, cwd, harness, model, images, Some(wid)));
+        };
         let runs = &w.info.harnesses;
         let fallback = || {
             runs.iter()
@@ -754,12 +761,14 @@ impl Ledger {
         let planning = harness.is_none();
         // A chosen worker: the planner picks among its harnesses, all of them (a usage limit
         // only makes the task wait there), and may neither answer it nor route it elsewhere.
-        let (fleet, offered) = match pin {
-            Some(wid) => (
-                fleet_of([&self.workers[&wid].info]),
+        // One that has left offers what any worker runs.
+        let (fleet, offered) = match (pin, pin.and_then(|wid| self.workers.get(&wid))) {
+            (Some(wid), Some(w)) => (
+                fleet_of([&w.info]),
                 self.cards().into_iter().filter(|c| c.id == wid).collect(),
             ),
-            None => (self.fleet(), self.cards()),
+            (Some(_), None) => (self.known_fleet(), vec![]),
+            (None, _) => (self.fleet(), self.cards()),
         };
         let plan_prompt =
             planning.then(|| plan::prompt(&prompt, images.len(), pin.is_some(), &fleet, &offered));
@@ -2460,8 +2469,18 @@ mod tests {
         // Past its grace too: it is a fresh task, not a session that left with it.
         l.expire(box_, 1);
         assert_eq!(task_status(&l, t), TaskStatus::Queued);
+        // Gone, it can still be chosen; it takes both once back.
+        let later = submit_to(&mut l, "later", None, box_);
+        assert_eq!(task_status(&l, later), TaskStatus::Planning);
+        let eff = finish_plan(&mut l, later, r#"{"harness":"claude"}"#);
+        assert!(assigned(&eff).is_empty(), "{eff:?}");
         let (_, eff) = l.connect(box_, linux(), &[], 3, T0);
         assert_eq!(assigned(&eff), [(3, t)]);
+        let done = AgentEvent::Finished {
+            ok: true,
+            summary: None,
+        };
+        assert_eq!(assigned(&l.event(box_, 3, t, done)), [(3, later)]);
     }
 
     #[test]
