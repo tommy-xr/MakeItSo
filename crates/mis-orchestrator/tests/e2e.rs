@@ -3478,6 +3478,42 @@ async fn settings_take_defaults_save_and_need_full_access() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[tokio::test]
+async fn unplanned_tasks_run_the_saved_default_harness() {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-default-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // Saved before it starts, as after a restart.
+    std::fs::write(dir.join("settings.json"), r#"{"default_harness":"codex"}"#).unwrap();
+    let base = start_app(App::new(None).with_ledger_dir(dir.clone())).await;
+    let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
+    let mut harness_of = async |prompt: &str| {
+        let submit = ClientMsg::Submit {
+            prompt: prompt.into(),
+            cwd: None,
+            harness: None,
+            model: None,
+            reply_to: None,
+            images: vec![],
+            worker: None,
+        };
+        send(&mut client, &submit).await;
+        let ServerMsg::Submitted { task } = recv(&mut client).await else {
+            panic!()
+        };
+        send(&mut client, &ClientMsg::Status).await;
+        let ServerMsg::Status { tasks, .. } = recv(&mut client).await else {
+            panic!()
+        };
+        tasks.into_iter().find(|t| t.id == task).unwrap().harness
+    };
+    assert_eq!(harness_of("a").await, "codex");
+    // Saved as Auto: claude again, without a restart.
+    let auto = r#"{"default_harness":null}"#;
+    assert_eq!(post_json(&base, "/api/settings", "s", auto).await.0, 204);
+    assert_eq!(harness_of("b").await, "claude");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A worker running claude, joined with the full token `s`.
 async fn join_as(base: &str) -> (WorkerId, Ws) {
     let mut req = format!("{base}/ws/worker").into_client_request().unwrap();

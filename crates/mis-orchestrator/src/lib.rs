@@ -637,6 +637,10 @@ impl App {
             Err(e) if e.is::<store::Locked>() => return Err(e),
             Err(e) => tracing::warn!("task history won't survive a restart: {e:#}"),
         }
+        match self.settings() {
+            Ok(s) => self.ledger().default_harness = s.default_harness,
+            Err(e) => tracing::warn!("{e}: unplanned tasks run on claude"),
+        }
         Ok(())
     }
 
@@ -1862,8 +1866,12 @@ async fn set_settings(
         Ok(s) => s,
         Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
     };
+    let default = new.default_harness.clone();
     match tokio::task::spawn_blocking(move || settings::save(&dir, &new)).await {
-        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Ok(())) => {
+            app.ledger().default_harness = default;
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }

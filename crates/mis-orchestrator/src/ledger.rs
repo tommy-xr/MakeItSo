@@ -541,6 +541,9 @@ pub struct Ledger {
     /// Unix millis of the transition in progress, set by the shell before each
     /// one; only stamped on tasks for display.
     pub now_ms: u64,
+    /// Settings' default harness, set by the shell: what a task naming none runs when it isn't
+    /// planned. None: claude. Not saved here: the settings file holds it.
+    pub default_harness: Option<String>,
     workers: HashMap<WorkerId, Worker>,
     usage: HashMap<WorkerId, Usage>,
     /// Each worker's inventory when its purpose was last saved (or first seen):
@@ -713,7 +716,8 @@ impl Ledger {
 
     /// [`Self::submit`], on `worker` only if given: the task waits while it is busy, offline or
     /// gone (it may come back). Without a harness it is planned (among `worker`'s), unless
-    /// `unplanned`: then it runs claude, or on `worker`, claude if it runs it, else its first.
+    /// `unplanned`: then it runs the default harness (claude unset), or on `worker`, the default
+    /// if it runs it, else claude if it does, else its first.
     /// Err if `worker` never connected, runs no harness, or doesn't run `harness`.
     #[allow(clippy::too_many_arguments)] // submit's, plus the worker and whether to plan
     pub fn submit_to(
@@ -727,12 +731,16 @@ impl Ledger {
         unplanned: bool,
     ) -> Result<(TaskId, Vec<Effect>), String> {
         let harness = match worker {
-            None => harness.or_else(|| unplanned.then(|| "claude".into())),
+            None => harness.or_else(|| {
+                let default = self.default_harness.clone();
+                unplanned.then(|| default.unwrap_or_else(|| "claude".into()))
+            }),
             Some(wid) => {
                 // As it last connected: one that has left keeps what it ran.
                 let runs = (self.seen.get(&wid).map(|i| &i.harnesses))
                     .ok_or_else(|| format!("unknown worker {}", &wid.to_string()[..8]))?;
-                let first = (plan::default_harness(runs))
+                let default = self.default_harness.clone().filter(|h| runs.contains(h));
+                let first = (default.or_else(|| plan::default_harness(runs)))
                     .ok_or_else(|| format!("{} runs no harness", self.host(wid)))?;
                 let harness = harness.or_else(|| unplanned.then_some(first));
                 if let Some(h) = harness.as_ref().filter(|h| !runs.contains(h)) {
@@ -2519,6 +2527,30 @@ mod tests {
             };
             assert_eq!((task.id, task.harness.as_str()), (t, want));
         }
+    }
+
+    #[test]
+    fn unplanned_runs_the_default_harness_where_the_worker_runs_it() {
+        let mut l = Ledger {
+            default_harness: Some("codex".into()),
+            ..Ledger::default()
+        };
+        let (mac, box_) = (Uuid::new_v4(), Uuid::new_v4());
+        l.connect(mac, info(), &[], 1, T0);
+        l.connect(box_, linux(), &[], 2, T0);
+        // Any machine, or one that runs it: the default; one that doesn't: claude.
+        for (wid, want) in [
+            (None, "codex"),
+            (Some(box_), "codex"),
+            (Some(mac), "claude"),
+        ] {
+            let r = l.submit_to("t".into(), None, None, None, vec![], wid, true);
+            let t = r.unwrap().0;
+            assert_eq!(status_of(&l, t).harness, want, "{wid:?}");
+        }
+        // Planned, it stays the planner's pick.
+        let r = l.submit_to("p".into(), None, None, None, vec![], None, false);
+        assert_eq!(task_status(&l, r.unwrap().0), TaskStatus::Planning);
     }
 
     #[test]

@@ -12,6 +12,17 @@ const MAX_CHARS: usize = 512;
 
 /// `s` with its values trimmed; Err: why one can't be saved.
 pub fn clean(mut s: Settings) -> Result<Settings, String> {
+    // Blank is Auto.
+    s.default_harness = (s.default_harness.take()).filter(|h| !h.trim().is_empty());
+    if let Some(h) = &mut s.default_harness {
+        *h = h.trim().to_string();
+        if !mis_agent::HARNESSES.contains(&h.as_str()) {
+            let known = mis_agent::HARNESSES.join(" or ");
+            return Err(format!(
+                "default harness {h:?}: want {known}, or none for Auto"
+            ));
+        }
+    }
     let a = &mut s.apps;
     if !mis_agent::HARNESSES.contains(&a.harness.trim()) {
         let known = mis_agent::HARNESSES.join(" or ");
@@ -64,6 +75,9 @@ mod tests {
         let s: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(s, Settings::default());
         assert_eq!(s.apps.model, "opus");
+        assert_eq!(s.default_harness, None);
+        let s: Settings = serde_json::from_str(r#"{"default_harness": "codex"}"#).unwrap();
+        assert_eq!(s.default_harness.as_deref(), Some("codex"));
     }
 
     #[test]
@@ -78,6 +92,22 @@ mod tests {
         }
         s.apps.harness = "gpt".into();
         assert!(clean(s).unwrap_err().contains("claude or codex"));
+    }
+
+    #[test]
+    fn clean_takes_a_known_default_harness_or_blank_for_auto() {
+        let with = |h: &str| {
+            let s = Settings {
+                default_harness: Some(h.into()),
+                ..Settings::default()
+            };
+            clean(s).map(|s| s.default_harness)
+        };
+        assert_eq!(with(" codex ").unwrap().as_deref(), Some("codex"));
+        assert_eq!(with("  ").unwrap(), None);
+        assert!(with("gpt")
+            .unwrap_err()
+            .starts_with("default harness \"gpt\""));
     }
 
     #[test]
