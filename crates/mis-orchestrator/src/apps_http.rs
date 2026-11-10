@@ -408,15 +408,14 @@ async fn me(
     if let Some(r) = denied(&apps, &slug, &m, Action::Read) {
         return r;
     }
+    let may_try = app_access::may_try(m.role);
+    let draft = may_try.then(|| apps.draft(&slug)).flatten();
     Json(AppMe {
         user: m.subject.name().into(),
         role: m.role,
-        drafted: (app_access::may_try(m.role))
-            .then(|| apps.draft(&slug).map(|d| d.release))
-            .flatten(),
-        feedback: match app_access::may_try(m.role) {
+        drafted: draft.as_ref().map(|d| d.release),
+        feedback: match may_try {
             true => {
-                let draft = apps.draft(&slug);
                 crate::feedback::statuses(&apps.feedback(&slug), m.subject.name(), draft.as_ref())
             }
             false => vec![],
@@ -633,6 +632,7 @@ async fn feedback(
         feedback: f,
         waiting: Some("on its way to an agent".into()),
         task: None,
+        outcome: None,
     };
     // Kept before it is acknowledged, so a restart can't lose it; the owner sees it until it goes.
     let (a, s) = (apps.clone(), slug.clone());

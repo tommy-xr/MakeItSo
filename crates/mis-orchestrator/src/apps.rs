@@ -779,6 +779,21 @@ impl Apps {
         all
     }
 
+    /// Mark `slug`'s feedback whose work is `task`'s thread decided: `what` (`live as v3`).
+    pub fn settle_feedback(&self, slug: &str, task: Option<uuid::Uuid>, what: &str) {
+        let Some(task) = task else { return };
+        for mut h in self
+            .feedback(slug)
+            .into_iter()
+            .filter(|h| h.task == Some(task))
+        {
+            h.outcome = Some(what.into());
+            if let Err(e) = self.keep_feedback(slug, &h) {
+                tracing::warn!("apps/{slug}: settling feedback: {e:#}");
+            }
+        }
+    }
+
     /// `slug`'s feedback waiting for its owner, oldest first.
     pub fn waiting_feedback(&self, slug: &str) -> Vec<HeldFeedback> {
         self.feedback(slug)

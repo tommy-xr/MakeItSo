@@ -73,6 +73,9 @@ pub const SHOWN: usize = 5;
 /// its task proposed since.
 pub fn status(held: &HeldFeedback, draft: Option<&AppDraft>) -> FeedbackStatus {
     let state = match (held.task, draft) {
+        _ if held.outcome.is_some() => FeedbackState::Done {
+            what: held.outcome.clone().unwrap_or_default(),
+        },
         (None, _) => FeedbackState::Waiting {
             why: held.waiting.clone().unwrap_or_default(),
         },
@@ -159,6 +162,7 @@ mod tests {
             },
             waiting: None,
             task: None,
+            outcome: None,
         }
     }
 

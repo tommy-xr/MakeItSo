@@ -872,8 +872,8 @@ impl App {
     }
 
     /// Send `held` (kept on its app as it came in) to an agent unless its app holds feedback
-    /// (`force`: the owner sent it), then drop it; else, or if it can't go now, keep it for the
-    /// owner with why. Whether it went.
+    /// (`force`: the owner sent it), then keep it as a record of its task; else, or if it can't
+    /// go now, keep it for the owner with why. Whether it went.
     async fn take_feedback(&self, slug: String, mut held: HeldFeedback, force: bool) -> bool {
         let Some(apps) = self.apps.clone() else {
             return false;
@@ -2127,7 +2127,7 @@ async fn decide_feedback(
     let Some(held) = read.await.expect("reading feedback doesn't panic") else {
         return (StatusCode::NOT_FOUND, "no such feedback").into_response();
     };
-    // Sent, it is dropped; if it can't go, it stays, with why.
+    // Sent, it stays as a record of its task; if it can't go, it waits, with why.
     if send && !app.take_feedback(slug, held, true).await {
         return (StatusCode::CONFLICT, "it couldn't go now; see why on it").into_response();
     }
@@ -2192,7 +2192,16 @@ async fn decide_draft(
             return (StatusCode::INTERNAL_SERVER_ERROR, note_failure(why).await).into_response();
         }
     }
-    let _ = tokio::task::spawn_blocking(move || apps.end_draft(&slug, id)).await;
+    // Feedback that led to it says how it ended, in its sender's menu.
+    let what = match publish {
+        true => format!("live as v{}", draft.release),
+        false => "discarded".into(),
+    };
+    let _ = tokio::task::spawn_blocking(move || {
+        apps.end_draft(&slug, id);
+        apps.settle_feedback(&slug, draft.task, &what)
+    })
+    .await;
     StatusCode::NO_CONTENT.into_response()
 }
 

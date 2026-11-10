@@ -85,7 +85,8 @@ own page.
   try, their feedback's status and Give feedback) belongs to the SDK. Place it at the right of
   your header: `mis.menu.mount(el)` (React: a `ref` on an empty `<span>`); unplaced, it floats
   top-right. Leave it neutral; to match the app, set `--mis-menu-fg`/`--mis-menu-bg` (its
-  button) and `--mis-menu-surface`/`--mis-menu-text` (the menu). Keep that corner free.
+  button), `--mis-menu-surface`/`--mis-menu-text` (the menu) and `--mis-menu-dot`. Keep that
+  corner free.
 - `records.list(space, collection, q)`: `where` with `eq`/`gt`/`gte`/`lt`/`lte` (a bound matches
   only values of its JSON type), one `order_by`, `limit` up to 100; follow `cursor` to the end.
 

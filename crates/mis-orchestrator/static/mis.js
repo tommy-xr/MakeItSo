@@ -75,6 +75,7 @@
   const slug = location.pathname.split('/')[2];
   // Set by the apps listener when an owner or editor tries the app's draft.
   const draft = mocked ? undefined : (new RegExp(`(?:^|; )mis-draft-${slug}=(\\d+)`).exec(document.cookie || '') || [])[1];
+  const menu = platformMenu();
   if (mocked) {
     const src = new URL('mis-mock.js', document.currentScript.src);
     const ready = import(src).then((m) => m.createMock({ role: params.get('role') || 'owner', Err: MisError }));
@@ -83,7 +84,6 @@
   } else {
     globalThis.mis = front(Promise.resolve(client(`/a/${slug}/api/v1/`, draft)));
   }
-  const menu = platformMenu();
   if (typeof document === 'object' && document.addEventListener) onBody(() => menu.start());
 
   // `fn` once the page's body exists.
@@ -104,9 +104,10 @@
 @media (prefers-color-scheme:dark){.mis-ui{--s:var(--mis-menu-surface,#1c1c1e);--t:var(--mis-menu-text,#f2f2f7)}}
 .mis-mb{all:unset;box-sizing:border-box;position:relative;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:8px;cursor:pointer;color:var(--mis-menu-fg,currentColor);background:var(--mis-menu-bg,transparent);opacity:.7;font:600 18px/1 system-ui,sans-serif;letter-spacing:1px}
 .mis-mb:hover,.mis-mb[aria-expanded=true]{opacity:1}
+.mis-mb[hidden]{display:none}
 .mis-mb:focus-visible{outline:2px solid currentColor}
 .mis-mb.mis-float{position:fixed;top:calc(8px + env(safe-area-inset-top));right:calc(8px + env(safe-area-inset-right));z-index:2147483646;color:var(--mis-menu-fg,var(--t));background:var(--mis-menu-bg,color-mix(in srgb,var(--s) 70%,transparent));-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
-.mis-mb .mis-dot{position:absolute;top:5px;right:4px;width:7px;height:7px;border-radius:50%;background:currentColor}
+.mis-mb .mis-dot{position:absolute;top:3px;right:2px;width:8px;height:8px;border-radius:50%;background:var(--mis-menu-dot,#e8a33d)}
 .mis-pop{position:fixed;z-index:2147483647;box-sizing:border-box;width:min(300px,calc(100vw - 16px));overflow-y:auto;padding:6px;border-radius:12px;background:var(--s);color:var(--t);box-shadow:0 0 0 1px var(--l),0 8px 24px rgba(0,0,0,.25);font:14px/1.4 system-ui,sans-serif}
 .mis-pop a,.mis-pop button{all:unset;box-sizing:border-box;display:block;width:100%;padding:9px 10px;border-radius:8px;cursor:pointer;color:var(--t)}
 .mis-pop a:hover,.mis-pop button:hover,.mis-pop a:focus-visible,.mis-pop button:focus-visible{background:var(--l)}
@@ -123,7 +124,7 @@
 .mis-panel button{padding:7px 14px;border:1px solid var(--l);border-radius:999px;background:transparent;color:inherit;font:600 13px/1.4 system-ui,sans-serif}
 .mis-panel button[type=submit]{background:var(--t);color:var(--s);border-color:var(--t)}
 .mis-panel .mis-err{color:#d33;font-size:13px}
-.mis-tag{position:fixed;left:calc(8px + env(safe-area-inset-left));bottom:calc(8px + env(safe-area-inset-bottom));z-index:2147483646;padding:4px 10px;border-radius:999px;background:color-mix(in srgb,var(--s) 80%,transparent);color:var(--t);box-shadow:0 0 0 1px var(--l);font:12px/1.5 system-ui,sans-serif;text-decoration:none;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}`;
+.mis-tag{position:fixed;left:calc(8px + env(safe-area-inset-left));bottom:calc(8px + env(safe-area-inset-bottom));z-index:2147483646;padding:4px 10px;border-radius:999px;background:color-mix(in srgb,var(--s) 80%,transparent);color:var(--t);box-shadow:0 0 0 1px var(--mis-menu-dot,#e8a33d);font:12px/1.5 system-ui,sans-serif;text-decoration:none;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}`;
 
   // The platform menu: who's signed in, All apps, and for owners and editors the app's draft,
   // what became of their feedback, and Give feedback. Apps place its button in their header
@@ -131,15 +132,22 @@
   function platformMenu() {
     let btn = null, host = null, me = null, pop = null;
     const mount = (el) => {
+      if (!el) return; // a React ref also calls with null
       host = el;
       if (btn) { btn.classList.remove('mis-float', 'mis-ui'); el.append(btn); }
     };
     const start = async () => {
-      me = await globalThis.mis.me().catch(() => null);
-      if (!me) return;
       const style = make('style');
       style.textContent = STYLE;
       document.head.append(style);
+      // Said whatever /me says: writes here go to test data.
+      if (draft) {
+        const tag = make('a', 'mis-tag mis-ui', `Draft v${draft} · test data · exit`);
+        tag.href = `/a/${slug}/?draft=off`;
+        document.body.append(tag);
+      }
+      me = await globalThis.mis.me().catch(() => null);
+      if (!me) return;
       btn = make('button', 'mis-mb', '⋯');
       btn.type = 'button';
       btn.setAttribute('aria-label', 'App menu');
@@ -155,12 +163,6 @@
         showDot();
         if (!pop) open();
       };
-      if (draft) {
-        const tag = make('a', 'mis-tag mis-ui', `Draft v${draft} · test data`);
-        tag.href = `/a/${slug}/?draft=off`;
-        tag.title = 'Back to the live app';
-        document.body.append(tag);
-      }
       if (host) return mount(host);
       // Not placed by the app: float, unless it places it soon after loading.
       setTimeout(() => { if (!host) { btn.classList.add('mis-float', 'mis-ui'); document.body.append(btn); } }, 800);
@@ -184,7 +186,8 @@
       if (writes && !mocked) {
         for (const f of me.feedback || []) {
           const row = make('div', 'mis-fb', f.note);
-          const state = f.state === 'draft_ready' ? `draft v${f.release} ready` : f.state === 'working' ? 'an agent is on it' : `waiting: ${f.why}`;
+          const state = f.state === 'draft_ready' ? `draft v${f.release} ready` : f.state === 'working' ? 'an agent is on it'
+            : f.state === 'done' ? f.what : `waiting: ${f.why}`;
           row.append(make('span', '', state));
           el.append(row);
         }
@@ -193,10 +196,12 @@
       el.append(make('hr'));
       item('All apps', '/a/');
       const r = btn.getBoundingClientRect();
-      // Under the button, never past the bottom: it scrolls instead.
+      // Under the button, inside the screen: it scrolls rather than run past the bottom.
       const top = Math.min(r.bottom + 6, innerHeight - 120);
-      Object.assign(el.style, { top: `${top}px`, right: `${Math.max(8, innerWidth - r.right)}px`, maxHeight: `${innerHeight - top - 8}px` });
+      Object.assign(el.style, { top: `${top}px`, maxHeight: `${innerHeight - top - 8}px` });
       document.body.append(el);
+      const w = el.offsetWidth;
+      el.style.left = `${Math.max(8, Math.min(r.right - w, innerWidth - w - 8))}px`;
       btn.setAttribute('aria-expanded', 'true');
       addEventListener('pointerdown', outside, true);
     }

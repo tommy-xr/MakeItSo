@@ -63,6 +63,7 @@ declare namespace Mis {
     | { state: 'waiting'; why: string }
     | { state: 'working' }
     | { state: 'draft_ready'; release: number }
+    | { state: 'done'; what: string }
   );
 
   /** Every record the caller can see, by collection. */
@@ -126,11 +127,11 @@ declare namespace Mis {
   /**
    * The platform menu (signed in as, All apps; for owners and editors the app's draft, their
    * feedback and Give feedback). Neutral; theme it with --mis-menu-fg, --mis-menu-bg (its
-   * button) and --mis-menu-surface, --mis-menu-text (the menu).
+   * button) and --mis-menu-surface, --mis-menu-text (the menu); --mis-menu-dot (a draft is ready).
    */
   interface Menu {
     /** Put its button in `el` (the app's header); unplaced, it floats top-right. */
-    mount(el: Element): void;
+    mount(el: Element | null): void;
   }
 
   interface Sdk {

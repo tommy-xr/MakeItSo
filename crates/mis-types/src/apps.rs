@@ -117,6 +117,9 @@ pub struct HeldFeedback {
     /// The task it went to. None: it waits.
     #[serde(default)]
     pub task: Option<uuid::Uuid>,
+    /// How its task's draft was decided, e.g. `live as v3`, `discarded`.
+    #[serde(default)]
+    pub outcome: Option<String>,
 }
 
 /// What became of feedback someone sent, as their app's menu shows it (`/me`).
@@ -139,6 +142,8 @@ pub enum FeedbackState {
     Working,
     /// A draft came after it: try it.
     DraftReady { release: u32 },
+    /// Its draft was decided (`what`: `live as v3`, `discarded`).
+    Done { what: String },
 }
 
 /// Longest feedback note.
