@@ -4262,10 +4262,11 @@ function renderNotes(path) {
   const entry = notesTree && notesTree.entries && (path ? notesTree.entries.find((e) => e.path === path) : { kind: 'dir', path: '' });
   if (entry && entry.kind === 'md' && (!noteShown || noteShown.path !== path)) loadNote(path);
   const got = entry && entry.kind === 'md' ? noteShown.got : null;
-  // A note's view depends on its own suggestion only. While its card has focus, only the card's state redraws it.
-  const one = !!got, drawn = [path, notesTree, got, noteMove, projects, one ? noteSugs && noteSugs[path] : noteSugs, one ? null : noteFiles];
+  // A note's view depends on its own suggestion only. While its card has focus, only the card's state (or the note
+  // going) redraws it: a tree, suggestion or project titles coming in wait.
+  const one = !!got, drawn = [path, got, noteMove, notesTree, projects, one ? noteSugs && noteSugs[path] : noteSugs, one ? null : noteFiles];
   if (notesDrawn && drawn.every((x, i) => x === notesDrawn[i])) return;
-  if (notesDrawn && $('notes-body').querySelector('.nmove')?.contains(document.activeElement) && drawn.slice(0, 4).every((x, i) => x === notesDrawn[i])) return;
+  if (notesDrawn && entry && $('notes-body').querySelector('.nmove')?.contains(document.activeElement) && drawn.slice(0, 3).every((x, i) => x === notesDrawn[i])) return;
   notesDrawn = drawn;
   const body = $('notes-body'), front = got && got.text !== undefined ? noteFront(got.text) : null;
   $('notes-head').replaceChildren(el('div', { className: 'ttl' }, el('span', {}, (front && typeof front.meta.title === 'string' && front.meta.title) || (path ? noteLabel(path) : 'Notes'))),
