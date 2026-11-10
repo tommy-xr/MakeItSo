@@ -423,6 +423,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let mut app = App::new(args.token)
+        .with_host(hostname())
         .with_channel(channel)
         .with_read_tokens(args.read_tokens)
         .with_access_subjects(args.access_subjects)
@@ -532,6 +533,21 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Ctrl-C, or SIGTERM (`kill`, service managers) on Unix.
+/// This machine's name, as its worker reports it: `MIS_HOSTNAME`, else `hostname`'s.
+fn hostname() -> String {
+    if let Some(h) = std::env::var("MIS_HOSTNAME")
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+    {
+        return h;
+    }
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
 async fn shutdown_signal() {
     #[cfg(unix)]
     {

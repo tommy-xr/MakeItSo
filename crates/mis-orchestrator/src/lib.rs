@@ -146,6 +146,8 @@ pub struct App {
     watchers: Arc<AtomicUsize>,
     /// Published apps. None: publishing is off.
     apps: Option<Arc<apps::Apps>>,
+    /// This machine's hostname: app tasks default to a worker reporting it. Empty: none does.
+    host: String,
     /// Held while an app task's token creates its app, so a thread creates only one.
     creating: Arc<tokio::sync::Mutex<()>>,
     /// Held by each draft proposal and decision: a publish's merge-then-activate isn't
@@ -193,6 +195,7 @@ impl App {
             routine_every: ROUTINE_EVERY,
             watchers: Default::default(),
             apps: None,
+            host: String::new(),
             creating: Default::default(),
             drafting: Default::default(),
         }
@@ -279,6 +282,12 @@ impl App {
     /// Accept, list and activate published apps.
     pub fn with_apps(mut self, apps: Arc<apps::Apps>) -> Self {
         self.apps = Some(apps);
+        self
+    }
+
+    /// This machine is `host`, as its worker names it (see `app_tasks::machine`).
+    pub fn with_host(mut self, host: String) -> Self {
+        self.host = host;
         self
     }
 
@@ -860,7 +869,12 @@ impl App {
     ) -> Result<TaskId, String> {
         let prompt = app_tasks::prompt(&t)?;
         self.check_images(&t.images)?;
-        let repo = self.settings()?.apps.repo;
+        let set = self.settings()?.apps;
+        let worker = {
+            let online = self.ledger().online_hosts(&t.harness);
+            let online = online.iter().map(|(id, h)| (*id, h.as_str()));
+            app_tasks::machine(t.worker, set.worker, &self.host, online)
+        };
         let bound = app_tasks::binding(&t, requester);
         if let (Some(apps), Some(slug)) = (self.apps.clone(), bound.slug.clone()) {
             let exists = tokio::task::spawn_blocking(move || apps.exists(&slug));
@@ -869,7 +883,7 @@ impl App {
         }
         let model = t.model.filter(|m| !m.trim().is_empty());
         self.transition(|l| {
-            match l.submit_app_task(prompt, repo, t.harness, model, t.worker, t.images, bound) {
+            match l.submit_app_task(prompt, set.repo, t.harness, model, worker, t.images, bound) {
                 Ok((task, effects)) => (Ok(task), effects),
                 Err(why) => (Err(why), vec![]),
             }

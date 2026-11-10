@@ -1,6 +1,6 @@
 //! Tasks that build or change an app (`+ App`, `Change…`): the prompt they run with. Pure.
 
-use mis_types::{guides, valid_slug, AppTask, SLUG_RULE};
+use mis_types::{guides, valid_slug, AppTask, WorkerId, SLUG_RULE};
 
 use crate::app_grant::Binding;
 
@@ -36,6 +36,23 @@ pub fn binding(t: &AppTask, requester: Option<String>) -> Binding {
         create: !t.change,
         requester,
     }
+}
+
+/// The worker an app task runs on: the one it `picked`, else Settings' (`set`), else an
+/// `online` worker (id, hostname; those running its harness) on the orchestrator's `host`, else
+/// any (None). By hostname, as the worker reports it: the same machine names itself the same.
+pub fn machine<'a>(
+    picked: Option<WorkerId>,
+    set: Option<WorkerId>,
+    host: &str,
+    online: impl IntoIterator<Item = (WorkerId, &'a str)>,
+) -> Option<WorkerId> {
+    let here = |h: &str| !host.is_empty() && h.eq_ignore_ascii_case(host);
+    let local = (online.into_iter())
+        .filter(|(_, h)| here(h))
+        .map(|(id, _)| id);
+    // Lowest id: the same one each time, whatever the order.
+    picked.or(set).or_else(|| local.min())
 }
 
 /// The app `t` names, if any.
@@ -82,6 +99,17 @@ mod tests {
         assert_eq!((b.slug.as_deref(), b.create), (Some("pool"), true));
         let b = binding(&task("x", Some(""), false), me.clone());
         assert_eq!((b.slug, b.create, b.requester), (None, true, me));
+    }
+
+    #[test]
+    fn the_machine_is_the_picked_then_the_set_then_this_hosts_then_any() {
+        let [a, b, c] = [1, 2, 3].map(uuid::Uuid::from_u128);
+        let online = [(c, "studio"), (b, "Demo-Mac"), (a, "demo-mac")];
+        assert_eq!(machine(Some(c), Some(b), "demo-mac", online), Some(c));
+        assert_eq!(machine(None, Some(c), "demo-mac", online), Some(c));
+        assert_eq!(machine(None, None, "demo-mac", online), Some(a));
+        assert_eq!(machine(None, None, "laptop", online), None);
+        assert_eq!(machine(None, None, "", [(a, "")]), None);
     }
 
     #[test]

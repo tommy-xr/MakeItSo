@@ -838,8 +838,9 @@ impl Ledger {
 
     /// Queue an app task: `prompt` as is (no planner), in `cwd` on `harness`, on `worker`
     /// only if given, with `images`, bound to `bound`'s app (its `thread` becomes this task) with a token
-    /// of its own. It never merges: the user approves its PR. Err if no worker runs
-    /// `harness` (it would wait for good), or `worker` is offline or doesn't run it.
+    /// of its own. It never merges: the user approves its PR. It waits while `worker` is busy or
+    /// offline. Err if no worker runs `harness` (it would wait for good), or `worker` never
+    /// connected or doesn't run it.
     #[allow(clippy::too_many_arguments)] // a task's fields, plus the worker and its app
     pub fn submit_app_task(
         &mut self,
@@ -873,12 +874,27 @@ impl Ledger {
             thread: id,
             ..bound
         });
-        let mut effects = match worker {
-            Some(wid) => self.enqueue_entry_pinned(wid, entry)?.1,
-            None => self.enqueue(entry).1,
-        };
+        if let Some(wid) = worker {
+            // As it last connected: one that has left keeps what it ran.
+            let info = (self.seen.get(&wid))
+                .ok_or_else(|| format!("unknown worker {}", &wid.to_string()[..8]))?;
+            if !info.harnesses.contains(&entry.task.harness) {
+                let h = &entry.task.harness;
+                return Err(format!("{} doesn't run {h}", self.host(wid)));
+            }
+            entry.pin = Some(wid);
+        }
+        let (_, mut effects) = self.enqueue(entry);
         effects.push(Effect::Broadcast(self.status()));
         Ok((id, effects))
+    }
+
+    /// Online workers running `harness`: id and hostname.
+    pub fn online_hosts(&self, harness: &str) -> Vec<(WorkerId, String)> {
+        (self.workers.iter())
+            .filter(|(_, w)| w.conn.is_some() && w.info.harnesses.iter().any(|h| h == harness))
+            .map(|(id, w)| (*id, w.info.hostname.clone()))
+            .collect()
     }
 
     /// The unfinished app task whose token is `token`, and its thread's binding.
