@@ -33,6 +33,9 @@ pub struct Member {
     pub role: AppRole,
     /// The owner is trying the app's draft, this release: its files and a copy of the records.
     pub draft: Option<u32>,
+    /// Not a page: a file one of the app's files asks for, this one (its Referer, under
+    /// `/a/<slug>/`). See `apps_http::draft_only`.
+    pub loaded_by: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,6 +92,38 @@ pub fn draft_cookie_name(slug: &str) -> String {
 /// API goes by it, not the cookie, so a page left open after the draft ends (or after another
 /// tab left it) can't write to the live records.
 pub const DRAFT_HEADER: &str = "x-mis-draft";
+
+/// Query parameter that previews a draft without entering it: the MIS page frames
+/// `/a/<slug>/?mis-preview=<n>`. Nothing is stored, so the app opened normally stays live.
+pub const PREVIEW_PARAM: &str = "mis-preview";
+
+/// The draft a preview asks for: [`PREVIEW_PARAM`] in the request's `query` (its entry page), else
+/// in its `referer` when that is a page of `slug` (the files that page loads). Its API calls name
+/// the draft in [`DRAFT_HEADER`], as `mis.js` reads the parameter too.
+pub fn preview_of(query: Option<&str>, referer: Option<&str>, slug: &str) -> Option<u32> {
+    // As `URLSearchParams.get` in `mis.js` reads it (decoded, the first), so both agree.
+    let param = |q: &str| {
+        (form_urlencoded::parse(q.as_bytes()).find(|(k, _)| k == PREVIEW_PARAM))
+            .and_then(|(_, v)| v.parse().ok())
+    };
+    let page = || {
+        let uri: axum::http::Uri = referer
+            .filter(|r| file_of(r, slug).is_some())?
+            .parse()
+            .ok()?;
+        param(uri.query()?)
+    };
+    query.and_then(param).or_else(page)
+}
+
+/// The path within app `slug` of `url` (a Referer), e.g. `js/app.js`; `""` for its entry. None:
+/// not one of its pages or files.
+pub fn file_of(url: &str, slug: &str) -> Option<String> {
+    let uri = url.parse::<axum::http::Uri>().ok()?;
+    uri.path()
+        .strip_prefix(&format!("/a/{slug}/"))
+        .map(str::to_string)
+}
 
 /// The draft release `Cookie` header `cookies` names for `slug`, if any.
 pub fn cookie_draft(cookies: Option<&str>, slug: &str) -> Option<u32> {
@@ -268,7 +303,37 @@ pub fn app_of(path: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    #[test]
+    fn a_preview_is_its_url_and_the_files_its_page_loads() {
+        assert_eq!(preview_of(Some("mis-preview=2"), None, "pool"), Some(2));
+        assert_eq!(preview_of(Some("x=1&mis-preview=3"), None, "pool"), Some(3));
+        let page = Some("https://home.example.com/a/pool/?mis-preview=2#/log");
+        assert_eq!(preview_of(None, page, "pool"), Some(2));
+        // Another app's page, no parameter, or not a number: live.
+        assert_eq!(preview_of(None, page, "chores"), None);
+        assert_eq!(
+            preview_of(None, Some("https://home.example.com/a/pool/"), "pool"),
+            None
+        );
+        assert_eq!(preview_of(Some("mis-preview=x"), None, "pool"), None);
+        assert_eq!(
+            file_of("http://h/a/pool/js/app.js", "pool").as_deref(),
+            Some("js/app.js")
+        );
+        assert_eq!(file_of("http://h/a/pool2/", "pool"), None);
+        // Read as `URLSearchParams.get` reads it: the first, decoded; a bare key is empty.
+        assert_eq!(
+            preview_of(Some("mis-preview&mis-preview=2"), None, "pool"),
+            None
+        );
+        assert_eq!(
+            preview_of(Some("mis%2Dpreview=&mis-preview=2"), None, "pool"),
+            None
+        );
+    }
 
     #[test]
     fn owners_and_editors_try_the_current_draft_named_by_its_cookie() {

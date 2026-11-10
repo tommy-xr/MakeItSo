@@ -17,7 +17,7 @@ const notesBlock = page.slice(page.indexOf('// notes:begin'), page.indexOf('// n
 const netBlock = page.slice(page.indexOf('// net:begin'), page.indexOf('// net:end'));
 const awayStatus = new Function(`${netBlock}; return awayStatus;`)();
 const appsBlock = page.slice(page.indexOf('// apps:begin'), page.indexOf('// apps:end'));
-const ap = new Function(`${appsBlock}; return { composerFor, appTaskBody };`)();
+const ap = new Function(`${appsBlock}; return { composerFor, appTaskBody, draftNote };`)();
 const nt = { ...new Function(`${notesBlock}; return { noteFront, noteAuthor, noteRows, projectDir, projectActive, projectFiles, projectFind, repoHref };`)(), notePath: new Function(`${block}; return notePath;`)() };
 
 // Every tag in the output, e.g. ['p', 'a', 'code'].
@@ -433,4 +433,10 @@ test('an app task runs where the chips say, else on Settings\' apps harness, wit
   assert.deepEqual(ap.appTaskBody('Add pH.', 'pool', { worker: { id: 'w1' }, harness: 'claude', model: 'opus' }, apps, []),
     { request: 'Add pH.', slug: 'pool', change: true, harness: 'claude', model: 'opus', worker: 'w1', images: [] });
   assert.equal(ap.appTaskBody('x', null, { worker: null, harness: '', model: '' }, null, []).harness, 'claude'); // Settings unread
+});
+
+test('beside a draft, the composer sends in-app feedback on it', () => {
+  assert.deepEqual(ap.composerFor('build', 'pool', 'Pool', 2), { key: 'draft:app:pool', placeholder: 'What should change in draft v2?', label: 'feedback on Pool v2' });
+  assert.deepEqual(ap.draftNote('Bars too thin.', 358, 600),
+    { route: '/', selector: '', rect: { x: 0, y: 0, w: 358, h: 600 }, viewport: { w: 358, h: 600 }, note: 'Bars too thin.' });
 });

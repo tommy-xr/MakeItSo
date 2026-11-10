@@ -4790,7 +4790,7 @@ async fn apps_publish_activate_and_serve() {
     );
     let csp = format!(
         "content-security-policy: {}",
-        mis_orchestrator::apps_http::CSP
+        mis_orchestrator::apps_http::csp(&[])
     );
     assert!(head.contains(&csp), "{head}");
     assert!(head.contains("x-content-type-options: nosniff"), "{head}");
@@ -4971,6 +4971,7 @@ fn apps_auth() -> mis_orchestrator::apps_http::Auth {
         public_host: Some(HOME.into()),
         dev: false,
         feedback: None,
+        frame_ancestors: vec![],
     }
 }
 
@@ -6540,6 +6541,125 @@ async fn feedback_from_an_editor_becomes_a_change_task_and_a_viewer_cant_send_an
         .2
         .contains("feedback"));
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn the_mis_page_frames_a_draft_and_its_feedback_continues_the_drafts_thread() {
+    let ui = mis_orchestrator::apps_http::Auth {
+        frame_ancestors: vec!["https://mis.example.com".into()],
+        ..Default::default()
+    };
+    let (mis, apps, dir) = live_demo(with_read_token(), ui).await;
+    // The page frames only the apps origin; apps let only the page frame them.
+    let (_, head, _) = http(&mis, "GET / HTTP/1.1", b"").await;
+    let apps_origin = mis_types::http_url(&apps);
+    assert!(
+        head.contains(&format!("frame-ancestors 'none'; frame-src {apps_origin}")),
+        "{head}"
+    );
+    let (_, head, _) = app_get(&apps, "/a/demo/", "").await;
+    assert!(
+        head.contains("frame-ancestors https://mis.example.com;"),
+        "{head}"
+    );
+
+    let (_, mut worker) = join_as(&mis).await;
+    let auth = [("authorization", "Bearer s")];
+    let change = serde_json::json!({"request": "A chart.", "slug": "demo", "change": true,
+        "harness": "claude"});
+    // Its own script, and a script (and the chunk it imports) only it has.
+    let v2 = bundle(&[
+        (
+            "app.json",
+            br#"{"title":"Demo","clients":{"web":"index.html"}}"#,
+        ),
+        ("index.html", b"v2"),
+        ("js/app.js", b"v2 js"),
+        ("js/main-2.js", b"import './chunk-2.js'"),
+        ("js/chunk-2.js", b"v2 chunk"),
+    ]);
+    let (task, token) = app_task(&mis, &mut worker, &auth, change).await;
+    assert_eq!(
+        publish(&mis, "/api/apps/demo/releases", &token, &v2)
+            .await
+            .0,
+        201
+    );
+    let propose = r#"{"release":2,"pr":"https://github.com/o/r/pull/1","head":"d68ea1f8a9b4b0890914ce16e5539e480e68c07b"}"#;
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/draft", &token, propose)
+            .await
+            .0,
+        201
+    );
+    finish_seen(&mis, &mut worker, task.id).await;
+
+    // Previewed by URL: the draft at `?mis-preview=2` and the files that page loads, with no
+    // cookie, so the app opened normally stays live.
+    let (status, head, page) = app_get(&apps, "/a/demo/?mis-preview=2", "").await;
+    assert_eq!((status, page.as_str()), (200, "v2"));
+    assert!(!head.to_ascii_lowercase().contains("set-cookie"), "{head}");
+    let from_preview =
+        "\r\nSec-Fetch-Dest: script\r\nReferer: http://127.0.0.1/a/demo/?mis-preview=2";
+    assert_eq!(
+        app_get(&apps, "/a/demo/js/app.js", from_preview).await.2,
+        "v2 js"
+    );
+    // A chunk a draft-only script imports names no draft; only the draft has it.
+    let from_draft = "\r\nSec-Fetch-Dest: script\r\nReferer: http://127.0.0.1/a/demo/js/main-2.js";
+    assert_eq!(
+        app_get(&apps, "/a/demo/js/chunk-2.js", from_draft).await.2,
+        "v2 chunk"
+    );
+    // Asked by a live page or file, or by no file: never the draft's.
+    for by in [
+        "",
+        "\r\nSec-Fetch-Dest: script\r\nReferer: http://127.0.0.1/a/demo/js/app.js",
+        "\r\nSec-Fetch-Dest: script\r\nReferer: http://127.0.0.1/a/demo/",
+    ] {
+        assert_eq!(
+            app_get(&apps, "/a/demo/js/chunk-2.js", by).await.0,
+            404,
+            "{by}"
+        );
+    }
+    // Opened normally, or navigated to from the preview: live.
+    assert_eq!(app_get(&apps, "/a/demo/", "").await.2, "v1");
+    let navigated = "\r\nSec-Fetch-Dest: iframe\r\nReferer: http://127.0.0.1/a/demo/?mis-preview=2";
+    assert_eq!(app_get(&apps, "/a/demo/", navigated).await.2, "v1");
+    assert_eq!(
+        app_get(&apps, "/a/demo/js/app.js", "").await.2,
+        "console.log(1)"
+    );
+    // A preview of a draft that isn't the current one: as Try it.
+    assert_eq!(app_get(&apps, "/a/demo/?mis-preview=1", "").await.0, 404);
+    // Its writes (mis.js names the draft from the URL) land in the draft's copy only.
+    let in_preview = "\r\nX-Mis-Draft: 2";
+    let put = put_op("shared", "r1", 0, serde_json::json!({"ppm": 2.4}));
+    assert_eq!(app_post(&apps, MUTATIONS, in_preview, &put).await.0, 200);
+    let read = "/a/demo/api/v1/records/shared/notes/r1?missing=null";
+    assert_eq!(app_get(&apps, read, "").await.2, "null");
+    assert!(app_get(&apps, read, in_preview).await.2.contains("2.4"));
+
+    // Asked beside the preview: as in-app feedback on the draft, back to the task that made it.
+    let path = "/api/apps/demo/feedback/new";
+    let body = feedback_body("Bars too thin.");
+    assert_eq!(post_json(&mis, path, "r", &body).await.0, 403);
+    assert_eq!(post_json(&mis, path, "s", &feedback_body(" ")).await.0, 400);
+    assert_eq!(post_json(&mis, path, "s", &body).await.0, 202);
+    let OrchMsg::Assign { task: reply, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    assert_eq!(reply.resume.as_deref(), Some("sess"));
+    assert!(
+        reply
+            .prompt
+            .starts_with("Feedback on `demo` v2 (the draft) from local:\n\n> Bars too thin."),
+        "{}",
+        reply.prompt
+    );
+    // Best effort: on Windows the still-running server holds data.sqlite open.
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]

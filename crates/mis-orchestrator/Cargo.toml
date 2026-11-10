@@ -14,6 +14,7 @@ base64ct.workspace = true
 chrono.workspace = true
 clap.workspace = true
 flate2 = "1.1"
+form_urlencoded = "1.2"
 futures-util.workspace = true
 if-addrs.workspace = true
 jsonwebtoken.workspace = true

@@ -34,13 +34,62 @@ pub struct Auth {
     pub dev: bool,
     /// Where in-app feedback goes (`App::feedback_inbox`). None: refused.
     pub feedback: Option<tokio::sync::mpsc::UnboundedSender<(String, HeldFeedback)>>,
+    /// The MIS page's origins, e.g. `https://mis.example.com`: the only pages that may frame
+    /// apps (its draft previews). None: no page may.
+    pub frame_ancestors: Vec<String>,
+}
+
+/// `url`'s origin as CSP writes it, e.g. `wss://MIS.example.com:443/x` -> `https://mis.example.com`.
+/// None: not an http(s)/ws(s) URL with a plain host, so it can't add a directive.
+pub fn origin(url: &str) -> Option<String> {
+    let url = mis_types::http_url(url.trim());
+    let scheme = url.split("://").next()?.to_ascii_lowercase();
+    let host = app_access::public_authority(&url).ok()?;
+    let plain = |c: char| c.is_ascii_alphanumeric() || ".-:[]".contains(c);
+    host.chars()
+        .all(plain)
+        .then(|| format!("{scheme}://{host}"))
+}
+
+/// The MIS page's origins, for [`Auth::frame_ancestors`]: `public_url`'s, each `allowed`
+/// browser origin, and the listener `local` (and `localhost`) when it is loopback.
+pub fn frame_ancestors(
+    public_url: Option<&str>,
+    allowed: &[String],
+    local: SocketAddr,
+) -> Vec<String> {
+    let loopback = local.ip().is_loopback().then(|| {
+        [
+            format!("http://{local}"),
+            format!("http://localhost:{}", local.port()),
+        ]
+    });
+    let all = public_url
+        .into_iter()
+        .map(str::to_string)
+        .chain(allowed.iter().cloned());
+    let mut out: Vec<String> = all
+        .filter_map(|u| origin(&u))
+        .chain(loopback.into_iter().flatten())
+        .collect();
+    out.dedup();
+    out
 }
 
 /// Pages load scripts, styles and fonts only from, and connect only to, this origin. Every app
-/// shares it (and its storage): apps are not isolated from each other.
-pub const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
-    img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; \
-    base-uri 'none'; form-action 'self'";
+/// shares it (and its storage): apps are not isolated from each other. Only `ancestors` (the
+/// MIS page) may frame them.
+pub fn csp(ancestors: &[String]) -> String {
+    let ancestors = match ancestors.join(" ") {
+        a if a.is_empty() => "'none'".to_string(),
+        a => a,
+    };
+    format!(
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+        img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors {ancestors}; \
+        base-uri 'none'; form-action 'self'"
+    )
+}
 
 /// The SDK every app may load from `/a/_/mis.js` (`_` is no app's slug), and its in-memory twin.
 const SDK: &str = include_str!("../static/mis.js");
@@ -160,10 +209,10 @@ async fn guard(
     {
         h.append(header::SET_COOKIE, clear);
     }
-    h.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CSP),
-    );
+    // `frame_ancestors` checks them; one that slipped through frames nothing rather than panicking.
+    let policy = HeaderValue::from_str(&csp(&auth.frame_ancestors))
+        .unwrap_or_else(|_| HeaderValue::from_str(&csp(&[])).expect("a fixed policy"));
+    h.insert(header::CONTENT_SECURITY_POLICY, policy);
     h.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
@@ -250,16 +299,33 @@ async fn admit(
     let role = app_access::role_of(&policy.unwrap_or_default(), &subject)
         .ok_or((StatusCode::FORBIDDEN, "this app isn't shared with you"))?;
     let role = dev_role.unwrap_or(role);
-    // A page goes by its cookie, an API call by the header its page's `mis.js` sends.
+    // A page goes by a preview's URL, else its cookie; an API call by the header its page's
+    // `mis.js` sends. Only the files a page loads take a preview from their Referer: a page
+    // navigated to from a preview, its own URL naming none, is live like its `mis.js`.
     let h = |name| req.headers().get(name).and_then(|v| v.to_str().ok());
     let api = apps::reserved(req.uri().path().splitn(4, '/').nth(3).unwrap_or(""));
+    let page = matches!(
+        h("sec-fetch-dest"),
+        None | Some("document" | "iframe" | "frame")
+    );
+    let referer = h(header::REFERER.as_str()).filter(|_| !page);
+    let preview = (!api).then(|| app_access::preview_of(req.uri().query(), referer, slug));
     let asked = match api {
         true => h(app_access::DRAFT_HEADER).map(|v| v.parse().unwrap_or(0)),
-        false => app_access::cookie_draft(h(header::COOKIE.as_str()), slug),
+        false => preview
+            .flatten()
+            .or_else(|| app_access::cookie_draft(h(header::COOKIE.as_str()), slug)),
     };
+    let loaded_by = referer
+        .filter(|_| !api)
+        .and_then(|r| app_access::file_of(r, slug));
     // Read only when a draft is asked for.
     let current = asked.and_then(|_| apps.draft(slug)).map(|d| d.release);
     let draft = match app_access::draft_of(asked, api, role, current) {
+        // A preview's own URL naming a draft that isn't (any more), or not for them: as Try it.
+        Serve::Live if page && preview.flatten().is_some() => {
+            return Err((StatusCode::NOT_FOUND, "no such draft"));
+        }
         Serve::Live => None,
         Serve::Draft(n) => Some(n),
         Serve::Gone => {
@@ -271,6 +337,7 @@ async fn admit(
         subject,
         role,
         draft,
+        loaded_by,
     });
     Ok(())
 }
@@ -748,6 +815,27 @@ async fn blocking(apps: Arc<Apps>, slug: String, path: String, m: Member) -> Res
     off_thread(move || serve(&apps, &slug, &path, &m)).await
 }
 
+/// `path` from the app's draft, for one who may try it, when the release served lacks it and
+/// a file only the draft has asks (never a page, nor a live file): e.g. a chunk a preview's
+/// script imports, whose request names no draft. Content-hashed names (the SDK's build) make a
+/// changed file a new name, so a preview gets each draft file; an unhashed one both have, live's.
+fn draft_only(apps: &Apps, slug: &str, path: &str, m: &Member) -> Option<(String, Vec<u8>)> {
+    let by = apps::clean_path(m.loaded_by.as_deref()?)?;
+    if m.draft.is_some() || !app_access::may_try(m.role) || apps::reserved(path) {
+        return None;
+    }
+    let draft = apps.release_at(slug, apps.draft(slug)?.release)?;
+    let live_has = |rel| {
+        apps.live(slug)
+            .is_some_and(|l| apps::read_file(&l.dir, rel).is_some())
+    };
+    if live_has(by) || apps::read_file(&draft.dir, by).is_none() {
+        return None;
+    }
+    let rel = apps::clean_path(path)?;
+    Some((rel.to_string(), apps::read_file(&draft.dir, rel)?))
+}
+
 /// `path` (empty: the entry) from the release `m` is served; an extensionless miss gets the entry.
 fn serve(apps: &Apps, slug: &str, path: &str, m: &Member) -> Response {
     let live = apps::valid_slug(slug)
@@ -755,12 +843,22 @@ fn serve(apps: &Apps, slug: &str, path: &str, m: &Member) -> Response {
         .flatten();
     // `api/…` is the server's: unknown API paths 404 rather than get the entry page.
     let Some(live) = live.filter(|_| !apps::reserved(path)) else {
-        return StatusCode::NOT_FOUND.into_response();
+        // A new app's draft, previewed, has no live release to lack its files.
+        return match apps::valid_slug(slug)
+            .then(|| draft_only(apps, slug, path, m))
+            .flatten()
+        {
+            Some((rel, bytes)) => {
+                ([(header::CONTENT_TYPE, apps::content_type(&rel))], bytes).into_response()
+            }
+            None => StatusCode::NOT_FOUND.into_response(),
+        };
     };
     let read = |rel: &'_ str| Some((rel.to_string(), apps::read_file(&live.dir, rel)?));
     let web = live.manifest.clients.web.as_str();
     let found = apps::clean_path(path.trim_end_matches('/'))
         .and_then(read)
+        .or_else(|| draft_only(apps, slug, path, m))
         .or_else(|| {
             apps::wants_entry_fallback(path)
                 .then(|| read(web))
@@ -776,13 +874,38 @@ fn serve(apps: &Apps, slug: &str, path: &str, m: &Member) -> Response {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_the_mis_page_may_frame_apps() {
+        let local: SocketAddr = "127.0.0.1:7474".parse().unwrap();
+        let allowed = [
+            "https://mis.lan".to_string(),
+            "https://x.example; script-src *".to_string(),
+        ];
+        let got = frame_ancestors(Some("wss://MIS.example.com:443/"), &allowed, local);
+        let want = [
+            "https://mis.example.com",
+            "https://mis.lan",
+            "http://127.0.0.1:7474",
+            "http://localhost:7474",
+        ];
+        assert_eq!(got, want);
+        assert_eq!(origin("https://u@x.example"), None);
+        assert_eq!(origin("ftp://x.example"), None);
+        let lan: SocketAddr = "0.0.0.0:7474".parse().unwrap();
+        assert!(frame_ancestors(None, &[], lan).is_empty());
+        assert!(csp(&[]).contains("frame-ancestors 'none';"));
+        assert!(csp(&got).contains("frame-ancestors https://mis.example.com https://mis.lan http://127.0.0.1:7474 http://localhost:7474;"));
+    }
+
     use super::*;
 
     #[test]
     fn dev_tooling_serves_the_listeners_csp() {
         // `mis apps sdk` writes vite.ts, whose `vite preview` stands in for this listener.
         let vite = include_str!("../../mis-cli/sdk/vite.ts");
-        assert!(vite.contains(&format!("const CSP = \"{CSP}\";")), "{CSP}");
+        let csp = csp(&[]); // no MIS page to frame it
+        assert!(vite.contains(&format!("const CSP = \"{csp}\";")), "{csp}");
     }
 
     fn tile(slug: &str, title: &str, icon: Option<&str>) -> Tile {
