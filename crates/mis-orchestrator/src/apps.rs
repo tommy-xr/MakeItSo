@@ -755,13 +755,10 @@ impl Apps {
         let dir = self.dir.join(slug).join(FEEDBACK);
         crate::images::private_dir(&dir)?;
         let json = serde_json::to_vec(held).expect("feedback serializes");
-        crate::push::write_private(&self.held_path(slug, held.id), &json)?;
-        for old in self.feedback(slug) {
-            if old.task.is_some() && held.at.saturating_sub(old.at) > SENT_KEPT_MS {
-                self.drop_held(slug, old.id);
-            }
-        }
-        Ok(())
+        Ok(crate::push::write_private(
+            &self.held_path(slug, held.id),
+            &json,
+        )?)
     }
 
     /// All `slug`'s feedback kept: waiting, and records of what went where, oldest first.
@@ -772,6 +769,12 @@ impl Apps {
         let mut all: Vec<HeldFeedback> = (entries.flatten())
             .filter_map(|e| serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok())
             .collect();
+        // Records of sent feedback go once old.
+        let now = crate::unix_ms();
+        all.retain(|h| {
+            let old = h.task.is_some() && now.saturating_sub(h.at) > SENT_KEPT_MS;
+            !(old && self.drop_held(slug, h.id))
+        });
         all.sort_by_key(|h| (h.at, h.id));
         all
     }

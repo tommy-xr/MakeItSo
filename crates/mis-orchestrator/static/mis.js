@@ -107,7 +107,7 @@
 .mis-mb:focus-visible{outline:2px solid currentColor}
 .mis-mb.mis-float{position:fixed;top:calc(8px + env(safe-area-inset-top));right:calc(8px + env(safe-area-inset-right));z-index:2147483646;color:var(--mis-menu-fg,var(--t));background:var(--mis-menu-bg,color-mix(in srgb,var(--s) 70%,transparent));-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
 .mis-mb .mis-dot{position:absolute;top:5px;right:4px;width:7px;height:7px;border-radius:50%;background:currentColor}
-.mis-pop{position:fixed;z-index:2147483647;box-sizing:border-box;width:min(300px,calc(100vw - 16px));padding:6px;border-radius:12px;background:var(--s);color:var(--t);box-shadow:0 0 0 1px var(--l),0 8px 24px rgba(0,0,0,.25);font:14px/1.4 system-ui,sans-serif}
+.mis-pop{position:fixed;z-index:2147483647;box-sizing:border-box;width:min(300px,calc(100vw - 16px));overflow-y:auto;padding:6px;border-radius:12px;background:var(--s);color:var(--t);box-shadow:0 0 0 1px var(--l),0 8px 24px rgba(0,0,0,.25);font:14px/1.4 system-ui,sans-serif}
 .mis-pop a,.mis-pop button{all:unset;box-sizing:border-box;display:block;width:100%;padding:9px 10px;border-radius:8px;cursor:pointer;color:var(--t)}
 .mis-pop a:hover,.mis-pop button:hover,.mis-pop a:focus-visible,.mis-pop button:focus-visible{background:var(--l)}
 .mis-pop .mis-dim{padding:6px 10px;color:var(--d);font-size:12px}
@@ -129,7 +129,7 @@
   // what became of their feedback, and Give feedback. Apps place its button in their header
   // (`mis.menu.mount(el)`); else it floats top-right.
   function platformMenu() {
-    let btn = null, host = null, me = null;
+    let btn = null, host = null, me = null, pop = null;
     const mount = (el) => {
       host = el;
       if (btn) { btn.classList.remove('mis-float', 'mis-ui'); el.append(btn); }
@@ -144,9 +144,17 @@
       btn.type = 'button';
       btn.setAttribute('aria-label', 'App menu');
       btn.setAttribute('aria-expanded', 'false');
-      if (me.drafted && !draft) btn.append(make('span', 'mis-dot'));
-      // Fresh each time it opens: a draft or a feedback status may have changed.
-      btn.onclick = async () => { me = (await globalThis.mis.me().catch(() => null)) || me; open(); };
+      const dot = make('span', 'mis-dot');
+      const showDot = () => { if (me.drafted && !draft) btn.append(dot); else dot.remove(); };
+      showDot();
+      // Fresh each time it opens: a draft or a feedback status may have changed. A tap while
+      // open closes it.
+      btn.onclick = async () => {
+        if (pop) return pop.close();
+        me = (await globalThis.mis.me().catch(() => null)) || me;
+        showDot();
+        if (!pop) open();
+      };
       if (draft) {
         const tag = make('a', 'mis-tag mis-ui', `Draft v${draft} · test data`);
         tag.href = `/a/${slug}/?draft=off`;
@@ -158,18 +166,19 @@
       setTimeout(() => { if (!host) { btn.classList.add('mis-float', 'mis-ui'); document.body.append(btn); } }, 800);
     };
     function open() {
-      const pop = make('div', 'mis-pop mis-ui');
-      pop.setAttribute('role', 'menu');
-      const close = () => { pop.remove(); btn.setAttribute('aria-expanded', 'false'); removeEventListener('pointerdown', outside, true); };
-      const outside = (e) => { if (!pop.contains(e.target) && e.target !== btn) close(); };
+      const el = make('div', 'mis-pop mis-ui');
+      el.setAttribute('role', 'menu');
+      const close = () => { el.remove(); pop = null; btn.setAttribute('aria-expanded', 'false'); removeEventListener('pointerdown', outside, true); };
+      const outside = (e) => { if (!el.contains(e.target) && !btn.contains(e.target)) close(); };
+      pop = { close };
       const item = (text, act) => {
         const a = make(typeof act === 'string' ? 'a' : 'button', '', text);
         if (typeof act === 'string') a.href = act; else a.onclick = () => { close(); act(); };
         a.setAttribute('role', 'menuitem');
-        pop.append(a);
+        el.append(a);
       };
       const writes = me.role === 'owner' || me.role === 'editor';
-      pop.append(make('div', 'mis-dim', `Signed in as ${me.user} · ${me.role}`));
+      el.append(make('div', 'mis-dim', `Signed in as ${me.user} · ${me.role}`));
       if (draft) item(`Trying draft v${draft} · back to live`, `/a/${slug}/?draft=off`);
       else if (me.drafted) item(`Draft v${me.drafted} ready · Try it`, `/a/${slug}/?draft=${me.drafted}`);
       if (writes && !mocked) {
@@ -177,15 +186,17 @@
           const row = make('div', 'mis-fb', f.note);
           const state = f.state === 'draft_ready' ? `draft v${f.release} ready` : f.state === 'working' ? 'an agent is on it' : `waiting: ${f.why}`;
           row.append(make('span', '', state));
-          pop.append(row);
+          el.append(row);
         }
         item('Give feedback…', () => mark());
       }
-      pop.append(make('hr'));
+      el.append(make('hr'));
       item('All apps', '/a/');
       const r = btn.getBoundingClientRect();
-      Object.assign(pop.style, { top: `${Math.min(r.bottom + 6, innerHeight - 40)}px`, right: `${Math.max(8, innerWidth - r.right)}px` });
-      document.body.append(pop);
+      // Under the button, never past the bottom: it scrolls instead.
+      const top = Math.min(r.bottom + 6, innerHeight - 120);
+      Object.assign(el.style, { top: `${top}px`, right: `${Math.max(8, innerWidth - r.right)}px`, maxHeight: `${innerHeight - top - 8}px` });
+      document.body.append(el);
       btn.setAttribute('aria-expanded', 'true');
       addEventListener('pointerdown', outside, true);
     }

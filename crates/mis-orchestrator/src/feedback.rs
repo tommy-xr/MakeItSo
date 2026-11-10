@@ -69,14 +69,16 @@ pub fn send(
 /// How many of someone's latest feedback their menu shows.
 pub const SHOWN: usize = 5;
 
-/// What became of `held`, given the app's current `draft`: waiting, with an agent, or a draft
-/// proposed since (its result, or close enough to try).
+/// What became of `held`, given the app's current `draft`: waiting, with an agent, or the draft
+/// its task proposed since.
 pub fn status(held: &HeldFeedback, draft: Option<&AppDraft>) -> FeedbackStatus {
     let state = match (held.task, draft) {
         (None, _) => FeedbackState::Waiting {
             why: held.waiting.clone().unwrap_or_default(),
         },
-        (Some(_), Some(d)) if d.at > held.at => FeedbackState::DraftReady { release: d.release },
+        (Some(task), Some(d)) if d.task == Some(task) && d.at > held.at => {
+            FeedbackState::DraftReady { release: d.release }
+        }
         (Some(_), _) => FeedbackState::Working,
     };
     FeedbackStatus {
@@ -219,7 +221,7 @@ mod tests {
             note: None,
             before: false,
             after: false,
-            task: None,
+            task: Some(uuid::Uuid::nil()),
             at,
             error: None,
         };
