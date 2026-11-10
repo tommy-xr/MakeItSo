@@ -6065,13 +6065,25 @@ async fn with_no_full_token_set_an_app_task_token_is_still_held_to_its_app() {
 const PNG: [u8; 9] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1];
 
 /// Answer the next query `worker` gets, a draft merge, with `result`; the query.
-async fn answer_merge(worker: &mut Ws, result: Result<String, String>) -> Query {
+async fn answer_assess(worker: &mut Ws, assessment: Assessment) -> Query {
     let OrchMsg::Query { req, query } = recv(worker).await else {
         panic!("query")
     };
-    let answer = Answer::Merged { result };
+    let answer = Answer::Assessed { assessment };
     send(worker, &WorkerMsg::Answer { req, answer }).await;
     query
+}
+
+/// Until `ok` holds of pool's app view as `headers` sees it.
+async fn pool_until(mis: &str, headers: &[(&str, &str)], ok: impl Fn(&AppView) -> bool) -> AppView {
+    for _ in 0..100 {
+        let pool = pool_view(mis, headers).await;
+        if ok(&pool) {
+            return pool;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("{:?}", pool_view(mis, headers).await)
 }
 
 /// Publish or discard pool's draft `id` as Access login `jwt`.
@@ -6099,7 +6111,7 @@ async fn pool_view(mis: &str, headers: &[(&str, &str)]) -> AppView {
 }
 
 #[tokio::test]
-async fn an_app_task_proposes_a_draft_that_only_the_owner_publishes_or_discards() {
+async fn an_app_task_proposes_a_draft_that_only_the_owner_publishes_or_rejects() {
     use base64ct::{Base64, Encoding};
     let (mis, _, dir) = start_with_apps(behind_access()).await;
     let live = "/api/apps/pool/releases?activate=true";
@@ -6172,13 +6184,18 @@ async fn an_app_task_proposes_a_draft_that_only_the_owner_publishes_or_discards(
     let stale = format!("/api/apps/pool/draft/after?id={}", uuid::Uuid::new_v4());
     assert_eq!(call(&mis, "GET", &stale, &auth, None).await.0, 404);
 
-    // A PR that won't merge leaves nothing live, and says why on the draft.
+    // Publish approves its review: failing checks go back to the task, nothing goes live.
+    finish_seen(&mis, &mut worker, task.id).await;
+    let failing = Assessment::Failing {
+        checks: vec!["verify".into()],
+        log: "boom".into(),
+    };
     let (got, query) = tokio::join!(
         decide(&mis, "publish", id, &me),
-        answer_merge(&mut worker, Err("checks failed: build".into()))
+        answer_assess(&mut worker, failing)
     );
-    assert!(got.0 == 409 && got.1.contains("checks failed"), "{got:?}");
-    let Query::MergeDraft {
+    assert_eq!(got.0, 202, "{got:?}");
+    let Query::AssessReview {
         cwd,
         repo,
         number,
@@ -6188,47 +6205,75 @@ async fn an_app_task_proposes_a_draft_that_only_the_owner_publishes_or_discards(
         panic!("{query:?}")
     };
     assert_eq!(
-        (cwd.as_str(), repo.as_str(), number),
-        ("~/code/mis-notes", "tommy-xr/mis-notes", 7)
+        (cwd.as_str(), repo.as_str(), number, h.as_str()),
+        ("~/code/mis-notes", "tommy-xr/mis-notes", 7, head)
     );
-    assert_eq!(h, head);
-    let pool = pool_view(&mis, &as_me).await;
+    let OrchMsg::Assign { task: fix, .. } = recv(&mut worker).await else {
+        panic!("a fix request")
+    };
+    assert_eq!(fix.resume.as_deref(), Some("sess"), "in the same session");
+    assert!(
+        fix.prompt.contains("checks failed: verify") && fix.prompt.contains("boom"),
+        "{}",
+        fix.prompt
+    );
+    let pool = pool_until(&mis, &as_me, |p| {
+        p.review
+            .as_ref()
+            .is_some_and(|r| r.status.as_deref().is_some_and(|s| s.contains("(1/3)")))
+    })
+    .await;
     assert_eq!(pool.active, Some(1));
     assert_eq!(
-        pool.draft.unwrap().error.as_deref(),
-        Some("checks failed: build")
+        decide(&mis, "publish", id, &me).await.0,
+        409,
+        "already merging"
     );
-    // Merged: live, and the draft is done.
-    let (got, _) = tokio::join!(
-        decide(&mis, "publish", id, &me),
-        answer_merge(&mut worker, Ok("merged".into()))
-    );
-    assert_eq!(got.0, 204, "{got:?}");
-    let pool = pool_view(&mis, &as_me).await;
-    assert_eq!((pool.active, pool.draft), (Some(2), None));
 
-    // Discarded: gone, nothing live changes, no merge.
-    assert_eq!(
-        publish(&mis, "/api/apps/pool/releases", &token, &demo("v3"))
-            .await
-            .0,
-        201
+    // Rejected: its PR is closed with a comment, the draft goes, nothing live changes.
+    let (got, closing) = tokio::join!(decide(&mis, "discard", id, &me), async {
+        let OrchMsg::Query { req, query } = recv(&mut worker).await else {
+            panic!("query")
+        };
+        let answer = Answer::Done {
+            result: Ok("closed".into()),
+        };
+        send(&mut worker, &WorkerMsg::Answer { req, answer }).await;
+        query
+    });
+    assert_eq!(got.0, 204, "{got:?}");
+    assert!(
+        matches!(closing, Query::ClosePr { number: 7, .. }),
+        "{closing:?}"
     );
-    assert_eq!(
-        post_json(&mis, path, &token, &propose(3, &PNG)).await.0,
-        201
-    );
-    let id = pool_view(&mis, &auth).await.draft.unwrap().id;
-    assert_eq!(decide(&mis, "discard", id, &jen).await.0, 403);
-    assert_eq!(decide(&mis, "discard", id, &me).await.0, 204);
-    let pool = pool_view(&mis, &as_me).await;
-    assert_eq!((pool.active, pool.draft), (Some(2), None));
+    let pool = pool_until(&mis, &as_me, |p| p.draft.is_none()).await;
+    assert_eq!(pool.active, Some(1));
     assert_eq!(
         call(&mis, "GET", "/api/apps/pool/draft/after", &auth, None)
             .await
             .0,
         404
     );
+
+    // Proposed again and approved: merged, then live.
+    assert_eq!(
+        publish(&mis, "/api/apps/pool/releases", "s", &demo("v3"))
+            .await
+            .0,
+        201
+    );
+    let again =
+        serde_json::json!({"release": 3, "pr": PR, "head": head, "task": task.id}).to_string();
+    assert_eq!(post_json(&mis, path, "s", &again).await.0, 201);
+    let id = pool_view(&mis, &auth).await.draft.unwrap().id;
+    assert_eq!(decide(&mis, "discard", id, &jen).await.0, 403);
+    let (got, _) = tokio::join!(
+        decide(&mis, "publish", id, &me),
+        answer_assess(&mut worker, Assessment::Merged)
+    );
+    assert_eq!(got.0, 202, "{got:?}");
+    let pool = pool_until(&mis, &as_me, |p| p.active == Some(3)).await;
+    assert!(pool.draft.is_none());
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -6327,6 +6372,13 @@ async fn owners_and_editors_try_a_draft_on_a_copy_of_the_records_that_goes_with_
             .0,
         204
     );
+    // It goes once its review is done (its PR closed meanwhile).
+    for _ in 0..100 {
+        if !dir.join("demo/draft").exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     let (status, why) = app_post(&apps, MUTATIONS, api, &op("late")).await;
     assert!(status == 409 && why.contains("reload"), "{status} {why}");
     let late = "/a/demo/api/v1/records/shared/notes/late";

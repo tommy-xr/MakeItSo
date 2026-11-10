@@ -3,7 +3,8 @@
 
 use base64ct::{Base64, Encoding};
 use mis_types::{
-    github_link, ImageKind, LinkKind, ProposeDraft, MAX_DRAFT_IMAGE_BYTES, MAX_DRAFT_NOTE_CHARS,
+    github_link, AppDraft, ImageKind, LinkKind, PrRef, ProposeDraft, Review, ReviewKind,
+    ReviewState, MAX_DRAFT_IMAGE_BYTES, MAX_DRAFT_NOTE_CHARS,
 };
 
 /// `https://github.com/<owner>/<repo>/pull/<n>` as its canonical URL, `owner/repo` and n.
@@ -42,6 +43,29 @@ pub fn check(p: &ProposeDraft, releases: &[u32], active: Option<u32>) -> Result<
         ));
     }
     Ok(pr)
+}
+
+/// The review that publishing `draft` of `slug` approves: same id, its PR at its head, made
+/// live once merged. `cwd`: the apps repo on the worker. None: its PR link doesn't parse.
+pub fn review(slug: &str, draft: &AppDraft, cwd: String) -> Option<Review> {
+    let (url, repo, number) = parse_pr(&draft.pr).ok()?;
+    Some(Review {
+        id: draft.id,
+        pr: PrRef { repo, number, url },
+        head: draft.head.clone(),
+        task: draft.task,
+        note: draft.note.clone(),
+        kind: ReviewKind::AppDraft {
+            slug: slug.into(),
+            release: draft.release,
+        },
+        state: ReviewState::Open,
+        at: draft.at,
+        status: None,
+        fixing: None,
+        cwd,
+        assessing: false,
+    })
 }
 
 /// A screenshot's base64 as bytes: PNG, JPEG or GIF, at most [`MAX_DRAFT_IMAGE_BYTES`].

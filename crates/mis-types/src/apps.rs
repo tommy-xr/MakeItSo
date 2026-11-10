@@ -63,6 +63,9 @@ pub struct AppView {
     /// Feedback waiting, oldest first.
     #[serde(default)]
     pub feedback: Vec<HeldFeedback>,
+    /// The draft's review: where publishing it is (merging when it can, a fix ready, …).
+    #[serde(default)]
+    pub review: Option<crate::Review>,
 }
 
 /// `POST /a/{slug}/api/v1/feedback`: an owner's or editor's note on what they see, from the
@@ -176,9 +179,6 @@ pub struct AppDraft {
     pub task: Option<uuid::Uuid>,
     /// Unix millis it was proposed.
     pub at: u64,
-    /// Why the last publish didn't happen, e.g. the PR couldn't merge.
-    #[serde(default)]
-    pub error: Option<String>,
 }
 
 /// `POST /api/apps/{slug}/draft`: propose release `release` as the app's draft.

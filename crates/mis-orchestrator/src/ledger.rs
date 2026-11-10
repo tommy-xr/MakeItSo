@@ -12,6 +12,7 @@ use crate::{app_grant, note, plan, routine, summary};
 
 mod alerts;
 pub mod persist;
+mod reviews;
 mod routines;
 mod sessions;
 
@@ -35,6 +36,17 @@ pub enum Effect {
         task: Task,
         images: Vec<Uuid>,
         token: Option<String>,
+    },
+    /// After `after`, look at approved review `id`'s PR on a worker (merging it if it can) and
+    /// feed what was found to `review_assessed`.
+    AdvanceReview {
+        id: Uuid,
+        after: std::time::Duration,
+    },
+    /// Review `review` was merged or rejected: run its kind's step (an app draft goes live, or
+    /// is discarded) and, rejected, close its PR.
+    ReviewDone {
+        review: Review,
     },
     Broadcast(ServerMsg),
     /// Worker went offline; call `expire(wid, generation)` after the grace period.
@@ -566,6 +578,8 @@ pub struct Ledger {
     bells: std::collections::BTreeSet<alerts::SessionKey>,
     /// When each live session last pushed (Unix millis) and whether urgently; not saved.
     alerted: HashMap<alerts::SessionKey, (u64, bool)>,
+    /// PRs waiting on the owner, and those approved until merged (see `reviews`).
+    reviews: Vec<Review>,
 }
 
 impl Ledger {
@@ -880,14 +894,24 @@ impl Ledger {
     /// The newest task in `task`'s app thread, for feedback to reply to. Err: one is still
     /// working (the next waits for it). None: no such task.
     pub fn thread_tip(&self, task: TaskId) -> Option<Result<TaskId, String>> {
-        let t = self.tasks.iter().find(|t| t.task.id == task)?;
-        let thread = t.bound.as_ref().map_or(task, |b| b.thread);
-        let mut tasks = (self.tasks.iter())
-            .filter(|t| t.task.id == task || t.bound.as_ref().is_some_and(|b| b.thread == thread));
-        if tasks.clone().any(|t| !t.status.finished()) {
-            return Some(Err("its draft's task is still working".into()));
+        let find = |id: TaskId| self.tasks.iter().find(|t| t.task.id == id);
+        // Up to its first task, then every reply below it (tasks are in order).
+        let mut root = find(task)?;
+        while let Some(up) = root.parent.and_then(find) {
+            root = up;
         }
-        tasks.next_back().map(|t| Ok(t.task.id))
+        let mut thread = vec![root];
+        for t in &self.tasks {
+            if t.parent
+                .is_some_and(|p| thread.iter().any(|x| x.task.id == p))
+            {
+                thread.push(t);
+            }
+        }
+        if thread.iter().any(|t| !t.status.finished()) {
+            return Some(Err("its task is still working".into()));
+        }
+        thread.last().map(|t| Ok(t.task.id))
     }
 
     /// App `slug`'s tasks that haven't finished.
@@ -2061,7 +2085,7 @@ fn reply_context(prompt: &str, answer: Option<&str>, text: &str, whole: bool) ->
 mod tests {
     use super::*;
 
-    const T0: Duration = Duration::ZERO;
+    pub(super) const T0: Duration = Duration::ZERO;
     const STALE: Duration = Duration::from_secs(35);
 
     fn secs(s: u64) -> Duration {
@@ -2378,7 +2402,7 @@ mod tests {
         assert_eq!(l.tick(secs(90), STALE).len(), 2);
     }
 
-    fn info() -> WorkerInfo {
+    pub(super) fn info() -> WorkerInfo {
         WorkerInfo {
             hostname: "h".into(),
             os: "o".into(),

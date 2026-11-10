@@ -38,7 +38,9 @@ live. Nothing you do goes live.
    before. The owner and editors try the draft (`/a/<slug>/?draft=<n>`: that release on a throwaway
    copy of the app's records, so it must work on real data), then publishes it (merges the PR, makes it live),
    discards it, or replies in this thread asking for changes: then push to the same branch,
-   publish a new release and propose it again; it replaces the draft.
+   publish a new release and propose it again; it replaces the draft. Once the owner
+   publishes, the PR merges when its checks pass; if they fail or it conflicts, a reply here
+   quotes the failure: fix it on the same branch and push (the owner approves the fix).
 8. Report the PR URL, the release number and what the owner should try.
 
 ## Feedback tasks

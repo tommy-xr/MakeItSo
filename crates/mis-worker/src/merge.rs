@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mis_types::{
-    first_line, Approval, Link, LinkKind, MergeApprove, MergeFacts, MergeMethod, MergePolicy,
-    TaskId, MAX_APPROVAL_DETAIL,
+    first_line, Approval, Assessment, Link, LinkKind, MergeApprove, MergeFacts, MergeMethod,
+    MergePolicy, TaskId, MAX_APPROVAL_DETAIL,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -135,6 +135,9 @@ pub struct Check {
     pub workflow_name: String,
     /// ISO 8601, so it sorts as a string.
     pub started_at: String,
+    /// A check run's page (a CI run's job); a status's link.
+    pub details_url: String,
+    pub target_url: String,
 }
 
 impl Check {
@@ -335,39 +338,94 @@ fn ready(pr: &Pr) -> Result<(), String> {
     Ok(())
 }
 
-/// What publishing an app draft does with its PR.
+/// What to do with an approved review's PR as it stands.
 #[derive(Debug, PartialEq)]
-pub enum DraftMerge {
+pub enum Assess {
+    /// Merge it now.
     Merge,
-    /// Already merged at the draft's head (an earlier publish whose activation failed).
-    Merged,
+    /// Not now: what was found (a failure's log still to fetch).
+    Found(Assessment),
 }
 
-/// Whether app draft PR `pr` (fetched as `w`) may merge now. The owner's tap is the review:
-/// no policy, and a repo without CI is fine, but its head must still be `head` (what the
-/// draft was built from), and it must be open and ready, no check failed or still running.
-pub fn check_draft(w: &Want, pr: &Pr, head: &str) -> Result<DraftMerge, String> {
+/// Whether review PR `pr` (fetched as `w`), approved at `head`, can merge now. The owner's
+/// approval is the review: no policy, and a repo without CI is fine; but it must still be at
+/// `head`, open and ready, with no check failed or still running.
+pub fn assess(w: &Want, pr: &Pr, head: &str) -> Assess {
+    let found = |a| Assess::Found(a);
+    let at_head = pr.head_ref_oid.eq_ignore_ascii_case(head);
     if pr.number != w.number {
-        return Err(format!("gh returned #{} for #{}", pr.number, w.number));
-    }
-    if !pr.head_ref_oid.eq_ignore_ascii_case(head) {
-        return Err(format!(
-            "it was pushed to after the draft was made (head {}, draft {})",
-            short(&pr.head_ref_oid),
-            short(head)
-        ));
+        let why = format!("gh returned #{} for #{}", pr.number, w.number);
+        return found(Assessment::Refused { why });
     }
     match pr.state.as_str() {
-        "MERGED" => return Ok(DraftMerge::Merged),
+        "MERGED" if at_head => return found(Assessment::Merged),
+        "MERGED" => {
+            return found(Assessment::Refused {
+                why: "it was merged at another head".into(),
+            })
+        }
         "OPEN" => {}
-        s => return Err(format!("it is {}", s.to_lowercase())),
+        s => {
+            return found(Assessment::Refused {
+                why: format!("it is {}", s.to_lowercase()),
+            })
+        }
+    }
+    if !at_head {
+        return found(Assessment::Moved {
+            head: pr.head_ref_oid.clone(),
+        });
     }
     if pr.is_draft {
-        return Err("it is a draft PR".into());
+        let why = "it is a draft PR: mark it ready".to_string();
+        return found(Assessment::Refused { why });
     }
-    checks_settled(&newest_checks(pr))?;
-    ready(pr)?;
-    Ok(DraftMerge::Merge)
+    let checks = newest_checks(pr);
+    let failing: Vec<String> = (checks.iter())
+        .filter(|c| c.verdict() == Some(false))
+        .map(|c| c.label().to_string())
+        .collect();
+    if !failing.is_empty() {
+        return found(Assessment::Failing {
+            checks: failing,
+            log: String::new(),
+        });
+    }
+    if let Err(why) = checks_settled(&checks) {
+        return found(Assessment::Waiting { why });
+    }
+    // Behind its base: its task can bring it up to date, as with a conflict.
+    let behind = matches!(pr.merge_state_status.as_str(), "DIRTY" | "BEHIND");
+    if pr.mergeable == "CONFLICTING" || behind {
+        return found(Assessment::Conflict);
+    }
+    if pr.merge_state_status == "BLOCKED" {
+        let why = "GitHub blocks it (a required review or rule)".to_string();
+        return found(Assessment::Refused { why });
+    }
+    match ready(pr) {
+        Ok(()) => Assess::Merge,
+        Err(why) => found(Assessment::Waiting { why }),
+    }
+}
+
+/// The CI run id in a check's link (`…/actions/runs/<id>/job/<job>`).
+pub fn run_id(url: &str) -> Option<u64> {
+    let rest = url.split("/actions/runs/").nth(1)?;
+    rest.split(['/', '?']).next()?.parse().ok()
+}
+
+/// The last lines of `log`, at most `MAX_LOG` bytes: what a fix request quotes.
+pub fn log_tail(log: &str) -> String {
+    const LINES: usize = 60;
+    const MAX_LOG: usize = 4000;
+    let lines: Vec<&str> = log.lines().collect();
+    let tail = lines[lines.len().saturating_sub(LINES)..].join("\n");
+    let cut = tail.len().saturating_sub(MAX_LOG);
+    let cut = (cut..tail.len())
+        .find(|i| tail.is_char_boundary(*i))
+        .unwrap_or(tail.len());
+    tail[cut..].to_string()
 }
 
 /// `owner/name` of a GitHub remote URL (`git@github.com:o/n.git`, `https://github.com/o/n`).
@@ -380,37 +438,81 @@ pub fn github_repo(remote: &str) -> Option<String> {
     (!o.is_empty() && !n.is_empty() && !n.contains('/')).then(|| format!("{o}/{n}"))
 }
 
-/// Merge app draft PR `w` at `head` if [`check_draft`] lets it, its repo being `apps_repo`'s
-/// origin. Ok: what happened. Err: why nothing was merged.
-pub async fn merge_draft(
+/// Look at approved review PR `w` and merge it at `head` if [`assess`] lets it; its repo
+/// must be `checkout`'s origin. A failure comes with the tail of its CI log.
+pub async fn assess_review(
     gh: &std::ffi::OsStr,
-    apps_repo: &str,
+    checkout: &str,
     w: &Want,
     head: &str,
-) -> Result<String, String> {
-    let origin = crate::git::origin(apps_repo).await;
+) -> Assessment {
+    let origin = crate::git::origin(checkout).await;
     let ours = origin.as_deref().and_then(github_repo);
     if !ours.is_some_and(|o| o.eq_ignore_ascii_case(&w.repo)) {
-        return Err(format!(
-            "{} isn't the apps repo ({apps_repo}'s origin is {})",
-            w.repo,
-            origin.as_deref().unwrap_or("unknown")
-        ));
+        let theirs = origin.as_deref().unwrap_or("unknown");
+        let why = format!(
+            "{} isn't {checkout}'s repo (its origin is {theirs})",
+            w.repo
+        );
+        return Assessment::Refused { why };
     }
-    let json =
-        (run_gh(gh, &view_args(w)).await).map_err(|e| format!("couldn't read the PR: {e}"))?;
-    match check_draft(w, &parse(&json)?, head)? {
-        DraftMerge::Merged => Ok(format!("{}#{} was merged already", w.repo, w.number)),
-        DraftMerge::Merge => {
-            merge_confirmed(gh, w, MergeMethod::Squash, head).await?;
-            Ok(format!(
-                "merged {}#{} (squash at {})",
-                w.repo,
-                w.number,
-                short(head)
-            ))
+    let pr = match run_gh(gh, &view_args(w))
+        .await
+        .and_then(|json| parse(&json))
+    {
+        Ok(pr) => pr,
+        Err(e) => {
+            return Assessment::Waiting {
+                why: format!("couldn't read the PR: {e}"),
+            }
         }
+    };
+    match assess(w, &pr, head) {
+        Assess::Merge => match merge_confirmed(gh, w, MergeMethod::Squash, head).await {
+            Ok(()) => Assessment::Merged,
+            Err(why) => Assessment::Waiting { why },
+        },
+        Assess::Found(Assessment::Failing { checks, .. }) => {
+            let run = (newest_checks(&pr).into_iter())
+                .filter(|c| c.verdict() == Some(false))
+                .find_map(|c| run_id(&c.details_url).or_else(|| run_id(&c.target_url)));
+            let log = match run {
+                Some(id) => {
+                    let args = [
+                        "run",
+                        "view",
+                        &id.to_string(),
+                        "-R",
+                        &w.repo,
+                        "--log-failed",
+                    ];
+                    run_gh(gh, &args.map(String::from))
+                        .await
+                        .map(|l| log_tail(&l))
+                        .unwrap_or_default()
+                }
+                None => String::new(),
+            };
+            Assessment::Failing { checks, log }
+        }
+        Assess::Found(a) => a,
     }
+}
+
+/// Close PR `w` with `comment`.
+pub async fn close_pr(gh: &std::ffi::OsStr, w: &Want, comment: &str) -> Result<String, String> {
+    let n = w.number.to_string();
+    let args = [
+        "pr",
+        "close",
+        n.as_str(),
+        "-R",
+        w.repo.as_str(),
+        "--comment",
+        comment,
+    ];
+    run_gh(gh, &args.map(String::from)).await?;
+    Ok(format!("closed {}#{}", w.repo, w.number))
 }
 
 /// `gh` with `args`, its stdout; Err: why it failed.
@@ -663,38 +765,78 @@ mod tests {
     type Edit = fn(&mut Value);
 
     #[test]
-    fn a_draft_pr_merges_open_ready_and_at_its_head_even_without_checks() {
+    fn an_approved_pr_merges_at_its_head_when_ready_even_without_checks() {
         let w = want7();
-        let ok = pr(|v| v["statusCheckRollup"] = json!([]));
-        assert_eq!(check_draft(&w, &ok, HEAD), Ok(DraftMerge::Merge));
-        let merged = pr(|v| v["state"] = json!("MERGED"));
-        assert_eq!(check_draft(&w, &merged, HEAD), Ok(DraftMerge::Merged));
-        let other = "a".repeat(40);
-        assert!(check_draft(&w, &ok, &other)
-            .unwrap_err()
-            .contains("pushed to"));
-        assert!(
-            check_draft(&w, &merged, &other).is_err(),
-            "merged at another head"
+        let found = |a| Assess::Found(a);
+        assert_eq!(
+            assess(&w, &pr(|v| v["statusCheckRollup"] = json!([])), HEAD),
+            Assess::Merge
         );
-        let refuse: [(Edit, &str); 6] = [
-            (|v| v["state"] = json!("CLOSED"), "closed"),
-            (|v| v["isDraft"] = json!(true), "draft PR"),
-            (|v| v["number"] = json!(8), "#8"),
-            (|v| v["mergeStateStatus"] = json!("BLOCKED"), "blocked"),
-            (
-                |v| v["statusCheckRollup"][0]["conclusion"] = json!("FAILURE"),
-                "failed",
-            ),
-            (
-                |v| v["statusCheckRollup"][0]["status"] = json!("IN_PROGRESS"),
-                "running",
-            ),
+        assert_eq!(assess(&w, &pr(|_| {}), HEAD), Assess::Merge);
+        let merged = pr(|v| v["state"] = json!("MERGED"));
+        assert_eq!(assess(&w, &merged, HEAD), found(Assessment::Merged));
+        let other = "a".repeat(40);
+        assert!(matches!(
+            assess(&w, &merged, &other),
+            Assess::Found(Assessment::Refused { .. })
+        ));
+        assert_eq!(
+            assess(&w, &pr(|_| {}), &other),
+            found(Assessment::Moved { head: HEAD.into() })
+        );
+        let failing = pr(|v| v["statusCheckRollup"][0]["conclusion"] = json!("FAILURE"));
+        let names = vec!["check (ubuntu-latest)".to_string()];
+        assert_eq!(
+            assess(&w, &failing, HEAD),
+            found(Assessment::Failing {
+                checks: names,
+                log: String::new()
+            })
+        );
+        let conflict = pr(|v| v["mergeable"] = json!("CONFLICTING"));
+        assert_eq!(assess(&w, &conflict, HEAD), found(Assessment::Conflict));
+        let waits: [Edit; 2] = [
+            |v| v["statusCheckRollup"][0]["status"] = json!("IN_PROGRESS"),
+            |v| v["mergeStateStatus"] = json!("UNKNOWN"),
         ];
-        for (edit, why) in refuse {
-            let got = check_draft(&w, &pr(edit), HEAD).unwrap_err();
-            assert!(got.contains(why), "{got}");
+        let behind = pr(|v| v["mergeStateStatus"] = json!("BEHIND"));
+        assert_eq!(assess(&w, &behind, HEAD), found(Assessment::Conflict));
+        let refused: [Edit; 2] = [
+            |v| v["isDraft"] = json!(true),
+            |v| v["mergeStateStatus"] = json!("BLOCKED"),
+        ];
+        for edit in refused {
+            assert!(matches!(
+                assess(&w, &pr(edit), HEAD),
+                Assess::Found(Assessment::Refused { .. })
+            ));
         }
+        for edit in waits {
+            assert!(matches!(
+                assess(&w, &pr(edit), HEAD),
+                Assess::Found(Assessment::Waiting { .. })
+            ));
+        }
+        let closed = pr(|v| v["state"] = json!("CLOSED"));
+        assert!(matches!(
+            assess(&w, &closed, HEAD),
+            Assess::Found(Assessment::Refused { .. })
+        ));
+    }
+
+    #[test]
+    fn failing_runs_are_found_and_their_logs_cut_to_the_end() {
+        let url = "https://github.com/o/r/actions/runs/123456/job/789";
+        assert_eq!(run_id(url), Some(123456));
+        assert_eq!(
+            run_id("https://github.com/o/r/actions/runs/42?pr=1"),
+            Some(42)
+        );
+        assert_eq!(run_id("https://ci.example.com/x"), None);
+        let log: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        let tail = log_tail(&log);
+        assert!(tail.starts_with("line 40\n") && tail.ends_with("line 99"));
+        assert!(log_tail(&"é".repeat(5000)).len() <= 4000);
     }
 
     #[test]
