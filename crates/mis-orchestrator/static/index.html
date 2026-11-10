@@ -741,8 +741,10 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   }
   /* Desktop (64rem+, not Quest): one sticky header row across the top; the menu is a rail on the left (the closed
      dialog shown in place; ☰ hides it); views, composer, Latest and toasts centre in the room beside it, 48rem wide.
-     Wide (75rem+, `.split`): Home's list is a column of its own beside the open task, or beside a prompt to pick one. */
-  #nav-need { display: none; margin-left: auto; font-size: .8125rem; font-weight: 600; }
+     Wide (75rem+, `.split`): the list (Home, Tasks or Sessions) is a column of its own beside what it opened, or a prompt to pick.
+     Rail rows carry counts: Home's in its attention tint, the rest dim unless tinted (Sessions waiting on you). */
+  :is(#nav-need, #menu .nc) { display: none; margin: 0 .375em 0 auto; font-size: .8125rem; font-weight: 600; }
+  #menu .nc:not(.att) { color: var(--dim); font-weight: 500; }
   @media (min-width: 64rem) {
     :root:not(.vr) { --rail: 16rem; --list: 0px; --side: calc(var(--rail) + var(--list)); --head: calc(3.5rem + env(safe-area-inset-top, 0px)); scroll-padding-top: var(--head); }
     :root.rail-off:not(.vr) { --rail: 0px; }
@@ -764,7 +766,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
     :root.rail-off:not(.vr) #menu { display: none; }
     :root:not(.vr) #menu .sheet { padding: .75rem .75rem 1rem; }
     :root:not(.vr) #menu .sheet-top { display: none; }
-    :root:not(.vr) #nav-need:not([hidden]) { display: inline; }
+    :root:not(.vr) :is(#nav-need, #menu .nc):not([hidden]) { display: inline; }
     :root:not(.vr) .chead { top: var(--head); }
     :root:not(.vr) #dock { left: var(--side); }
     :root:not(.vr) .composer { max-width: calc(48rem - 2 * var(--pad)); }
@@ -778,7 +780,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
     :root.split:not(.vr) body > #list { position: fixed; z-index: 1; inset: var(--head) auto 0 var(--rail); box-sizing: border-box; width: var(--list); max-width: none; margin: 0;
       padding: 0 var(--pad) 1.5rem; overflow-y: auto; overscroll-behavior: contain; border-right: 1px solid var(--sep); }
     :root.split:not(.vr) #list .rows a[aria-current] { background: var(--bubble); box-shadow: inset 3px 0 var(--accent); }
-    :root.split:not(.vr) #detail .chead .back { display: none; }
+    :root.split:not(.vr) :is(#detail, #session) .chead .back { display: none; }
     #choose { padding-top: 30svh; text-align: center; }
     #choose .keys { display: none; margin-top: .5rem; font-size: .8125rem; }
     @media (hover: hover) and (pointer: fine) { #choose .keys { display: block; } }
@@ -807,8 +809,10 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   <div class="sheet">
     <div class="sheet-top"><span class="title">Make It So</span><button type="button" id="menu-close" class="ibtn" aria-label="Close menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
     <nav aria-label="Views">
-      <a href="#" data-view="list">Home<span id="nav-need" hidden></span></a>
-      <div class="ngrp"><a href="#notes" data-view="notes">Notes</a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-notes" aria-label="Show notes"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
+      <a href="#" data-view="home">Home<span id="nav-need" hidden></span></a>
+      <a href="#tasks" data-view="tasks">Tasks<span id="n-tasks" class="nc" hidden></span></a>
+      <a href="#sessions" data-view="sessions">Sessions<span id="n-sessions" class="nc" hidden></span></a>
+      <div class="ngrp"><a href="#notes" data-view="notes">Notes<span id="n-inbox" class="nc" hidden></span></a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-notes" aria-label="Show notes"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
       <ul id="nav-notes" class="nsub" hidden></ul>
       <div class="ngrp"><a href="#projects" data-view="projects">Projects</a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-projects" aria-label="Show projects"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
       <ul id="nav-projects" class="nsub" hidden></ul>
@@ -816,7 +820,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
       <ul id="nav-routines" class="nsub" hidden></ul>
       <div class="ngrp"><a href="#apps" data-view="apps">Apps</a><button type="button" id="app-add" class="ibtn" aria-label="New app" title="New app"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-apps" aria-label="Show apps"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
       <ul id="nav-apps" class="nsub" hidden></ul>
-      <div class="ngrp"><a href="#workers" data-view="workers">Workers</a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-workers" aria-label="Show workers"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
+      <div class="ngrp"><a href="#workers" data-view="workers">Workers<span id="n-busy" class="nc" hidden></span></a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-workers" aria-label="Show workers"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
       <ul id="nav-workers" class="nsub" hidden></ul>
       <a href="#settings" data-view="settings" id="nav-settings">Settings</a>
     </nav>
@@ -1826,7 +1830,7 @@ $('upd').onclick = (e) => {
   renderUpdate();
 };
 
-// `#` tasks, `#task/<id>`, `#routines`, `#apps`, `#settings`, `#workers`, `#worker/<id>`, `#session/<worker>/<harness>/<id>`,
+// `#` Home, `#tasks`, `#sessions`, `#task/<id>`, `#routines`, `#apps`, `#settings`, `#workers`, `#worker/<id>`, `#session/<worker>/<harness>/<id>`,
 // `#notes/<repo path>` (each segment URI-encoded), `#projects`, `#projects/<id or alias>`.
 // `#new` (see takeNew) is Tasks with the composer focused.
 function route() {
@@ -1838,21 +1842,28 @@ function route() {
   if (n) { try { return { view: 'notes', id: (n[1] || '').split('/').map(decodeURIComponent).join('/') }; } catch { return { view: 'notes', id: '' }; } }
   const p = location.hash.match(/^#projects(?:\/([^/]*))?\/*$/);
   if (p) { try { return { view: 'projects', id: decodeURIComponent(p[1] || '') }; } catch { return { view: 'projects', id: '' }; } }
+  if (location.hash === '#tasks' || location.hash === '#sessions') return { view: 'list', id: location.hash.slice(1) };
   return { view: { '#workers': 'workers', '#routines': 'routines', '#apps': 'apps', '#settings': 'settings' }[location.hash] || 'list' };
 }
 
-// Wide desktop (75rem+, not Quest): Home's list stays up beside the open task (or `#choose` when none is).
+// The list a hash shows (Home, Tasks or Sessions), else null.
+const secOf = (h) => ({ '': 'home', '#': 'home', '#tasks': 'tasks', '#sessions': 'sessions' })[h] || null;
+// The list in view, or the one the open task or session came from (Home if neither).
+const listSec = () => (route().view === 'list' ? route().id || 'home' : secOf(from) || 'home');
+// Wide desktop (75rem+, not Quest): the list stays up beside the open task, or a session opened from it (or `#choose`).
 const wide = matchMedia('(min-width: 75rem)');
-const isSplit = (view) => wide.matches && isDesk() && (view === 'list' || view === 'detail');
+const isSplit = (r) => wide.matches && isDesk() && (r.view === 'list' || r.view === 'detail' || (r.view === 'session' && !!secOf(from)));
 const inSplit = () => document.documentElement.classList.contains('split'); // as render() last laid out
 // The finished task last opened beside the list, and the attention it had: its row keeps its place until another is
 // opened or Home is left, rather than leaving Needs you the moment opening it marks it seen. { id, attention } or null.
 let kept = null;
 // A task's attention for placing its row: its own, else the kept one's.
 const att = (t) => (ATTENTION[t.attention] || kept?.id !== t.id ? t.attention : kept.attention);
+// What each list last had open beside it ({ home: '#task/<id>', … }), so its rail link reopens that.
+const lastOpen = {};
 
 function render() {
-  const r = route(), split = everOpen && isSplit(r.view);
+  const r = route(), split = everOpen && isSplit(r);
   document.documentElement.classList.toggle('split', split);
   const open = split && r.view === 'detail' && tasks.find((t) => t.id === r.id);
   if (open) kept = { id: open.id, attention: ATTENTION[open.attention] ? open.attention : kept?.id === open.id && isFinished(open) ? kept.attention : null };
@@ -1876,20 +1887,22 @@ function render() {
   $('clip').disabled = shots.length >= MAX_SHOTS || !!pending;
   for (const v in views) $(v).hidden = !everOpen || (v !== r.view && !(split && v === 'list'));
   $('choose').hidden = !everOpen || !split || r.view !== 'list';
+  $('choose').firstChild.textContent = r.id === 'sessions' ? 'Select a session, or start a task below.' : 'Select a task, or start one below.';
   // A conversation's back link returns to the view it was opened from.
   if (r.view === 'detail' || r.view === 'session') $(r.view).querySelector('.back').href = from;
   else from = location.hash || '#';
+  if (split && secOf(from)) lastOpen[secOf(from)] = r.view === 'list' ? null : location.hash;
   if (r.view !== 'detail' && r.view !== 'session') { follow.key = null; $('latest').hidden = true; if (detail) { detail.sig = null; detail.since = 0; } }
   if (r.view !== 'session') closeSession();
-  const onWorkers = r.view === 'workers' || r.view === 'machine' || r.view === 'session';
-  const area = onWorkers ? 'workers' : ['routines', 'apps', 'settings', 'notes', 'projects'].includes(r.view) ? r.view : 'list';
+  const onWorkers = r.view === 'workers' || r.view === 'machine' || (r.view === 'session' && !secOf(from));
+  const area = onWorkers ? 'workers' : ['routines', 'apps', 'settings', 'notes', 'projects'].includes(r.view) ? r.view : listSec();
   for (const a of $('menu').querySelectorAll('nav a')) {
     if (a.dataset.view === area) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
   $('clear').hidden = !store.get();
   renderNav();
   views[r.view](r.id);
-  if (split && r.view === 'detail') renderList();
+  if (split && r.view !== 'list') renderList();
   fitAll();
   if (wantNew && !$('dock').hidden) { wantNew = false; $('prompt').focus(); }
 }
@@ -2005,7 +2018,8 @@ const sentTo = (t) => (t.send_to ? `↪ ${t.send_to.title || short(t.send_to.ses
 const sendKey = (t) => `${t.worker}/${t.harness}/${t.send_to.session}`; // the session a message went to
 const sessionHref = (t) => `#session/${sendKey(t)}`;
 
-// Home: what needs you and what runs, every machine's live sessions, then finished work by day.
+// Home: what needs you (tasks, and sessions waiting on you) and what runs. Tasks: those, then finished work by day.
+// Sessions: every machine's live sessions.
 let feed = []; // the sessions feed (`ServerMsg::Sessions`); stays empty for a read-only token
 const repliesOpen = new Set(); // threads whose replies are shown
 const shortHost = (h) => (h || '').split('.')[0];
@@ -2121,37 +2135,46 @@ function liveRow(s, now) {
     s.last ? el('div', { className: 'r3 one' }, snippet(s.last)) : ''), ...you);
 }
 const secHead = (label, ...end) => el('div', { className: 'sec' }, el('h3', {}, label), ...end);
+// Waiting on you, or stalled mid-turn (as the orchestrator ranks them): Home lists these.
+const asks = (s) => s.online && (s.state === 'waiting' || s.state === 'stalled');
+// Under way: Sessions' Live; the rest (idle, offline) are Recent.
+const isLive = (s) => s.online && s.state !== 'idle';
 function renderList() {
   if (frozen()) return;
-  const now = Date.now() + skew, listed = new Set(feed.flatMap((s) => s.messages.map((m) => m.task)));
+  const sec = listSec(), now = Date.now() + skew;
+  const fed = sec === 'home' ? feed.filter(asks) : sec === 'sessions' ? feed : [];
+  const listed = new Set(fed.flatMap((s) => s.messages.map((m) => m.task)));
   hintBudget = HINT_FILES;
-  const threads = held('home', homeThreads(tasks, listed), (th) => th.root.id);
-  const sessions = held('live', [...feed], liveKey);
+  const threads = sec === 'sessions' ? [] : held(sec, homeThreads(tasks, listed), (th) => th.root.id).filter((th) => sec === 'tasks' || secRank(th.sec) < 2);
+  const sessions = held(`${sec}:live`, [...fed], liveKey);
   const label = (sec) => (sec === 'need' ? 'Needs you' : sec === 'flight' ? 'In flight' : dayLabel(sec.slice(4), now));
   const groups = new Map();
   for (const th of threads) groups.set(th.sec, [...(groups.get(th.sec) || []), th]);
   // A new task on its way shows at once, atop In flight.
-  const sending = pending && pending.key === 'draft:new' && el('li', {}, el('a', {},
+  const sending = pending && pending.key === 'draft:new' && sec !== 'sessions' && el('li', {}, el('a', {},
     el('div', { className: 'r1' }, el('span', { className: 'sd queued' }), el('span', { className: 'one' }, pending.text)), el('div', { className: 'r2' }, 'Sending…')));
   if (sending && !groups.has('flight')) groups.set('flight', []);
-  // Drafts waiting on a decision need you too, first.
-  if (!hosted && !hostedAsked && everOpen) loadApps();
-  const drafted = ((hosted && hosted.list) || []).filter((a) => a.draft).map((a) => el('li', { className: 'draftrow' },
+  // Home: drafts waiting on a decision need you too, first.
+  if (sec === 'home' && !hosted && !hostedAsked && everOpen) loadApps();
+  const drafted = sec !== 'home' ? [] : ((hosted && hosted.list) || []).filter((a) => a.draft).map((a) => el('li', { className: 'draftrow' },
     el('a', { href: a.draft.task ? `#task/${a.draft.task}` : '#apps' },
       el('div', { className: 'r1' }, el('span', { className: 'sd done att-unread' }), el('strong', { className: 'one' }, `Draft v${a.draft.release} of ${a.title}`)),
       el('div', { className: 'r2 one' }, a.role === 'owner' && !readOnly ? 'Try it, then publish or ask for changes' : 'Waiting for its owner'))));
-  if (drafted.length && !groups.has('need')) groups.set('need', []);
-  // Sections in Home's order; live sessions after the work in hand.
+  if (sec === 'home' && (drafted.length || sessions.length) && !groups.has('need')) groups.set('need', []);
+  // Sections in Home's order; on Home, drafts, then the tasks needing you, then sessions waiting on you.
   const keys = [...groups.keys()].sort((a, b) => secRank(a) - secRank(b) || b.localeCompare(a));
-  const body = keys.map((k) => [secHead(label(k)), el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []), ...(k === 'need' ? drafted : []), ...groups.get(k).flatMap((th) => threadRows(th, now)))]);
-  const liveAt = keys.filter((k) => secRank(k) < 2).length;
-  if (sessions.length) body.splice(liveAt, 0, [secHead('Live sessions', el('a', { href: '#workers' }, 'All sessions')), el('ul', { className: 'rows' }, ...sessions.map((s) => liveRow(s, now)))]);
+  const body = keys.map((k) => [secHead(label(k)), el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []), ...(k === 'need' ? drafted : []), ...groups.get(k).flatMap((th) => threadRows(th, now)),
+    ...(k === 'need' && sec === 'home' ? sessions.map((s) => liveRow(s, now)) : []))]);
+  if (sec === 'sessions') for (const [h, ss] of [['Live', sessions.filter(isLive)], ['Recent', sessions.filter((s) => !isLive(s))]]) {
+    if (ss.length) body.push([secHead(h, ...(body.length ? [] : [el('a', { href: '#workers' }, 'All sessions')])), el('ul', { className: 'rows' }, ...ss.map((s) => liveRow(s, now)))]);
+  }
   const focused = $('list').contains(document.activeElement) && document.activeElement.getAttribute('href');
   $('list').replaceChildren(...(inSplit() ? [el('a', { href: '#new', className: 'newtask', title: 'New task (c)' }, '+ New task')] : []), ...body.flat());
-  // The open task's links (its row, or its message under a live session), beside the list when wide.
-  if (route().view === 'detail') for (const a of $('list').querySelectorAll(`a[href="${location.hash}"]`)) a.setAttribute('aria-current', 'page');
+  // The open task's or session's links (its row, or a message under a live session), beside the list when wide.
+  if (route().view !== 'list') for (const a of $('list').querySelectorAll(`a[href="${location.hash}"]`)) a.setAttribute('aria-current', 'page');
   if (focused) $('list').querySelector(`a[href="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true }); // a redraw keeps j/k's (or Tab's) place
-  if (!body.length) $('list').append(el('p', { className: 'dim', style: 'padding: 1rem .375rem' }, inSplit() ? 'No tasks yet.' : 'No tasks yet. Start one below.'));
+  if (!body.length) $('list').append(el('p', { className: 'dim', style: 'padding: 1rem .375rem' }, sec === 'sessions' ? 'No live sessions.'
+    : sec === 'home' && tasks.length ? 'Nothing needs you or is running.' : inSplit() ? 'No tasks yet.' : 'No tasks yet. Start one below.'));
 }
 
 const KIND = { pr: 'PR', commit: 'commit', ci_run: 'CI', issue: 'issue', url: 'link', test: 'test', note: 'note' };
@@ -3508,6 +3531,12 @@ function renderNav() {
   // Notes: one link per folder the repo has, no dot; the inbox with how many notes wait in it.
   const ns = notesTree && notesTree.entries, inbox = ns && ns.filter((e) => e.kind === 'md' && /^inbox\/[^/]+$/.test(e.path)).length;
   const folders = ns ? NOTE_FOLDERS.filter(([f]) => ns.some((e) => e.path === f)) : [];
+  // Rail counts: Tasks under way, Sessions waiting on you (tinted; else live), the notes inbox, busy workers.
+  const waits = feed.filter(asks).length;
+  navCount('n-tasks', tasks.filter((t) => t.status === 'running' || t.status === 'queued').length);
+  navCount('n-sessions', waits || feed.filter(isLive).length, waits ? 'att approval' : '');
+  navCount('n-inbox', inbox);
+  navCount('n-busy', workers.filter((w) => w.online && w.busy).length);
   fillNav($('nav-notes'), !notesTree ? [['Loading…']] : notesTree.error ? [[notesTree.error]] : notesTree.state === 'off' ? [['Not configured']]
     : !folders.length ? [['No notes yet']] : folders.map(([f, label]) => [noteHref(f), null, label, f === 'inbox' && inbox ? String(inbox) : '']));
   // Projects: one link per active one.
@@ -3515,6 +3544,7 @@ function renderNav() {
   fillNav($('nav-projects'), !projects ? [['Loading…']] : projects.error ? [[projects.error]] : projects.state === 'off' ? [['Not configured']]
     : !active.length ? [['No active projects']] : active.map((p) => [projectHref(p.id), null, p.title]));
 }
+const navCount = (id, n, cls = '') => Object.assign($(id), { hidden: !n, textContent: n || '', className: `nc ${cls}` });
 // Rows as [href, dot class (null: none), name, count], or [text] for a note.
 function fillNav(ul, rows) {
   const key = JSON.stringify(rows);
@@ -4445,12 +4475,12 @@ $('new').addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('opts
 
 // Keyboard shortcuts: c a new task, j/k the next/previous task, Esc back (or out of a field), Cmd/Ctrl+B the menu.
 const mac = /Mac|iPhone|iPad/.test(navigator.platform); // Cmd+B there; Ctrl+B moves the cursor in a field
-// The next (d = 1) or previous task in Home's list: beside the list it opens it, on Home it focuses its row.
+// The next (d = 1) or previous task or session in the list: beside the list it opens it, else it focuses its row.
 // A task under a live session as well as in Needs you counts once, at its row.
 function step(d) {
   const split = inSplit();
   if (!split && route().view !== 'list') return;
-  const seen = new Set(), links = [...$('list').querySelectorAll('a[href^="#task/"]')].filter((a) => !seen.has(a.getAttribute('href')) && seen.add(a.getAttribute('href')));
+  const seen = new Set(), links = [...$('list').querySelectorAll('a[href^="#task/"], a[href^="#session/"]')].filter((a) => !seen.has(a.getAttribute('href')) && seen.add(a.getAttribute('href')));
   const here = split ? location.hash : document.activeElement?.getAttribute('href');
   const at = links.findIndex((a) => a.getAttribute('href') === here);
   const a = links[at < 0 ? 0 : Math.max(0, Math.min(links.length - 1, at + d))];
@@ -4609,6 +4639,14 @@ for (const b of $('menu').querySelectorAll('.ngrp button[aria-controls]')) b.onc
   if (open && b.getAttribute('aria-controls') === 'nav-projects') loadProjects();
 };
 $('menu').addEventListener('close', () => $('menu-btn').setAttribute('aria-expanded', String(railShown())));
+// Beside the list, Home, Tasks and Sessions reopen what each last had open beside it.
+for (const a of $('menu').querySelectorAll('nav a[data-view]')) a.addEventListener('click', (e) => {
+  const h = lastOpen[a.dataset.view];
+  if (!h || !wide.matches || !isDesk()) return;
+  e.preventDefault();
+  from = a.getAttribute('href');
+  if (location.hash === h) render(); else location.hash = h;
+});
 // The rail opens with Notes and Workers unfolded: short lists, and Workers carries what's running.
 if (isDesk()) for (const id of ['nav-notes', 'nav-workers']) $('menu').querySelector(`[aria-controls=${id}]`).click();
 $('menu-btn').setAttribute('aria-expanded', String(railShown()));
