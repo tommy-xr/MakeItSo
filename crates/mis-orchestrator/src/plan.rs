@@ -91,10 +91,17 @@ pub const SCHEMA: &str = r#"{"type":"object","properties":{"harness":{"type":"st
 /// Prompt asking the model to answer a trivial question itself, or else pick a
 /// harness and model and strip dispatch instructions. A request with `images`
 /// attached always dispatches: only the agent gets to see them. So does one whose
-/// worker the user `chose`.
-pub fn prompt(request: &str, images: usize, chose: bool, fleet: &Fleet, cards: &[Card]) -> String {
+/// worker the user `chose`. Absent a named harness it picks [`default_harness`] (`prefer`ring one).
+pub fn prompt(
+    request: &str,
+    images: usize,
+    chose: bool,
+    fleet: &Fleet,
+    cards: &[Card],
+    prefer: Option<&str>,
+) -> String {
     let harnesses: Vec<&str> = fleet.keys().map(String::as_str).collect();
-    let default = default_harness(fleet.keys()).unwrap_or_else(|| "claude".into());
+    let default = default_harness(fleet.keys(), prefer).unwrap_or_else(|| "claude".into());
     let models: String = fleet
         .iter()
         .filter(|(_, m)| !m.is_empty())
@@ -144,11 +151,37 @@ pub fn prompt(request: &str, images: usize, chose: bool, fleet: &Fleet, cards: &
     )
 }
 
-/// claude if among `harnesses`, else the first.
-pub fn default_harness<'a>(harnesses: impl IntoIterator<Item = &'a String>) -> Option<String> {
+/// `prefer` (Settings' default harness) if among `harnesses`, else claude if among them, else
+/// the first.
+pub fn default_harness<'a>(
+    harnesses: impl IntoIterator<Item = &'a String>,
+    prefer: Option<&str>,
+) -> Option<String> {
     let all: Vec<_> = harnesses.into_iter().collect();
-    let claude = all.iter().find(|h| **h == "claude");
-    claude.or(all.first()).map(|h| h.to_string())
+    let pick = [prefer, Some("claude")]
+        .into_iter()
+        .flatten()
+        .find_map(|p| all.iter().find(|h| **h == p));
+    pick.or(all.first()).map(|h| h.to_string())
+}
+
+/// What a task naming no harness runs unplanned: [`default_harness`] among `fleet`'s harnesses
+/// that list `model`, else among them all. E.g. `--model sonnet` runs claude, whatever `prefer`.
+pub fn unplanned_harness(
+    fleet: &Fleet,
+    model: Option<&str>,
+    prefer: Option<&str>,
+) -> Option<String> {
+    let lists = |m: &Vec<String>| model.is_some_and(|x| m.iter().any(|y| y == x));
+    let listing: Vec<_> = fleet
+        .iter()
+        .filter(|(_, m)| lists(m))
+        .map(|(h, _)| h)
+        .collect();
+    match listing.is_empty() {
+        true => default_harness(fleet.keys(), prefer),
+        false => default_harness(listing, prefer),
+    }
 }
 
 /// The workers and what each is for, when any worker says; empty otherwise.
@@ -185,13 +218,14 @@ fn workers_section(cards: &[Card]) -> String {
 /// safe side); then check it exists and fill an omitted prompt with `request`.
 /// Without one, the answer stands alone. A named worker must be in `cards` and run
 /// the harness; it becomes `pin`. No `cards`: the worker is already chosen, so a named one
-/// is ignored and an answer never stands: it runs on `fleet`'s default harness instead. A model not listed for the harness (blank, invented, or gone since
+/// is ignored and an answer never stands: it runs on `fleet`'s [`default_harness`] instead. A model not listed for the harness (blank, invented, or gone since
 /// the prompt was built) falls back to the harness default.
 pub fn parse(
     reply: &str,
     request: &str,
     fleet: &Fleet,
     cards: Option<&[Card]>,
+    prefer: Option<&str>,
 ) -> Result<Plan, String> {
     let start = reply.find('{').ok_or("planner reply has no JSON")?;
     let end = reply
@@ -202,7 +236,8 @@ pub fn parse(
         serde_json::from_str(&reply[start..=end]).map_err(|e| format!("bad planner reply: {e}"))?;
     plan.answer = plan.answer.filter(|a| !a.trim().is_empty());
     if plan.harness.is_empty() && cards.is_none() {
-        plan.harness = default_harness(fleet.keys()).ok_or("the chosen worker runs no harness")?;
+        plan.harness =
+            default_harness(fleet.keys(), prefer).ok_or("the chosen worker runs no harness")?;
     }
     if plan.harness.is_empty() {
         return match plan.answer {
@@ -256,22 +291,23 @@ mod tests {
     #[test]
     fn parses_fenced_json_and_validates_harness() {
         let reply = "Sure.\n```json\n{\"harness\":\"codex\",\"prompt\":\"what agent are you?\",\"reason\":\"asked for codex\"}\n```";
-        let p = parse(reply, "req", &both(), Some(&[])).unwrap();
+        let p = parse(reply, "req", &both(), Some(&[]), None).unwrap();
         assert_eq!(p.harness, "codex");
         assert_eq!(p.prompt, "what agent are you?");
         assert_eq!(p.model, None);
         let claude_only: Fleet = [("claude".into(), vec![])].into();
-        assert!(parse(reply, "req", &claude_only, Some(&[]))
+        assert!(parse(reply, "req", &claude_only, Some(&[]), None)
             .unwrap_err()
             .contains("unknown harness"));
-        assert!(parse("no json here", "req", &both(), Some(&[])).is_err());
-        assert!(parse("} {", "req", &both(), Some(&[])).is_err());
+        assert!(parse("no json here", "req", &both(), Some(&[]), None).is_err());
+        assert!(parse("} {", "req", &both(), Some(&[]), None).is_err());
         // Omitted or blank prompt keeps the original request verbatim.
         let p = parse(
             "{\"harness\":\"claude\",\"prompt\":\" \"}",
             "req",
             &both(),
             Some(&[]),
+            None,
         )
         .unwrap();
         assert_eq!(p.prompt, "req");
@@ -279,7 +315,7 @@ mod tests {
 
     #[test]
     fn unlisted_model_falls_back_to_default() {
-        let p = |reply| parse(reply, "req", &both(), Some(&[]));
+        let p = |reply| parse(reply, "req", &both(), Some(&[]), None);
         let ok = p(r#"{"harness":"claude","model":"haiku"}"#).unwrap();
         assert_eq!(ok.model.as_deref(), Some("haiku"));
         // Blank, listed for another harness, or not at all: harness default.
@@ -294,7 +330,7 @@ mod tests {
 
     #[test]
     fn answer_xor_harness() {
-        let p = |reply| parse(reply, "what is 2+2?", &both(), Some(&[]));
+        let p = |reply| parse(reply, "what is 2+2?", &both(), Some(&[]), None);
         let a = p(r#"{"answer":"4","reason":"arithmetic"}"#).unwrap();
         assert_eq!((a.answer.as_deref(), a.harness.as_str()), (Some("4"), ""));
         // Both: dispatch wins.
@@ -312,7 +348,7 @@ mod tests {
 
     #[test]
     fn prompt_lists_harnesses_models_and_request() {
-        let p = prompt("hey run as codex", 0, false, &both(), &[]);
+        let p = prompt("hey run as codex", 0, false, &both(), &[], None);
         assert!(p.contains("claude, codex"));
         assert!(p.contains("otherwise pick claude"));
         assert!(p.contains("- claude: haiku, sonnet\n"));
@@ -321,16 +357,39 @@ mod tests {
         assert!(p.contains("names no harness, agent or model"));
         assert!(p.ends_with("Request:\nhey run as codex"));
         let codex: Fleet = [("codex".into(), vec![])].into();
-        let p = prompt("x", 0, false, &codex, &[]);
+        let p = prompt("x", 0, false, &codex, &[], None);
         assert!(p.contains("otherwise pick codex"));
         assert!(!p.contains("never answer"));
-        let p = prompt("x", 0, true, &codex, &[]);
+        let p = prompt("x", 0, true, &codex, &[], None);
         assert!(p.contains("chose the machine to run this request on, so never answer"));
         assert!(!p.contains("\"model\""));
         assert!(!p.contains("attached"));
-        let p = prompt("what is this?", 2, false, &codex, &[]);
+        let p = prompt("what is this?", 2, false, &codex, &[], None);
         assert!(p.contains("attached 2 image(s) that only the agent will see"));
         assert!(p.ends_with("yourself.\n\nRequest:\nwhat is this?"));
+        // Settings' default, where the fleet runs it.
+        assert!(prompt("x", 0, false, &both(), &[], Some("codex")).contains("otherwise pick codex"));
+        let claude_only: Fleet = [("claude".into(), vec![])].into();
+        let p = prompt("x", 0, false, &claude_only, &[], Some("codex"));
+        assert!(p.contains("otherwise pick claude"));
+    }
+
+    #[test]
+    fn default_and_unplanned_harness_prefer_the_setting_where_run() {
+        let hs = |v: &[&str]| v.iter().map(|h| h.to_string()).collect::<Vec<_>>();
+        let pick = |v: &[&str], prefer| default_harness(&hs(v), prefer);
+        assert_eq!(
+            pick(&["claude", "codex"], Some("codex")).as_deref(),
+            Some("codex")
+        );
+        assert_eq!(pick(&["claude"], Some("codex")).as_deref(), Some("claude"));
+        assert_eq!(pick(&["codex", "x"], None).as_deref(), Some("codex"));
+        assert_eq!(pick(&[], Some("codex")), None);
+        // A model picks among the harnesses that list it; one none lists: all of them.
+        let run = |model| unplanned_harness(&both(), model, Some("codex"));
+        assert_eq!(run(Some("sonnet")).as_deref(), Some("claude"));
+        assert_eq!(run(Some("gpt-9")).as_deref(), Some("codex"));
+        assert_eq!(run(None).as_deref(), Some("codex"));
     }
 
     fn blender_fleet() -> Vec<Card> {
@@ -356,7 +415,7 @@ mod tests {
 
     #[test]
     fn prompt_lists_workers_only_when_one_says_what_it_is_for() {
-        let p = prompt("model a chair", 0, false, &both(), &blender_fleet());
+        let p = prompt("model a chair", 0, false, &both(), &blender_fleet(), None);
         assert!(p.contains(
             "- studio (offline): harnesses claude; purpose: Blender + blender-mcp; 3D modelling; \
              mcp claude: blender\n"
@@ -364,13 +423,13 @@ mod tests {
         assert!(p.contains("- laptop: harnesses claude, codex\n"));
         assert!(p.contains("set \"worker\""));
         let plain = cards([(WorkerId::nil(), &WorkerInfo::default(), true)]);
-        assert!(!prompt("x", 0, false, &both(), &plain).contains("Workers:"));
+        assert!(!prompt("x", 0, false, &both(), &plain, None).contains("Workers:"));
     }
 
     #[test]
     fn named_worker_must_exist_and_run_the_harness() {
         let fleet = blender_fleet();
-        let p = |reply| parse(reply, "model a chair", &both(), Some(&fleet));
+        let p = |reply| parse(reply, "model a chair", &both(), Some(&fleet), None);
         let ok = p(r#"{"harness":"claude","worker":"studio"}"#).unwrap();
         assert_eq!(ok.pin, Some(WorkerId::from_u128(1)));
         for reply in [
@@ -384,21 +443,23 @@ mod tests {
         let e = p(r#"{"harness":"codex","worker":"studio"}"#).unwrap_err();
         assert!(e.contains("doesn't run codex"), "{e}");
         // The user already chose: an answer runs on the fleet's default harness instead.
-        let plan = parse(r#"{"answer":"4"}"#, "what is 2+2?", &both(), None).unwrap();
+        let plan = parse(r#"{"answer":"4"}"#, "what is 2+2?", &both(), None, None).unwrap();
         assert_eq!((plan.harness.as_str(), plan.answer), ("claude", None));
         let codex: Fleet = [("codex".into(), vec![])].into();
         assert_eq!(
-            parse(r#"{"answer":"4"}"#, "q", &codex, None)
+            parse(r#"{"answer":"4"}"#, "q", &codex, None, None)
                 .unwrap()
                 .harness,
             "codex"
         );
-        let e = parse(r#"{"answer":"4"}"#, "q", &Fleet::new(), None).unwrap_err();
+        let plan = parse(r#"{"answer":"4"}"#, "q", &both(), None, Some("codex")).unwrap();
+        assert_eq!(plan.harness, "codex", "Settings' default");
+        let e = parse(r#"{"answer":"4"}"#, "q", &Fleet::new(), None, None).unwrap_err();
         assert_eq!(e, "the chosen worker runs no harness");
         // A named worker is ignored, known or not.
         for name in ["studio", "mars"] {
             let reply = format!(r#"{{"harness":"codex","worker":"{name}"}}"#);
-            let plan = parse(&reply, "model a chair", &both(), None).unwrap();
+            let plan = parse(&reply, "model a chair", &both(), None, None).unwrap();
             assert_eq!((plan.worker, plan.pin), (None, None), "{name}");
         }
     }

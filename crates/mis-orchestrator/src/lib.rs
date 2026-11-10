@@ -98,7 +98,7 @@ pub struct App {
     /// How long a disconnected worker may be gone before its tasks are failed.
     grace: Duration,
     /// Chooses a harness and rewrites the prompt for tasks submitted without one.
-    /// None: such tasks default to "claude" unplanned.
+    /// None: such tasks run unplanned, on `plan::unplanned_harness`.
     planner: Option<Arc<dyn Agent>>,
     /// Bounds concurrent planner processes; tasks wait in Planning.
     planner_slots: Arc<tokio::sync::Semaphore>,
@@ -637,9 +637,13 @@ impl App {
             Err(e) if e.is::<store::Locked>() => return Err(e),
             Err(e) => tracing::warn!("task history won't survive a restart: {e:#}"),
         }
-        match self.settings() {
-            Ok(s) => self.ledger().default_harness = s.default_harness,
-            Err(e) => tracing::warn!("{e}: unplanned tasks run on claude"),
+        // Checked as a save is: a hand-edited " codex " runs codex, "gpt" nothing.
+        let default = self
+            .settings()
+            .and_then(|s| settings::default_harness(s.default_harness));
+        match default {
+            Ok(h) => self.transition(|l| ((), l.set_default_harness(h))),
+            Err(e) => tracing::warn!("{e}: no default harness"),
         }
         Ok(())
     }
@@ -1866,10 +1870,13 @@ async fn set_settings(
         Ok(s) => s,
         Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
     };
+    // One save at a time, so the ledger ends on the default the file does.
+    static SAVING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = SAVING.lock().await;
     let default = new.default_harness.clone();
     match tokio::task::spawn_blocking(move || settings::save(&dir, &new)).await {
         Ok(Ok(())) => {
-            app.ledger().default_harness = default;
+            app.transition(|l| ((), l.set_default_harness(default)));
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -2587,8 +2594,8 @@ async fn client_conn(mut sock: WebSocket, app: App, scope: Scope) {
                 Some(ClientMsg::Submit { prompt, cwd, harness, model, reply_to, images, worker }) => {
                     let planner = app.planner.is_some();
                     let model = model.filter(|m| !m.trim().is_empty());
-                    // A chosen model pins the default harness: the planner could pick
-                    // one that doesn't know that model.
+                    // A chosen model skips the planner, which could pick a harness that
+                    // doesn't know it: `submit_to` runs one that lists it.
                     let unplanned = !planner || model.is_some();
                     let task = app.check_images(&images).and_then(|()| {
                         app.transition(|l| {

@@ -1398,6 +1398,7 @@ mod tests {
                 tasks: vec![summary(&other.to_string()), t],
                 now_ms: None,
                 update: Update::None,
+                default_harness: None,
             }
         };
         assert_eq!(wait_step(id, finished(other)), Wait::Pending);

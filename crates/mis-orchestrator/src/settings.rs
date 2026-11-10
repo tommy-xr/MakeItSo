@@ -10,24 +10,29 @@ pub const FILE: &str = "settings.json";
 /// Longest value: a path, with room.
 const MAX_CHARS: usize = 512;
 
+/// `h` trimmed, if a harness that exists; Err names it `what`.
+fn known(what: &str, h: &str) -> Result<String, String> {
+    match mis_agent::HARNESSES.contains(&h.trim()) {
+        true => Ok(h.trim().to_string()),
+        false => Err(format!(
+            "{what} {h:?}: want {}",
+            mis_agent::HARNESSES.join(" or ")
+        )),
+    }
+}
+
+/// `Settings::default_harness` trimmed, blank as None (Auto); Err: not a harness that exists.
+pub fn default_harness(h: Option<String>) -> Result<Option<String>, String> {
+    let h = h.filter(|h| !h.trim().is_empty());
+    h.map(|h| known("default harness", &h).map_err(|e| format!("{e}, or none for Auto")))
+        .transpose()
+}
+
 /// `s` with its values trimmed; Err: why one can't be saved.
 pub fn clean(mut s: Settings) -> Result<Settings, String> {
-    // Blank is Auto.
-    s.default_harness = (s.default_harness.take()).filter(|h| !h.trim().is_empty());
-    if let Some(h) = &mut s.default_harness {
-        *h = h.trim().to_string();
-        if !mis_agent::HARNESSES.contains(&h.as_str()) {
-            let known = mis_agent::HARNESSES.join(" or ");
-            return Err(format!(
-                "default harness {h:?}: want {known}, or none for Auto"
-            ));
-        }
-    }
+    s.default_harness = default_harness(s.default_harness.take())?;
     let a = &mut s.apps;
-    if !mis_agent::HARNESSES.contains(&a.harness.trim()) {
-        let known = mis_agent::HARNESSES.join(" or ");
-        return Err(format!("apps harness {:?}: want {known}", a.harness));
-    }
+    known("apps harness", &a.harness)?;
     for (name, v) in [
         ("apps harness", &mut a.harness),
         ("apps model", &mut a.model),
