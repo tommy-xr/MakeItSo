@@ -157,6 +157,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   #opts { display: flex; align-items: center; gap: .25rem; min-width: 0; max-width: 100%; color: var(--faint); font-size: .75rem; }
   .optc { position: relative; display: flex; align-items: center; gap: .375rem; flex: 0 1 auto; min-width: 2.5rem; min-height: 0; height: 1.75rem; padding: 0 .625rem; border-radius: 999px; background: var(--raised); color: var(--soft); font: 500 .75rem/1 var(--sans); }
   .optc .v { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  #o-harness { flex: none; } /* short names (Auto, claude, codex): the machine and model give way instead */
   .optc::after { content: ""; position: absolute; inset: -.5rem -.125rem; }
   .optc[aria-expanded=true] { color: var(--fg); background: var(--seg-on); }
   #opt-menu { position: absolute; z-index: 1; bottom: calc(100% + .375rem); display: grid; min-width: 10rem; max-width: min(20rem, 100%); box-sizing: border-box; padding: .375rem; border-radius: 1rem; background: var(--card); box-shadow: var(--shadow); animation: rise .15s ease-out; }
