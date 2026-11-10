@@ -145,7 +145,8 @@
       btn.setAttribute('aria-label', 'App menu');
       btn.setAttribute('aria-expanded', 'false');
       if (me.drafted && !draft) btn.append(make('span', 'mis-dot'));
-      btn.onclick = () => open();
+      // Fresh each time it opens: a draft or a feedback status may have changed.
+      btn.onclick = async () => { me = (await globalThis.mis.me().catch(() => null)) || me; open(); };
       if (draft) {
         const tag = make('a', 'mis-tag mis-ui', `Draft v${draft} · test data`);
         tag.href = `/a/${slug}/?draft=off`;
@@ -239,7 +240,6 @@
         const res = await fetch(`/a/${slug}/api/v1/feedback`, { method: 'POST', headers, body: JSON.stringify(body) }).catch(() => null);
         if (res && res.ok) {
           done();
-          me = (await globalThis.mis.me().catch(() => null)) || me; // its status, for the menu
           toast('Feedback sent');
           return;
         }
