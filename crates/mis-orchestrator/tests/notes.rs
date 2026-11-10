@@ -155,6 +155,12 @@ impl World {
         git(&clone, &["config", "remote.origin.receivepack", wrapper]);
     }
 
+    /// File `path` as the Notes view serves it: the clone's checkout, which a filter or
+    /// `core.autocrlf` may make differ from HEAD's blob.
+    fn shown(&self, path: &str) -> Vec<u8> {
+        std::fs::read(self.state.join("notes").join(path)).unwrap()
+    }
+
     /// Queue filing `path` in `dest` and run: how it went.
     fn file(&self, notes: &Notes, path: &str, dest: &str, hash: Option<&str>) -> Filed {
         let m = NoteMove {
@@ -681,7 +687,7 @@ fn filing_moves_a_note_and_its_image_in_one_pushed_commit() {
         format!("inbox/{}", a.file),
         format!("inbox/{}", image_of(&a.file)),
     );
-    let hash = sha256(&w.show(&md));
+    let hash = sha256(&w.shown(&md));
     let got = w.file(&notes, &md, "projects/amf", Some(&hash)).unwrap();
     let to = format!("projects/amf/{}", a.file);
     assert_eq!(got.path, to);
@@ -747,7 +753,7 @@ fn a_note_changed_gone_or_edited_in_the_clone_is_not_filed() {
     notes.run();
     w.folders(&["areas/home/boiler.md"]);
     let (a_md, b_md) = (format!("inbox/{}", a.file), format!("inbox/{}", b.file));
-    let read = sha256(&w.show(&a_md));
+    let read = sha256(&w.shown(&a_md));
     // The human edits one and deletes the other after the view read them.
     w.human_pull();
     std::fs::write(w.human.join(&a_md), "edited\n").unwrap();
@@ -770,7 +776,7 @@ fn a_note_changed_gone_or_edited_in_the_clone_is_not_filed() {
     );
     assert_eq!(w.head(), head, "nothing filed");
     git(&clone, &["checkout", "--", &a_md]);
-    let current = sha256(b"edited\n");
+    let current = sha256(&w.shown(&a_md));
     let got = w.file(&notes, &a_md, "areas/home", Some(&current)).unwrap();
     assert_eq!(got.path, format!("areas/home/{}", a.file));
 }
@@ -920,6 +926,8 @@ fn frontmatter_keeps_its_line_endings_and_loses_no_lines() {
         "---\r\ntitle: x\r\nsummary: |\r\n  old\r\n\r\n  text\r\nproject:\r\n  - a\r\n- b\r\n\
                 tags: [t]\r\n---\r\nbody\r\nproject: kept\r\n";
     w.human_pull();
+    // Bytes as written, whatever `core.autocrlf` says.
+    std::fs::write(w.human.join(".gitattributes"), "* -text\n").unwrap();
     std::fs::write(w.human.join("inbox/crlf.md"), crlf).unwrap();
     std::fs::write(
         w.human.join("inbox/open.md"),

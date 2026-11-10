@@ -4439,7 +4439,11 @@ async fn filing_a_note_answers_how_it_went_for_full_scope_only() {
     // Filed and pushed at once: no waiting on the publisher's timer.
     let (status, got) = mv("s", body("inbox/a.md", "projects/amf", "")).await;
     assert_eq!(status, 409, "a wrong hash: {got}");
-    let (status, got) = mv("s", body("inbox/a.md", "projects/amf", &sha_hex(b"# a\n"))).await;
+    // The page hashes the note as served: the clone's checkout (CRLF under core.autocrlf).
+    let head = "GET /api/notes/file?path=inbox/a.md HTTP/1.1\r\nAuthorization: Bearer s";
+    let (status, _, shown) = http(&base, head, b"").await;
+    assert_eq!(status, 200);
+    let (status, got) = mv("s", body("inbox/a.md", "projects/amf", &sha_hex(&shown))).await;
     assert_eq!(status, 200, "{got}");
     let moved: mis_types::NoteMoved = serde_json::from_str(&got).unwrap();
     assert_eq!(moved.path, "projects/amf/a.md");
