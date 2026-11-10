@@ -197,7 +197,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .ngrp .chev { width: 1rem; height: 1rem; transition: transform .15s; }
   .ngrp [aria-expanded=true] .chev { transform: rotate(180deg); }
   #menu .nsub a { gap: .625rem; min-height: 2.5rem; padding-left: 1.5rem; font-size: .875rem; }
-  .nsub .sd { background: var(--s, var(--faint)); } /* never run: faint, as on Routines */
+  .nsub .sd, .rows .sd.never { background: var(--s, var(--faint)); } /* never run (or not live): faint, as on Routines */
   .nsub .n { margin-left: auto; color: var(--dim); font-size: .75rem; font-variant-numeric: tabular-nums; }
   /* Notes: folder rows (icon, name, size or count); a note's chips, body and pictures. */
   .nlist .r1 svg { flex: none; width: 1.125rem; height: 1.125rem; color: var(--dim); }
@@ -873,8 +873,16 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
     /* The list scrolls in its own column; the window still scrolls the task, so following a reply works as before. */
     :root.split:not(.vr) body > #list { position: fixed; z-index: 1; inset: var(--head) auto 0 var(--rail); box-sizing: border-box; width: var(--list); max-width: none; margin: 0;
       padding: 0 var(--pad) 1.5rem; overflow-y: auto; overscroll-behavior: contain; border-right: 1px solid var(--sep); }
+    :root.split:not(.vr) #list > .rows:first-child { margin-top: .75rem; } /* a section's list with no heading over it */
     :root.split:not(.vr) #list .rows a[aria-current] { background: var(--bubble); box-shadow: inset 3px 0 var(--accent); }
     :root.split:not(.vr) :is(#detail, #session) .chead .back { display: none; }
+    /* Every rail section opens its list beside the view: no chevrons, nothing unfolds under them. */
+    :root:not(.vr) #menu :is(.nsub, .ngrp button[aria-controls]) { display: none; }
+    :root:not(.vr) #menu nav > a > .nc { margin-right: .375em; }
+    :root.split:not(.vr) :is(#projects .chead .back, #machine .mtop) { display: none; }
+    :root.split:not(.vr) #notify-row { justify-content: center; }
+    /* A diff takes the task column's whole width, past the 48rem measure (wider than 1440px). */
+    :root.split:not(.vr) #diff { margin-inline: calc((100% - (100vw - var(--side) - 2 * var(--pad))) / 2); }
     #choose { padding-top: 30svh; text-align: center; }
     #choose .keys { display: none; margin-top: .5rem; font-size: .8125rem; }
     @media (hover: hover) and (pointer: fine) { #choose .keys { display: block; } }
@@ -1948,39 +1956,58 @@ $('upd').onclick = (e) => {
   renderUpdate();
 };
 
-// `#` Home, `#tasks`, `#sessions`, `#task/<id>`, `#routines`, `#apps`, `#settings`, `#workers`, `#worker/<id>`, `#session/<worker>/<harness>/<id>`,
-// `#notes/<repo path>` (each segment URI-encoded), `#projects`, `#projects/<id or alias>`, `#new-app`, `#apps/<slug>`.
+// `#` Home, `#tasks`, `#sessions`, `#task/<id>`, `#routines`, `#routines/<name>`, `#apps`, `#new-app`, `#apps/<slug>`, `#settings`,
+// `#workers`, `#worker/<id>`, `#session/<worker>/<harness>/<id>`, `#notes/<repo path>` (each segment URI-encoded), `#projects`,
+// `#projects/<id or alias>`.
 // `#new` (see takeNew) is Home or Tasks with the composer focused.
-function route() {
-  const m = location.hash.match(/^#(task|worker)\/([0-9a-f-]{36})$/);
+function route(h = location.hash) {
+  const m = h.match(/^#(task|worker)\/([0-9a-f-]{36})$/);
   if (m) return { view: m[1] === 'task' ? 'detail' : 'machine', id: m[2] };
-  const s = location.hash.match(/^#session\/([0-9a-f-]{36}\/(?:claude|codex)\/[0-9a-f-]{36})$/);
+  const s = h.match(/^#session\/([0-9a-f-]{36}\/(?:claude|codex)\/[0-9a-f-]{36})$/);
   if (s) return { view: 'session', id: s[1] };
-  const n = location.hash.match(/^#notes(?:\/(.*?))?\/*$/);
+  const n = h.match(/^#notes(?:\/(.*?))?\/*$/);
   if (n) { try { return { view: 'notes', id: (n[1] || '').split('/').map(decodeURIComponent).join('/') }; } catch { return { view: 'notes', id: '' }; } }
-  const p = location.hash.match(/^#projects(?:\/([^/]*))?\/*$/);
-  if (p) { try { return { view: 'projects', id: decodeURIComponent(p[1] || '') }; } catch { return { view: 'projects', id: '' }; } }
-  if (secOf(location.hash)) return { view: 'list', id: secOf(location.hash) };
-  if (location.hash === '#new-app') return { view: 'build', id: null };
-  const b = location.hash.match(/^#apps\/([a-z0-9][a-z0-9-]{0,31})$/);
+  if (h === '#new-app') return { view: 'build', id: null };
+  const b = h.match(/^#apps\/([a-z0-9][a-z0-9-]{0,31})$/);
   if (b) return { view: 'build', id: b[1] };
-  return { view: { '#workers': 'workers', '#routines': 'routines', '#apps': 'apps', '#settings': 'settings' }[location.hash] || 'list' };
+  const p = h.match(/^#(projects|routines)(?:\/([^/]*))?\/*$/);
+  if (p) { try { return { view: p[1], id: decodeURIComponent(p[2] || '') }; } catch { return { view: p[1], id: '' }; } }
+  if (secOf(h)) return { view: 'list', id: secOf(h) };
+  return { view: { '#workers': 'workers', '#apps': 'apps', '#settings': 'settings' }[h] || 'list' };
 }
 
 // The list a hash shows (Home, Tasks or Sessions), else null.
 const secOf = (h) => ({ '': 'home', '#': 'home', '#tasks': 'tasks', '#sessions': 'sessions' })[h] || null;
 // The list in view, or the one the open task or session came from (Home if neither).
 const listSec = () => here.sec || 'home';
-// On entering a view: a task or session takes its place from its history entry, else stamps it with the view it left.
+// The rail's other sections, each its own list beside what it opens when wide: Notes' folders, Projects, Routines, Apps, Workers.
+const COLS = ['notes', 'projects', 'routines', 'apps', 'workers'];
+// The section a view is in when not opened from one: a worker's page is in Workers, an app's (or a new one's) in Apps.
+const homeOf = (view) => (view === 'machine' ? 'workers' : view === 'build' ? 'apps' : COLS.includes(view) ? view : null);
+// What a list opens (a task, session, worker, note or folder, project, routine, an app's page), as against a list itself.
+const isItem = (r) => ['detail', 'session', 'machine'].includes(r.view) || ((COLS.includes(r.view) || r.view === 'build') && !!r.id);
+// The page locate() last placed, as { hash, view }, unless a task or session: an item opened from it goes back there.
+// Null where a link sets `here` itself (the rail, a notification).
+let left = null;
+// On entering a view: an item takes its place from its history entry, else stamps it with the section it was opened from
+// (its own if none, e.g. Settings or a fresh load) and goes back to the page left (a worker's page, say), unless that was
+// one of its own kind (j/k from one routine to the next) or a task or session: then where that one went back to.
 function locate() {
   const r = route();
-  if (r.view !== 'detail' && r.view !== 'session') here = { sec: r.view === 'list' ? r.id || 'home' : null, back: location.hash || '#' };
+  if (!isItem(r)) here = { sec: r.view === 'list' ? r.id || 'home' : homeOf(r.view), back: location.hash || '#' };
   else if (history.state?.here) here = history.state.here;
-  else history.replaceState({ here }, '');
+  else {
+    const sec = here.sec || homeOf(r.view), back = left && left.view !== r.view ? left.hash : here.back;
+    // Reached by going back to it (Esc from its run): back to its section, not itself.
+    here = { sec, back: back === location.hash ? $('menu').querySelector(`nav a[data-view="${sec}"]`)?.getAttribute('href') || '#' : back };
+    history.replaceState({ here }, '');
+  }
+  left = r.view === 'detail' || r.view === 'session' ? null : { hash: location.hash || '#', view: r.view };
 }
-// Wide desktop (75rem+, not Quest): the list stays up beside the open task, or a session opened from it (or `#choose`).
+// Wide desktop (75rem+, not Quest): the list stays up beside what it opened, or `#choose`; a session or task opened from
+// no list (a fresh load) shows Home's, or for a session, none.
 const wide = matchMedia('(min-width: 75rem)');
-const isSplit = (r) => wide.matches && isDesk() && (r.view === 'list' || r.view === 'detail' || (r.view === 'session' && !!here.sec));
+const isSplit = (r) => wide.matches && isDesk() && r.view !== 'settings' && (r.view === 'list' || r.view === 'detail' || !!here.sec);
 const inSplit = () => document.documentElement.classList.contains('split'); // as render() last laid out
 // The task last opened beside the list, its list, and the attention it had or whether it was under way: its row keeps
 // its place until another is opened or its list is left, rather than leaving Needs you (or In flight) the moment opening
@@ -1993,6 +2020,8 @@ const hold = (t) => (kept?.id === t.id && kept.sec === building ? kept : null);
 const att = (t) => (ATTENTION[t.attention] || !hold(t) ? t.attention : kept.attention);
 // What each list last had open beside it ({ home: '#task/<id>', … }), so its rail link reopens that.
 const lastOpen = {};
+const CHOOSE = { sessions: 'Select a session, or start a task below.', notes: 'Select a folder.', projects: 'Select a project.',
+  routines: 'Select a routine.', apps: 'Select an app.', workers: 'Select a worker.' };
 
 function render() {
   const r = route(), split = everOpen && isSplit(r);
@@ -2021,16 +2050,22 @@ function render() {
   if (shots.some((x) => !x.id) || (r.view === 'build' && boardBusy)) $('send').disabled = true; // still uploading
   $('clip').disabled = shots.length >= MAX_SHOTS || !!pending || appSending;
   $('prompt').readOnly = appSending;
-  for (const v in views) $(v).hidden = !everOpen || (v !== r.view && !(split && v === 'list'));
-  $('choose').hidden = !everOpen || !split || r.view !== 'list';
-  $('choose').firstChild.textContent = r.id === 'sessions' ? 'Select a session, or start a task below.' : 'Select a task, or start one below.';
+  // Beside a list with nothing open (or a Notes folder, listed there): Select a …. Instead: the + form open atop Routines,
+  // a new app being built, or a section with nothing to pick, whose page says why (no notes repo, how to add a routine).
+  // Workers keeps its Notify me toggle under it.
+  const folder = listSec() === 'notes' && r.view === 'notes' && notesTree?.entries?.some((e) => e.path === r.id && e.kind === 'dir');
+  const choosing = split && (!isItem(r) || folder) && !bare(r) && r.view !== 'build' && !(r.view === 'routines' && !$('routine-new').hidden);
+  for (const v in views) $(v).hidden = !everOpen || (v === 'list' ? !split && r.view !== 'list' : v !== r.view || (choosing && v !== 'workers'));
+  $('fleet').hidden = $('machines').hidden = choosing; // listed beside it; Notify me stays
+  $('choose').hidden = !everOpen || !choosing;
+  $('choose').firstChild.textContent = folder ? 'Select a note.' : CHOOSE[r.view === 'list' ? r.id : r.view] || 'Select a task, or start one below.';
   // A conversation's back link returns to the view it was opened from.
   if (r.view === 'detail' || r.view === 'session') $(r.view).querySelector('.back').href = here.back;
   if (r.view !== 'detail' && r.view !== 'session') { follow.key = null; $('latest').hidden = true; if (detail) detail.sig = null; }
   if (r.view !== 'detail' && detail) detail.since = 0; // its 2s start again on return, from a session too
   if (r.view !== 'session') closeSession();
-  const onWorkers = r.view === 'workers' || r.view === 'machine' || (r.view === 'session' && !here.sec);
-  const area = onWorkers ? 'workers' : r.view === 'build' ? 'apps' : ['routines', 'apps', 'settings', 'notes', 'projects'].includes(r.view) ? r.view : listSec();
+  // The rail marks the section the view is in, or was opened from; a session from none is under Workers.
+  const area = here.sec || homeOf(r.view) || { settings: 'settings', session: 'workers' }[r.view] || 'home';
   for (const a of $('menu').querySelectorAll('nav a')) {
     if (a.dataset.view === area) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
@@ -2286,14 +2321,23 @@ function listOf(sec, holds = true) {
   return { fed, threads };
 }
 const onHome = (th) => secRank(th.sec) < 2;
-// Whether list `sec` shows `h` (a task or session), in a row of its own, under a session's, or as Home's draft row.
+// Whether list `sec` shows `h` (a task or session), in a row of its own, under a session's, or as Home's draft row; for
+// another section, whether `h` is one of its own (a worker, note or folder, project or a project's file, routine, app)
+// still listed, as far as this page has read.
 function shows(sec, h) {
+  if (COLS.includes(sec)) {
+    const r = route(h), has = (got, list, f) => !got?.[list] || got[list].some(f), note = () => has(notesTree, 'entries', (e) => e.path === r.id);
+    return { notes: r.view === 'notes' && note(), workers: r.view === 'machine' && workers.some((w) => w.id === r.id),
+      projects: r.view === 'projects' ? has(projects, 'projects', (p) => projectFind([p], r.id)) : r.view === 'notes' && note() && !!projectOf(projects?.projects || [], r.id),
+      routines: r.view === 'routines' && has(routines, 'list', (x) => x.name === r.id), apps: r.view === 'build' && !!r.id && has(hosted, 'list', (a) => a.slug === r.id) }[sec];
+  }
   const { fed, threads } = listOf(sec);
   return (sec === 'home' && appDrafts().some((a) => draftHref(a) === h)) || threads.some((th) => (sec !== 'home' || onHome(th)) && [th.root, ...th.replies].some((t) => `#task/${t.id}` === h))
     || fed.some((s) => `#session/${liveKey(s)}` === h || shownMessages(s).some((m) => `#task/${m.task}` === h));
 }
 function renderList() {
   if (frozen()) return;
+  if (COLS.includes(listSec())) return renderCol(listSec());
   const sec = listSec(), now = Date.now() + skew, { fed, threads: all } = listOf(sec);
   hintBudget = HINT_FILES;
   const threads = held(sec, all, (th) => th.root.id).filter((th) => sec !== 'home' || onHome(th));
@@ -2331,6 +2375,63 @@ function renderList() {
   if (focused) $('list').querySelector(`a[href="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true }); // a redraw keeps j/k's (or Tab's) place
   if (!body.length) $('list').append(el('p', { className: 'dim', style: 'padding: 1rem .375rem' }, sec === 'sessions' ? 'No live sessions.'
     : sec === 'home' && tasks.length ? 'Nothing needs you or is running.' : inSplit() ? 'No tasks yet.' : 'No tasks yet. Start one below.'));
+}
+
+// A section's list came in: redraw if it is beside the view (whether Select a … shows may change too).
+const relistCol = (sec) => { if (inSplit() && listSec() === sec) render(); };
+// A section's own page with nothing to pick, or that couldn't be read (no notes repo, no routines, an error): it says
+// why, in place of Select a …, and its list beside it stays blank.
+const bare = (r) => !r.id && { notes: notesTree && !noteTops(notesTree.entries || []).length, projects: projects && !projects.projects?.length,
+  routines: routines && !routines.list?.length, apps: hosted && !hosted.list?.length, workers: !workers.length }[r.view];
+// The folder Notes' list shows: the one open, or the open note's; '' (the top folders) at `#notes` or elsewhere.
+function noteDir() {
+  const r = route();
+  if (r.view !== 'notes' || !r.id) return '';
+  return notesTree?.entries?.find((e) => e.path === r.id)?.kind === 'dir' ? r.id : r.id.slice(0, Math.max(0, r.id.lastIndexOf('/')));
+}
+// Another section's list beside what it opens: a Notes folder (up to its parent, so j/k step its notes), projects,
+// routines, apps or workers, fetched if not yet. The open one's row is marked: its own, the folder it is in, or the
+// project a note is in.
+function renderCol(sec) {
+  const now = Date.now() + skew, say = (cls, text) => el('p', { className: cls, style: 'padding: 1rem .375rem' }, text);
+  const rows = (list, row, none, cls = 'rows') => (list.length ? el('ul', { className: cls }, ...list.map(row)) : say('dim', none));
+  let body;
+  if (bare(route())) body = [];
+  else if (sec === 'workers') body = [rows(workers, (w) => { const run = runningOn(w.id); return el('li', {}, el('a', { href: `#worker/${w.id}` },
+    el('div', { className: 'r1' }, el('span', { className: `sd ${workerState(w)}` }), el('span', { className: 'one' }, w.info.hostname), chip(workerState(w))),
+    el('div', { className: 'r2 one' }, ...(run ? dots([clock(run), run.activity]) : [w.info.purpose || machineText(w)])))); }, 'No workers connected')];
+  else {
+    const [got, asked, load] = { notes: [notesTree, notesAsked, loadNotes], projects: [projects, projectsAsked, loadProjects],
+      routines: [routines, routinesAsked, loadRoutines], apps: [hosted, hostedAsked, loadApps] }[sec];
+    if (!got) { if (!asked) load(); body = [el('div', { className: 'rows' }, skel())]; }
+    else if (got.error) body = [say('bad', got.error)];
+    else if (got.state === 'off') body = [say('dim', 'Notes repo not configured (MIS_NOTES_REMOTE)')];
+    else body = {
+      notes: () => {
+        const dir = noteDir(), es = notesTree.entries, cut = dir.lastIndexOf('/');
+        if (!dir) return [rows(noteTops(es), (e) => noteRow(e, es), 'No notes yet', 'rows nlist')];
+        return [secHead(noteLabel(dir), el('a', { href: cut < 0 ? '#notes' : noteHref(dir.slice(0, cut)) }, `‹ ${cut < 0 ? 'Notes' : noteLabel(dir.slice(0, cut))}`)),
+          rows(noteRows(es, dir), (e) => noteRow(e, es), 'Empty', 'rows nlist')];
+      },
+      projects: projectList,
+      routines: () => [rows(routines.list, (r) => el('li', {}, el('a', { href: `#routines/${encodeURIComponent(r.name)}` },
+        el('div', { className: 'r1' }, el('span', { className: `sd ${routineState(r) || 'never'}` }), el('span', { className: 'one' }, r.name), modeChip(r.mode)),
+        el('div', { className: 'r2 one' }, ...dots([r.trigger || r.file, nextText(r.next_at, now)])))), 'No routines yet')],
+      apps: () => [rows(hosted.list, (a) => el('li', {}, el('a', { href: `#apps/${encodeURIComponent(a.slug)}` },
+        el('div', { className: 'r1' }, el('span', { className: `sd ${a.active ? 'done' : 'never'}` }), el('span', { className: 'one' }, a.title)),
+        el('div', { className: 'r2 one' }, ...dots([a.slug, a.active ? `v${a.active} live` : 'not live', plural(a.releases.length, 'release')])))), 'No apps yet')],
+    }[sec]();
+  }
+  // Focus on a row (its link or File) stays there across the redraw, so `f` files the one focused.
+  const at = document.activeElement, li = $('list').contains(at) && at.closest('li'), href = li && li.querySelector('a')?.getAttribute('href');
+  $('list').replaceChildren(...body);
+  const again = href && [...$('list').querySelectorAll('li')].find((x) => x.querySelector('a')?.getAttribute('href') === href);
+  if (again) ((at.tagName === 'BUTTON' && again.querySelector(':scope > button')) || again.querySelector('a')).focus({ preventScroll: true });
+  const r = route(), proj = sec === 'projects' && r.view === 'notes' && projectOf(projects?.projects || [], r.id), t = r.view === 'detail' && tasks.find((x) => x.id === r.id);
+  const h = proj ? projectHref(proj.id) : sec === 'routines' && t?.routine ? `#routines/${encodeURIComponent(t.routine)}`
+    : sec === 'workers' && (t?.worker || r.view === 'session') ? `#worker/${t?.worker || r.id.split('/')[0]}` : location.hash;
+  const links = [...$('list').querySelectorAll('.rows a[href^="#"]')];
+  (links.find((a) => a.getAttribute('href') === h) || links.find((a) => h.startsWith(`${a.getAttribute('href')}/`)))?.setAttribute('aria-current', 'page');
 }
 
 const KIND = { pr: 'PR', commit: 'commit', ci_run: 'CI', issue: 'issue', url: 'link', test: 'test', note: 'note' };
@@ -3342,7 +3443,7 @@ function capsLine(w) {
 const sessOpen = new Set(), sessLists = new Map(), sessAsked = new Map(); // id -> latest request, so a stale reply is dropped
 let showHeadless = false; // `claude -p` / `codex exec` runs: most sessions, rarely the ones wanted
 const folder = (p) => (p || '').split(/[\\/]/).filter(Boolean).pop() || '';
-const redrawWorkers = () => route().view === 'workers' && renderWorkers();
+const redrawWorkers = () => (route().view === 'workers' ? renderWorkers() : route().view === 'machine' && renderMachine(route().id));
 async function loadSessions(id) {
   const ask = {};
   sessAsked.set(id, ask);
@@ -3592,6 +3693,7 @@ async function loadRoutines() {
   const got = res.error ? res : { list: res.ok };
   routines = got;
   if (route().view === 'routines') renderRoutines();
+  relistCol('routines');
   renderNav();
 }
 async function routineAct(name, action, body) {
@@ -3658,7 +3760,10 @@ function renderRoutines() {
   if (!routines) { if (!$('routine-list').querySelector('.skel')) $('routine-list').replaceChildren(el('li', {}, skel())); if (!routinesAsked) loadRoutines(); return; }
   const now = Date.now() + skew;
   if (routines.error) { $('routine-list').replaceChildren(el('li', { className: 'bad' }, routines.error)); return; }
-  $('routine-list').replaceChildren(...routines.list.map((r) => routineRow(r, now)));
+  // Beside the list, only the one picked there (none under the + form).
+  const one = inSplit() ? route().id : null, list = routines.list.filter((r) => one === null || r.name === one);
+  $('routine-list').replaceChildren(...list.map((r) => routineRow(r, now)));
+  if (one && !list.length && routines.list.length) $('routine-list').append(el('li', { className: 'dim' }, 'No such routine'));
   if (!routines.list.length) $('routine-list').append(el('li', { className: 'dim' }, `No routines yet: ${readOnly ? '' : 'tap + by Routines in the menu, or '}add a .md file to the orchestrator’s routines folder`));
   // A routine picked in the menu: scroll to it once.
   const pick = routineFocus && [...$('routine-list').children].find((li) => li.dataset.name === routineFocus);
@@ -3668,6 +3773,8 @@ function renderRoutines() {
 
 // The menu's unfolded lists: one link per routine (to its row on Routines), app (live: out to it) and worker, with its status dot.
 let routineFocus = null; // routine to scroll to when Routines next renders
+// Below the split, `#routines/<name>` is the whole page, scrolled to that one (also on narrowing).
+function aim() { const r = route(); if (r.id && r.view === 'routines' && !isSplit(r)) routineFocus = r.id; }
 function renderNav() {
   $('routine-add').hidden = $('app-add').hidden = $('nav-settings').hidden = readOnly;
   if (!$('menu').open && !railShown()) return;
@@ -3692,6 +3799,13 @@ function renderNav() {
   navCount('n-busy', workers.filter((w) => workerState(w) === 'busy').length, 'busy');
   fillNav($('nav-notes'), !notesTree ? [['Loading…']] : notesTree.error ? [[notesTree.error]] : notesTree.state === 'off' ? [['Not configured']]
     : !folders.length ? [['No notes yet']] : folders.map(([f, label]) => [noteHref(f), null, label, f === 'inbox' && inbox ? String(inbox) : '']));
+  // No notes remote has nothing to unfold: Notes and Projects (read from the same repo) drop their chevron and list.
+  const off = notesTree?.state === 'off' || projects?.state === 'off';
+  for (const id of ['nav-notes', 'nav-projects']) {
+    const b = $('menu').querySelector(`[aria-controls=${id}]`);
+    b.style.visibility = off ? 'hidden' : ''; // its room kept, so the row doesn't shift under a pointer
+    $(id).hidden = off || b.getAttribute('aria-expanded') !== 'true';
+  }
   // Projects: one link per active one.
   const active = projects && projects.projects && projects.projects.filter(projectActive);
   fillNav($('nav-projects'), !projects ? [['Loading…']] : projects.error ? [[projects.error]] : projects.state === 'off' ? [['Not configured']]
@@ -4218,7 +4332,10 @@ const slugify = (name) => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace
 // apps:end
 
 // notes:begin. The Notes view, pure: a note's frontmatter, who wrote it, a folder's rows. tests/md.test.mjs runs this block.
-const NOTE_FOLDERS = [['inbox', 'Inbox'], ['projects', 'Projects'], ['areas', 'Areas'], ['resources', 'Resources'], ['archive', 'Archive'], ['ai', 'AI']];
+// Projects live under Projects, not here.
+const NOTE_FOLDERS = [['inbox', 'Inbox'], ['areas', 'Areas'], ['resources', 'Resources'], ['archive', 'Archive'], ['ai', 'AI']];
+// The top folders `entries` has, in NOTE_FOLDERS' order.
+const noteTops = (entries) => NOTE_FOLDERS.map(([f]) => entries.find((e) => e.path === f)).filter(Boolean);
 // A YAML scalar or flow list as the notes repo writes them: `"json"`, `'single'`, `[a, b]`, plain (`# comment` dropped).
 function yamlValue(v) {
   v = v.trim();
@@ -4250,6 +4367,8 @@ function noteRows(entries, dir) {
 }
 // A project record's folder, its files and the AI's (`ai/` mirrors the repo), and the one named `slug` (id or alias, any case).
 const projectDir = (p) => `${p.archived ? 'archive' : 'projects'}/${p.id}`;
+// The listed project whose folder, or the AI's mirror of it, holds `path` (`ai/projects/x/a.md`: x), else null.
+const projectOf = (list, path) => list.find((p) => [projectDir(p), `ai/${projectDir(p)}`].some((d) => path.startsWith(`${d}/`))) || null;
 const projectActive = (p) => !p.archived && p.status.toLowerCase() === 'active';
 function projectFiles(entries, p) {
   const dir = projectDir(p);
@@ -4313,6 +4432,7 @@ async function loadNotes() {
   if (JSON.stringify(got) !== JSON.stringify(notesTree)) notesTree = got;
   if (route().view === 'notes') renderNotes(route().id);
   if (route().view === 'projects') renderProjects(route().id);
+  relistCol('notes');
   renderNav();
   pollSuggestions();
 }
@@ -4339,13 +4459,14 @@ async function loadSuggestions() {
   if (error !== sugsError || (!error && JSON.stringify(res.ok) !== JSON.stringify(noteSugs))) {
     sugsError = error;
     if (!error) noteSugs = res.ok;
-    if (route().view === 'notes') renderNotes(route().id);
+    if (route().view === 'notes') { renderNotes(route().id); relistCol('notes'); }
   }
   if (!error) pollSuggestions();
   else if (sugsTries <= 4) sugsLater(5000 * 2 ** (sugsTries - 1), true);
 }
 function pollSuggestions() {
-  const r = route(), shown = r.view === 'notes' ? ((notesTree && notesTree.entries) || []).filter((e) => isInboxNote(e) && (r.id === 'inbox' || r.id === e.path)) : [];
+  const r = route(), listed = r.id === 'inbox' || (inSplit() && listSec() === 'notes' && noteDir() === 'inbox'); // the inbox beside a note
+  const shown = r.view === 'notes' ? ((notesTree && notesTree.entries) || []).filter((e) => isInboxNote(e) && (listed || r.id === e.path)) : [];
   if (shown.some((e) => sugPending(e.path))) sugsLater(10000);
   else if (sugsStale > 0 && shown.some((e) => sugStale(e.path))) { sugsStale--; sugsLater(10000); }
 }
@@ -4420,7 +4541,7 @@ async function moveNote(path, dest, summary, hash) {
     notesTree = noteShown = null;
     return loadNotes();
   }
-  if (route().view === 'notes') renderNotes(route().id);
+  if (route().view === 'notes') { renderNotes(route().id); relistCol('notes'); }
 }
 // A row's File under way, or why it failed (`hash`: the suggestion sent): path -> { busy } | { error, status, hash }.
 let noteFiles = {};
@@ -4428,14 +4549,14 @@ let noteFiles = {};
 // tree and suggestions are read again.
 async function fileNote(path, s) {
   noteFiles = { ...noteFiles, [path]: { busy: true } };
-  if (route().view === 'notes') renderNotes(route().id);
+  if (route().view === 'notes') { renderNotes(route().id); relistCol('notes'); }
   const r = await postMove({ path, dest: s.dest, summary: s.summary || undefined, hash: s.hash });
   if (r.moved) {
     await loadNotes();
     const { [path]: _, ...rest } = noteFiles;
     noteFiles = rest; // drawn again so a row the tree couldn't drop (it wasn't read) doesn't stay Filing…
   } else noteFiles = { ...noteFiles, [path]: { error: noteWhy(path, r.error), status: r.status, hash: s.hash } };
-  if (route().view === 'notes') renderNotes(route().id);
+  if (route().view === 'notes') { renderNotes(route().id); relistCol('notes'); }
   if (r.status === 409) { sugsStale = 3; loadNotes(); }
 }
 // Fills `img` with repo image `path` through the evidence file cache, keyed by size too so a changed picture is
@@ -4448,7 +4569,7 @@ function noteImg(img, path) {
 }
 // A picture in its box; `href` (its own page) when shown inside a note.
 const noteFig = (path, href) => { const img = el('img', { alt: '' }), f = el(href ? 'a' : 'span', { className: 'nimg', ...(href ? { href } : {}) }, img); noteImg(img, path); return f; };
-const noteLabel = (path) => { const name = path.slice(path.lastIndexOf('/') + 1); return (NOTE_FOLDERS.find(([f]) => f === path) || [])[1] || name.replace(/\.md$/i, ''); };
+const noteLabel = (path) => { const name = path.slice(path.lastIndexOf('/') + 1); return (NOTE_FOLDERS.find(([f]) => f === path) || [])[1] || (path === 'projects' ? 'Projects' : name.replace(/\.md$/i, '')); };
 const noteSize = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 const NOTE_ICON = { dir: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z', md: 'M7 3h7l5 5v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM9 13h6M9 17h4', image: 'M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM3 16l5-5 5 5 3-3 5 5', other: 'M7 3h7l5 5v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z' };
 function noteRow(e, entries) {
@@ -4496,7 +4617,12 @@ function noteText(src, dir) {
 function renderNotes(path) {
   if (!everOpen) return; // fetch once connected, with the token in place
   const cut = path.lastIndexOf('/'), dir = cut < 0 ? '' : path.slice(0, cut);
-  $('notes').querySelector('.back').href = !path ? '#' : dir ? noteHref(dir) : '#notes';
+  // Opened from Projects, a project's own file (or the AI's on it) goes back to the project; one deeper, or browsed
+  // from Notes, to its folder.
+  const fromProjects = here.sec === 'projects';
+  if (fromProjects && !projects && !projectsAsked) loadProjects();
+  const proj = fromProjects && projects?.projects && projectOf(projects.projects, path), atTop = proj && [projectDir(proj), `ai/${projectDir(proj)}`].includes(dir);
+  $('notes').querySelector('.back').href = atTop ? projectHref(proj.id) : !path ? '#' : dir ? noteHref(dir) : '#notes';
   const entry = notesTree && notesTree.entries && (path ? notesTree.entries.find((e) => e.path === path) : { kind: 'dir', path: '' });
   if (entry && entry.kind === 'md' && (!noteShown || noteShown.path !== path)) loadNote(path);
   const got = entry && entry.kind === 'md' ? noteShown.got : null;
@@ -4517,8 +4643,7 @@ function renderNotes(path) {
   const stale = [['offline', 'conflict'].includes(notesTree.state) ? el('p', { className: 'dim' }, `Notes repo ${notesTree.state}: showing the last copy`) : '',
     sugsError && /^inbox(\/[^/]+)?$/.test(path) ? el('p', { className: 'bad' }, `Couldn’t read suggestions: ${sugsError}`) : ''];
   if (entry.kind === 'dir') {
-    const rows = path ? noteRows(notesTree.entries, path)
-      : NOTE_FOLDERS.map(([f]) => notesTree.entries.find((e) => e.path === f)).filter(Boolean);
+    const rows = path ? noteRows(notesTree.entries, path) : noteTops(notesTree.entries);
     const ul = el('ul', { className: 'rows nlist' }, ...rows.map((e) => noteRow(e, notesTree.entries)));
     if (!rows.length) ul.append(el('li', { className: 'dim' }, path ? 'Empty' : 'No notes yet'));
     // Focus on a row (its link or File) stays there across the redraw.
@@ -4552,7 +4677,9 @@ async function loadProjects() {
   const got = res.error ? res : res.ok;
   if (JSON.stringify(got) !== JSON.stringify(projects)) projects = got;
   if (route().view === 'projects') renderProjects(route().id);
-  if (route().view === 'notes') renderNotes(route().id); // Move to…'s project titles
+  if (route().view === 'notes') renderNotes(route().id); // Move to…'s project titles, and its back link may go to a project
+  relistCol('projects');
+  relistCol('notes'); // inbox rows' project titles
   renderNav();
 }
 // Rows of files, linking into the Notes view; skeleton until the tree is in.
@@ -4561,6 +4688,16 @@ function projectRows(rows) {
   const ul = el('ul', { className: 'rows nlist' }, ...rows.map((e) => noteRow(e, notesTree.entries)));
   if (!rows.length) ul.append(el('li', { className: 'dim' }, 'None'));
   return ul;
+}
+// Every project, then records that couldn't be read: `#projects`, or its list beside one.
+function projectList() {
+  const list = projects.projects, row = (q) => el('li', {}, el('a', { href: projectHref(q.id) },
+    el('div', { className: 'r1' }, el('span', { className: 'one' }, q.title), el('span', { className: 'n' }, q.archived ? 'archived' : q.status))));
+  const ul = el('ul', { className: 'rows nlist' }, ...list.map(row));
+  if (!list.length) ul.append(el('li', { className: 'dim' }, 'No projects yet'));
+  const bad = projects.errors.map((e) => el('li', {}, el('a', { href: noteHref(e.path) },
+    el('div', { className: 'r1' }, el('span', { className: 'one' }, e.path)), el('div', { className: 'r2 bad' }, e.error))));
+  return [ul, ...(bad.length ? [el('h3', {}, 'Can’t read'), el('ul', { className: 'rows nlist' }, ...bad)] : [])];
 }
 // `#projects`: every project, then records that couldn't be read. `#projects/<slug>`: one project.
 function renderProjects(slug) {
@@ -4579,15 +4716,7 @@ function renderProjects(slug) {
   if (projects.error) return say('bad', projects.error);
   if (projects.state === 'off') return say('dim', 'Notes repo not configured (MIS_NOTES_REMOTE)');
   const stale = ['offline', 'conflict'].includes(projects.state) ? el('p', { className: 'dim' }, `Notes repo ${projects.state}: showing the last copy`) : '';
-  if (!slug) {
-    const row = (q) => el('li', {}, el('a', { href: projectHref(q.id) },
-      el('div', { className: 'r1' }, el('span', { className: 'one' }, q.title), el('span', { className: 'n' }, q.archived ? 'archived' : q.status))));
-    const ul = el('ul', { className: 'rows nlist' }, ...list.map(row));
-    if (!list.length) ul.append(el('li', { className: 'dim' }, 'No projects yet'));
-    const bad = projects.errors.map((e) => el('li', {}, el('a', { href: noteHref(e.path) },
-      el('div', { className: 'r1' }, el('span', { className: 'one' }, e.path)), el('div', { className: 'r2 bad' }, e.error))));
-    return body.replaceChildren(stale, ul, ...(bad.length ? [el('h3', {}, 'Can’t read'), el('ul', { className: 'rows nlist' }, ...bad)] : []));
-  }
+  if (!slug) return body.replaceChildren(stale, ...projectList());
   if (!p) return say('dim', 'No such project');
   const dir = projectDir(p), files = notesTree && notesTree.entries ? projectFiles(notesTree.entries, p) : { own: [], ai: [] };
   const facts = [
@@ -4685,6 +4814,8 @@ function renderMachine(id) {
     meter(disk === null ? 'disk —' : `disk ${free === null ? '' : `${Math.round(free)} GB free, `}${pct(disk)} used`, disk),
     meter(`cpu ${pct(cpu)}`, cpu),
     meter(`memory ${pct(mem)}`, mem),
+    // Beside Workers' list, which has no cards: their usage limits, sessions on disk and build.
+    ...(inSplit() ? [limitRows(w), sessionsLine(w), versionLine(w)] : []),
     el('h3', {}, 'Tasks on this worker'),
     mine);
 }
@@ -5109,7 +5240,7 @@ async function sendBoard(request, slug) {
   drafts.set('draft:app:name', '');
   board = null;
   boardAsked = '';
-  here = { sec: null, back: '#apps' }; // its page's back link
+  here = { sec: 'apps', back: '#apps' }; left = null; // beside Apps; its page's back link
   location.hash = `#task/${task}`;
 }
 $('reply').onsubmit = (e) => {
@@ -5142,7 +5273,7 @@ for (const f of [$('prompt'), $('reply-text')]) f.addEventListener('input', () =
 $('prompt').value = drafts.get('draft:new');
 // Leaving a view stops dictation into it and any readback.
 // A press's click has landed once the view changes: nothing left to hold for.
-window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); locate(); remember(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (['apps', 'build'].includes(route().view) && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; if (route().view === 'notes') { noteShown = null; if (notesTree) loadNotes(); } if (route().view === 'projects') { if (projects) loadProjects(); if (notesTree && route().id) loadNotes(); } render(); };
+window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); locate(); remember(); aim(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (['apps', 'build'].includes(route().view) && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; if (route().view === 'notes') { noteShown = null; if (notesTree) loadNotes(); } if (route().view === 'projects') { if (projects) loadProjects(); if (notesTree && route().id) loadNotes(); } render(); };
 setInterval(tick, 1000);
 
 // `#new`, a link into the page for a new task, is a list with the composer focused: Tasks from Tasks (or a task opened
@@ -5324,15 +5455,18 @@ $('new').addEventListener('keydown', (e) => { if (e.key === 'Escape' && menuFor)
 // Keyboard shortcuts: c a new task, j/k the next/previous task, f files an inbox note, Esc back (or out of a field),
 // Cmd/Ctrl+B the menu.
 const mac = /Mac|iPhone|iPad/.test(navigator.platform); // Cmd+B there; Ctrl+B moves the cursor in a field
-// The next (d = 1) or previous task or session in the list: beside the list it opens it, else it focuses its row.
+// The next (d = 1) or previous row in the list: beside the list it opens it, else it focuses its row.
 // A task under a live session as well as in Needs you counts once, at its row.
 function step(d) {
   const split = inSplit();
   if (!split && route().view !== 'list') return;
-  const seen = new Set(), links = [...$('list').querySelectorAll('a[href^="#task/"], a[href^="#session/"]')].filter((a) => !seen.has(a.getAttribute('href')) && seen.add(a.getAttribute('href')));
-  const cur = split ? location.hash : document.activeElement?.getAttribute('href');
+  // In a Notes folder, its notes only: stepping into a subfolder would leave them.
+  const dirs = split && listSec() === 'notes' && noteDir() ? new Set((notesTree?.entries || []).filter((e) => e.kind === 'dir').map((e) => noteHref(e.path))) : new Set();
+  const seen = new Set(dirs), links = [...$('list').querySelectorAll('.rows a[href^="#"]')].filter((a) => !seen.has(a.getAttribute('href')) && seen.add(a.getAttribute('href')));
+  const cur = split ? $('list').querySelector('a[aria-current]')?.getAttribute('href') ?? location.hash : document.activeElement?.getAttribute('href');
   const at = links.findIndex((a) => a.getAttribute('href') === cur);
-  const a = links[at < 0 ? 0 : Math.max(0, Math.min(links.length - 1, at + d))];
+  // None current (nothing open, or what is came from a link): j takes the first row, k the last.
+  const a = links[at < 0 ? (d > 0 ? 0 : links.length - 1) : Math.max(0, Math.min(links.length - 1, at + d))];
   if (!a || (at >= 0 && a === links[at])) return; // an end of the list
   settle(); // like a tap, a step holds the rows' order a moment, so stepping back finds the row just left
   a.scrollIntoView({ block: 'nearest' });
@@ -5362,8 +5496,9 @@ document.addEventListener('keydown', (e) => {
   const field = e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable]');
   if (e.key === 'Escape') {
     if (field) { field.blur(); return; }
-    const back = $(route().view).querySelector('.back');
-    if (back) { e.preventDefault(); location.hash = back.getAttribute('href'); }
+    // Beside the list, a routine or app (no back link) goes back to it.
+    const back = $(route().view).querySelector('.back')?.getAttribute('href') ?? (inSplit() && isItem(route()) ? here.back : null);
+    if (back) { e.preventDefault(); location.hash = back; }
     return;
   }
   if (field || menuFor || e.metaKey || e.ctrlKey || e.altKey) return; // keys in an open chip list stay there
@@ -5403,19 +5538,20 @@ function deskMode() {
   if (railShown()) loadNav();
 }
 desk.addEventListener('change', deskMode);
-wide.addEventListener('change', () => { remember(); render(); });
+wide.addEventListener('change', () => { remember(); aim(); render(); });
 remember(); // a task or session open at load
+aim();
 $('list').addEventListener('scroll', settle);
 // + opens the new-routine form atop Routines; the orchestrator writes `<name>.md`, paused.
 function showNewRoutine(on) {
   $('routine-new').hidden = !on;
   $('rn-error').hidden = true;
+  render(); // shown now, so the name field can take focus; beside the list, in place of Select a routine
   if (on) $('rn-name').focus();
 }
 $('routine-add').onclick = () => {
   $('menu').close();
   location.hash = '#routines';
-  render(); // shown now, so the name field can take focus
   showNewRoutine(true);
 };
 $('rn-cancel').onclick = () => { $('routine-new').reset(); showNewRoutine(false); };
@@ -5433,8 +5569,9 @@ $('routine-new').onsubmit = async (e) => {
   if (why) { $('rn-error').textContent = why; $('rn-error').hidden = false; return; }
   $('routine-new').reset();
   showNewRoutine(false);
-  routineFocus = body.name;
+  if (!inSplit()) routineFocus = body.name;
   await loadRoutines();
+  if (inSplit()) location.hash = `#routines/${encodeURIComponent(body.name)}`; // once listed, so it shows at once
 };
 // + by Apps: the composer, building a new app.
 $('app-add').onclick = () => {
@@ -5452,26 +5589,35 @@ for (const b of $('menu').querySelectorAll('.ngrp button[aria-controls]')) b.onc
   if (open && b.getAttribute('aria-controls') === 'nav-apps') loadApps();
   if (open && b.getAttribute('aria-controls') === 'nav-notes') loadNotes();
   if (open && b.getAttribute('aria-controls') === 'nav-projects') loadProjects();
+  try { localStorage.setItem('mis-nav-open', JSON.stringify([...$('menu').querySelectorAll('.ngrp [aria-expanded=true]')].map((x) => x.getAttribute('aria-controls')))); } catch {}
 };
 $('menu').addEventListener('close', () => $('menu-btn').setAttribute('aria-expanded', String(railShown())));
-// Beside the list, Home, Tasks and Sessions reopen what each last had open beside it, while that list still shows it.
-function remember() { const r = route(); if (here.sec && isSplit(r)) lastOpen[here.sec] = r.view === 'list' ? null : location.hash; }
+// Beside the list, each section reopens what it last had open beside it, while that list still shows it (or, for
+// Notes, Projects, Routines, Apps and Workers, while it is still there).
+function remember() { const r = route(); if (here.sec && isSplit(r)) lastOpen[here.sec] = isItem(r) ? location.hash : null; }
 for (const a of $('menu').querySelectorAll('nav a[data-view]')) a.addEventListener('click', (e) => {
   const sec = a.dataset.view, h = lastOpen[sec];
   if (!h || !wide.matches || !isDesk()) return;
   if (!shows(sec, h)) { lastOpen[sec] = null; return; }
   e.preventDefault();
   here = { sec, back: a.getAttribute('href') };
-  if (location.hash !== h) location.hash = h;
+  if (location.hash !== h) { left = null; location.hash = h; } // else `left` is still this page
   else { history.replaceState({ here }, ''); remember(); render(); }
 });
-// The rail opens with Notes and Workers unfolded: short lists, and Workers carries what's running.
-if (isDesk()) for (const id of ['nav-notes', 'nav-workers']) $('menu').querySelector(`[aria-controls=${id}]`).click();
+// The lists unfold as last left; the first time, the rail has Notes and Workers unfolded: short lists, and Workers carries what's running.
+let navOpen = null;
+try { navOpen = JSON.parse(localStorage.getItem('mis-nav-open')); } catch {}
+for (const id of Array.isArray(navOpen) ? navOpen : isDesk() ? ['nav-notes', 'nav-workers'] : []) $('menu').querySelector(`.ngrp [aria-controls="${CSS.escape(id)}"]`)?.click();
 $('menu-btn').setAttribute('aria-expanded', String(railShown()));
 $('menu-close').onclick = () => $('menu').close();
 let downOnBackdrop = false;
 $('menu').addEventListener('pointerdown', (e) => { downOnBackdrop = e.target === $('menu'); });
 $('menu').addEventListener('click', (e) => { if ((e.target === $('menu') && downOnBackdrop) || e.target.closest('nav a')) $('menu').close(); });
+// An unfolded list's link opens its item in that list's section (a worker in Workers), wherever the view was.
+$('menu').addEventListener('click', (e) => {
+  const top = e.target.closest('.nsub a[href^="#"]')?.closest('.nsub').previousElementSibling.querySelector('a[data-view]');
+  if (top) { here = { sec: top.dataset.view, back: top.getAttribute('href') }; left = null; }
+});
 // Theme, per viewer: System follows the device; Dark or Light set `data-theme`, which the token blocks key on.
 const theme = {
   get() { try { return localStorage.getItem('mis-theme') || ''; } catch { return ''; } },
@@ -5519,7 +5665,7 @@ function pushStart(key) {
   // A tapped notification for an open window: show its task or session here.
   navigator.serviceWorker.addEventListener('message', (e) => {
     const url = e.data && e.data.open && new URL(e.data.open);
-    if (url && url.origin === location.origin) { here = { sec: null, back: '#' }; location.hash = url.hash; } // as a deep link
+    if (url && url.origin === location.origin) { here = { sec: null, back: '#' }; left = null; location.hash = url.hash; } // as a deep link
   });
   navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready).then((reg) => {
     push.reg = reg;
