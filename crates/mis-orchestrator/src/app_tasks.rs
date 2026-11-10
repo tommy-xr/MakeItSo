@@ -55,6 +55,7 @@ mod tests {
             harness: "claude".into(),
             model: None,
             worker: None,
+            images: vec![],
         }
     }
 

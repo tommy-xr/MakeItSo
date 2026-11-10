@@ -837,9 +837,10 @@ impl Ledger {
     }
 
     /// Queue an app task: `prompt` as is (no planner), in `cwd` on `harness`, on `worker`
-    /// only if given, bound to `bound`'s app (its `thread` becomes this task) with a token
+    /// only if given, with `images`, bound to `bound`'s app (its `thread` becomes this task) with a token
     /// of its own. It never merges: the user approves its PR. Err if no worker runs
     /// `harness` (it would wait for good), or `worker` is offline or doesn't run it.
+    #[allow(clippy::too_many_arguments)] // a task's fields, plus the worker and its app
     pub fn submit_app_task(
         &mut self,
         prompt: String,
@@ -847,6 +848,7 @@ impl Ledger {
         harness: String,
         model: Option<String>,
         worker: Option<WorkerId>,
+        images: Vec<Uuid>,
         bound: app_grant::Binding,
     ) -> Result<(TaskId, Vec<Effect>), String> {
         if worker.is_none() && !self.known_fleet().contains_key(&harness) {
@@ -866,7 +868,7 @@ impl Ledger {
         };
         let id = task.id;
         let mut entry = TaskEntry::new(task, self.now_ms);
-        (entry.app, entry.token) = (true, Some(app_grant::mint()));
+        (entry.app, entry.token, entry.images) = (true, Some(app_grant::mint()), images);
         entry.bound = Some(app_grant::Binding {
             thread: id,
             ..bound
@@ -2127,6 +2129,7 @@ mod tests {
             "claude".into(),
             None,
             None,
+            vec![],
             new_app(),
         ))
         .unwrap();
@@ -2197,6 +2200,7 @@ mod tests {
             "claude".into(),
             None,
             None,
+            vec![],
             new_app(),
         ))
         .unwrap();
@@ -2225,6 +2229,7 @@ mod tests {
             "claude".into(),
             None,
             None,
+            vec![],
             new_app(),
         ))
         .unwrap();
@@ -2263,6 +2268,7 @@ mod tests {
                 "claude".into(),
                 None,
                 Some(wid),
+                vec![],
                 new_app(),
             )
             .unwrap();

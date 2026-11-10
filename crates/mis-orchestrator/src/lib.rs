@@ -859,6 +859,7 @@ impl App {
         requester: Option<String>,
     ) -> Result<TaskId, String> {
         let prompt = app_tasks::prompt(&t)?;
+        self.check_images(&t.images)?;
         let repo = self.settings()?.apps.repo;
         let bound = app_tasks::binding(&t, requester);
         if let (Some(apps), Some(slug)) = (self.apps.clone(), bound.slug.clone()) {
@@ -868,7 +869,7 @@ impl App {
         }
         let model = t.model.filter(|m| !m.trim().is_empty());
         self.transition(|l| {
-            match l.submit_app_task(prompt, repo, t.harness, model, t.worker, bound) {
+            match l.submit_app_task(prompt, repo, t.harness, model, t.worker, t.images, bound) {
                 Ok((task, effects)) => (Ok(task), effects),
                 Err(why) => (Err(why), vec![]),
             }
@@ -921,6 +922,7 @@ impl App {
                     harness: s.apps.harness,
                     model: Some(s.apps.model),
                     worker: None,
+                    images: vec![],
                 };
                 self.start_app_task(t, None).await
             }

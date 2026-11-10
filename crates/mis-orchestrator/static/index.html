@@ -209,12 +209,15 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .nimg { position: relative; display: block; min-height: 4rem; margin: 0 0 .75rem; border-radius: .75rem; overflow: hidden; background: var(--raised); }
   .nimg img { display: block; max-width: 100%; height: auto; margin: 0 auto; }
   /* New routine: name, schedule and prompt atop Routines. 16px fields: iOS zooms into smaller ones. */
-  #routine-new, #settings-form, #app-new { display: grid; gap: .5rem; margin: 0 0 1rem; padding: .875rem; border-radius: 1rem; background: var(--card); }
-  :is(#routine-new, #settings-form, #app-new) :is(input, textarea, select) { width: 100%; font-size: 1rem; }
-  :is(#routine-new, #settings-form, #app-new) input { min-height: 2.75rem; padding: 0 .75rem; }
-  :is(#routine-new, #settings-form, #app-new) p { margin: 0; font-size: .8125rem; overflow-wrap: anywhere; }
-  :is(#routine-new, #settings-form, #app-new) .row { margin: 0; }
-  #app-new .pick { display: flex; gap: .5rem; }
+  #routine-new, #settings-form { display: grid; gap: .5rem; margin: 0 0 1rem; padding: .875rem; border-radius: 1rem; background: var(--card); }
+  :is(#routine-new, #settings-form) :is(input, textarea, select) { width: 100%; font-size: 1rem; }
+  :is(#routine-new, #settings-form) input { min-height: 2.75rem; padding: 0 .75rem; }
+  :is(#routine-new, #settings-form) p { margin: 0; font-size: .8125rem; overflow-wrap: anywhere; }
+  :is(#routine-new, #settings-form) .row { margin: 0; }
+  /* Building an app: references dropped anywhere on the page (or pasted, or picked here) attach to its request. */
+  .refs { display: block; width: 100%; margin: 1rem 0 .5rem; padding: 1.5rem 1rem; border: 1.5px dashed var(--sep); border-radius: 1rem; background: none; color: var(--dim); font-size: .9375rem; }
+  body.over .refs, body.over #new .box { box-shadow: 0 0 0 2px var(--accent); }
+  #build-app:empty { display: none; }
   #settings-form fieldset { display: grid; gap: .5rem; min-width: 0; margin: 0; padding: 0; border: 0; }
   #settings-form label { margin-top: .25rem; font-size: .8125rem; color: var(--dim); }
   #settings-form h3 { margin: .75rem 0 0; padding: 0; }
@@ -904,17 +907,14 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
 </main>
 
 <main id="apps" hidden>
-  <form id="app-new" hidden>
-    <p><strong id="an-head">New app</strong></p>
-    <textarea id="an-request" aria-label="What it should do" placeholder="What should it do? Who uses it, what it keeps, what they see" required></textarea>
-    <input id="an-slug" aria-label="Name" placeholder="Name (optional), e.g. pool" autocomplete="off" autocapitalize="off" spellcheck="false">
-    <div class="pick"><select id="an-harness" aria-label="Harness"><option>claude</option><option>codex</option></select><input id="an-model" aria-label="Model" placeholder="Model" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
-    <select id="an-worker" aria-label="Machine"></select>
-    <p class="dim">An agent works on it in the apps repo, then opens a PR and publishes a version for you to make live.</p>
-    <p id="an-error" class="bad" hidden></p>
-    <div class="row"><button>Start</button><button type="button" id="an-cancel">Cancel</button></div>
-  </form>
   <ul id="app-list"></ul>
+</main>
+
+<main id="build" hidden>
+  <div class="chead"><a href="#apps" class="back" aria-label="Back to apps"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a><div id="build-head"></div></div>
+  <ul id="build-app" class="rows"></ul>
+  <button type="button" id="refs" class="refs">Drop or paste sketches, screenshots and other references, or tap to add them</button>
+  <p id="build-hint" class="dim">Say who uses it, what it keeps and what they see. An agent builds it in the apps repo, then opens a PR and proposes a draft for you to try.</p>
 </main>
 
 <main id="settings" hidden>
@@ -1013,7 +1013,7 @@ function restore(field, text) {
   fit(field);
 }
 function unsend() {
-  const p = pending, f = p && (p.key === 'draft:new' ? $('prompt') : p.key === replyDraft(replyFor) && $('reply-text'));
+  const p = pending, f = p && (p.key === promptKey ? $('prompt') : p.key === replyDraft(replyFor) && $('reply-text'));
   pending = null;
   if (f) restore(f, p.text);
 }
@@ -1025,11 +1025,13 @@ const writingOf = (id) => live.get(id)?.text;
 // Photos for the new task: downscaled here (phone shots are ~4 MB), uploaded on pick, sent as ids.
 // Each is { url: preview object URL, id: upload id once stored }.
 const MAX_SHOTS = 4, MAX_SIDE = 1600;
-let shots = [];
+let shots = []; // the shown composer's (promptKey)
+const keptShots = new Map(); // another composer's draft key -> its photos, while that one isn't shown
 
 // Composer text kept across reloads and drops until the server takes it: `draft:new`, and
 // `draft:reply:<task id>` per thread (the newest DRAFT_REPLIES), as { text, at }.
 const DRAFT_REPLIES = 20;
+let promptKey = 'draft:new'; // where the new-task field's text is kept: `draft:new`, or an app's (composerFor)
 const replyDraft = (id) => `draft:reply:${id}`;
 const drafts = {
   get(key) { try { return JSON.parse(localStorage.getItem(key)).text || ''; } catch { return ''; } },
@@ -1045,7 +1047,7 @@ const drafts = {
 };
 // Saves a composer field under its view's key; typing and dictation both land here. A session message keeps none.
 function keepDraft(field) {
-  const key = field.id === 'prompt' ? 'draft:new' : field.id === 'reply-text' && replyFor && replyDraft(replyFor);
+  const key = field.id === 'prompt' ? promptKey : field.id === 'reply-text' && replyFor && replyDraft(replyFor);
   if (key) drafts.set(key, field.value);
 }
 
@@ -1744,7 +1746,7 @@ function tick() {
   if (++ticks % 30 === 0 && everOpen && route().view === 'workers') renderWorkers();
   if (ticks % 10 === 0 && everOpen && route().view === 'routines' && !document.hidden) loadRoutines();
   // Apps while shown; less often on Home and task pages, for their drafts.
-  const appsEvery = route().view === 'apps' ? 10 : ['list', 'detail'].includes(route().view) ? 30 : 0;
+  const appsEvery = ['apps', 'build'].includes(route().view) ? 10 : ['list', 'detail'].includes(route().view) ? 30 : 0;
   if (appsEvery && ticks % appsEvery === 0 && everOpen && !document.hidden) loadApps();
   for (const s of document.querySelectorAll('[data-asof]')) s.textContent = asOf(Number(s.dataset.asof));
 }
@@ -1861,7 +1863,7 @@ $('upd').onclick = (e) => {
 };
 
 // `#` Home, `#tasks`, `#sessions`, `#task/<id>`, `#routines`, `#apps`, `#settings`, `#workers`, `#worker/<id>`, `#session/<worker>/<harness>/<id>`,
-// `#notes/<repo path>` (each segment URI-encoded), `#projects`, `#projects/<id or alias>`.
+// `#notes/<repo path>` (each segment URI-encoded), `#projects`, `#projects/<id or alias>`, `#new-app`, `#apps/<slug>`.
 // `#new` (see takeNew) is Home or Tasks with the composer focused.
 function route() {
   const m = location.hash.match(/^#(task|worker)\/([0-9a-f-]{36})$/);
@@ -1873,6 +1875,9 @@ function route() {
   const p = location.hash.match(/^#projects(?:\/([^/]*))?\/*$/);
   if (p) { try { return { view: 'projects', id: decodeURIComponent(p[1] || '') }; } catch { return { view: 'projects', id: '' }; } }
   if (secOf(location.hash)) return { view: 'list', id: secOf(location.hash) };
+  if (location.hash === '#new-app') return { view: 'build', id: null };
+  const b = location.hash.match(/^#apps\/([a-z0-9][a-z0-9-]{0,31})$/);
+  if (b) return { view: 'build', id: b[1] };
   return { view: { '#workers': 'workers', '#routines': 'routines', '#apps': 'apps', '#settings': 'settings' }[location.hash] || 'list' };
 }
 
@@ -1912,7 +1917,7 @@ function render() {
   if (open) kept = { id: open.id, sec: listSec(), attention: ATTENTION[open.attention] ? open.attention : was && isFinished(open) ? was.attention : null, underway: underway(open) || !!was?.underway };
   else if (!split || r.view !== 'list') kept = null;
   const live = ws && ws.readyState === WebSocket.OPEN;
-  const views = { list: renderList, detail: renderDetail, routines: renderRoutines, apps: renderApps, settings: renderSettings, notes: renderNotes, projects: renderProjects, workers: renderWorkers, machine: renderMachine, session: renderSession };
+  const views = { list: renderList, detail: renderDetail, routines: renderRoutines, apps: renderApps, build: renderBuild, settings: renderSettings, notes: renderNotes, projects: renderProjects, workers: renderWorkers, machine: renderMachine, session: renderSession };
   $('auth').hidden = live || !authNeeded || !!store.get();
   // Placeholder rows until the first socket opens, unless that is stuck (a token, no server).
   $('skel').hidden = everOpen || !$('auth').hidden || offline || connMsg !== 'connecting…';
@@ -1922,12 +1927,14 @@ function render() {
   $('dock').hidden = !everOpen || readOnly;
   for (const f of ['new', 'reply', 'say']) $(f).hidden = f !== form;
   if (form !== 'new') showOpts(false);
+  composeFor(r);
   renderStrip();
   document.body.classList.toggle('stale', everOpen && offline);
   // Sending needs a socket and no submit in flight; drafts stay in their fields meanwhile.
-  $('send').disabled = $('send-reply').disabled = !live || !!pending;
+  $('send').disabled = $('send-reply').disabled = !live || !!pending || appSending;
   if (shots.some((x) => !x.id)) $('send').disabled = true; // photos still uploading
-  $('clip').disabled = shots.length >= MAX_SHOTS || !!pending;
+  $('clip').disabled = shots.length >= MAX_SHOTS || !!pending || appSending;
+  $('prompt').readOnly = appSending;
   for (const v in views) $(v).hidden = !everOpen || (v !== r.view && !(split && v === 'list'));
   $('choose').hidden = !everOpen || !split || r.view !== 'list';
   $('choose').firstChild.textContent = r.id === 'sessions' ? 'Select a session, or start a task below.' : 'Select a task, or start one below.';
@@ -1937,7 +1944,7 @@ function render() {
   if (r.view !== 'detail' && detail) detail.since = 0; // its 2s start again on return, from a session too
   if (r.view !== 'session') closeSession();
   const onWorkers = r.view === 'workers' || r.view === 'machine' || (r.view === 'session' && !here.sec);
-  const area = onWorkers ? 'workers' : ['routines', 'apps', 'settings', 'notes', 'projects'].includes(r.view) ? r.view : listSec();
+  const area = onWorkers ? 'workers' : r.view === 'build' ? 'apps' : ['routines', 'apps', 'settings', 'notes', 'projects'].includes(r.view) ? r.view : listSec();
   for (const a of $('menu').querySelectorAll('nav a')) {
     if (a.dataset.view === area) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
@@ -3632,7 +3639,7 @@ async function loadApps() {
   if (hostedAsked !== ask || !res) return;
   hosted = res.error ? res : { list: res.ok };
   // Drafts also show on Home (beside a task or session too) and their task's page.
-  if (['apps', 'list', 'detail', 'session'].includes(route().view)) render();
+  if (['apps', 'build', 'list', 'detail', 'session'].includes(route().view)) render();
   renderNav();
 }
 async function activateApp(slug, n) {
@@ -3646,7 +3653,7 @@ async function setMember(slug, email, role) {
 }
 // Who an app is shared with; full access can share it and, after a confirm, stop sharing.
 function appMembers(a, busy) {
-  const askRemove = (who) => { memberAsk = who; renderApps(); };
+  const askRemove = (who) => { memberAsk = who; render(); };
   const rows = a.members.map((m) => {
     const asking = memberAsk && memberAsk[0] === a.slug && memberAsk[1] === m.email;
     return el('li', {},
@@ -3671,7 +3678,7 @@ function appMembers(a, busy) {
 // POST `body` to `path` for app `slug` (`done` once it went), then reload apps; a failure shows on the app.
 async function appPost(slug, path, body, done) {
   appBusy = slug;
-  renderApps();
+  render();
   try {
     const r = await fetch(path, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
     if (r.ok) { appErr.delete(slug); if (done) done(); } else appErr.set(slug, (await r.text()) || `error ${r.status}`);
@@ -3700,15 +3707,16 @@ function appAge(at, now) {
   s.dataset.at = at;
   return s;
 }
-function appRow(a, now) {
+// `alone`: on the app's own page, which is where Change… goes.
+function appRow(a, now, alone) {
   const newest = a.releases[a.releases.length - 1];
   // A draft's release is published through the draft, not made live bare.
   const ready = newest && newest.n > (a.active || 0) && !(a.draft && a.draft.release === newest.n) ? newest : null;
   const busy = appBusy === a.slug, asking = appAsk === a.slug && ready, err = appErr.get(a.slug);
-  const ask = (slug) => { appAsk = slug; renderApps(); };
+  const ask = (slug) => { appAsk = slug; render(); };
   const actions = readOnly ? '' : el('div', { className: 'row' },
     ready ? el('button', { type: 'button', disabled: busy || asking, onclick: () => ask(a.slug) }, `Make v${ready.n} live`) : '',
-    el('button', { type: 'button', onclick: () => showNewApp(a.slug) }, 'Change…'));
+    alone ? '' : el('button', { type: 'button', onclick: () => { wantNew = true; location.hash = `#apps/${a.slug}`; } }, 'Change…'));
   const confirm = !actions || !asking ? '' : el('div', { className: 'golive' },
     el('p', {}, `Make v${ready.n} of ${a.title} live? It shows on the next reload.${a.active ? ` Making v${a.active} live again reverts it.` : ''}`),
     el('div', { className: 'row' },
@@ -3812,17 +3820,38 @@ function renderApps() {
   if (!everOpen) return; // fetch once connected, with the token in place
   if (!hosted) { delete $('app-list').dataset.key; if (!$('app-list').querySelector('.skel')) $('app-list').replaceChildren(el('li', {}, skel())); if (!hostedAsked) loadApps(); return; }
   if (hosted.error) { delete $('app-list').dataset.key; $('app-list').replaceChildren(el('li', { className: 'bad' }, hosted.error)); return; }
-  // Rebuilt only when something shown changes, so a share form being typed into survives other updates.
-  const key = JSON.stringify([hosted.list, appAsk, appBusy, memberAsk, [...appErr], readOnly, draftAsk, draftBusy, [...draftErr]]);
-  const now = Date.now() + skew;
-  if ($('app-list').dataset.key === key) {
-    for (const s of $('app-list').querySelectorAll('[data-at]')) s.textContent = ago(now - Number(s.dataset.at));
-    return;
-  }
-  $('app-list').replaceChildren(...hosted.list.map((a) => appRow(a, now)));
-  $('app-list').dataset.key = key;
-  if (!hosted.list.length) $('app-list').append(el('li', { className: 'dim' }, `No apps yet: ${readOnly ? '' : 'tap + by Apps in the menu, or '}publish one with mis apps publish <name> <folder>`));
+  if (drawApps($('app-list'), hosted.list, false) && !hosted.list.length) $('app-list').append(el('li', { className: 'dim' }, `No apps yet: ${readOnly ? '' : 'tap + by Apps in the menu, or '}publish one with mis apps publish <name> <folder>`));
 }
+
+// `list`'s rows into `ul`. Rebuilt only when something shown changes, so a share form being typed into survives
+// other updates; else just their ages. Whether it was rebuilt.
+function drawApps(ul, list, alone) {
+  const key = JSON.stringify([list, alone, appAsk, appBusy, memberAsk, [...appErr], readOnly, draftAsk, draftBusy, [...draftErr]]);
+  const now = Date.now() + skew;
+  if (ul.dataset.key === key) {
+    for (const s of ul.querySelectorAll('[data-at]')) s.textContent = ago(now - Number(s.dataset.at));
+    return false;
+  }
+  ul.replaceChildren(...list.map((a) => appRow(a, now, alone)));
+  ul.dataset.key = key;
+  return true;
+}
+// `#new-app` (`slug` null) or `#apps/<slug>`: one app being built or changed from the composer below, and
+// nothing else. A change shows its app (drafts, releases); references dropped or pasted on the page attach.
+function renderBuild(slug) {
+  if (!everOpen) return;
+  if (!settingsAsked) loadSettings(); // the composer's harness and model
+  const ul = $('build-app'), a = slug && hosted && hosted.list && hosted.list.find((x) => x.slug === slug);
+  $('build-head').replaceChildren(el('div', { className: 'ttl' }, el('span', {}, slug ? (a ? a.title : slug) : 'New app')));
+  $('build-hint').hidden = !!slug;
+  $('refs').disabled = shots.length >= MAX_SHOTS || appSending;
+  if (!slug) { delete ul.dataset.key; ul.replaceChildren(); return; }
+  if (a) { drawApps(ul, [a], true); return; }
+  delete ul.dataset.key;
+  if (!hosted) { if (!hostedAsked) loadApps(); ul.replaceChildren(el('li', {}, skel())); }
+  else ul.replaceChildren(el('li', { className: hosted.error ? 'bad' : 'dim' }, hosted.error || `No app called ${slug}`));
+}
+$('refs').onclick = () => $('pick').click();
 
 // Settings (full access only), fetched each time the page opens. Its fields stay disabled until
 // they hold what was fetched, and while a save is in flight, so nothing typed is overwritten.
@@ -3840,6 +3869,7 @@ async function loadSettings() {
   if (got.s) { $('st-default').value = got.s.default_harness || ''; $('st-harness').value = got.s.apps.harness; $('st-model').value = got.s.apps.model; $('st-repo').value = got.s.apps.repo; }
   settingsMsg(got.error || '', true);
   renderSettings();
+  if (route().view === 'build') render(); // its composer's harness and model
   return got;
 }
 function settingsMsg(text, bad) { $('st-msg').textContent = text; $('st-msg').hidden = !text; $('st-msg').className = bad ? 'bad' : 'dim'; }
@@ -3864,6 +3894,23 @@ $('settings-form').onsubmit = async (e) => {
   renderSettings();
   settingsMsg(msg, msg !== 'Saved');
 };
+
+// apps:begin. The app composer, pure. tests/md.test.mjs runs this block.
+// What the composer says and where its text is kept, in view `view`: a new app (`build`, no `slug`), a change to
+// app `slug` (`title` once known), else a task.
+function composerFor(view, slug, title) {
+  if (view !== 'build') return { key: 'draft:new', placeholder: 'Start a task or ask anything', label: 'new task' };
+  if (!slug) return { key: 'draft:app', placeholder: 'Create an app: what should it do?', label: 'new app' };
+  const name = title || slug;
+  return { key: `draft:app:${slug}`, placeholder: `Change ${name}: what should change?`, label: `change ${name}` };
+}
+// `POST /api/apps/tasks`: `request` building (`slug` null) or changing app `slug`, where the chips (`pick`) say,
+// else on Settings' apps harness (`apps`), with uploaded `images`.
+function appTaskBody(request, slug, pick, apps, images) {
+  return { request, slug, change: !!slug, harness: pick.harness || (apps && apps.harness) || 'claude', model: pick.model || null,
+    worker: pick.worker ? pick.worker.id : null, images };
+}
+// apps:end
 
 // notes:begin. The Notes view, pure: a note's frontmatter, who wrote it, a folder's rows. tests/md.test.mjs runs this block.
 const NOTE_FOLDERS = [['inbox', 'Inbox'], ['projects', 'Projects'], ['areas', 'Areas'], ['resources', 'Resources'], ['archive', 'Archive'], ['ai', 'AI']];
@@ -4193,7 +4240,7 @@ function onMessage(msg) {
       // Taken: its draft goes, unless typed on since.
       if (drafts.get(p.key).trim() === p.text) drafts.set(p.key, '');
       if (p.key !== 'draft:new') location.hash = `#task/${msg.task}`;
-      else clearShots();
+      else clearShotsOf(p.key);
       refreshSoon();
       break;
     }
@@ -4439,22 +4486,63 @@ async function attach(file) {
 function dropShot(shot) {
   if (shot.url) URL.revokeObjectURL(shot.url);
   shots = shots.filter((x) => x !== shot);
+  for (const [k, l] of keptShots) keptShots.set(k, l.filter((x) => x !== shot));
   renderShots();
 }
-function clearShots() { for (const x of shots) dropShot(x); }
+// The photos of the composer whose draft key is `key`, shown or not.
+function clearShotsOf(key) { for (const x of key === promptKey ? shots : keptShots.get(key) || []) dropShot(x); }
 function renderShots() {
+  drawShots();
+  render();
+}
+function drawShots() {
   $('shots').replaceChildren(...shots.filter((x) => x.url).map((x) => el('div', { className: `shot${x.id ? '' : ' busy'}` },
     el('img', { src: x.url, alt: '' }),
     el('button', { type: 'button', className: 'x', ariaLabel: 'Remove photo', onclick: () => dropShot(x) }, '✕'))));
   $('shots').hidden = !$('shots').children.length;
-  render();
 }
 $('clip').onclick = () => $('pick').click();
 $('pick').onchange = () => {
-  for (const f of [...$('pick').files].slice(0, MAX_SHOTS - shots.length)) attach(f);
+  takeImages($('pick').files);
   $('pick').value = '';
-  render();
 };
+// References for the new task or app: images dropped on its page or pasted into the field attach (up to
+// MAX_SHOTS). Building an app, text or a link dropped off the field goes into it (on it, the field takes it itself).
+const composing = () => !$('dock').hidden && !$('new').hidden;
+function takeImages(files) {
+  if (appSending) return; // what's sent is settled
+  const imgs = [...files].filter((f) => f.type.startsWith('image/')), room = MAX_SHOTS - shots.length;
+  if (imgs.length < files.length) flash('only images attach');
+  else if (imgs.length > room) flash(`at most ${MAX_SHOTS} images`);
+  for (const f of imgs.slice(0, Math.max(0, room))) attach(f);
+  render();
+}
+let overTimer = 0;
+document.addEventListener('dragover', (e) => {
+  if (!composing()) return;
+  e.preventDefault();
+  document.body.classList.add('over');
+  clearTimeout(overTimer);
+  overTimer = setTimeout(() => document.body.classList.remove('over'), 150);
+});
+document.addEventListener('drop', (e) => {
+  if (!composing()) return;
+  const dt = e.dataTransfer;
+  if (dt.files.length) { e.preventDefault(); takeImages(dt.files); return; }
+  if (e.target.closest('input, textarea')) return;
+  e.preventDefault(); // else a dropped link opens in place of the page
+  if (route().view !== 'build') return;
+  const text = dt.getData('text/plain').trim(), f = $('prompt');
+  if (!text) return;
+  f.value = f.value.trim() ? `${f.value.trimEnd()}\n${text}` : text;
+  keepDraft(f);
+  fit(f);
+  f.focus();
+});
+$('prompt').addEventListener('paste', (e) => {
+  const files = e.clipboardData ? e.clipboardData.files : [];
+  if ([...files].some((f) => f.type.startsWith('image/'))) { e.preventDefault(); takeImages(files); }
+});
 // The open task's photos, fetched with the token (an <img> can't send it) into object URLs that
 // are revoked when another task's replace them. A network failure retries on the next render; a 404 doesn't.
 let attached = { key: '', urls: [] };
@@ -4488,12 +4576,34 @@ $('new').onsubmit = (e) => {
   micOff();
   unlock();
   const prompt = $('prompt').value.trim();
-  if (!prompt || pending) return;
+  if (!prompt || pending || appSending) return;
+  if (route().view === 'build') { startApp(prompt, route().id); return; }
   pending = { key: 'draft:new', text: prompt };
   send({ type: 'submit', prompt, cwd: null, harness: pick.harness || null, model: pick.model || null, worker: pick.worker ? pick.worker.id : null, images: shots.map((x) => x.id) });
   $('prompt').value = '';
   render();
 };
+// Build (`slug` null) or change app `slug` from the composer, then open its task. The text and images stay
+// until it starts, so a refusal (e.g. no worker runs the harness) loses nothing.
+let appSending = false;
+async function startApp(request, slug) {
+  const key = promptKey;
+  const body = appTaskBody(request, slug, pick, settings && settings.s && settings.s.apps, shots.map((x) => x.id));
+  appSending = true;
+  render();
+  let why = '', task = null;
+  try {
+    const r = await fetch('/api/apps/tasks', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (r.ok) task = (await r.json()).task; else why = (await r.text()) || `error ${r.status}`;
+  } catch { why = 'couldn’t reach the orchestrator'; }
+  appSending = false;
+  if (why) { flash(`error: ${why}`); render(); return; }
+  drafts.set(key, '');
+  if (promptKey === key) $('prompt').value = '';
+  clearShotsOf(key);
+  here = { sec: null, back: slug ? `#apps/${slug}` : '#apps' }; // its page's back link
+  location.hash = `#task/${task}`;
+}
 $('reply').onsubmit = (e) => {
   e.preventDefault();
   const prompt = $('reply-text').value.trim();
@@ -4524,7 +4634,7 @@ for (const f of [$('prompt'), $('reply-text')]) f.addEventListener('input', () =
 $('prompt').value = drafts.get('draft:new');
 // Leaving a view stops dictation into it and any readback.
 // A press's click has landed once the view changes: nothing left to hold for.
-window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); locate(); remember(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (route().view === 'apps' && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; if (route().view === 'notes') { noteShown = null; if (notesTree) loadNotes(); } if (route().view === 'projects') { if (projects) loadProjects(); if (notesTree && route().id) loadNotes(); } render(); };
+window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); locate(); remember(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (['apps', 'build'].includes(route().view) && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; if (route().view === 'notes') { noteShown = null; if (notesTree) loadNotes(); } if (route().view === 'projects') { if (projects) loadProjects(); if (notesTree && route().id) loadNotes(); } render(); };
 setInterval(tick, 1000);
 
 // `#new`, a link into the page for a new task, is a list with the composer focused: Tasks from Tasks (or a task opened
@@ -4537,7 +4647,7 @@ locate();
 const composerFields = [$('prompt'), $('reply-text'), $('say-text')], fitted = new WeakMap();
 function fit(f) {
   if (!f.offsetParent) return; // hidden: fit once shown
-  const key = `${f.clientWidth}:${f.value}`;
+  const key = `${f.clientWidth}:${f.placeholder}:${f.value}`;
   if (fitted.get(f) === key) return;
   fitted.set(f, key);
   f.style.height = 'auto';
@@ -4563,7 +4673,37 @@ for (const f of composerFields) {
 // Where a new task runs, as chips `Any machine ▾ › Auto ▾ › Default model ▾`, each opening a list above them.
 // Unset is the default: any machine, Auto (the planner picks the harness), the harness's own model. Kept until reload.
 // `worker` is the chosen machine's summary as last seen, so one that goes offline or leaves stays chosen.
-const pick = { worker: null, harness: '', model: '' };
+const taskPick = { worker: null, harness: '', model: '' };
+// Building an app, the chips set its own: Settings' apps harness and model until one is chosen here; no Auto.
+const appPick = { worker: null, harness: '', model: '' };
+let pick = taskPick, appChosen = false;
+function appDefaults() {
+  const s = settings && settings.s;
+  if (!s || appChosen || (appPick.harness === s.apps.harness && appPick.model === s.apps.model)) return false;
+  Object.assign(appPick, { harness: s.apps.harness, model: s.apps.model });
+  return true;
+}
+// The composer as the view `r` wants it: its words, its draft, its chips.
+function composeFor(r) {
+  const a = r.view === 'build' && r.id && hosted && hosted.list && hosted.list.find((x) => x.slug === r.id);
+  const c = composerFor(r.view, r.id, a && a.title);
+  if (c.key !== promptKey) {
+    keptShots.set(promptKey, shots);
+    shots = keptShots.get(c.key) || [];
+    keptShots.delete(c.key);
+    promptKey = c.key;
+    // Its text, unless it was just sent (storage keeps it until Submitted, for a send that fails).
+    $('prompt').value = pending && pending.key === c.key ? '' : drafts.get(c.key);
+    drawShots();
+  }
+  $('prompt').placeholder = c.placeholder;
+  $('prompt').setAttribute('aria-label', c.label);
+  const want = r.view === 'build' ? appPick : taskPick, filled = appDefaults();
+  if (want === pick && !filled) return;
+  pick = want;
+  followDefault();
+  optLabel();
+}
 let menuFor = ''; // the chip whose list is open: 'worker', 'harness', 'model' or ''
 const modelField = $('model'); // moves into the model list, so it's held here
 // Hostname, plus its id's start where two workers share one (as the planner names them): `mac-1a2b3c4d`.
@@ -4580,7 +4720,7 @@ const autoHarness = () => (pick.worker ? preferred(pick.worker.info.harnesses) :
 // Until a harness is chosen here, the Harness chip follows Settings' default where the machine runs it, else Auto.
 let harnessChosen = false;
 function followDefault() {
-  if (harnessChosen) return;
+  if (harnessChosen || pick !== taskPick) return;
   const was = pick.harness, d = taskDefault;
   pick.harness = pickHarnesses().includes(d) ? d : '';
   if (pick.harness !== was) pick.model = '';
@@ -4602,7 +4742,7 @@ function optLabel() {
   };
   chip('worker', 'Machine', w ? workerName(w) : 'Any machine', w ? [stateDot(w)] : [], w && !w.online ? ' · offline' : '');
   $('o-worker').classList.toggle('off', !!w && !w.online);
-  chip('harness', 'Harness', pick.harness || 'Auto');
+  chip('harness', 'Harness', pick.harness || (pick === appPick ? appTaskBody('', null, pick, settings && settings.s && settings.s.apps, []).harness : 'Auto'));
   chip('model', 'Model', pick.model || 'Default model');
 }
 optLabel();
@@ -4624,7 +4764,7 @@ function showOpts(k) {
   const listed = pickModels();
   m.setAttribute('aria-label', { worker: 'Machine', harness: 'Harness', model: 'Model' }[k]);
   m.replaceChildren(...(k === 'worker' ? [item(null, 'Any machine', stateDot()), ...[...workers, ...gone].map(machine)]
-    : k === 'harness' ? [item('', 'Auto'), ...pickHarnesses().map((h) => item(h, h))]
+    : k === 'harness' ? [...(pick === appPick ? [] : [item('', 'Auto')]), ...pickHarnesses().map((h) => item(h, h))]
     : [item('', 'Default model'), ...listed.map((x) => item(x, x)), modelField]));
   modelField.hidden = k !== 'model';
   modelField.value = listed.includes(pick.model) ? '' : pick.model;
@@ -4635,9 +4775,11 @@ function showOpts(k) {
 function choose(k, value) {
   const was = { harness: pick.harness, listed: pickModels().includes(pick.model) };
   pick[k] = value;
-  if (k === 'harness') harnessChosen = true;
+  if (pick === appPick) appChosen = true;
+  else if (k === 'harness') harnessChosen = true;
   else followDefault();
-  if (pick.harness && !pickHarnesses().includes(pick.harness)) pick.harness = ''; // the new machine doesn't run it
+  // The new machine doesn't run it: Auto, or for an app (which has no Auto) one it runs.
+  if (pick.harness && !pickHarnesses().includes(pick.harness)) pick.harness = pick === appPick ? pickHarnesses()[0] || '' : '';
   // A model belongs to its harness; one picked from a machine's list goes with a machine that doesn't list it.
   if (pick.harness !== was.harness || (k === 'worker' && was.listed && !pickModels().includes(pick.model))) pick.model = '';
   optLabel();
@@ -4647,6 +4789,7 @@ function choose(k, value) {
 for (const k of ['worker', 'harness', 'model']) $(`o-${k}`).onclick = () => showOpts(menuFor === k ? '' : k);
 modelField.addEventListener('input', () => {
   pick.model = modelField.value.trim();
+  if (pick === appPick) appChosen = true;
   for (const b of $('opt-menu').querySelectorAll('.oi')) b.setAttribute('aria-pressed', 'false');
   optLabel();
 });
@@ -4760,59 +4903,11 @@ $('routine-new').onsubmit = async (e) => {
   routineFocus = body.name;
   await loadRoutines();
 };
-// + by Apps, or an app's Change…: a form atop Apps that starts a task building (`change` null) or
-// changing an app. Shown once Settings are read, with their harness and model.
-let appChange = null, appOpening = null; // the app the form changes; the latest open, so an older one's reply is dropped
-async function showNewApp(change) {
-  const ask = {};
-  appOpening = ask;
-  $('app-new').hidden = true;
-  $('an-error').hidden = true;
-  const got = settings && settings.s ? settings : await loadSettings();
-  if (appOpening !== ask) return;
-  if (change !== appChange) $('an-request').value = ''; // a request is for the app it was typed for
-  appChange = change;
-  const a = change && hosted && hosted.list && hosted.list.find((x) => x.slug === change);
-  $('an-head').textContent = change ? `Change ${a ? a.title : change}` : 'New app';
-  $('an-slug').hidden = !!change;
-  $('an-harness').value = got.s ? got.s.apps.harness : 'claude';
-  pickHarness();
-  if (got.error) { $('an-error').textContent = `Settings: ${got.error}`; $('an-error').hidden = false; }
-  $('app-new').hidden = false;
-  window.scrollTo(0, 0);
-  $('an-request').focus();
-}
-// The harness's model from Settings (another harness: its own default), and the machines running it.
-function pickHarness() {
-  const h = $('an-harness').value, s = settings && settings.s;
-  $('an-model').value = s && s.apps.harness === h ? s.apps.model : '';
-  $('an-worker').replaceChildren(el('option', { value: '' }, 'Any machine'),
-    ...workers.filter((w) => w.online && w.info.harnesses.includes(h)).map((w) => el('option', { value: w.id }, w.info.hostname)));
-}
-$('an-harness').onchange = pickHarness;
+// + by Apps: the composer, building a new app.
 $('app-add').onclick = () => {
   $('menu').close();
-  location.hash = '#apps';
-  render();
-  showNewApp(null);
-};
-$('an-cancel').onclick = () => { appOpening = null; $('app-new').reset(); $('app-new').hidden = true; };
-$('app-new').onsubmit = async (e) => {
-  e.preventDefault();
-  const body = { request: $('an-request').value, slug: appChange || $('an-slug').value.trim() || null, change: !!appChange,
-    harness: $('an-harness').value, model: $('an-model').value.trim() || null, worker: $('an-worker').value || null };
-  const btn = $('app-new').querySelector('.row button');
-  btn.disabled = true;
-  let why = '', task = null;
-  try {
-    const r = await fetch('/api/apps/tasks', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    if (r.ok) task = (await r.json()).task; else why = (await r.text()) || `error ${r.status}`;
-  } catch { why = 'couldn’t reach the orchestrator'; }
-  btn.disabled = false;
-  if (why) { $('an-error').textContent = why; $('an-error').hidden = false; return; }
-  $('app-new').reset();
-  $('app-new').hidden = true;
-  location.hash = `#task/${task}`;
+  wantNew = true;
+  if (location.hash === '#new-app') render(); else location.hash = '#new-app';
 };
 // A chevron unfolds its list; opening Routines' or Apps' fetches them fresh.
 for (const b of $('menu').querySelectorAll('.ngrp button[aria-controls]')) b.onclick = () => {
