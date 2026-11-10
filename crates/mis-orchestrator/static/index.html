@@ -479,7 +479,12 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .preview a { display: inline-block; margin-top: .25rem; font-size: .8125rem; color: var(--dim); }
   .draft .ba { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; margin: .5rem 0 0; }
   .draft figure { margin: 0; }
+  .draft figure button { position: relative; display: block; width: 100%; padding: 0; border-radius: .5rem; background: none; }
   .draft figure img { display: block; width: 100%; max-height: 14rem; object-fit: cover; object-position: top; border-radius: .5rem; background: var(--raised); box-shadow: 0 0 0 1px var(--raised); }
+  /* A draft's shots under its task's Evidence: taller, side by side; stacked on a phone. */
+  #proof .draft { margin: .5rem 0 .75rem; padding: 0 .375rem; background: none; box-shadow: none; }
+  #proof .draft figure img { max-height: 24rem; }
+  @media (max-width: 40rem) { #proof .ba { grid-template-columns: 1fr; } #proof .ba > div:empty { display: none; } }
   .draft figcaption { margin-bottom: .25rem; font-size: .75rem; color: var(--dim); }
   .draft .pr { display: inline-block; margin-top: .5rem; font-size: .875rem; color: var(--accent); overflow-wrap: anywhere; }
   .draft .row { gap: .375rem; }
@@ -972,7 +977,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   <div id="task-preview" class="preview" hidden></div>
   <section id="approvals" hidden></section>
   <div class="row" hidden><button type="button" id="speak">Speak</button></div>
-  <section id="evidence" hidden><div class="evh"><h3>Evidence</h3><button type="button" id="refresh-ev" aria-label="Refresh PR status" hidden>↻</button></div><ul class="evl"></ul></section>
+  <section id="evidence" hidden><div class="evh"><h3>Evidence</h3><button type="button" id="refresh-ev" aria-label="Refresh PR status" hidden>↻</button></div><div id="proof"></div><ul class="evl"></ul></section>
   <div id="shots-view" class="shots" hidden></div>
   <div id="thread" class="meta dim"></div>
   <div id="cancel" hidden>
@@ -2574,7 +2579,9 @@ function renderEvidence(t) {
     return [el('li', {}, url ? el('a', { href: url.href, target: '_blank', rel: 'noopener' }, ...cells) : el('div', {}, ...cells))];
   });
   $('evidence').querySelector('ul').replaceChildren(...rows);
-  $('evidence').hidden = !rows.length;
+  const proof = t ? taskProof(t).filter(Boolean) : [];
+  $('proof').replaceChildren(...proof);
+  $('evidence').hidden = !rows.length && !proof.length;
   $('refresh-ev').hidden = readOnly || !((t && t.links) || []).some((l) => l.kind === 'pr');
   if (refreshing && (!t || t.id !== refreshing.id || JSON.stringify(t.links) !== refreshing.links)) refreshDone();
   $('refresh-ev').disabled = !!refreshing;
@@ -2666,10 +2673,10 @@ function renderPlan(t) {
   if (!p.length) { box.hidden = true; box.replaceChildren(); planKey = ''; return false; }
   if (planUi.id !== t.id) planUi = { id: t.id, open: null };
   const running = t.status === 'running', open = planUi.open ?? running;
-  const key = JSON.stringify([t.id, p, running, open]);
+  const key = JSON.stringify([t.id, p, running, open, ledDraft]);
   if (key === planKey) return false;
   planKey = key;
-  const at = running ? $('approvals') : $('diff');
+  const at = running && !ledDraft ? $('approvals') : $('diff'); // led by a draft, under its actions
   if (box.nextElementSibling !== at) at.before(box);
   box.hidden = false;
   const done = planDone(p);
@@ -3253,11 +3260,11 @@ function mdCached(text) {
 // with the work between; each tool run folded to a row. Yours are bubbles, the agent's plain prose. `open` ({ earlier,
 // runs, just }) keeps what the reader unfolded (`just`: the one to animate); `more`: older turns exist than were sent;
 // `working`: a last line while it runs; `retry`: the composer field the latest reply's Retry fills with your message.
-// The reply's actions (copy, retry) show once it has stopped working.
-function drawConvo(box, items, open, more, working, retry) {
+// The reply's actions (copy, retry) show once it has stopped working. `lead`: a node kept first across redraws.
+function drawConvo(box, items, open, more, working, retry, lead) {
   const [earlier, latest] = exchange(items), reply = latest.findLast((x) => x.role === 'assistant');
   const asked = items.findLast((x) => x.role === 'user');
-  const redraw = () => drawConvo(box, items, open, more, working, retry);
+  const redraw = () => drawConvo(box, items, open, more, working, retry, lead);
   const toggle = (cls, label, on, key, flip) => {
     const b = el('button', { type: 'button', className: cls }, ...label);
     b.setAttribute('aria-expanded', String(on));
@@ -3294,7 +3301,7 @@ function drawConvo(box, items, open, more, working, retry) {
   nodes.push(...toolRuns(latest).flatMap(part));
   if (working) nodes.push(el('div', { className: 'msg working' }, el('div', { className: 'body' }, working)));
   open.just = null;
-  box.replaceChildren(...nodes);
+  box.replaceChildren(...(lead ? [lead] : []), ...nodes);
 }
 // Conversation views open on the latest exchange (`toEnd`: at the newest content, e.g. a running task's approvals;
 // `toTop`: at the top, e.g. a finished task's result card), then stay at the bottom as it grows unless the reader
@@ -3370,7 +3377,9 @@ function renderDetail(id) {
     const wait = inSplit() ? detail.since + 2000 - Date.now() : 0;
     if (wait > 0) seenLater = setTimeout(render, wait); else send({ type: 'seen', task: id });
   }
-  showPreview($('task-preview'), ((hosted && hosted.list) || []).find((a) => a.draft && a.draft.task === id));
+  const drafted = draftsOf(id)[0];
+  showPreview($('task-preview'), drafted);
+  leadWithDraft(!!drafted);
   const cards = [...approvalCards(t), ...taskDrafts(id)];
   $('approvals').replaceChildren(...cards);
   $('approvals').hidden = !cards.length;
@@ -3422,12 +3431,19 @@ function drawTask(t) {
   const last = items[items.length - 1], said = last && last.role === 'assistant' && last.text.trimStart();
   const activity = said && t.activity && said.startsWith(t.activity.replace(/…$/, '')) ? '' : t.activity;
   const working = isFinished(t) || writing ? '' : t.status === 'running' ? activity || 'working…' : activity || t.status;
-  const sig = JSON.stringify([items.length, writing ? '' : items[items.length - 1].text, working, !!pending]);
+  const reply = items.findLast((x) => x.role === 'assistant'), folds = ledDraft && isFinished(t) && !!reply, brief = folds && !fullConvo.has(t.id);
+  // What's drawn; a fold or unfold isn't new content, so placing it leaves the fold out.
+  const drawn = JSON.stringify([items.length, writing ? '' : items[items.length - 1].text, working, !!pending]), sig = drawn + folds + brief;
   if (sig === detail.sig) return;
   const bottom = atBottom();
   detail.sig = sig;
-  drawConvo($('task-convo'), items, detail.open, false, working, $('reply-text'));
-  placeConvo(`task/${t.id}`, sig, bottom, $('task-convo'), !isFinished(t), isFinished(t) && !$('result').hidden);
+  // Unfolding shows every turn, earlier ones too.
+  const fold = folds && el('button', { type: 'button', className: 'fold', onclick: () => { if (brief) { fullConvo.add(t.id); detail.open.earlier = true; } else fullConvo.delete(t.id); render(); } },
+    brief ? `Show full conversation · ${plural(items.filter((x) => x.role !== 'tool').length, 'turn')}` : 'Hide full conversation');
+  if (fold) fold.setAttribute('aria-expanded', String(!brief));
+  drawConvo($('task-convo'), brief ? [reply, ...items.filter((x) => x.key === 'pending')] : items, detail.open, false, working, $('reply-text'), fold);
+  // Led by a draft (its apps read late, maybe), it is placed afresh: at the top.
+  placeConvo(`task/${t.id}${ledDraft ? '/draft' : ''}`, drawn, bottom, $('task-convo'), !isFinished(t), isFinished(t) && (ledDraft || !$('result').hidden));
 }
 
 // Cancel: a tap asks, a second confirms. `cancelAsk` belongs to the task open when it was asked.
@@ -4029,18 +4045,18 @@ function appRow(a, now, alone) {
 // (merge the PR, then live) or discards it, or asks its task for changes; others just see it.
 let draftAsk = null, draftBusy = null; // [slug, 'publish' | 'discard'] being confirmed, or under way
 const draftErr = new Map(); // slug -> why its last decision failed
-const draftShots = new Map(); // `slug/which` -> { id, url }: the shown draft's, freed when replaced
-function draftShot(a, which) {
-  const d = a.draft, key = `${a.slug}/${which}`, had = draftShots.get(key);
-  const img = el('img', { alt: `${which} v${d.release}`, loading: 'lazy' });
-  if (had && had.id === d.id) img.src = had.url;
-  else fetch(`/api/apps/${encodeURIComponent(a.slug)}/draft/${which}?id=${d.id}`, { headers: authHeaders() }).then(async (r) => {
-    if (!r.ok) { img.alt = 'screenshot gone'; return; }
-    const old = draftShots.get(key);
-    if (old) URL.revokeObjectURL(old.url);
-    draftShots.set(key, { id: d.id, url: img.src = URL.createObjectURL(await r.blob()) });
-  }).catch(() => {});
-  return el('figure', {}, el('figcaption', {}, which === 'before' ? 'Before' : `After · v${d.release}`), img);
+// The draft's before and after shots, fetched as evidence files are (kept by id); a tap opens the viewer on one, the
+// other a swipe away. No before (a new app): the after sits in the right column.
+function draftShots(a) {
+  const d = a.draft, which = ['before', 'after'].filter((w) => d[w]);
+  const items = which.map((w) => ({ id: w, title: w === 'before' ? 'Before' : `After · v${d.release}`,
+    file: { id: `draft/${d.id}/${w}`, url: `/api/apps/${encodeURIComponent(a.slug)}/draft/${w}?id=${d.id}`, mime: 'image/png' } }));
+  return el('div', { className: 'ba' }, d.before ? '' : el('div'), ...items.map((it, i) => {
+    const img = el('img', { alt: `${which[i]} v${d.release}` }), b = el('button', { type: 'button', onclick: () => openViewer(items, i) }, img);
+    b.setAttribute('aria-label', `Open ${it.title}`);
+    evMedia(img, it.file, b);
+    return el('figure', {}, el('figcaption', {}, it.title), b);
+  }));
 }
 async function decideDraft(a, action) {
   draftAsk = null; draftBusy = [a.slug, action];
@@ -4090,8 +4106,7 @@ function draftCard(a, inTask, alone) {
   return el('div', { className: inTask ? 'appr draft' : 'draft' },
     el('div', { className: 'dim' }, `Draft v${d.release}${inTask ? ` of ${a.title}` : ''} · proposed `, appAge(d.at, Date.now() + skew)),
     d.note ? el('p', { className: 'what' }, d.note) : '',
-    d.before || d.after ? el('div', { className: 'ba' }, d.before ? draftShot(a, 'before') : el('div'), d.after ? draftShot(a, 'after') : '') : '',
-    el('a', { className: 'pr', href: d.pr, target: '_blank', rel: 'noopener' }, d.pr.replace('https://github.com/', '').replace('/pull/', '#')),
+    ...(inTask ? [] : draftProof(a, true)), // on its task's page, under Evidence
     said ? el('div', { className: st.state === 'needs_you' ? 'err bad' : 'sub dim' }, said) : '',
     err ? el('div', { className: 'err bad' }, err) : '',
     actions);
@@ -4113,19 +4128,43 @@ function showPreview(box, a) {
     onclick: () => window.addEventListener('focus', () => { frame.src = url; }, { once: true }) }, 'Blank? Sign in to apps ↗');
   box.replaceChildren(el('div', { className: 'dim' }, `Draft v${a.draft.release} of ${a.title}, live`), frame, signIn);
 }
+// A draft's screenshots, and its PR link if `pr`.
+const draftProof = (a, pr) => [a.draft.before || a.draft.after ? draftShots(a) : '',
+  pr ? el('a', { className: 'pr', href: a.draft.pr, target: '_blank', rel: 'noopener' }, a.draft.pr.replace('https://github.com/', '').replace('/pull/', '#')) : ''];
 // The drafts proposed by task `id`, as cards for its page.
 // Kept while nothing they show changes, so a render doesn't redraw their screenshots.
 const draftNodes = new Map();
+const draftsOf = (id) => ((hosted && hosted.list) || []).filter((a) => a.draft && a.draft.task === id); // apps task `id` drafted
 function taskDrafts(id) {
-  const apps = ((hosted && hosted.list) || []).filter((a) => a.draft && a.draft.task === id);
-  return apps.map((a) => {
-    const key = JSON.stringify([a.draft, a.role, readOnly, draftAsk, draftBusy, draftErr.get(a.slug)]);
+  return draftsOf(id).map((a) => {
+    const key = JSON.stringify([a.draft, a.review, a.role, readOnly, draftAsk, draftBusy, draftErr.get(a.slug)]);
     const had = draftNodes.get(a.slug);
     if (had && had.key === key) return had.node;
     const node = draftCard(a, true);
     draftNodes.set(a.slug, { key, node });
     return node;
   });
+}
+// The proof of the drafts task `t` proposed, atop its Evidence (the PR link unless a row has it); kept like their cards.
+const proofNodes = new Map();
+function taskProof(t) {
+  return draftsOf(t.id).map((a) => {
+    const pr = !(t.links || []).some((l) => l.url === a.draft.pr), key = JSON.stringify([a.draft, pr]), had = proofNodes.get(a.slug);
+    if (had && had.key === key) return had.node;
+    const node = a.draft.before || a.draft.after || pr ? el('div', { className: 'draft' }, ...draftProof(a, pr)) : '';
+    proofNodes.set(a.slug, { key, node });
+    return node;
+  });
+}
+// A task that proposed a draft leads with it: the draft's actions, then Evidence (its shots, PR, checks), then the
+// result and the conversation, folded to the agent's last reply.
+let ledDraft = false;
+const fullConvo = new Set(); // such tasks whose whole conversation is unfolded
+function leadWithDraft(on) {
+  if (on === ledDraft) return;
+  ledDraft = on;
+  if (on) $('task-head').parentNode.after($('approvals'), $('evidence'));
+  else { $('task-preview').after($('approvals')); $('speak').parentNode.after($('evidence')); }
 }
 function renderApps() {
   if (!everOpen) return; // fetch once connected, with the token in place
