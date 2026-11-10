@@ -94,12 +94,7 @@ pub const SCHEMA: &str = r#"{"type":"object","properties":{"harness":{"type":"st
 /// worker the user `chose`.
 pub fn prompt(request: &str, images: usize, chose: bool, fleet: &Fleet, cards: &[Card]) -> String {
     let harnesses: Vec<&str> = fleet.keys().map(String::as_str).collect();
-    let default = harnesses
-        .iter()
-        .find(|h| **h == "claude")
-        .or(harnesses.first())
-        .copied()
-        .unwrap_or("claude");
+    let default = default_harness(fleet.keys()).unwrap_or_else(|| "claude".into());
     let models: String = fleet
         .iter()
         .filter(|(_, m)| !m.is_empty())
@@ -149,6 +144,13 @@ pub fn prompt(request: &str, images: usize, chose: bool, fleet: &Fleet, cards: &
     )
 }
 
+/// claude if among `harnesses`, else the first.
+pub fn default_harness<'a>(harnesses: impl IntoIterator<Item = &'a String>) -> Option<String> {
+    let all: Vec<_> = harnesses.into_iter().collect();
+    let claude = all.iter().find(|h| **h == "claude");
+    claude.or(all.first()).map(|h| h.to_string())
+}
+
 /// The workers and what each is for, when any worker says; empty otherwise.
 fn workers_section(cards: &[Card]) -> String {
     if cards
@@ -182,8 +184,8 @@ fn workers_section(cards: &[Card]) -> String {
 /// a code fence). A harness dispatches, even beside an answer (dispatching is the
 /// safe side); then check it exists and fill an omitted prompt with `request`.
 /// Without one, the answer stands alone. A named worker must be in `cards` and run
-/// the harness; it becomes `pin`. No `cards`: the worker is already chosen, and a named
-/// one is ignored. A model not listed for the harness (blank, invented, or gone since
+/// the harness; it becomes `pin`. No `cards`: the worker is already chosen, so a named one
+/// is ignored and an answer never stands: it runs on `fleet`'s default harness instead. A model not listed for the harness (blank, invented, or gone since
 /// the prompt was built) falls back to the harness default.
 pub fn parse(
     reply: &str,
@@ -199,6 +201,9 @@ pub fn parse(
     let mut plan: Plan =
         serde_json::from_str(&reply[start..=end]).map_err(|e| format!("bad planner reply: {e}"))?;
     plan.answer = plan.answer.filter(|a| !a.trim().is_empty());
+    if plan.harness.is_empty() && cards.is_none() {
+        plan.harness = default_harness(fleet.keys()).unwrap_or_default();
+    }
     if plan.harness.is_empty() {
         return match plan.answer {
             Some(_) => Ok(plan),
@@ -378,7 +383,17 @@ mod tests {
         assert!(e.contains("unknown worker"), "{e}");
         let e = p(r#"{"harness":"codex","worker":"studio"}"#).unwrap_err();
         assert!(e.contains("doesn't run codex"), "{e}");
-        // The user already chose: a named worker is ignored, known or not.
+        // The user already chose: an answer runs on the fleet's default harness instead.
+        let plan = parse(r#"{"answer":"4"}"#, "what is 2+2?", &both(), None).unwrap();
+        assert_eq!((plan.harness.as_str(), plan.answer), ("claude", None));
+        let codex: Fleet = [("codex".into(), vec![])].into();
+        assert_eq!(
+            parse(r#"{"answer":"4"}"#, "q", &codex, None)
+                .unwrap()
+                .harness,
+            "codex"
+        );
+        // A named worker is ignored, known or not.
         for name in ["studio", "mars"] {
             let reply = format!(r#"{{"harness":"codex","worker":"{name}"}}"#);
             let plan = parse(&reply, "model a chair", &both(), None).unwrap();

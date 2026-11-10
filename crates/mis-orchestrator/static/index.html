@@ -158,6 +158,8 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .optc { position: relative; display: flex; align-items: center; gap: .375rem; flex: 0 1 auto; min-width: 2.5rem; min-height: 0; height: 1.75rem; padding: 0 .625rem; border-radius: 999px; background: var(--raised); color: var(--soft); font: 500 .75rem/1 var(--sans); }
   .optc .v { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   #o-harness { flex: none; } /* short names (Auto, claude, codex): the machine and model give way instead */
+  #o-model { min-width: 6.75rem; } /* room for e.g. `gpt-5-codex ▾` before the machine gives way */
+  .optc .off { flex: none; }
   .optc::after { content: ""; position: absolute; inset: -.5rem -.125rem; }
   .optc[aria-expanded=true] { color: var(--fg); background: var(--seg-on); }
   #opt-menu { position: absolute; z-index: 1; bottom: calc(100% + .375rem); display: grid; min-width: 10rem; max-width: min(20rem, 100%); box-sizing: border-box; padding: .375rem; border-radius: 1rem; background: var(--card); box-shadow: var(--shadow); animation: rise .15s ease-out; }
@@ -4333,10 +4335,11 @@ const modelField = $('model'); // moves into the model list, so it's held here
 // Hostname, plus its id's start where two workers share one (as the planner names them): `mac-1a2b3c4d`.
 const workerName = (w) => w.info.hostname + (workers.some((x) => x.id !== w.id && x.info.hostname === w.info.hostname) ? `-${w.id.slice(0, 8)}` : '');
 // The chosen machine, else every machine: their harnesses, and the models they list for the harness
-// (under Auto, claude's: a model makes the server run claude).
+// (under Auto, the one a model makes the server run: claude, or on a chosen machine without it, its first).
 const pickFrom = () => (pick.worker ? [pick.worker] : workers);
 const pickHarnesses = () => [...new Set(pickFrom().flatMap((w) => w.info.harnesses))].sort();
-const pickModels = () => [...new Set(pickFrom().flatMap((w) => w.info.models[pick.harness || 'claude'] || []))];
+const autoHarness = () => (!pick.worker || pick.worker.info.harnesses.includes('claude') ? 'claude' : pick.worker.info.harnesses[0]);
+const pickModels = () => [...new Set(pickFrom().flatMap((w) => w.info.models[pick.harness || autoHarness()] || []))];
 // A worker's status dot, its state as text; without a worker, an empty one keeping the column.
 function stateDot(w) {
   const state = w ? workerState(w) : '';
@@ -4346,11 +4349,12 @@ function stateDot(w) {
 }
 function optLabel() {
   const w = pick.worker;
-  const chip = (k, name, text, ...pre) => {
-    $(`o-${k}`).replaceChildren(...pre, el('span', { className: 'v' }, text), ' ▾');
-    $(`o-${k}`).setAttribute('aria-label', `${name}: ${text}`);
+  // `pre` and `post` sit outside the truncated text: a dot, and " · offline" kept in view.
+  const chip = (k, name, text, pre = [], post = '') => {
+    $(`o-${k}`).replaceChildren(...pre, el('span', { className: 'v' }, text), ...(post ? [el('span', { className: 'off' }, post)] : []), ' ▾');
+    $(`o-${k}`).setAttribute('aria-label', `${name}: ${text}${post}`);
   };
-  chip('worker', 'Machine', w ? `${workerName(w)}${w.online ? '' : ' · offline'}` : 'Any machine', ...(w ? [stateDot(w)] : []));
+  chip('worker', 'Machine', w ? workerName(w) : 'Any machine', w ? [stateDot(w)] : [], w && !w.online ? ' · offline' : '');
   $('o-worker').classList.toggle('off', !!w && !w.online);
   chip('harness', 'Harness', pick.harness || 'Auto');
   chip('model', 'Model', pick.model || 'Default model');
@@ -4402,7 +4406,9 @@ modelField.addEventListener('input', () => {
 modelField.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); choose('model', pick.model); } });
 // A tap elsewhere, or Tab out of the list and chips, closes it; Esc too, back to its chip.
 document.addEventListener('pointerdown', (e) => { if (menuFor && !e.target.closest('#opt-menu, #opts')) showOpts(''); });
-for (const g of [$('opt-menu'), $('opts')]) g.addEventListener('focusout', (e) => { if (menuFor && e.relatedTarget && !e.relatedTarget.closest('#opt-menu, #opts')) showOpts(''); });
+// Focus leaving to nowhere closes it only once the list is out of view (the composer hid), not on a tap inside.
+for (const g of [$('opt-menu'), $('opts')]) g.addEventListener('focusout', (e) => { if (menuFor && (e.relatedTarget ? !e.relatedTarget.closest('#opt-menu, #opts') : !$('opt-menu').offsetParent)) showOpts(''); });
+window.addEventListener('hashchange', () => showOpts('')); // another view: its shortcuts work again
 $('new').addEventListener('keydown', (e) => { if (e.key === 'Escape' && menuFor) { e.preventDefault(); const k = menuFor; showOpts(''); $(`o-${k}`).focus(); } });
 
 // Keyboard shortcuts: c a new task, j/k the next/previous task, Esc back (or out of a field), Cmd/Ctrl+B the menu.

@@ -2586,13 +2586,7 @@ async fn client_conn(mut sock: WebSocket, app: App, scope: Scope) {
                         app.transition(|l| {
                             let r = match (reply_to, worker) {
                                 (Some(parent), _) => l.reply(parent, prompt, images, planner),
-                                (None, Some(wid)) => {
-                                    l.submit_to(prompt, cwd, harness, model, images, wid, unplanned)
-                                }
-                                (None, None) => {
-                                    let harness = harness.or_else(|| unplanned.then(|| "claude".into()));
-                                    Ok(l.submit(prompt, cwd, harness, model, images))
-                                }
+                                (None, w) => l.submit_to(prompt, cwd, harness, model, images, w, unplanned),
                             };
                             match r {
                                 Ok((task, effects)) => (Ok(task), effects),

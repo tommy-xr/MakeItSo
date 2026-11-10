@@ -28,6 +28,9 @@ struct Saved<'a> {
     /// `Ledger::noted`.
     #[serde(default)]
     noted: BTreeMap<WorkerId, Inventory>,
+    /// `Ledger::seen`.
+    #[serde(default)]
+    seen: BTreeMap<WorkerId, WorkerInfo>,
     /// In submission order, without transcripts.
     tasks: Cow<'a, [TaskEntry]>,
     /// `Ledger::routines`.
@@ -80,6 +83,7 @@ impl Ledger {
             noted: (self.noted.iter())
                 .map(|(id, i)| (*id, i.clone()))
                 .collect(),
+            seen: (self.seen.iter()).map(|(id, i)| (*id, i.clone())).collect(),
             tasks: Cow::Borrowed(&self.tasks),
             routines: Cow::Borrowed(&self.routines),
             live: Cow::Borrowed(&self.live),
@@ -126,7 +130,9 @@ impl Ledger {
             ..Default::default()
         };
         let mut effects = vec![];
+        l.seen = saved.seen.into_iter().collect();
         for (wid, info) in saved.workers {
+            l.seen.insert(wid, info.clone());
             let generation = 1;
             let w = Worker {
                 info,
@@ -448,6 +454,27 @@ mod tests {
             unreachable!()
         };
         assert_eq!(workers[0].new_tools, ["Houdini"]);
+    }
+
+    #[test]
+    fn a_worker_that_left_can_be_chosen_after_a_restart() {
+        let mut l = Ledger::default();
+        let w = Uuid::new_v4();
+        let codex = WorkerInfo {
+            hostname: "box".into(),
+            harnesses: vec!["codex".into()],
+            ..info()
+        };
+        l.connect(w, codex, &[], 1, NOW);
+        l.disconnect(w, 1);
+        l.expire(w, 1);
+        let (mut r, _) = round_trip(&l);
+        let (t, _) = (r.submit_to("t".into(), None, None, None, vec![], Some(w), true)).unwrap();
+        let s = status_of(&r, t);
+        assert_eq!(
+            (s.harness.as_str(), s.activity.as_str()),
+            ("codex", "waiting for box")
+        );
     }
 
     #[test]

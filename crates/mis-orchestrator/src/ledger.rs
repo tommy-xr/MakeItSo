@@ -546,6 +546,9 @@ pub struct Ledger {
     /// Each worker's inventory when its purpose was last saved (or first seen):
     /// what it gained since is offered as "new" for the note. Outlives the worker.
     noted: HashMap<WorkerId, Inventory>,
+    /// Every worker that ever connected, as it last did: what one that has left ran and was
+    /// called, and the set `submit_to` takes a chosen worker from. Grows only by worker ids.
+    seen: HashMap<WorkerId, WorkerInfo>,
     tasks: Vec<TaskEntry>, // insertion order = submission order
     queue: VecDeque<TaskId>,
     /// The supervisor's last report; not saved, so a restart clears it.
@@ -646,10 +649,13 @@ impl Ledger {
         s
     }
 
-    /// `wid`'s card name; its short id once it has left.
+    /// `wid`'s card name; once it has left, named the same way among the workers ever seen;
+    /// its short id if never seen.
     fn host(&self, wid: WorkerId) -> String {
-        let cards = self.cards();
-        let card = cards.into_iter().find(|c| c.id == wid);
+        let card = (self.cards().into_iter().find(|c| c.id == wid)).or_else(|| {
+            let seen = self.seen.iter().map(|(id, info)| (*id, info, false));
+            plan::cards(seen).into_iter().find(|c| c.id == wid)
+        });
         card.map_or_else(|| wid.to_string()[..8].to_string(), |c| c.name)
     }
 
@@ -705,10 +711,10 @@ impl Ledger {
         self.submit_on(prompt, cwd, harness, model, images, None)
     }
 
-    /// [`Self::submit`] for worker `wid` only: it waits while `wid` is busy or offline, even
-    /// once it has left (its harnesses are then checked when it is back). Without a harness
-    /// it is planned among `wid`'s, unless `unplanned`: then it runs claude if `wid` does, else
-    /// `wid`'s first. Err if `wid` never connected, or doesn't run the harness.
+    /// [`Self::submit`], on `worker` only if given: the task waits while it is busy, offline or
+    /// gone (it may come back). Without a harness it is planned (among `worker`'s), unless
+    /// `unplanned`: then it runs claude, or on `worker`, claude if it runs it, else its first.
+    /// Err if `worker` never connected, runs no harness, or doesn't run `harness`.
     #[allow(clippy::too_many_arguments)] // submit's, plus the worker and whether to plan
     pub fn submit_to(
         &mut self,
@@ -717,34 +723,25 @@ impl Ledger {
         harness: Option<String>,
         model: Option<String>,
         images: Vec<Uuid>,
-        wid: WorkerId,
+        worker: Option<WorkerId>,
         unplanned: bool,
     ) -> Result<(TaskId, Vec<Effect>), String> {
-        let Some(w) = self.workers.get(&wid) else {
-            // `noted` outlives a worker: one that left may come back.
-            if !self.noted.contains_key(&wid) {
-                return Err(format!("unknown worker {}", &wid.to_string()[..8]));
+        let harness = match worker {
+            None => harness.or_else(|| unplanned.then(|| "claude".into())),
+            Some(wid) => {
+                // As it last connected: one that has left keeps what it ran.
+                let runs = (self.seen.get(&wid).map(|i| &i.harnesses))
+                    .ok_or_else(|| format!("unknown worker {}", &wid.to_string()[..8]))?;
+                let first = (plan::default_harness(runs))
+                    .ok_or_else(|| format!("{} runs no harness", self.host(wid)))?;
+                let harness = harness.or_else(|| unplanned.then_some(first));
+                if let Some(h) = harness.as_ref().filter(|h| !runs.contains(h)) {
+                    return Err(format!("{} doesn't run {h}", self.host(wid)));
+                }
+                harness
             }
-            let harness = harness.or_else(|| unplanned.then(|| "claude".into()));
-            return Ok(self.submit_on(prompt, cwd, harness, model, images, Some(wid)));
         };
-        let runs = &w.info.harnesses;
-        let fallback = || {
-            runs.iter()
-                .find(|h| *h == "claude")
-                .or(runs.first())
-                .cloned()
-        };
-        let harness = match harness {
-            None if unplanned => {
-                Some(fallback().ok_or_else(|| format!("{} runs no harness", self.host(wid)))?)
-            }
-            h => h,
-        };
-        if let Some(h) = harness.as_ref().filter(|h| !runs.contains(h)) {
-            return Err(format!("{} doesn't run {h}", self.host(wid)));
-        }
-        Ok(self.submit_on(prompt, cwd, harness, model, images, Some(wid)))
+        Ok(self.submit_on(prompt, cwd, harness, model, images, worker))
     }
 
     /// [`Self::submit`], pinned to `pin` if given.
@@ -759,16 +756,15 @@ impl Ledger {
     ) -> (TaskId, Vec<Effect>) {
         let id = Uuid::new_v4();
         let planning = harness.is_none();
-        // A chosen worker: the planner picks among its harnesses, all of them (a usage limit
-        // only makes the task wait there), and may neither answer it nor route it elsewhere.
-        // One that has left offers what any worker runs.
-        let (fleet, offered) = match (pin, pin.and_then(|wid| self.workers.get(&wid))) {
-            (Some(wid), Some(w)) => (
-                fleet_of([&w.info]),
+        // A chosen worker: the planner picks among its harnesses as it last connected, all of
+        // them (a usage limit only makes the task wait there), and may neither answer it nor
+        // route it elsewhere.
+        let (fleet, offered) = match pin.and_then(|wid| Some((wid, self.seen.get(&wid)?))) {
+            Some((wid, info)) => (
+                fleet_of([info]),
                 self.cards().into_iter().filter(|c| c.id == wid).collect(),
             ),
-            (Some(_), None) => (self.known_fleet(), vec![]),
-            (None, _) => (self.fleet(), self.cards()),
+            None => (self.fleet(), self.cards()),
         };
         let plan_prompt =
             planning.then(|| plan::prompt(&prompt, images.len(), pin.is_some(), &fleet, &offered));
@@ -980,17 +976,10 @@ impl Ledger {
                     true => (None, None),
                     false => (Some(p.task.harness.clone()), p.task.model.clone()),
                 };
-                // It stays on the thread's worker while that is known.
-                match p.pin.filter(|w| self.workers.contains_key(w)) {
-                    Some(wid) => {
-                        let cwd = p.task.cwd.clone();
-                        self.submit_to(prompt, cwd, harness, model, images, wid, !planner)?
-                    }
-                    None => {
-                        let harness = harness.or_else(|| (!planner).then(|| "claude".into()));
-                        self.submit(prompt, p.task.cwd.clone(), harness, model, images)
-                    }
-                }
+                // It stays on the thread's worker, as a new task does on a chosen one.
+                let pin = p.pin.filter(|w| self.seen.contains_key(w));
+                let cwd = p.task.cwd.clone();
+                self.submit_to(prompt, cwd, harness, model, images, pin, !planner)?
             }
         };
         let t = self.tasks.iter_mut().find(|t| t.task.id == id);
@@ -1297,8 +1286,8 @@ impl Ledger {
         // Pinned while planning: the user chose the worker, so the plan must fit it (any named
         // worker is ignored). Else any known harness is valid: one the planner wasn't offered
         // may still be the user's explicit pick.
-        let chosen = self.tasks[i].pin.and_then(|wid| self.workers.get(&wid));
-        let fleet = chosen.map_or_else(|| self.known_fleet(), |w| fleet_of([&w.info]));
+        let chosen = self.tasks[i].pin.and_then(|wid| self.seen.get(&wid));
+        let fleet = chosen.map_or_else(|| self.known_fleet(), |info| fleet_of([info]));
         let now = self.now_ms;
         let t = &mut self.tasks[i];
         if t.status != TaskStatus::Planning {
@@ -1412,6 +1401,7 @@ impl Ledger {
         let stream = self.workers.remove(&wid).and_then(|w| w.stream);
         // The first inventory is the baseline. An empty one isn't: it comes from
         // `mis-worker setup`'s test connection or a worker predating inventories.
+        self.seen.insert(wid, info.clone());
         let noted = self.noted.entry(wid).or_default();
         if *noted == Inventory::default() {
             *noted = info.inventory.clone();
@@ -2414,7 +2404,7 @@ mod tests {
     /// Submit `prompt` on `harness` (None: planned) for worker `wid` only.
     fn submit_to(l: &mut Ledger, prompt: &str, harness: Option<&str>, wid: WorkerId) -> TaskId {
         let harness = harness.map(String::from);
-        let r = l.submit_to(prompt.into(), None, harness, None, vec![], wid, false);
+        let r = l.submit_to(prompt.into(), None, harness, None, vec![], Some(wid), false);
         r.unwrap().0
     }
 
@@ -2438,7 +2428,7 @@ mod tests {
             Some("claude".into()),
             None,
             vec![],
-            box_,
+            Some(box_),
             false,
         );
         let (a, eff) = r.unwrap();
@@ -2474,6 +2464,8 @@ mod tests {
         assert_eq!(task_status(&l, later), TaskStatus::Planning);
         let eff = finish_plan(&mut l, later, r#"{"harness":"claude"}"#);
         assert!(assigned(&eff).is_empty(), "{eff:?}");
+        // Named as it was, not by its id.
+        assert_eq!(status_of(&l, later).activity, "waiting for linux");
         let (_, eff) = l.connect(box_, linux(), &[], 3, T0);
         assert_eq!(assigned(&eff), [(3, t)]);
         let done = AgentEvent::Finished {
@@ -2489,11 +2481,23 @@ mod tests {
         let mac = Uuid::new_v4();
         l.connect(mac, info(), &[], 1, T0);
         let codex = Some("codex".to_string());
-        let err = l.submit_to("t".into(), None, codex, None, vec![], mac, false);
+        let err = l.submit_to("t".into(), None, codex, None, vec![], Some(mac), false);
         assert_eq!(err.unwrap_err(), "h doesn't run codex");
         let gone = Uuid::from_u128(0xabcdef12 << 96);
-        let err = l.submit_to("t".into(), None, None, None, vec![], gone, false);
+        let err = l.submit_to("t".into(), None, None, None, vec![], Some(gone), false);
         assert_eq!(err.unwrap_err(), "unknown worker abcdef12");
+        // One that runs no harness: refused before the planner runs, too.
+        let none = Uuid::new_v4();
+        let bare = WorkerInfo {
+            hostname: "bare".into(),
+            harnesses: vec![],
+            ..info()
+        };
+        l.connect(none, bare, &[], 2, T0);
+        for unplanned in [false, true] {
+            let err = l.submit_to("t".into(), None, None, None, vec![], Some(none), unplanned);
+            assert_eq!(err.unwrap_err(), "bare runs no harness");
+        }
         assert!(l.tasks.is_empty());
     }
 
@@ -2508,13 +2512,59 @@ mod tests {
         };
         l.connect(box_, codex_only, &[], 2, T0);
         for (wid, want) in [(mac, "claude"), (box_, "codex")] {
-            let r = l.submit_to("t".into(), None, None, None, vec![], wid, true);
+            let r = l.submit_to("t".into(), None, None, None, vec![], Some(wid), true);
             let (t, eff) = r.unwrap();
             let [Effect::Assign { task, .. }] = &eff[..] else {
                 panic!("{eff:?}")
             };
             assert_eq!((task.id, task.harness.as_str()), (t, want));
         }
+    }
+
+    #[test]
+    fn a_chosen_worker_that_left_keeps_what_it_ran() {
+        let mut l = Ledger::default();
+        let (mac, box_) = (Uuid::new_v4(), Uuid::new_v4());
+        l.connect(mac, info(), &[], 1, T0);
+        let codex_only = WorkerInfo {
+            harnesses: vec!["codex".into()],
+            models: [("codex".into(), vec!["gpt-5".into()])].into(),
+            ..linux()
+        };
+        l.connect(box_, codex_only, &[], 2, T0);
+        l.disconnect(box_, 2);
+        l.expire(box_, 1);
+        // Unplanned: its own harness, not claude.
+        let r = l.submit_to("a".into(), None, None, None, vec![], Some(box_), true);
+        let a = r.unwrap().0;
+        assert_eq!(
+            l.tasks
+                .iter()
+                .find(|t| t.task.id == a)
+                .unwrap()
+                .task
+                .harness,
+            "codex"
+        );
+        // Planned: among its harnesses and models, not mac's.
+        let r = l.submit_to("b".into(), None, None, None, vec![], Some(box_), false);
+        let [Effect::Plan { prompt, .. }] = &r.unwrap().1[..] else {
+            panic!()
+        };
+        assert!(
+            prompt.contains("harnesses: codex.\n") && prompt.contains("- codex: gpt-5\n"),
+            "{prompt}"
+        );
+        let err = l.submit_to(
+            "c".into(),
+            None,
+            Some("claude".into()),
+            None,
+            vec![],
+            Some(box_),
+            false,
+        );
+        assert_eq!(err.unwrap_err(), "linux doesn't run claude");
     }
 
     #[test]
@@ -2528,7 +2578,15 @@ mod tests {
         l.connect(studio_id, with_app(studio(), "Blender"), &[], 2, T0);
         l.connect(Uuid::new_v4(), linux(), &[], 3, T0);
         let submit = |l: &mut Ledger| {
-            let r = l.submit_to("model a chair".into(), None, None, None, vec![], mac, false);
+            let r = l.submit_to(
+                "model a chair".into(),
+                None,
+                None,
+                None,
+                vec![],
+                Some(mac),
+                false,
+            );
             let (task, eff) = r.unwrap();
             let [Effect::Plan { prompt, .. }] = &eff[..] else {
                 panic!("{eff:?}")
@@ -2559,6 +2617,14 @@ mod tests {
         let eff = finish_plan(&mut l, task, r#"{"harness":"claude"}"#);
         assert!(assigned(&eff).is_empty(), "{eff:?}");
         assert_eq!(status_of(&l, task).activity, "waiting for h");
+        // An answer doesn't stand: it runs on the chosen worker's default harness.
+        let task = submit(&mut l);
+        finish_plan(&mut l, task, r#"{"answer":"4","reason":"trivial"}"#);
+        let t = l.tasks.iter().find(|t| t.task.id == task).unwrap();
+        assert_eq!(
+            (t.status, t.task.harness.as_str()),
+            (TaskStatus::Queued, "claude")
+        );
         // A harness the chosen worker lacks fails it, saying why.
         let task = submit(&mut l);
         finish_plan(&mut l, task, r#"{"harness":"codex","reason":"asked"}"#);
@@ -2587,12 +2653,13 @@ mod tests {
         let (r, eff) = l.reply(t, "again".into(), vec![], false).unwrap();
         assert!(assigned(&eff).is_empty(), "ran elsewhere: {eff:?}");
         assert_eq!(status_of(&l, r).activity, "waiting for linux");
-        // Once that worker is gone, it may run anywhere.
+        // Gone, it still waits for it, as a new task for it would.
         l.cancel(r).unwrap();
         l.disconnect(box_, 2);
         l.expire(box_, 1);
         let (r2, eff) = l.reply(t, "once more".into(), vec![], false).unwrap();
-        assert_eq!(assigned(&eff), [(1, r2)]);
+        assert!(assigned(&eff).is_empty(), "ran elsewhere: {eff:?}");
+        assert_eq!(status_of(&l, r2).activity, "waiting for linux");
     }
 
     fn with_app(mut i: WorkerInfo, name: &str) -> WorkerInfo {
