@@ -1775,13 +1775,17 @@ function ticker() {
 // opening it settles it, so the next tap opens the next.
 const needYou = () => tasks.filter((t) => ATTENTION[t.attention]).reverse().sort((a, b) => rank(a) - rank(b));
 const needLabel = (n) => `${n} need${n === 1 ? 's' : ''} you`;
-// Home's Needs you rows (tasks, then sessions waiting on you), not counting rows only held there:
+// Home's Needs you rows (app drafts, tasks, sessions waiting on you), not counting rows only held there:
 // { n, att: the most urgent kind, href: its first }.
 function homeNeed() {
   const need = everOpen ? listOf('home', false).threads.filter((th) => th.sec === 'need') : [], waits = everOpen ? feed.filter(asks) : [];
-  const first = need[0] && [need[0].root, ...need[0].replies].find((t) => rank(t) === need[0].rank);
-  return { n: need.length + waits.length, att: first ? first.attention : 'approval', href: first ? `#task/${first.id}` : waits[0] ? `#session/${liveKey(waits[0])}` : '' };
+  const drafts = everOpen ? appDrafts() : [], first = need[0] && [need[0].root, ...need[0].replies].find((t) => rank(t) === need[0].rank);
+  return { n: drafts.length + need.length + waits.length, att: first ? first.attention : waits[0] ? 'approval' : 'unread',
+    href: first ? `#task/${first.id}` : waits[0] ? `#session/${liveKey(waits[0])}` : drafts[0] ? draftHref(drafts[0]) : '' };
 }
+// Apps with a draft waiting on its owner; Home lists them first under Needs you, each opening the task that made it.
+const appDrafts = () => ((hosted && hosted.list) || []).filter((a) => a.draft);
+const draftHref = (a) => (a.draft.task ? `#task/${a.draft.task}` : '#apps');
 // The header badge: Home's count, lit in the most urgent one's colour; a tap opens that one.
 function renderNeed() {
   const need = homeNeed(), b = $('need');
@@ -2174,10 +2178,10 @@ function listOf(sec, holds = true) {
   return { fed, threads };
 }
 const onHome = (th) => secRank(th.sec) < 2;
-// Whether list `sec` shows `h` (a task or session), in a row of its own or under a session's.
+// Whether list `sec` shows `h` (a task or session), in a row of its own, under a session's, or as Home's draft row.
 function shows(sec, h) {
   const { fed, threads } = listOf(sec);
-  return threads.some((th) => (sec !== 'home' || onHome(th)) && [th.root, ...th.replies].some((t) => `#task/${t.id}` === h))
+  return (sec === 'home' && appDrafts().some((a) => draftHref(a) === h)) || threads.some((th) => (sec !== 'home' || onHome(th)) && [th.root, ...th.replies].some((t) => `#task/${t.id}` === h))
     || fed.some((s) => `#session/${liveKey(s)}` === h || shownMessages(s).some((m) => `#task/${m.task}` === h));
 }
 function renderList() {
@@ -2195,8 +2199,8 @@ function renderList() {
   if (sending && !groups.has('flight')) groups.set('flight', []);
   // Home: drafts waiting on a decision need you too, first.
   if (sec === 'home' && !hosted && !hostedAsked && everOpen) loadApps();
-  const drafted = sec !== 'home' ? [] : ((hosted && hosted.list) || []).filter((a) => a.draft).map((a) => el('li', { className: 'draftrow' },
-    el('a', { href: a.draft.task ? `#task/${a.draft.task}` : '#apps' },
+  const drafted = sec !== 'home' ? [] : appDrafts().map((a) => el('li', { className: 'draftrow' },
+    el('a', { href: draftHref(a) },
       el('div', { className: 'r1' }, el('span', { className: 'sd done att-unread' }), el('strong', { className: 'one' }, `Draft v${a.draft.release} of ${a.title}`)),
       el('div', { className: 'r2 one' }, a.role === 'owner' && !readOnly ? 'Try it, then publish or ask for changes' : 'Waiting for its owner'))));
   if (sec === 'home' && (drafted.length || sessions.length) && !groups.has('need')) groups.set('need', []);
@@ -3622,8 +3626,8 @@ async function loadApps() {
   } catch { got = { error: 'couldn’t reach the orchestrator' }; }
   if (hostedAsked !== ask) return;
   hosted = got;
-  // Drafts also show on Home and their task's page.
-  if (['apps', 'list', 'detail'].includes(route().view)) render();
+  // Drafts also show on Home (beside a task or session too) and their task's page.
+  if (['apps', 'list', 'detail', 'session'].includes(route().view)) render();
   renderNav();
 }
 async function activateApp(slug, n) {
