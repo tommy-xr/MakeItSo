@@ -63,10 +63,11 @@ struct Args {
     /// Model the planner itself runs on.
     #[arg(long, default_value = "sonnet", value_parser = clap::builder::NonEmptyStringValueParser::new())]
     planner_model: String,
-    /// Don't summarize finished tasks; they keep the agent's own last message.
+    /// Don't summarize finished tasks (they keep the agent's own last message) or suggest
+    /// where inbox notes go.
     #[arg(long)]
     no_summary: bool,
-    /// Model that summarizes finished tasks.
+    /// Model that summarizes finished tasks and suggests where inbox notes go.
     #[arg(long, default_value = "haiku", value_parser = clap::builder::NonEmptyStringValueParser::new())]
     summary_model: String,
     /// Cloudflare Access team: the `<team>` in `<team>.cloudflareaccess.com`. With
@@ -508,6 +509,10 @@ async fn main() -> anyhow::Result<()> {
     if !args.no_summary && mis_agent::which("claude") {
         tracing::info!(model = %args.summary_model, "summaries: local claude (tool-less)");
         app = app.with_summarizer(one_shot_claude(&args.summary_model, &[]));
+        if nonempty(&args.notes_remote).is_some() {
+            tracing::info!("inbox suggestions: on, the same model");
+            app = app.with_suggester(one_shot_claude(&args.summary_model, &[]));
+        }
     }
     // Shut down on a signal, or once the updater has swapped in a new build: then restart on it.
     let restarting = std::cell::Cell::new(false);

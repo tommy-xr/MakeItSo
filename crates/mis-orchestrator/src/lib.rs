@@ -35,6 +35,7 @@ pub mod drafts;
 pub mod email;
 pub mod evidence;
 pub mod feedback;
+pub mod file_suggest;
 pub mod filing;
 pub mod images;
 pub mod ledger;
@@ -58,6 +59,8 @@ pub mod tools;
 /// leaving it in Planning forever.
 const PLANNER_TIMEOUT: Duration = Duration::from_secs(90);
 const SUMMARY_TIMEOUT: Duration = Duration::from_secs(60);
+/// Failed suggestion calls in a row that end a pass: likely offline or logged out.
+const SUGGEST_FAILURES: usize = 2;
 /// How often the ledger is saved (only files that changed are written).
 const SAVE_EVERY: Duration = Duration::from_secs(1);
 /// How often tasks past `ledger::persist::KEEP_MS` are forgotten.
@@ -113,6 +116,10 @@ pub struct App {
     summary_slots: Arc<tokio::sync::Semaphore>,
     /// Drafts worker purpose notes (the planner's model, free text). None: no suggestions.
     drafter: Option<Arc<dyn Agent>>,
+    /// Suggests where inbox notes go ([`file_suggest`]). None: no suggestions.
+    suggester: Option<Arc<dyn Agent>>,
+    /// Notes the suggestion pass under way has still to ask about; empty between passes.
+    suggesting: Arc<Mutex<std::collections::BTreeSet<String>>>,
     /// A worker silent (no Hello/Stats) this long is treated as disconnected.
     stale_after: Duration,
     /// How often to check for silent workers.
@@ -179,6 +186,8 @@ impl App {
             summarizer: None,
             summary_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             drafter: None,
+            suggester: None,
+            suggesting: Default::default(),
             // Two missed beats plus slack for network jitter.
             stale_after: 2 * STATS_INTERVAL + Duration::from_secs(5),
             tick_every: Duration::from_secs(5),
@@ -338,6 +347,12 @@ impl App {
 
     pub fn with_drafter(mut self, drafter: Arc<dyn Agent>) -> Self {
         self.drafter = Some(drafter);
+        self
+    }
+
+    /// Suggest where inbox notes go after each publisher run (with notes on).
+    pub fn with_suggester(mut self, suggester: Arc<dyn Agent>) -> Self {
+        self.suggester = Some(suggester);
         self
     }
 
@@ -581,6 +596,82 @@ impl App {
             },
         )
         .await;
+    }
+
+    /// After each publisher run (the first is at start), suggest where each inbox note goes
+    /// that needs it. The suggestions are kept here and saved after each change, so a
+    /// failed save never brings on another call.
+    async fn suggest_loop(self, notes: Arc<notes::Notes>, agent: Arc<dyn Agent>) {
+        let file = notes.suggestions_file();
+        let mut store = load_suggestions(&file);
+        loop {
+            notes.ran().await;
+            self.suggest(&notes, agent.as_ref(), &file, &mut store)
+                .await;
+            // However it ended: nothing more is asked until the next run.
+            self.suggesting.lock().unwrap().clear();
+        }
+    }
+
+    /// One pass over [`file_suggest::pending`], listed in `suggesting` until each is asked
+    /// about. A failed call (offline, logged out, timed out) stores nothing;
+    /// [`SUGGEST_FAILURES`] in a row end the pass, the rest wait for the next run.
+    async fn suggest(
+        &self,
+        notes: &notes::Notes,
+        agent: &dyn Agent,
+        file: &std::path::Path,
+        store: &mut file_suggest::Store,
+    ) {
+        let Some(inbox) = notes.inbox() else {
+            return;
+        };
+        let clone = notes.clone_dir().to_path_buf();
+        let read = tokio::task::spawn_blocking(move || projects::list(&clone));
+        let dests = file_suggest::dests(&notes.dests(), &read.await.expect("reads").0);
+        let before = store.len();
+        let todo = file_suggest::pending(store, &inbox, &dests);
+        if store.len() != before {
+            save_suggestions(file, store);
+        }
+        *self.suggesting.lock().unwrap() = todo.iter().map(|n| n.path.clone()).collect();
+        let mut failed = 0;
+        for note in todo {
+            let mut reply = Err("no reply".to_string());
+            run_oneshot(
+                "suggester",
+                agent,
+                &self.summary_slots,
+                uuid::Uuid::new_v4(),
+                &file_suggest::prompt(&note.text, &dests),
+                SUMMARY_TIMEOUT,
+                |ev| {
+                    if let AgentEvent::Finished { ok, summary } = ev {
+                        let summary = summary.unwrap_or_default();
+                        reply = if ok { Ok(summary) } else { Err(summary) };
+                    }
+                },
+            )
+            .await;
+            match reply {
+                Ok(reply) => {
+                    failed = 0;
+                    let r = file_suggest::parse(&reply, &dests);
+                    let s = file_suggest::suggestion(note, r, &dests, unix_ms());
+                    store.insert(note.path.clone(), s);
+                    save_suggestions(file, store);
+                }
+                Err(why) => {
+                    tracing::warn!(path = %note.path, "suggesting where a note goes: {why}");
+                    failed += 1;
+                    if failed == SUGGEST_FAILURES {
+                        return;
+                    }
+                }
+            }
+            // Only once saved (or skipped): a reader sees it pending or suggested.
+            self.suggesting.lock().unwrap().remove(&note.path);
+        }
     }
 
     /// Images for a new task: Err says why they can't be attached.
@@ -1361,6 +1452,7 @@ pub fn router(app: App) -> Router {
         .route("/api/notes/tree", get(notes_tree))
         .route("/api/notes/file", get(notes_file))
         .route("/api/notes/move", post(notes_move))
+        .route("/api/notes/suggestions", get(notes_suggestions))
         .route("/api/projects", get(projects_list))
         .route("/api/images/{id}", get(image))
         .route("/api/evidence/{id}", get(evidence_file))
@@ -1433,7 +1525,10 @@ pub async fn serve_until(
     app.spawn_routines();
     app.spawn_image_sweep();
     if let Some(notes) = app.notes.clone() {
-        tokio::spawn(notes.publish_loop());
+        tokio::spawn(notes.clone().publish_loop());
+        if let Some(agent) = app.suggester.clone() {
+            tokio::spawn(app.clone().suggest_loop(notes, agent));
+        }
     }
     let svc = router(app.clone()).into_make_service_with_connect_info::<SocketAddr>();
     tokio::select! {
@@ -1867,6 +1962,53 @@ async fn notes_sync(
     }
     let sync = app.notes.as_ref().map_or(NotesSync::OFF, |n| n.status());
     Json(sync).into_response()
+}
+
+/// `<state>/captures/suggestions.json`; empty if absent or unreadable (suggestions are
+/// remade as needed).
+fn load_suggestions(file: &std::path::Path) -> file_suggest::Store {
+    match std::fs::read(file) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        r => (r.map_err(|e| e.to_string()))
+            .and_then(|b| serde_json::from_slice(&b).map_err(|e| e.to_string()))
+            .unwrap_or_else(|e| {
+                tracing::warn!("{}: {e}", file.display());
+                Default::default()
+            }),
+    }
+}
+
+/// Write `store` to `file` whole, or not at all.
+fn save_suggestions(file: &std::path::Path, store: &file_suggest::Store) {
+    let json = serde_json::to_vec_pretty(store).expect("serializes");
+    let saved = (file.parent().map_or(Ok(()), std::fs::create_dir_all))
+        .and_then(|()| push::write_private(file, &json));
+    if let Err(e) = saved {
+        tracing::warn!("{}: {e}", file.display());
+    }
+}
+
+/// Where each inbox note might be filed, as last suggested: `{}` with notes or suggestions
+/// off. Auth as for the tree: summaries quote notes.
+async fn notes_suggestions(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(refused) = app
+        .admit_full(&headers, peer, "/api/notes/suggestions")
+        .await
+    {
+        return refused.into_response();
+    }
+    let Some(file) = app.notes.as_ref().map(|n| n.suggestions_file()) else {
+        return Json(mis_types::NoteSuggestions::default()).into_response();
+    };
+    // Pending first: a note leaves it only once saved, so it is in one or the other.
+    let pending = app.suggesting.lock().unwrap().iter().cloned().collect();
+    let read = tokio::task::spawn_blocking(move || load_suggestions(&file));
+    let notes = read.await.expect("reads");
+    Json(mis_types::NoteSuggestions { pending, notes }).into_response()
 }
 
 /// The notes clone's shown folders, for the Notes view. Full scope only: notes are the

@@ -293,6 +293,10 @@ pub struct Notes {
     moves: Mutex<Vec<(NoteMove, oneshot::Sender<Filed>)>>,
     /// Where notes may be filed, as of the last run's HEAD.
     dests: Mutex<Vec<String>>,
+    /// The inbox as of the last run that could list it; None before one.
+    inbox: Mutex<Option<crate::file_suggest::Inbox>>,
+    /// Woken at the end of each run.
+    ran: tokio::sync::Notify,
     /// Woken by each filing queued.
     queued: tokio::sync::Notify,
     after_capture: Duration,
@@ -315,6 +319,8 @@ impl Notes {
             kick: Default::default(),
             moves: Default::default(),
             dests: Default::default(),
+            inbox: Default::default(),
+            ran: Default::default(),
             queued: Default::default(),
             after_capture: AFTER_CAPTURE,
             every: EVERY,
@@ -340,6 +346,21 @@ impl Notes {
     /// Where notes may be filed ([`crate::filing::dests`]) as of the last run's HEAD.
     pub fn dests(&self) -> Vec<String> {
         self.dests.lock().unwrap().clone()
+    }
+
+    /// The inbox at the last run's HEAD; None until a run lists it.
+    pub fn inbox(&self) -> Option<crate::file_suggest::Inbox> {
+        self.inbox.lock().unwrap().clone()
+    }
+
+    /// Returns once a run has ended since the last call returned (or, the first time, ever).
+    pub async fn ran(&self) {
+        self.ran.notified().await
+    }
+
+    /// `<state>/captures/suggestions.json`, beside the published map.
+    pub fn suggestions_file(&self) -> PathBuf {
+        self.map.with_file_name("suggestions.json")
     }
 
     /// A new capture was kept: count it and publish soon.
@@ -382,6 +403,7 @@ impl Notes {
     }
 
     /// The queued filings, then one publish (blocking: runs `git`), then the status it leaves.
+    /// Notes HEAD's folders and inbox for filing and suggestions, then wakes [`Self::ran`].
     pub fn run(&self) -> NotesSync {
         let moves = std::mem::take(&mut *self.moves.lock().unwrap());
         let mut filed = Vec::new();
@@ -403,6 +425,10 @@ impl Notes {
         if let Ok(modes) = self.dest_modes() {
             *self.dests.lock().unwrap() = crate::filing::dests(&modes);
         }
+        if let Ok(inbox) = self.inbox_notes() {
+            *self.inbox.lock().unwrap() = Some(inbox);
+        }
+        self.ran.notify_one();
         let mut s = self.status.lock().unwrap();
         // Captures kept mid-run may postdate the receipts it read. Counted before
         // reading them, so at worst one is counted twice until the next run.
@@ -750,6 +776,23 @@ impl Notes {
             Some(p) => Err(Failure::Other(format!("{p} exists"))),
             None => Ok(()),
         }
+    }
+
+    /// HEAD's `inbox/*.md`, the newest ([`crate::file_suggest::MAX_NOTES`], by name) read
+    /// as a filing reads them.
+    fn inbox_notes(&self) -> Result<crate::file_suggest::Inbox, Failure> {
+        let note = |p: &String| crate::notes_view::kind(p, false) == mis_types::NoteKind::Md;
+        let paths: std::collections::BTreeSet<String> =
+            (self.modes(&[&format!("{INBOX}/")])?.into_keys())
+                .filter(note)
+                .collect();
+        let notes = (paths.iter().rev().take(crate::file_suggest::MAX_NOTES))
+            .filter_map(|p| {
+                let bytes = crate::apps::read_file(&self.clone, p)?;
+                Some(crate::file_suggest::note(p.clone(), &bytes))
+            })
+            .collect();
+        Ok(crate::file_suggest::Inbox { paths, notes })
     }
 
     /// HEAD's modes [`crate::filing::dests`] reads: the folders and what's directly in

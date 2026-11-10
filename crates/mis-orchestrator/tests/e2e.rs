@@ -4178,6 +4178,7 @@ async fn refused_everywhere_else(base: &str, headers: &[(&'static str, &str)]) {
         ("GET", "/api/notes/tree".into()),
         ("GET", "/api/notes/file?path=inbox/a.md".into()),
         ("POST", "/api/notes/move".into()),
+        ("GET", "/api/notes/suggestions".into()),
         ("GET", "/api/projects".into()),
         ("GET", "/api/apps".into()),
         ("POST", "/api/apps/a/releases".into()),
@@ -4743,6 +4744,377 @@ async fn projects_are_read_from_the_notes_clone_for_full_scope_only() {
     assert_eq!(serde_json::from_str::<Projects>(&body).unwrap(), want);
     // The running app may still hold files in it (Windows refuses to delete them).
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Suggester stub, by the note's text: `#fail` fails (as a logged-out claude would),
+/// `#offlist` names a folder that isn't one, `#home` goes to `areas/home`, anything else to
+/// `projects/amf` (fenced, as models sometimes reply). Keeps each prompt, then answers once
+/// its gate has a permit.
+struct FakeSuggester(Prompts, std::sync::Arc<tokio::sync::Semaphore>);
+impl mis_agent::Agent for FakeSuggester {
+    fn name(&self) -> &'static str {
+        "fake"
+    }
+    fn models(&self) -> Vec<String> {
+        vec![]
+    }
+    fn run<'a>(
+        &'a self,
+        _task: TaskId,
+        prompt: &'a str,
+        _opts: mis_agent::RunOpts<'a>,
+        tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> mis_agent::BoxFut<'a> {
+        Box::pin(async move {
+            self.0.lock().unwrap().push(prompt.to_string());
+            drop(self.1.acquire().await.unwrap());
+            let note = prompt.split_once("Note:\n").unwrap().1;
+            let (ok, reply) = match note {
+                n if n.contains("#fail") => (false, "not logged in"),
+                n if n.contains("#offlist") => {
+                    (true, r#"{"dest":"projects/nope","summary":"Off"}"#)
+                }
+                n if n.contains("#home") => (true, r#"{"dest":"areas/home","summary":"Home"}"#),
+                n if n.contains("v2") => (
+                    true,
+                    "```json\n{\"dest\":\"projects/amf\",\"summary\":\"Second\"}\n```",
+                ),
+                _ => (true, r#"{"dest":"projects/amf","summary":"First"}"#),
+            };
+            let summary = Some(reply.into());
+            tx.send(AgentEvent::Finished { ok, summary }).await?;
+            Ok(())
+        })
+    }
+}
+
+/// A temp bare notes remote, pushed to from a human's clone.
+struct NotesRemote {
+    dir: std::path::PathBuf,
+}
+
+impl NotesRemote {
+    /// Holding `files` (path, text), plus a project `amf` and a folder `areas/home`.
+    fn new(files: &[(&str, &str)]) -> Self {
+        let dir = std::env::temp_dir().join(format!("mis-e2e-suggest-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let r = Self { dir };
+        r.git(&["init", "--quiet", "--bare", "-b", "main", "remote.git"]);
+        r.git(&["clone", "--quiet", "remote.git", "human"]);
+        r.write(".gitattributes", "* -text\n");
+        let amf = "---\ntitle: All Must Fall\naliases: [allmustfall]\n---\nA game.\n";
+        r.write("projects/amf/README.md", amf);
+        r.write("areas/home/boiler.md", "# Boiler\n");
+        for (path, text) in files {
+            r.write(path, text);
+        }
+        r.push("init");
+        r
+    }
+
+    fn git(&self, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .current_dir(&self.dir)
+            .args(["-c", "user.name=Human", "-c", "user.email=h@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "git {args:?}: {err}");
+    }
+
+    fn write(&self, path: &str, text: &str) {
+        let at = self.dir.join("human").join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, text).unwrap();
+    }
+
+    fn remove(&self, path: &str) {
+        std::fs::remove_file(self.dir.join("human").join(path)).unwrap();
+    }
+
+    fn push(&self, msg: &str) {
+        self.git(&["-C", "human", "add", "-A"]);
+        self.git(&["-C", "human", "commit", "--quiet", "-m", msg]);
+        self.git(&["-C", "human", "push", "--quiet", "origin", "HEAD:main"]);
+    }
+
+    /// The publisher for state dir `name`, running every second: suggestions follow pushes.
+    fn notes(&self, name: &str) -> (mis_orchestrator::notes::Notes, std::path::PathBuf) {
+        let state = self.dir.join(name);
+        let remote = self.dir.join("remote.git").display().to_string();
+        let notes = mis_orchestrator::notes::Notes::new(remote, &state).with_timing(
+            std::time::Duration::from_secs(3600),
+            std::time::Duration::from_secs(1),
+        );
+        (notes, state)
+    }
+
+    /// An app on the publisher for `name`, with a [`FakeSuggester`]: its URL, state dir and
+    /// the prompts it was given.
+    async fn suggesting(&self, name: &str) -> (String, std::path::PathBuf, Prompts) {
+        let open = tokio::sync::Semaphore::new(tokio::sync::Semaphore::MAX_PERMITS);
+        self.gated(name, std::sync::Arc::new(open)).await
+    }
+
+    /// As [`Self::suggesting`], each answer waiting for a permit of `gate`.
+    async fn gated(
+        &self,
+        name: &str,
+        gate: std::sync::Arc<tokio::sync::Semaphore>,
+    ) -> (String, std::path::PathBuf, Prompts) {
+        let (notes, state) = self.notes(name);
+        let prompts = Prompts::default();
+        let fake = FakeSuggester(prompts.clone(), gate);
+        let app = capturing(&state).with_notes(notes);
+        let base = start_app(app.with_suggester(std::sync::Arc::new(fake)));
+        (base.await, state, prompts)
+    }
+}
+
+impl Drop for NotesRemote {
+    fn drop(&mut self) {
+        // The running app may still hold files in it (Windows refuses to delete them).
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+type Prompts = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+/// How many prompts asked about a note containing `text`.
+fn asked(prompts: &Prompts, text: &str) -> usize {
+    let p = prompts.lock().unwrap();
+    p.iter()
+        .filter(|p| p.split_once("Note:\n").unwrap().1.contains(text))
+        .count()
+}
+
+type Suggested = std::collections::BTreeMap<String, NoteSuggestion>;
+
+/// `GET /api/notes/suggestions`, which must say what is pending.
+async fn suggestions(base: &str) -> NoteSuggestions {
+    let (status, body) = get_json(base, "/api/notes/suggestions", "s").await;
+    assert_eq!(status, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v["pending"].is_array(), "{body}");
+    serde_json::from_value(v).unwrap()
+}
+
+/// The suggestions once `done` holds of them (10 s at most).
+async fn until(base: &str, done: impl Fn(&Suggested) -> bool) -> Suggested {
+    for _ in 0..100 {
+        let s = suggestions(base).await.notes;
+        if done(&s) {
+            return s;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("{:?}", suggestions(base).await);
+}
+
+/// What's pending once a pass is under way and its first note asked about (10 s at most).
+async fn asking(base: &str, prompts: &Prompts) -> Vec<String> {
+    for _ in 0..100 {
+        if !prompts.lock().unwrap().is_empty() {
+            return suggestions(base).await.pending;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("never asked");
+}
+
+/// sha256 hex of `path` as the Notes view serves it (what a filing checks).
+async fn served(base: &str, path: &str) -> String {
+    let head = format!("GET /api/notes/file?path={path} HTTP/1.1\r\nAuthorization: Bearer s");
+    let (status, _, body) = http(base, &head, b"").await;
+    assert_eq!(status, 200, "{path}");
+    sha_hex(&body)
+}
+
+/// Sorted inbox paths for these names.
+fn inbox(names: &[&str]) -> Vec<String> {
+    let mut paths: Vec<String> = names.iter().map(|n| format!("inbox/{n}.md")).collect();
+    paths.sort();
+    paths
+}
+
+#[tokio::test]
+async fn inbox_notes_get_a_suggestion_per_text_held_to_the_folders() {
+    use std::time::Duration;
+    let r = NotesRemote::new(&[("inbox/a.md", "# a\n")]);
+    let (base, state, prompts) = r.suggesting("state").await;
+    let s = until(&base, |s| s.contains_key("inbox/a.md")).await;
+    let a = &s["inbox/a.md"];
+    assert_eq!(
+        (a.dest.as_str(), a.summary.as_str(), &a.hash, &a.error),
+        (
+            "projects/amf",
+            "First",
+            &served(&base, "inbox/a.md").await,
+            &None
+        )
+    );
+    let first = prompts.lock().unwrap()[0].clone();
+    assert!(
+        first.contains("- projects/amf: All Must Fall (also allmustfall): A game.\n"),
+        "{first}"
+    );
+    assert!(first.contains("- areas/home\n") && first.ends_with("Note:\n# a\n"));
+    // An edit gets a new suggestion; an off-list folder becomes none.
+    r.write("inbox/a.md", "# a v2\n");
+    r.write("inbox/b.md", "#offlist\n");
+    r.push("edit");
+    let s = until(&base, |s| {
+        s.contains_key("inbox/b.md") && s["inbox/a.md"].summary == "Second"
+    })
+    .await;
+    assert_eq!(s["inbox/a.md"].hash, served(&base, "inbox/a.md").await);
+    let b = &s["inbox/b.md"];
+    assert_eq!((b.dest.as_str(), b.summary.as_str()), ("none", "Off"));
+    let why = b.error.as_deref().unwrap();
+    assert_eq!(why, "projects/nope is not a folder to file in");
+    // Unchanged notes aren't asked about again, however many runs pass.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(prompts.lock().unwrap().len(), 3);
+    // A note gone from the inbox loses its suggestion; the file is what's served.
+    r.remove("inbox/b.md");
+    r.push("filed");
+    let s = until(&base, |s| !s.contains_key("inbox/b.md")).await;
+    let saved = std::fs::read(state.join("captures/suggestions.json")).unwrap();
+    assert_eq!(serde_json::from_slice::<Suggested>(&saved).unwrap(), s);
+    // Summaries quote notes: full scope only.
+    for (token, want) in [("r", 403), ("c", 401)] {
+        let (status, _) = get_json(&base, "/api/notes/suggestions", token).await;
+        assert_eq!(status, want, "{token}");
+    }
+    // No claude: the clone is read, but nothing is suggested.
+    let (notes, quiet) = r.notes("quiet");
+    let base = start_app(capturing(&quiet).with_notes(notes)).await;
+    for _ in 0..100 {
+        let (_, body) = get_json(&base, "/api/notes/tree", "s").await;
+        if body.contains("inbox/a.md") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let none = r#"{"pending":[],"notes":{}}"#;
+    let got = get_json(&base, "/api/notes/suggestions", "s").await;
+    assert_eq!(got, (200, none.into()), "nothing pending either");
+    assert!(!quiet.join("captures/suggestions.json").exists());
+    // No notes remote: none either.
+    let off = start_app(capturing(&r.dir.join("off"))).await;
+    let got = get_json(&off, "/api/notes/suggestions", "s").await;
+    assert_eq!(got, (200, none.into()));
+}
+
+#[tokio::test]
+async fn a_failing_note_neither_holds_up_older_ones_nor_is_kept() {
+    use std::time::Duration;
+    // Newest first: c fails, then a is still asked.
+    let r = NotesRemote::new(&[("inbox/a.md", "# a\n"), ("inbox/c.md", "#fail c\n")]);
+    let (base, _, prompts) = r.suggesting("state").await;
+    let s = until(&base, |s| s.contains_key("inbox/a.md")).await;
+    assert!(!s.contains_key("inbox/c.md"), "{s:?}");
+    // The pass over, c (failed, skipped) isn't pending: it waits for the next run.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(suggestions(&base).await.pending, Vec::<String>::new());
+    // Two failures in a row end the pass (likely logged out): b, after them, waits.
+    r.write("inbox/d.md", "#fail d\n");
+    r.write("inbox/e.md", "#fail e\n");
+    r.write("inbox/b.md", "# b\n");
+    r.push("more");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(asked(&prompts, "#fail e") > 0 && asked(&prompts, "#fail d") > 0);
+    assert_eq!(asked(&prompts, "# b"), 0);
+    // A pass that stops early leaves nothing pending (between passes, runs a second apart).
+    let mut idle = false;
+    for _ in 0..50 {
+        idle = suggestions(&base).await.pending.is_empty();
+        if idle {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(idle, "{:?}", suggestions(&base).await.pending);
+    assert_eq!(
+        suggestions(&base).await.notes.keys().collect::<Vec<_>>(),
+        ["inbox/a.md"]
+    );
+}
+
+#[tokio::test]
+async fn notes_are_pending_while_asked_about_and_only_the_newest_50() {
+    // 51 notes: n00 is the oldest by name.
+    let names: Vec<String> = (0..51).map(|i| format!("n{i:02}")).collect();
+    let files: Vec<(String, String)> = (names.iter())
+        .map(|n| (format!("inbox/{n}.md"), format!("# {n}\n")))
+        .collect();
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    let r = NotesRemote::new(&files);
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    let (base, _, prompts) = r.gated("state", gate.clone()).await;
+    // The first call is held: all 50 are pending, n50 (asked about) too; n00 never is.
+    let newest: Vec<&str> = names[1..].iter().map(String::as_str).collect();
+    assert_eq!(asking(&base, &prompts).await, inbox(&newest));
+    assert!(suggestions(&base).await.notes.is_empty());
+    gate.add_permits(1);
+    let s = until(&base, |s| s.len() == 50).await;
+    assert!(!s.contains_key("inbox/n00.md"));
+    assert_eq!(suggestions(&base).await.pending, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_folder_gone_or_new_folders_ask_again() {
+    use std::time::Duration;
+    let r = NotesRemote::new(&[
+        ("inbox/a.md", "# a\n"),
+        ("inbox/b.md", "#home b\n"),
+        ("inbox/c.md", "#offlist c\n"),
+    ]);
+    let (base, _, prompts) = r.suggesting("state").await;
+    until(&base, |s| s.len() == 3).await;
+    // Its folder gone, a is asked again (and the reply naming it is now off-list); c, with
+    // none, is asked again as the folders changed; b's folder is still there.
+    r.remove("projects/amf/README.md");
+    r.push("amf gone");
+    let s = until(&base, |s| s["inbox/a.md"].dest == "none").await;
+    assert_eq!(s["inbox/b.md"].dest, "areas/home");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let counts = || {
+        (
+            asked(&prompts, "# a"),
+            asked(&prompts, "#home b"),
+            asked(&prompts, "#offlist c"),
+        )
+    };
+    assert_eq!(counts(), (2, 1, 2));
+    // A new folder: only the notes with none are asked again.
+    r.write("areas/work/plan.md", "# Plan\n");
+    r.push("work");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(counts(), (3, 1, 3));
+}
+
+#[tokio::test]
+async fn a_suggestion_that_cant_be_saved_isnt_asked_for_again() {
+    use std::time::Duration;
+    let r = NotesRemote::new(&[("inbox/a.md", "# a\n")]);
+    // A folder where the save's temp file goes: every save fails.
+    std::fs::create_dir_all(r.dir.join("state/captures/suggestions.tmp")).unwrap();
+    let (_base, _, prompts) = r.suggesting("state").await;
+    for _ in 0..100 {
+        if asked(&prompts, "# a") > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(asked(&prompts, "# a"), 1);
 }
 
 #[tokio::test]
