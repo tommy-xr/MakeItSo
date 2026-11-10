@@ -217,6 +217,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   #app-new .pick { display: flex; gap: .5rem; }
   #settings-form fieldset { display: grid; gap: .5rem; min-width: 0; margin: 0; padding: 0; border: 0; }
   #settings-form label { margin-top: .25rem; font-size: .8125rem; color: var(--dim); }
+  #settings-form h3 { margin: .75rem 0 0; padding: 0; }
   .nsub .dim { padding: .5rem 1.5rem; font-size: .8125rem; }
   #menu fieldset { margin: 1.25rem 0 0; padding: 0; border: 0; }
   #menu legend { padding: 0 .5rem .5rem; color: var(--dim); font: 600 .75rem var(--sans); }
@@ -895,8 +896,10 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
 </main>
 
 <main id="settings" hidden>
-  <h3>Apps</h3>
   <form id="settings-form"><fieldset disabled>
+    <label for="st-default">New tasks start on</label><select id="st-default"><option value="">Auto</option><option>claude</option><option>codex</option></select>
+    <p class="dim">Auto: the planner (claude) picks.</p>
+    <h3>Apps</h3>
     <p class="dim">Tasks that build or change apps run with these.</p>
     <label for="st-harness">Harness</label><select id="st-harness"><option>claude</option><option>codex</option></select>
     <label for="st-model">Model</label><input id="st-model" placeholder="e.g. opus" autocomplete="off" autocapitalize="off" spellcheck="false" required>
@@ -3639,7 +3642,7 @@ async function loadSettings() {
   } catch { got = { error: 'couldn’t reach the orchestrator' }; }
   if (settingsAsked !== ask) return got;
   settings = got;
-  if (got.s) { $('st-harness').value = got.s.apps.harness; $('st-model').value = got.s.apps.model; $('st-repo').value = got.s.apps.repo; }
+  if (got.s) { $('st-default').value = got.s.default_harness || ''; followDefault(); optLabel(); $('st-harness').value = got.s.apps.harness; $('st-model').value = got.s.apps.model; $('st-repo').value = got.s.apps.repo; }
   settingsMsg(got.error || '', true);
   renderSettings();
   return got;
@@ -3652,7 +3655,7 @@ function renderSettings() {
 }
 $('settings-form').onsubmit = async (e) => {
   e.preventDefault();
-  const body = { apps: { harness: $('st-harness').value, model: $('st-model').value, repo: $('st-repo').value } };
+  const body = { default_harness: $('st-default').value || null, apps: { harness: $('st-harness').value, model: $('st-model').value, repo: $('st-repo').value } };
   settingsBusy = true;
   renderSettings();
   let why = '';
@@ -3985,7 +3988,8 @@ function onMessage(msg) {
       workers = [...msg.workers].sort((a, b) => a.info.hostname.localeCompare(b.info.hostname) || a.id.localeCompare(b.id));
       // The chosen machine as now seen; one that left stays chosen, offline (its task waits for it).
       if (pick.worker) pick.worker = workers.find((w) => w.id === pick.worker.id) || { ...pick.worker, online: false, busy: false };
-      // A harness no longer offered goes back to Auto, and its model with it.
+      // A harness no longer offered goes back to Auto (or the default, if now offered), and its model with it.
+      followDefault();
       if (pick.harness && !pickHarnesses().includes(pick.harness)) pick.harness = pick.model = '';
       optLabel();
       break;
@@ -4118,6 +4122,7 @@ function connect() {
     live.clear(); // pieces were missed meanwhile; the open task's Show brings its reply so far
     send({ type: 'subscribe' });
     if (!readOnly) send({ type: 'watch_sessions' }); // full access only
+    if (!readOnly && !settingsAsked) loadSettings(); // the composer's default harness
     send({ type: 'status' });
     // The orchestrator may have restarted with a new key: re-read it before syncing.
     if (push.key) info().then((i) => { if (i.vapid) push.key = i.vapid; pushSync(); }).catch(() => {});
@@ -4335,10 +4340,23 @@ const modelField = $('model'); // moves into the model list, so it's held here
 // Hostname, plus its id's start where two workers share one (as the planner names them): `mac-1a2b3c4d`.
 const workerName = (w) => w.info.hostname + (workers.some((x) => x.id !== w.id && x.info.hostname === w.info.hostname) ? `-${w.id.slice(0, 8)}` : '');
 // The chosen machine, else every machine: their harnesses, and the models they list for the harness
-// (under Auto, the one a model makes the server run: claude, or on a chosen machine without it, its first).
+// (under Auto, the one a model makes the server run: the default harness, claude unset; on a chosen machine,
+// the default if it runs it, else claude if it does, else its first).
 const pickFrom = () => (pick.worker ? [pick.worker] : workers);
 const pickHarnesses = () => [...new Set(pickFrom().flatMap((w) => w.info.harnesses))].sort();
-const autoHarness = () => (!pick.worker || pick.worker.info.harnesses.includes('claude') ? 'claude' : pick.worker.info.harnesses[0]);
+const defaultHarness = () => (settings && settings.s && settings.s.default_harness) || '';
+const autoHarness = () => {
+  const runs = pick.worker && pick.worker.info.harnesses, d = defaultHarness();
+  return !runs ? d || 'claude' : [d, 'claude'].find((h) => runs.includes(h)) || runs[0];
+};
+// Until a harness is chosen here, the Harness chip follows Settings' default where the machine runs it, else Auto.
+let harnessChosen = false;
+function followDefault() {
+  if (harnessChosen) return;
+  const was = pick.harness, d = defaultHarness();
+  pick.harness = pickHarnesses().includes(d) ? d : '';
+  if (pick.harness !== was) pick.model = '';
+}
 const pickModels = () => [...new Set(pickFrom().flatMap((w) => w.info.models[pick.harness || autoHarness()] || []))];
 // A worker's status dot, its state as text; without a worker, an empty one keeping the column.
 function stateDot(w) {
@@ -4389,6 +4407,8 @@ function showOpts(k) {
 function choose(k, value) {
   const was = { harness: pick.harness, listed: pickModels().includes(pick.model) };
   pick[k] = value;
+  if (k === 'harness') harnessChosen = true;
+  else followDefault();
   if (pick.harness && !pickHarnesses().includes(pick.harness)) pick.harness = ''; // the new machine doesn't run it
   // A model belongs to its harness; one picked from a machine's list goes with a machine that doesn't list it.
   if (pick.harness !== was.harness || (k === 'worker' && was.listed && !pickModels().includes(pick.model))) pick.model = '';
