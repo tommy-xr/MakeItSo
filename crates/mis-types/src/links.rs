@@ -185,12 +185,40 @@ fn sha(s: &str) -> Option<&str> {
     token(s, |c| c.is_ascii_hexdigit()).filter(|h| (7..=40).contains(&h.len()))
 }
 
+/// `owner/name` of a GitHub remote URL (`git@github.com:o/n.git`, `https://github.com/o/n`).
+pub fn github_repo(remote: &str) -> Option<String> {
+    let path = (remote.strip_prefix("git@github.com:"))
+        .or_else(|| remote.strip_prefix("https://github.com/"))
+        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))?;
+    let path = path.trim_end_matches('/').trim_end_matches(".git");
+    let (o, n) = path.split_once('/')?;
+    (!o.is_empty() && !n.is_empty() && !n.contains('/')).then(|| format!("{o}/{n}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn urls(text: &str) -> Vec<String> {
         github_links(text).into_iter().map(|l| l.url).collect()
+    }
+
+    #[test]
+    fn github_remotes_name_their_repo() {
+        for url in [
+            "git@github.com:tommy-xr/mis-notes.git",
+            "https://github.com/tommy-xr/mis-notes",
+            "https://github.com/tommy-xr/mis-notes.git",
+            "ssh://git@github.com/tommy-xr/mis-notes.git",
+        ] {
+            assert_eq!(
+                github_repo(url).as_deref(),
+                Some("tommy-xr/mis-notes"),
+                "{url}"
+            );
+        }
+        assert_eq!(github_repo("https://gitlab.com/o/r"), None);
+        assert_eq!(github_repo("https://github.com/o/r/x"), None);
     }
 
     #[test]

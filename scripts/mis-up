@@ -5,20 +5,23 @@
 #   mis-up --worker      also run a local worker on ~/code (tools run without prompts)
 #   mis-up --update      fast-forward main from origin first
 #   mis-up --watch       every MIS_UPDATE_INTERVAL s (300): when origin/main moves, pull and build;
-#                        once no task runs, restart the orchestrator and local worker on it (the
-#                        tunnel stays up). A failed build keeps the running version; an orchestrator
-#                        that exits within 30 s is rolled back. The page's title bar shows which.
+#                        the page then shows Update ready. Once the owner taps Update and no task
+#                        runs, restart the orchestrator and local worker on it (the tunnel stays
+#                        up); Roll back returns to the build before. A failed build keeps the
+#                        running version; one that exits within 30 s is dropped. Started again, it
+#                        resumes the build last chosen, not the checkout's.
+#   mis-up --auto-update with --watch, start a ready build once no task runs, without the owner
 #   mis-up --no-tray     don't start the menu bar app (started by default on macOS, restarted with
 #                        each update; not with --worker-only)
 #   mis-up --worker-only just a worker; other args go to mis-worker (e.g. --url). With --watch a
-#                        remote machine updates the same way, waiting until no task runs anywhere.
+#                        remote machine updates on its own once no task runs anywhere.
 # Other args pass through to mis-orchestrator. Builds $MIS_REPO (default ~/code/make-it-so) only
 # when it is on main with no local changes: agents switch branches there. Each build's binaries
 # are copied to <state dir>/builds/<sha> and run from there, so a build never swaps a running one.
 set -e
 REPO=${MIS_REPO:-$HOME/code/make-it-so}
 ENV_FILE=$HOME/.config/mis/orchestrator.env
-tunnel=0 worker=0 update=0 watch=0 only=0 url='' pass=''
+tunnel=0 worker=0 update=0 watch=0 only=0 auto=false url='' pass=''
 tray=0; [ "$(uname -s)" = Darwin ] && tray=1
 while [ $# -gt 0 ]; do
   case $1 in
@@ -26,6 +29,7 @@ while [ $# -gt 0 ]; do
     --worker) worker=1 ;;
     --update) update=1 ;;
     --watch) watch=1 ;;
+    --auto-update) auto=true ;;
     --worker-only) only=1 ;;
     --no-tray) tray=0 ;;
     --url) url=$2 pass="$pass $1 $2"; shift ;;
@@ -122,10 +126,13 @@ headers() {
   true
 }
 
-# Tell the local orchestrator about update $2 (pending, failed, rolled_back); the page shows it.
+# Escape stdin for a JSON string.
+esc() { sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+# Tell the local orchestrator about update $2 (failed, rolled_back); the page shows it.
 report() {
   [ $only = 1 ] && return 0
-  subject=$(git -C "$REPO" log -1 --format=%s "$2" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g')
+  subject=$(git -C "$REPO" log -1 --format=%s "$2" | tr -d '\000-\037' | esc)
   body="{\"state\":\"$1\",\"sha\":\"$2\",\"subject\":\"$subject\"}"
   headers | curl -sf -m 10 -o /dev/null -H @- --data-binary "$body" "$url/api/update" ||
     log "could not report '$1' to $url"
@@ -133,18 +140,7 @@ report() {
 
 # Tasks a restart would interrupt, fleet-wide; empty if the orchestrator can't be asked.
 running() {
-  headers | curl -sf -m 10 -H @- "$url/api/update" | sed -n 's/.*"running":\([0-9]*\).*/\1/p'
-}
-
-# Wait for a moment with no task running.
-idle() {
-  told=''
-  while n=$(running); [ "$n" != 0 ]; do
-    if [ -z "$n" ] && [ -z "$told" ]; then
-      log "can't ask $url/api/update how many tasks run; retrying"; told=1
-    fi
-    nap 5
-  done
+  headers | curl -sf -m 10 -H @- "$url/api/update" | sed -n 's/.*"running":\([0-9][0-9]*\).*/\1/p'
 }
 
 # Sleep $1 s; if the watched process exits meanwhile, exit with its status, as a plain run would.
@@ -159,19 +155,101 @@ nap() {
   done
 }
 
-# Healthy: still running 30 s after start.
+# Healthy: still running 30 s after start. Meanwhile it hears the builds report, so the page
+# shows the new build at once.
 healthy() {
   i=0
   while [ $i -lt 30 ]; do
     kill -0 "$main" 2>/dev/null || return 1
+    [ $only = 1 ] || next >/dev/null
     sleep 1; i=$((i + 1))
   done
 }
 
-# Keep the three most recently built or run builds.
+# Keep the running, previous and ready builds.
 prune() {
-  # shellcheck disable=SC2012 # names are shas
-  ls -t "$BUILDS" | tail -n +4 | while read -r d; do rm -rf "${BUILDS:?}/$d"; done
+  for d in "$BUILDS"/*; do
+    case ${d##*/} in "$cur" | "$prev" | "$ready") ;; *) rm -rf "$d" ;; esac
+  done
+}
+
+# The running and previous builds, for a restart of mis-up and for Roll back.
+save() { printf '%s %s\n' "$cur" "$prev" >"$BUILDS/.state.new" && mv "$BUILDS/.state.new" "$BUILDS/.state"; }
+
+# Commits $1..$2, newest first (at most 50), as JSON [{"sha","subject"}].
+commits() {
+  [ -n "$1" ] && [ -n "$2" ] || { printf '[]'; return; }
+  printf '[%s]' "$(git -C "$REPO" log -50 --format='%H %s' "$1..$2" | tr -d '\000-\011\013-\037' | esc |
+    sed 's/^\([0-9a-f]*\) \(.*\)$/{"sha":"\1","subject":"\2"}/' | paste -sd, -)"
+}
+str() { if [ -n "$1" ]; then printf '"%s"' "$1"; else printf null; fi; }
+
+# The builds report (mis_types::Builds), rebuilt when the builds change.
+describe() {
+  [ -d "$BUILDS/$prev" ] || prev=''
+  origin=$(git -C "$REPO" config --get remote.origin.url | tr -d '\000-\037' | esc)
+  builds=$(printf '{"running":"%s","started":"%s","ready":%s,"previous":%s,"incoming":%s,"outgoing":%s,"origin":"%s","auto":%s}' \
+    "$cur" "$how" "$(str "$ready")" "$(str "$prev")" "$(commits "$cur" "$ready")" "$(commits "$prev" "$cur")" "$origin" "$auto")
+}
+
+# Main's build is ready unless it runs; build it (once) if it isn't yet.
+consider() {
+  head=$(git -C "$REPO" rev-parse HEAD)
+  if [ "$head" = "$cur" ]; then
+    ready=''
+  elif [ -d "$BUILDS/$head" ]; then
+    ready=$head
+  elif [ "$head" != "$tried" ]; then
+    tried=$head
+    if build; then
+      ready=$head
+    else
+      log "build failed; still running $(short "$cur")"
+      report failed "$head"
+    fi
+  fi
+  describe
+  prune
+}
+
+# The build to start now, if any: the orchestrator's answer to the builds report. A worker-only
+# machine has no say there: its ready build starts once no task runs anywhere.
+next() {
+  if [ $only = 1 ]; then
+    [ -n "$ready" ] && [ "$(running)" = 0 ] && echo "$ready"
+    return 0
+  fi
+  if ! answer=$(headers | curl -sf -m 10 -H @- --data-binary "$builds" "$url/api/update/builds"); then
+    [ -n "$told" ] || log "can't report builds to $url/api/update/builds; retrying"
+    told=1
+    return 0
+  fi
+  told=''
+  echo "$answer" | sed -n 's/.*"start":"\([0-9a-f]*\)".*/\1/p'
+}
+
+# Restart on build $1 (ready: Update, previous: Roll back). One that exits within 30 s is
+# dropped, and the running build starts again.
+go() {
+  if [ "$1" = "$ready" ]; then to=update; else to=roll_back; fi
+  log "restarting on $(short "$1") ($to)"
+  was_cur=$cur was_prev=$prev was_how=$how
+  prev=$cur cur=$1 how=$to ready=''
+  [ $to = roll_back ] && ready=$prev # Update brings it back
+  describe
+  restart "$cur"
+  if healthy; then
+    save
+  else
+    log "$(short "$cur") exited within 30 s; back on $(short "$was_cur")"
+    rm -rf "${BUILDS:?}/$cur"
+    cur=$was_cur prev=$was_prev how=$was_how ready=''
+    restart "$cur"
+    # Report once it is listening again.
+    tries=0; until [ -n "$(running)" ] || [ $tries -ge 20 ]; do nap 1; tries=$((tries + 1)); done
+    report rolled_back "$1"
+  fi
+  if on_clean_main; then consider; else describe; fi
 }
 
 if [ $watch = 1 ] && [ -z "$url" ]; then
@@ -185,8 +263,19 @@ if ! on_clean_main; then
   exit 1
 fi
 [ $update = 1 ] && git -C "$REPO" pull -q --ff-only
-build || exit 1
-cur=$sha
+mkdir -p "$BUILDS"
+cur='' prev='' ready='' tried='' how=launch told=''
+[ -f "$BUILDS/.state" ] && read -r cur prev <"$BUILDS/.state" || true
+if [ $watch = 1 ] && [ -n "$cur" ] && [ -d "$BUILDS/$cur" ]; then
+  # What main gained since waits for the owner, as it would have had this kept running.
+  log "resuming $(short "$cur")"
+else
+  last=$cur
+  build || exit 1
+  cur=$sha
+  [ "$last" = "$cur" ] || prev=$last
+fi
+save
 tpid='' orch='' wpid='' trpid='' main=''
 trap 'kill $tpid $orch $wpid $trpid 2>/dev/null || true' EXIT
 trap 'exit 130' INT
@@ -197,41 +286,36 @@ if [ $tunnel = 1 ]; then
   echo "tunnel up: $MIS_PUBLIC_URL (log: ~/.config/mis/cloudflared.log)" >&2
 fi
 start "$cur"
-prune
 if [ $watch = 0 ]; then
+  prune
   wait "$main"
   exit
 fi
 
-# Watch: from here every failure is logged and the running version keeps serving.
+# Watch: from here every failure is logged and the running version keeps serving. Every few
+# seconds the orchestrator hears the builds and says which to start; main is fetched every
+# INTERVAL s.
 set +e
-tried=$cur
+consider
+step=5; [ "$INTERVAL" -lt $step ] && step=$INTERVAL
+waited=0
 while :; do
-  nap "$INTERVAL"
-  git -C "$REPO" fetch -q origin main || { log "fetch failed"; continue; }
-  new=$(git -C "$REPO" rev-parse origin/main)
-  # Each sha gets one try: a failed build or a rollback waits for the next commit.
-  [ "$new" = "$tried" ] || [ "$new" = "$(git -C "$REPO" rev-parse HEAD)" ] && continue
-  on_clean_main || { log "$REPO is not clean main; not updating"; continue; }
-  tried=$new
-  git -C "$REPO" merge -q --ff-only origin/main || { log "can't fast-forward to origin/main"; continue; }
-  if ! build; then
-    log "build failed; still running $(short "$cur")"
-    report failed "$new"
-    continue
+  nap "$step"
+  waited=$((waited + step))
+  if [ $waited -ge "$INTERVAL" ]; then
+    waited=0
+    if ! on_clean_main; then
+      log "$REPO is not clean main; not updating"
+    elif git -C "$REPO" fetch -q origin main && git -C "$REPO" merge -q --ff-only origin/main; then
+      consider
+    else
+      log "can't fetch or fast-forward to origin/main"
+    fi
   fi
-  report pending "$new"
-  idle
-  log "restarting on $(short "$new")"
-  restart "$new"
-  if healthy; then
-    cur=$new
-  else
-    log "new build exited within 30 s; rolling back to $(short "$cur")"
-    restart "$cur"
-    # Report once it is listening again.
-    tries=0; until [ -n "$(running)" ] || [ $tries -ge 20 ]; do nap 1; tries=$((tries + 1)); done
-    report rolled_back "$new"
-  fi
-  prune
+  sha=$(next)
+  case $sha in
+    '') ;;
+    "$ready" | "$prev") go "$sha" ;;
+    *) log "asked to start $(short "$sha"), which isn't ready or previous" ;;
+  esac
 done

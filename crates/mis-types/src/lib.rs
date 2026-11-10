@@ -12,6 +12,7 @@ use uuid::Uuid;
 mod access;
 pub use access::access_headers;
 mod apps;
+mod builds;
 pub use apps::{
     valid_slug, AppBackup, AppDraft, AppFeedback, AppMe, AppMember, AppRelease, AppRole, AppTask,
     AppView, BackupKind, FeedbackEnd, FeedbackRect, FeedbackSize, FeedbackState, FeedbackStatus,
@@ -19,6 +20,7 @@ pub use apps::{
     MAX_DRAFT_IMAGE_BYTES, MAX_DRAFT_NOTE_CHARS, MAX_FEEDBACK_CHARS, MAX_FEEDBACK_TASKS,
     MAX_HELD_FEEDBACK, SLUG_RULE,
 };
+pub use builds::{Builds, Change, Commit, CoreUpdate, Started};
 pub mod diff;
 pub mod reviews;
 pub use diff::{DiffBase, DiffStat, TaskDiff};
@@ -33,7 +35,9 @@ pub use inventory::{InstalledApp, Inventory, Machine};
 mod links;
 pub mod merge;
 mod notes;
-pub use links::{github_link, github_links, Checks, Link, LinkKind, PrState, PrStatus};
+pub use links::{
+    github_link, github_links, github_repo, Checks, Link, LinkKind, PrState, PrStatus,
+};
 pub use merge::{
     is_merge_label, merge_label, MergeApprove, MergeFacts, MergeMethod, MergePolicy, MergeRule,
     MERGE_TOOL,
@@ -818,6 +822,9 @@ pub enum ServerMsg {
         now_ms: Option<u64>,
         #[serde(default)]
         update: Update,
+        /// The core's builds, from `mis-up --watch`; None without one.
+        #[serde(default)]
+        core_update: Option<CoreUpdate>,
         /// `Settings::default_harness`: under Auto, composers list the models it would run.
         #[serde(default)]
         default_harness: Option<String>,
