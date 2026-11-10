@@ -1,6 +1,6 @@
-//! The notes repo: publishing captures to it (`GET /api/notes/sync`), reading it (`GET
-//! /api/notes/tree`, `GET /api/projects`) and filing its inbox (`GET /api/notes/suggestions`,
-//! `POST /api/notes/move`).
+//! The notes repo: publishing captures to it (`/api/notes/sync`), reading it (`GET
+//! /api/notes/tree`, `GET /api/projects`), filing its inbox (`GET /api/notes/suggestions`,
+//! `POST /api/notes/move`) and starting projects in it (`POST /api/projects/tasks`).
 
 use std::collections::BTreeMap;
 
@@ -162,4 +162,24 @@ pub struct NoteSuggestion {
     /// sha256 (hex) of the folders it was chosen from: `none` is asked again when they change.
     #[serde(default)]
     pub folders: String,
+}
+
+/// `POST /api/projects/tasks`: a task that starts project `slug`. It runs in the settings' apps
+/// repo (the mis-notes checkout) with the projects guide (`guides/projects.md`): a record in a
+/// mis-notes PR and, if `repo`, a private GitHub repo.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProjectTask {
+    pub title: String,
+    /// Its id and folder, `projects/<slug>/`; the repo's name too.
+    pub slug: String,
+    /// What it is, in the user's words: the record's body and the repo's README.
+    pub description: String,
+    /// Create a private GitHub repo `<worker's gh user>/<slug>`.
+    pub repo: bool,
+    pub harness: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Only this worker runs it; None: Settings' apps machine, as for an app task.
+    #[serde(default)]
+    pub worker: Option<uuid::Uuid>,
 }

@@ -3,8 +3,9 @@
 //! starts with SKILL.md frontmatter (`name`, `description`), so it installs as a skill unchanged.
 
 /// Each guide's name and text.
-pub const GUIDES: [(&str, &str); 2] = [
+pub const GUIDES: [(&str, &str); 3] = [
     ("apps", include_str!("../../../guides/apps.md")),
+    ("projects", include_str!("../../../guides/projects.md")),
     ("routines", include_str!("../../../guides/routines.md")),
 ];
 

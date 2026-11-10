@@ -166,6 +166,37 @@ pub fn resolve<'a>(projects: &'a [Project], slug: &str) -> Option<&'a Project> {
         .find(|p| is(&p.id) || p.aliases.iter().any(is))
 }
 
+/// What has `slug` (ignoring case), so a new project can't: a record whose id or alias it is,
+/// e.g. `projects/pool/README.md`, else one of `folders` (`projects/<x>`, `archive/<x>`) named it.
+pub fn taken(projects: &[Project], folders: &[String], slug: &str) -> Option<String> {
+    if let Some(p) = resolve(projects, slug) {
+        let top = if p.archived { "archive" } else { "projects" };
+        return Some(format!("{top}/{}/README.md", p.id));
+    }
+    let named = |f: &&String| {
+        f.split_once('/')
+            .is_some_and(|(_, n)| n.eq_ignore_ascii_case(slug))
+    };
+    folders.iter().find(named).cloned()
+}
+
+/// Every folder under [`DIRS`] in `clone`, record or not, e.g. `projects/pool`.
+pub fn folders(clone: &Path) -> Vec<String> {
+    let mut all = Vec::new();
+    for top in DIRS {
+        for e in std::fs::read_dir(clone.join(top))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            if let (Some(name), true) = (e.file_name().to_str(), e.path().is_dir()) {
+                all.push(format!("{top}/{name}"));
+            }
+        }
+    }
+    all
+}
+
 /// Every record in `clone`: each folder under [`DIRS`] with a `README.md`. Read as the Notes
 /// view serves them ([`crate::notes_view::read`]: no symlinks below the clone); symlinked
 /// folders are skipped.
@@ -370,6 +401,22 @@ mod tests {
         }
         assert_eq!(resolve(&ps, "nope"), None);
         assert_eq!(resolve(&ps, ""), None);
+    }
+
+    #[test]
+    fn a_slug_is_taken_by_an_id_an_alias_or_a_folder() {
+        let mut old = project("old", &["Pool"]);
+        old.archived = true;
+        let list = [project("garden", &[]), old];
+        let folders = ["projects/garden".into(), "archive/Notes-Only".into()];
+        let taken = |slug| taken(&list, &folders, slug);
+        assert_eq!(
+            taken("garden").as_deref(),
+            Some("projects/garden/README.md")
+        );
+        assert_eq!(taken("pool").as_deref(), Some("archive/old/README.md"));
+        assert_eq!(taken("notes-only").as_deref(), Some("archive/Notes-Only"));
+        assert_eq!(taken("new"), None);
     }
 
     #[test]

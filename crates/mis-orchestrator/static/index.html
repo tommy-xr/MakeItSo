@@ -229,11 +229,14 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .nimg { position: relative; display: block; min-height: 4rem; margin: 0 0 .75rem; border-radius: .75rem; overflow: hidden; background: var(--raised); }
   .nimg img { display: block; max-width: 100%; height: auto; margin: 0 auto; }
   /* New routine: name, schedule and prompt atop Routines. 16px fields: iOS zooms into smaller ones. */
-  #routine-new, #settings-form { display: grid; gap: .5rem; margin: 0 0 1rem; padding: .875rem; border-radius: 1rem; background: var(--card); }
-  :is(#routine-new, #settings-form) :is(input, textarea, select) { width: 100%; font-size: 1rem; }
-  :is(#routine-new, #settings-form) input { min-height: 2.75rem; padding: 0 .75rem; }
-  :is(#routine-new, #settings-form) p { margin: 0; font-size: .8125rem; overflow-wrap: anywhere; }
-  :is(#routine-new, #settings-form) .row { margin: 0; }
+  #routine-new, #settings-form, #project-new { display: grid; gap: .5rem; margin: 0 0 1rem; padding: .875rem; border-radius: 1rem; background: var(--card); }
+  :is(#routine-new, #settings-form, #project-new) :is(input, textarea, select) { width: 100%; font-size: 1rem; }
+  :is(#routine-new, #settings-form, #project-new) input { min-height: 2.75rem; padding: 0 .75rem; }
+  :is(#routine-new, #settings-form, #project-new) p { margin: 0; font-size: .8125rem; overflow-wrap: anywhere; }
+  :is(#routine-new, #settings-form, #project-new) .row { margin: 0; }
+  #project-new .pick { display: flex; gap: .5rem; }
+  #project-new .toggle input { width: 2.5rem; min-height: 0; padding: 0; }
+  #project-new .toggle { font-size: .9375rem; }
   /* An app's board: references dropped anywhere on the page (or pasted, or picked) float as tilted cards, gently
      bobbing (none with reduced motion); Catalog sets them in tidy columns. Notes and documents are paper in either theme. */
   .refs { display: block; width: 100%; margin: 1rem 0 .5rem; padding: 1.5rem 1rem; border: 1.5px dashed var(--sep); border-radius: 1rem; background: none; color: var(--dim); font-size: .9375rem; }
@@ -929,7 +932,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
       <a href="#sessions" data-view="sessions">Sessions<span id="n-sessions" class="nc" hidden></span></a>
       <div class="ngrp"><a href="#notes" data-view="notes">Notes<span id="n-inbox" class="nc" hidden></span></a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-notes" aria-label="Show notes"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
       <ul id="nav-notes" class="nsub" hidden></ul>
-      <div class="ngrp"><a href="#projects" data-view="projects">Projects</a><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-projects" aria-label="Show projects"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
+      <div class="ngrp"><a href="#projects" data-view="projects">Projects</a><button type="button" id="project-add" class="ibtn" aria-label="New project" title="New project"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-projects" aria-label="Show projects"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
       <ul id="nav-projects" class="nsub" hidden></ul>
       <div class="ngrp"><a href="#routines" data-view="routines">Routines</a><button type="button" id="routine-add" class="ibtn" aria-label="New routine" title="New routine"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><button type="button" class="ibtn" aria-expanded="false" aria-controls="nav-routines" aria-label="Show routines"><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button></div>
       <ul id="nav-routines" class="nsub" hidden></ul>
@@ -1024,7 +1027,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
     <label for="st-default">Default harness</label><select id="st-default"><option value="">Auto</option><option>claude</option><option>codex</option></select>
     <p class="dim">Auto tasks run on this unless the planner picks another. Auto: claude.</p>
     <h3>Apps</h3>
-    <p class="dim">Tasks that build or change apps run with these.</p>
+    <p class="dim">Tasks that build or change apps, or start projects, run with these.</p>
     <label for="st-harness">Harness</label><select id="st-harness"><option>claude</option><option>codex</option></select>
     <label for="st-model">Model</label><input id="st-model" placeholder="e.g. opus" autocomplete="off" autocapitalize="off" spellcheck="false" required>
     <label for="st-repo">Apps repo on the worker</label><input id="st-repo" placeholder="e.g. ~/code/mis-notes" autocomplete="off" autocapitalize="off" spellcheck="false" required>
@@ -1042,6 +1045,18 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
 
 <main id="projects" hidden>
   <div class="chead"><a href="#projects" class="back" aria-label="Back"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a><div id="projects-head"></div></div>
+  <form id="project-new" hidden>
+    <p><strong>New project</strong></p>
+    <input id="pn-title" aria-label="Title" placeholder="Title, e.g. Pool robot" autocomplete="off" required>
+    <input id="pn-slug" aria-label="Slug" placeholder="Slug, e.g. pool-robot" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+    <textarea id="pn-description" aria-label="Description" placeholder="What is it? Goals, first steps" required></textarea>
+    <label class="toggle"><input type="checkbox" id="pn-repo" checked> Create a GitHub repo (private)</label>
+    <div class="pick"><select id="pn-harness" aria-label="Harness"><option>claude</option><option>codex</option></select><input id="pn-model" aria-label="Model" placeholder="Model" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+    <select id="pn-worker" aria-label="Machine"></select>
+    <p class="dim">An agent writes its record in the notes repo and opens a PR for you to merge.</p>
+    <p id="pn-error" class="bad" hidden></p>
+    <div class="row"><button>Start</button><button type="button" id="pn-cancel">Cancel</button></div>
+  </form>
   <div id="projects-body"></div>
 </main>
 
@@ -2099,11 +2114,11 @@ function render() {
   if (shots.some((x) => !x.id) || (r.view === 'build' && boardBusy)) $('send').disabled = true; // still uploading
   $('clip').disabled = shots.length >= MAX_SHOTS || !!pending || appSending;
   $('prompt').readOnly = appSending;
-  // Beside a list with nothing open (or a Notes folder, listed there): Select a …. Instead: the + form open atop Routines,
-  // a new app being built, or a section with nothing to pick, whose page says why (no notes repo, how to add a routine).
+  // Beside a list with nothing open (or a Notes folder, listed there): Select a …. Instead: the + form open atop Routines
+  // or Projects, a new app being built, or a section with nothing to pick, whose page says why (no notes repo, how to add a routine).
   // Workers keeps its Notify me toggle under it.
   const folder = listSec() === 'notes' && r.view === 'notes' && notesTree?.entries?.some((e) => e.path === r.id && e.kind === 'dir');
-  const choosing = split && (!isItem(r) || folder) && !bare(r) && r.view !== 'build' && !(r.view === 'routines' && !$('routine-new').hidden);
+  const choosing = split && (!isItem(r) || folder) && !bare(r) && r.view !== 'build' && !(r.view === 'routines' && !$('routine-new').hidden) && !(r.view === 'projects' && !$('project-new').hidden);
   for (const v in views) $(v).hidden = !everOpen || (v === 'list' ? !split && r.view !== 'list' : v !== r.view || (choosing && v !== 'workers'));
   $('fleet').hidden = $('machines').hidden = choosing; // listed beside it; Notify me stays
   $('choose').hidden = !everOpen || !choosing;
@@ -2223,12 +2238,12 @@ function taskRows(ul, rows) {
   if (!rows.length) ul.append(el('li', { className: 'dim' }, 'No tasks yet'));
 }
 
-// A routine run's own prompt, past the paragraph of rules the orchestrator puts first; an app task's, less the apps
-// guide it carries (up to a reply's earlier answer).
-const APP_TASK = 'This folder is a checkout of the apps repo.';
+// A routine run's own prompt, past the paragraph of rules the orchestrator puts first; an app or project task's,
+// less the guide it carries (up to a reply's earlier answer).
+const GUIDED = ['This folder is a checkout of the apps repo.', 'This folder is a checkout of the mis-notes repo.'];
 const promptOf = (t) => {
   const p = t.routine ? t.prompt.split('\n\n').slice(1).join('\n\n') || t.prompt : t.prompt;
-  return !p.includes(APP_TASK) ? p : p.replace(/\n\n---\nname: apps\n[\s\S]*?(?=\n\nEarlier answer:\n|$)/, '\n\n(+ the apps guide: mis guide apps)');
+  return !GUIDED.some((g) => p.includes(g)) ? p : p.replace(/\n\n---\nname: (apps|projects)\n[\s\S]*?(?=\n\nEarlier answer:\n|$)/, '\n\n(+ the $1 guide: mis guide $1)');
 };
 // A routine run's row: `↻ <routine> · `, the mode it ran in, then its own prompt.
 const routineHead = (t) => (t.routine ? [`↻ ${t.routine} · `, modeChip(t.routine_mode), promptOf(t)] : [t.prompt]);
@@ -3863,7 +3878,7 @@ let routineFocus = null; // routine to scroll to when Routines next renders
 // Below the split, `#routines/<name>` is the whole page, scrolled to that one (also on narrowing).
 function aim() { const r = route(); if (r.id && r.view === 'routines' && !isSplit(r)) routineFocus = r.id; }
 function renderNav() {
-  $('routine-add').hidden = $('app-add').hidden = $('nav-settings').hidden = readOnly;
+  $('routine-add').hidden = $('app-add').hidden = $('project-add').hidden = $('nav-settings').hidden = readOnly;
   if (!$('menu').open && !railShown()) return;
   // Rows as [href, dot class, name], or [text] for a note; a list is rebuilt only when they change, so focus stays.
   const rs = routines && routines.list;
@@ -4512,8 +4527,20 @@ const noteWhy = (path, why) => { const t = why.startsWith(`${path} `) ? why.slic
 const noteSuggested = (s, dests, pending) => (s && !s.error && s.dest !== 'none' && dests.includes(s.dest) ? 'file' : pending ? 'wait' : 'none');
 // A GitHub `owner/repo`'s page; null for anything else.
 const repoHref = (r) => (/^[\w.-]+\/[\w.-]+$/.test(r) && !/(^|\/)\.\.?($|\/)/.test(r) ? `https://github.com/${r}` : null);
+// A project slug from its title: an app's (slugify), accents dropped: `Café crème` -> `cafe-creme`.
+const projectSlug = (title) => slugify(title.normalize('NFKD').replace(/[\u0300-\u036f]/g, ''));
 // notes:end
 
+// Opening Notes or Projects asks the orchestrator to fetch the notes repo now (at most every 30 s), then rereads what
+// was read before it was in (the open note too), so a PR just merged shows.
+let notesFetched = 0;
+async function fetchNotes() {
+  if (Date.now() - notesFetched < 30000) return;
+  notesFetched = Date.now();
+  try { if (!(await fetch('/api/notes/sync', { method: 'POST', headers: authHeaders() })).ok) return; } catch { return; }
+  if (notesAsked) { noteShown = null; loadNotes(); }
+  if (projectsAsked) loadProjects();
+}
 // The notes repo's tree, fetched on open and on each move within Notes; the open note's text, fetched when shown.
 let notesTree = null; // { state, entries } | { error } | null while reading
 let notesAsked = null;
@@ -5070,6 +5097,7 @@ function connect() {
     retries = 0;
     everOpen = true;
     if (railShown()) loadNav(); // the rail's lists, for this token
+    if (['notes', 'projects'].includes(route().view)) fetchNotes();
     offline = false;
     clearTimeout(offlineTimer);
     offlineTimer = 0;
@@ -5385,7 +5413,7 @@ for (const f of [$('prompt'), $('reply-text')]) f.addEventListener('input', () =
 $('prompt').value = drafts.get('draft:new');
 // Leaving a view stops dictation into it and any readback.
 // A press's click has landed once the view changes: nothing left to hold for.
-window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); locate(); remember(); aim(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (['apps', 'build'].includes(route().view) && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; if (route().view === 'notes') { noteShown = null; if (notesTree) loadNotes(); } if (route().view === 'projects') { if (projects) loadProjects(); if (notesTree && route().id) loadNotes(); } render(); };
+window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); locate(); remember(); aim(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (['apps', 'build'].includes(route().view) && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; if (route().view === 'notes') { noteShown = null; if (notesTree) loadNotes(); } if (route().view === 'projects') { if (projects) loadProjects(); if (notesTree && route().id) loadNotes(); } if (['notes', 'projects'].includes(route().view)) fetchNotes(); render(); };
 setInterval(tick, 1000);
 
 // `#new`, a link into the page for a new task, is a list with the composer focused: Tasks from Tasks (or a task opened
@@ -5690,6 +5718,59 @@ $('app-add').onclick = () => {
   $('menu').close();
   wantNew = true;
   if (location.hash === '#new-app') render(); else location.hash = '#new-app';
+};
+// + by Projects: a form atop Projects that starts a task creating a project (a record in a notes repo PR, and a
+// private GitHub repo if ticked). Shown once Settings are read, with their harness and model.
+let projectOpening = null, slugTyped = false; // the latest open; the slug was typed, so the title no longer sets it
+async function showNewProject() {
+  const ask = {};
+  projectOpening = ask;
+  $('project-new').hidden = true;
+  $('pn-error').hidden = true;
+  const got = settings && settings.s ? settings : await loadSettings();
+  if (projectOpening !== ask) return;
+  $('pn-harness').value = got.s ? got.s.apps.harness : 'claude';
+  pickHarness();
+  if (got.error) { $('pn-error').textContent = `Settings: ${got.error}`; $('pn-error').hidden = false; }
+  $('project-new').hidden = false;
+  render(); // beside the list, in place of Select a project
+  window.scrollTo(0, 0);
+  $('pn-title').focus();
+}
+// The harness's model from Settings (another harness: its own default), and the machines running it. None picked:
+// Settings' apps machine (it has the notes checkout), else Auto as there.
+function pickHarness() {
+  const h = $('pn-harness').value, s = settings && settings.s;
+  $('pn-model').value = s && s.apps.harness === h ? s.apps.model : '';
+  $('pn-worker').replaceChildren(el('option', { value: '' }, s && s.apps.worker ? 'Settings’ apps machine' : 'Auto'),
+    ...workers.filter((w) => w.online && w.info.harnesses.includes(h)).map((w) => el('option', { value: w.id }, workerName(w))));
+}
+$('pn-harness').onchange = pickHarness;
+$('pn-title').oninput = () => { if (!slugTyped) $('pn-slug').value = projectSlug($('pn-title').value); };
+$('pn-slug').oninput = () => { slugTyped = $('pn-slug').value !== ''; };
+$('project-add').onclick = () => {
+  $('menu').close();
+  location.hash = '#projects';
+  render();
+  showNewProject();
+};
+const closeNewProject = () => { projectOpening = null; slugTyped = false; $('project-new').reset(); $('project-new').hidden = true; render(); };
+$('pn-cancel').onclick = closeNewProject;
+$('project-new').onsubmit = async (e) => {
+  e.preventDefault();
+  const body = { title: $('pn-title').value, slug: $('pn-slug').value.trim(), description: $('pn-description').value, repo: $('pn-repo').checked,
+    harness: $('pn-harness').value, model: $('pn-model').value.trim() || null, worker: $('pn-worker').value || null };
+  const btn = $('project-new').querySelector('.row button');
+  btn.disabled = true;
+  let why = '', task = null;
+  try {
+    const r = await fetch('/api/projects/tasks', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (r.ok) task = (await r.json()).task; else why = (await r.text()) || `error ${r.status}`;
+  } catch { why = 'couldn’t reach the orchestrator'; }
+  btn.disabled = false;
+  if (why) { $('pn-error').textContent = why; $('pn-error').hidden = false; return; }
+  closeNewProject();
+  location.hash = `#task/${task}`;
 };
 // A chevron unfolds its list; opening Routines' or Apps' fetches them fresh.
 for (const b of $('menu').querySelectorAll('.ngrp button[aria-controls]')) b.onclick = () => {

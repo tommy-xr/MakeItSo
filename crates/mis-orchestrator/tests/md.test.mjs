@@ -23,7 +23,7 @@ const ap = new Function(`${refsBlock}; ${appsBlock}; return { composerFor, appTa
 const rf = new Function(`${refsBlock}; return { refKind, docExt, servedName };`)();
 const clearBlock = page.slice(page.indexOf('// clear:begin'), page.indexOf('// clear:end'));
 const cl = new Function(`${clearBlock}; return { clearKey, draftWaits, withCleared, CLEARED_MAX };`)();
-const nt = { ...new Function(`${notesBlock}; return { noteFront, noteAuthor, noteRows, noteDestGroups, noteDestLabel, noteSuggested, noteWhy, noteTops, projectOf, projectDir, projectActive, projectFiles, projectFind, repoHref };`)(), notePath: new Function(`${block}; return notePath;`)() };
+const nt = { ...new Function('slugify', `${notesBlock}; return { noteFront, noteAuthor, noteRows, noteDestGroups, noteDestLabel, noteSuggested, noteWhy, noteTops, projectOf, projectDir, projectActive, projectFiles, projectFind, repoHref, projectSlug };`)(ap.slugify), notePath: new Function(`${block}; return notePath;`)() };
 
 // Every tag in the output, e.g. ['p', 'a', 'code'].
 const tags = (html) => [...html.matchAll(/<([a-z0-9]+)/g)].map((m) => m[1]);
@@ -544,4 +544,13 @@ test('cleared keys stay unique and capped, newest kept', () => {
   const many = cl.withCleared([], Array.from({ length: cl.CLEARED_MAX + 5 }, (_, i) => `k${i}`));
   assert.equal(many.length, cl.CLEARED_MAX);
   assert.equal(many.at(-1), `k${cl.CLEARED_MAX + 4}`);
+});
+
+test('a title suggests a slug the orchestrator takes', () => {
+  const ok = (s) => /^[a-z0-9][a-z0-9-]{0,31}$/.test(s);
+  for (const [title, slug] of [['Pool robot', 'pool-robot'], ['  Pool Robot #2!', 'pool-robot-2'], ['Café crème', 'cafe-creme'],
+    ['--x--', 'x'], ['日本', ''], ['a'.repeat(31) + ' bcd', 'a'.repeat(31)]]) {
+    assert.equal(nt.projectSlug(title), slug, title);
+    if (slug) assert.ok(ok(slug), slug);
+  }
 });

@@ -48,7 +48,7 @@ pub use merge::{
 };
 pub use notes::{
     NoteEntry, NoteKind, NoteMove, NoteMoved, NoteSuggestion, NoteSuggestions, NotesSync,
-    NotesTree, Project, ProjectError, Projects, SyncState,
+    NotesTree, Project, ProjectError, ProjectTask, Projects, SyncState,
 };
 pub mod mcp;
 mod permissions;

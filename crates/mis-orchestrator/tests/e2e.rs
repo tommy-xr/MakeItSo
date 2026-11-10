@@ -4270,11 +4270,13 @@ async fn refused_everywhere_else(base: &str, headers: &[(&'static str, &str)]) {
         ("GET", "/api/routines".into()),
         ("POST", "/api/routines/r/run".into()),
         ("GET", "/api/notes/sync".into()),
+        ("POST", "/api/notes/sync".into()),
         ("GET", "/api/notes/tree".into()),
         ("GET", "/api/notes/file?path=inbox/a.md".into()),
         ("POST", "/api/notes/move".into()),
         ("GET", "/api/notes/suggestions".into()),
         ("GET", "/api/projects".into()),
+        ("POST", "/api/projects/tasks".into()),
         ("GET", "/api/apps".into()),
         ("POST", "/api/apps/a/releases".into()),
         ("POST", "/api/apps/a/activate".into()),
@@ -5212,6 +5214,184 @@ async fn a_suggestion_that_cant_be_saved_isnt_asked_for_again() {
     }
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert_eq!(asked(&prompts, "# a"), 1);
+}
+
+/// `git args` in `dir` as a human; panics if it fails.
+fn human_git(dir: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["-c", "user.name=Human", "-c", "user.email=h@example.com"])
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "git {args:?}: {err}");
+}
+
+/// Push `files` from the human's clone `<dir>/human` of `<dir>/remote.git`, made by the first call.
+fn human_push(dir: &std::path::Path, files: &[(&str, &str)]) {
+    let human = dir.join("human");
+    if !human.exists() {
+        std::fs::create_dir_all(dir).unwrap();
+        human_git(
+            dir,
+            &["init", "--quiet", "--bare", "-b", "main", "remote.git"],
+        );
+        human_git(dir, &["clone", "--quiet", "remote.git", "human"]);
+    }
+    for (path, text) in files {
+        let at = human.join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, text).unwrap();
+    }
+    human_git(&human, &["add", "-A"]);
+    human_git(&human, &["commit", "--quiet", "-m", "notes"]);
+    human_git(&human, &["push", "--quiet", "origin", "HEAD:main"]);
+}
+
+/// An orchestrator publishing to `<dir>/remote.git`, its settings in `<dir>/ledger`, that runs
+/// only at start and when asked; once a run has cloned the notes repo.
+async fn start_with_notes(dir: &std::path::Path) -> String {
+    use std::time::Duration;
+    let notes = mis_orchestrator::notes::Notes::new(
+        dir.join("remote.git").display().to_string(),
+        &dir.join("state"),
+    )
+    .with_timing(Duration::from_secs(3600), Duration::from_secs(3600));
+    let app = capturing(&dir.join("state"))
+        .with_ledger_dir(dir.join("ledger"))
+        .with_notes(notes);
+    let base = start_app(app).await;
+    let (status, body) = post_json(&base, "/api/notes/sync", "s", "").await;
+    assert_eq!(status, 200, "{body}");
+    assert!(dir.join("state/notes/.git").exists(), "{body}");
+    base
+}
+
+#[tokio::test]
+async fn new_project_task_runs_the_projects_guide_in_the_settings_repo_and_never_merges() {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-project-task-{}", uuid::Uuid::new_v4()));
+    let garden = "---\ntitle: Garden\naliases: [beds]\n---\nBeds.\n";
+    human_push(
+        &dir,
+        &[
+            (".gitattributes", "* -text\n"),
+            ("projects/garden/README.md", garden),
+            ("archive/shed/plan.md", "# plan\n"),
+        ],
+    );
+    let base = start_with_notes(&dir).await;
+    // Settings' apps machine runs it, as an app task: it waits while that is offline, though
+    // another worker is idle.
+    let studio = WorkerId::new_v4();
+    join_host(&base, studio, "studio")
+        .await
+        .close(None)
+        .await
+        .unwrap();
+    let (_, mut other) = join_as(&base).await;
+    let mut s = Settings::default();
+    (s.apps.repo, s.apps.worker) = ("~/code/notes".into(), Some(studio));
+    let s = serde_json::to_string(&s).unwrap();
+    assert_eq!(post_json(&base, "/api/settings", "s", &s).await.0, 204);
+
+    let body = serde_json::json!({
+        "title": "Pool robot", "slug": "pool-robot", "description": "Clean the pool.",
+        "repo": true, "harness": "claude", "model": "opus",
+    })
+    .to_string();
+    for token in ["r", "c"] {
+        let (status, _) = post_json(&base, "/api/projects/tasks", token, &body).await;
+        assert!(matches!(status, 401 | 403), "{token}: {status}");
+    }
+    let (status, created) = post_json(&base, "/api/projects/tasks", "s", &body).await;
+    assert_eq!(status, 201, "{created}");
+    let id: TaskId = serde_json::from_value(
+        serde_json::from_str::<serde_json::Value>(&created).unwrap()["task"].clone(),
+    )
+    .unwrap();
+    idle(&mut other).await;
+    let mut worker = join_host(&base, studio, "studio").await;
+    let OrchMsg::Assign { task, token, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    assert_eq!(task.id, id);
+    assert!(task
+        .prompt
+        .starts_with("Start a new project, slug `pool-robot`."));
+    assert!(task.prompt.contains("\ntitle: \"Pool robot\"\n"));
+    assert!(task.prompt.contains("\nrepos: [OWNER/pool-robot]\n"));
+    assert!(task
+        .prompt
+        .ends_with(mis_types::guides::guide("projects").unwrap()));
+    assert_eq!(task.cwd.as_deref(), Some("~/code/notes"));
+    assert_eq!(
+        (task.harness.as_str(), task.model.as_deref()),
+        ("claude", Some("opus"))
+    );
+    assert_eq!((task.merge, token), (MergeRule::Never, None));
+
+    // A slug the notes repo has (an id, alias or folder), a bad one, a blank description or
+    // an unknown harness starts nothing.
+    let with = |k: &str, v: serde_json::Value| {
+        let mut b: serde_json::Value = serde_json::from_str(&body).unwrap();
+        b[k] = v;
+        b.to_string()
+    };
+    for (bad, why) in [
+        (
+            with("slug", "garden".into()),
+            "taken: projects/garden/README.md",
+        ),
+        (with("slug", "beds".into()), "taken: projects/garden"),
+        (with("slug", "shed".into()), "taken: archive/shed"),
+        (with("slug", "Pool!".into()), "a-z"),
+        (with("description", " ".into()), "what the project is"),
+        (with("harness", "gpt".into()), "gpt"),
+    ] {
+        let (status, got) = post_json(&base, "/api/projects/tasks", "s", &bad).await;
+        assert!(status == 400 && got.contains(why), "{bad}: {status} {got}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn notes_sync_post_fetches_now_for_full_scope_only() {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-notes-fetch-{}", uuid::Uuid::new_v4()));
+    human_push(&dir, &[(".gitattributes", "* -text\n")]);
+    let base = start_with_notes(&dir).await;
+    let ids = || async {
+        let (_, body) = get_json(&base, "/api/projects", "s").await;
+        let got: Projects = serde_json::from_str(&body).unwrap();
+        got.projects.into_iter().map(|p| p.id).collect::<Vec<_>>()
+    };
+    // A PR merged after the first run: not shown until a run fetches it.
+    human_push(
+        &dir,
+        &[("projects/pool-robot/README.md", "---\n---\nNew.\n")],
+    );
+    assert!(ids().await.is_empty());
+    for token in ["r", "c"] {
+        let (status, _) = post_json(&base, "/api/notes/sync", token, "").await;
+        assert!(matches!(status, 401 | 403), "{token}: {status}");
+    }
+    assert!(ids().await.is_empty());
+    let (status, body) = post_json(&base, "/api/notes/sync", "s", "").await;
+    assert_eq!(status, 200, "{body}");
+    let sync: NotesSync = serde_json::from_str(&body).unwrap();
+    assert_eq!((sync.state, sync.last_error), (SyncState::Idle, None));
+    assert_eq!(ids().await, ["pool-robot"]);
+    // Without a remote: off, at once.
+    let off = start_app(capturing(&dir.join("off"))).await;
+    let (status, body) = post_json(&off, "/api/notes/sync", "s", "").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_str::<NotesSync>(&body).unwrap(),
+        NotesSync::OFF
+    );
+    // The running app may still hold files in it (Windows refuses to delete them).
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]

@@ -1140,3 +1140,27 @@ fn a_folder_converting_line_endings_differently_is_refused() {
     assert_eq!(w.head(), head);
     assert_eq!(git(&w.state.join("notes"), &["status", "--porcelain"]), "");
 }
+
+#[tokio::test]
+async fn fetch_asks_coalesce_into_one_run_that_cuts_the_capture_wait_short() {
+    use std::time::Duration;
+    let w = World::new();
+    let hour = Duration::from_secs(3600);
+    let notes = std::sync::Arc::new(w.notes().with_timing(hour, hour));
+    tokio::spawn(notes.clone().publish_loop());
+    notes.fetch_now(hour).await;
+    let first = notes.runs();
+    assert_eq!(first, 1, "the run at start served it");
+    // Asks made together, before the loop wakes (one thread), share one run.
+    let ask = || notes.fetch_now(hour);
+    tokio::join!(ask(), ask(), ask());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(notes.runs(), first + 1);
+    // A capture waits an hour to publish, unless a fetch is asked for.
+    w.capture("now", &[]);
+    notes.captured();
+    let s = tokio::time::timeout(Duration::from_secs(30), notes.fetch_now(hour))
+        .await
+        .unwrap();
+    assert_eq!((s.state, s.pending), (Idle, 0));
+}
