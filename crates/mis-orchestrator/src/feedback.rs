@@ -227,7 +227,6 @@ mod tests {
             after: false,
             task: Some(uuid::Uuid::nil()),
             at,
-            error: None,
         };
         let mut waiting = held("Bigger.", false);
         waiting.waiting = Some("held for the owner".into());

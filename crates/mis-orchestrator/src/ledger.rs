@@ -12,6 +12,7 @@ use crate::{app_grant, note, plan, routine, summary};
 
 mod alerts;
 pub mod persist;
+mod reviews;
 mod routines;
 mod sessions;
 
@@ -35,6 +36,17 @@ pub enum Effect {
         task: Task,
         images: Vec<Uuid>,
         token: Option<String>,
+    },
+    /// After `after`, look at approved review `id`'s PR on a worker (merging it if it can) and
+    /// feed what was found to `review_assessed`.
+    AdvanceReview {
+        id: Uuid,
+        after: std::time::Duration,
+    },
+    /// Review `review` was merged or rejected: run its kind's step (an app draft goes live, or
+    /// is discarded) and, rejected, close its PR.
+    ReviewDone {
+        review: Review,
     },
     Broadcast(ServerMsg),
     /// Worker went offline; call `expire(wid, generation)` after the grace period.
@@ -559,6 +571,8 @@ pub struct Ledger {
     bells: std::collections::BTreeSet<alerts::SessionKey>,
     /// When each live session last pushed (Unix millis) and whether urgently; not saved.
     alerted: HashMap<alerts::SessionKey, (u64, bool)>,
+    /// PRs waiting on the owner, and those approved until merged (see `reviews`).
+    reviews: Vec<Review>,
 }
 
 impl Ledger {
@@ -1955,7 +1969,7 @@ fn reply_context(prompt: &str, answer: Option<&str>, text: &str, whole: bool) ->
 mod tests {
     use super::*;
 
-    const T0: Duration = Duration::ZERO;
+    pub(super) const T0: Duration = Duration::ZERO;
     const STALE: Duration = Duration::from_secs(35);
 
     fn secs(s: u64) -> Duration {
@@ -2272,7 +2286,7 @@ mod tests {
         assert_eq!(l.tick(secs(90), STALE).len(), 2);
     }
 
-    fn info() -> WorkerInfo {
+    pub(super) fn info() -> WorkerInfo {
         WorkerInfo {
             hostname: "h".into(),
             os: "o".into(),

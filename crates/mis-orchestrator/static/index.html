@@ -3677,7 +3677,13 @@ function askChanges(a) {
   setTimeout(() => { const t = $('reply-text'); t.focus(); t.setSelectionRange(t.value.length, t.value.length); }, 0);
 }
 function draftCard(a, inTask) {
-  const d = a.draft, doing = draftBusy && draftBusy[0] === a.slug && draftBusy[1], busy = !!doing, err = draftErr.get(a.slug) || d.error;
+  const d = a.draft, doing = draftBusy && draftBusy[0] === a.slug && draftBusy[1], busy = !!doing, err = draftErr.get(a.slug);
+  // Its review: approved, it merges when it can, sending failures back to its task.
+  const rv = a.review || { state: { state: 'open' } }, st = rv.state, merging = st.state === 'approved';
+  const publishAs = st.state === 'fix_ready' ? 'Approve the fix' : st.state === 'needs_you' ? 'Try again' : 'Publish';
+  const said = st.state === 'approved' ? `Merging when it can: ${rv.status || 'starting'}`
+    : st.state === 'fix_ready' ? `Its task pushed a fix (${st.fixes} of 3): look, then approve it`
+    : st.state === 'needs_you' ? `Needs you: ${st.why}` : '';
   const asking = draftAsk && draftAsk[0] === a.slug ? draftAsk[1] : null;
   const ask = (action) => { draftAsk = action && [a.slug, action]; render(); };
   const owner = !readOnly && a.role === 'owner';
@@ -3685,21 +3691,22 @@ function draftCard(a, inTask) {
   const tryIt = a.url && ['owner', 'editor'].includes(a.role) ? el('a', { className: 'try', href: `${a.url}?draft=${d.release}`, target: '_blank', rel: 'noopener' }, 'Try it') : '';
   const actions = !owner ? el('div', {}, tryIt ? el('div', { className: 'row' }, tryIt) : '', el('p', { className: 'dim' }, 'Only its owner can publish it.'))
     : asking ? el('div', { className: 'golive' },
-      el('p', {}, asking === 'publish' ? `Publish v${d.release} of ${a.title}? Its PR merges first; if it can’t, nothing changes.`
-        : `Discard draft v${d.release}? The PR stays open for you to close.`),
+      el('p', {}, asking === 'publish' ? `Publish v${d.release} of ${a.title}? Its PR merges when its checks pass (failures go back to its task), then v${d.release} goes live.`
+        : `Reject draft v${d.release}? Its PR is closed with a comment.`),
       el('div', { className: 'row' },
-        el('button', { disabled: busy, onclick: () => decideDraft(a, asking) }, asking === 'publish' ? 'Yes, publish' : 'Yes, discard'),
+        el('button', { disabled: busy, onclick: () => decideDraft(a, asking) }, asking === 'publish' ? 'Yes, publish' : 'Yes, reject'),
         el('button', { type: 'button', onclick: () => ask(null) }, 'Not yet')))
     : el('div', { className: 'row' },
       tryIt,
-      el('button', { type: 'button', disabled: busy, onclick: () => ask('publish') }, doing === 'publish' ? 'Publishing…' : 'Publish'),
+      merging ? '' : el('button', { type: 'button', disabled: busy, onclick: () => ask('publish') }, doing === 'publish' ? 'Publishing…' : publishAs),
       d.task && !inTask ? el('button', { type: 'button', onclick: () => askChanges(a) }, 'Request changes') : '',
-      el('button', { type: 'button', className: 'quiet', disabled: busy, onclick: () => ask('discard') }, doing === 'discard' ? 'Discarding…' : 'Discard'));
+      el('button', { type: 'button', className: 'quiet', disabled: busy, onclick: () => ask('discard') }, doing === 'discard' ? 'Rejecting…' : 'Reject'));
   return el('div', { className: inTask ? 'appr draft' : 'draft' },
     el('div', { className: 'dim' }, `Draft v${d.release}${inTask ? ` of ${a.title}` : ''} · proposed `, appAge(d.at, Date.now() + skew)),
     d.note ? el('p', { className: 'what' }, d.note) : '',
     d.before || d.after ? el('div', { className: 'ba' }, d.before ? draftShot(a, 'before') : el('div'), d.after ? draftShot(a, 'after') : '') : '',
     el('a', { className: 'pr', href: d.pr, target: '_blank', rel: 'noopener' }, d.pr.replace('https://github.com/', '').replace('/pull/', '#')),
+    said ? el('div', { className: st.state === 'needs_you' ? 'err bad' : 'sub dim' }, said) : '',
     err ? el('div', { className: 'err bad' }, err) : '',
     actions);
 }

@@ -19,7 +19,9 @@ pub use apps::{
     MAX_DRAFT_NOTE_CHARS, MAX_FEEDBACK_CHARS, MAX_FEEDBACK_TASKS, MAX_HELD_FEEDBACK, SLUG_RULE,
 };
 pub mod diff;
+pub mod reviews;
 pub use diff::{DiffBase, DiffStat, TaskDiff};
+pub use reviews::{Assessment, PrRef, Review, ReviewKind, ReviewState, MAX_FIX_ATTEMPTS};
 pub mod evidence;
 pub mod guides;
 pub use evidence::{Evidence, EvidenceDraft, TaskResult};

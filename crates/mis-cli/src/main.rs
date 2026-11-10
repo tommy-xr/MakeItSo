@@ -1635,6 +1635,7 @@ mod tests {
             role: None,
             hold_feedback: false,
             feedback: vec![],
+            review: None,
         };
         assert_eq!(
             app_lines(&a, 120_000),
@@ -1662,7 +1663,6 @@ mod tests {
                 after: true,
                 task: None,
                 at: 0,
-                error: None,
             }),
             ..staged
         };

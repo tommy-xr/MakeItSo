@@ -483,6 +483,9 @@ fn refused(r: Refusal, index: Option<usize>) -> Response {
 }
 
 fn failed(slug: &str, e: anyhow::Error) -> Response {
+    if let Some(gone) = e.downcast_ref::<apps::DraftGone>() {
+        return (StatusCode::CONFLICT, gone.to_string()).into_response();
+    }
     tracing::error!("apps/{slug} records: {e:#}");
     (StatusCode::INTERNAL_SERVER_ERROR, "records unavailable").into_response()
 }

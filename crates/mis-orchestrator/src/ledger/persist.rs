@@ -39,6 +39,9 @@ struct Saved<'a> {
     /// `Ledger::bells`.
     #[serde(default)]
     bells: Cow<'a, BTreeSet<super::alerts::SessionKey>>,
+    /// `Ledger::reviews`.
+    #[serde(default)]
+    reviews: Cow<'a, [Review]>,
 }
 
 /// One save: the ledger file and each transcript that may have changed.
@@ -84,6 +87,7 @@ impl Ledger {
             routines: Cow::Borrowed(&self.routines),
             live: Cow::Borrowed(&self.live),
             bells: Cow::Borrowed(&self.bells),
+            reviews: Cow::Borrowed(&self.reviews),
         };
         let transcripts = (self.tasks.iter())
             .filter(|t| !written.contains(&t.task.id))
@@ -146,6 +150,7 @@ impl Ledger {
         l.routines = saved.routines.into_owned();
         l.live = saved.live.into_owned();
         l.bells = saved.bells.into_owned();
+        l.reviews = saved.reviews.into_owned();
         let written = (l.tasks.iter())
             .filter(|t| t.status.finished())
             .map(|t| t.task.id)

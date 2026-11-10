@@ -315,6 +315,18 @@ pub enum PublishError {
     Io(anyhow::Error),
 }
 
+/// The draft a request was trying ended (published, rejected, replaced) while it was on its way.
+#[derive(Debug)]
+pub struct DraftGone;
+
+impl std::fmt::Display for DraftGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("this draft was published, discarded or replaced: reload the page")
+    }
+}
+
+impl std::error::Error for DraftGone {}
+
 #[derive(Debug, PartialEq)]
 pub enum DraftError {
     NoSuchApp,
@@ -642,7 +654,6 @@ impl Apps {
             after: after.is_some(),
             task,
             at,
-            error: None,
         };
         let app = self.dir.join(slug);
         let tmp = app.join(format!(".draft-{}", uuid::Uuid::new_v4()));
@@ -688,10 +699,9 @@ impl Apps {
         f: impl FnOnce(&str) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
         let _held = self.lock.lock().unwrap();
-        anyhow::ensure!(
-            self.draft(slug).is_some_and(|d| d.release == n),
-            "v{n} of {slug} is no longer its draft"
-        );
+        if !self.draft(slug).is_some_and(|d| d.release == n) {
+            return Err(DraftGone.into());
+        }
         f(&self.fork_draft(slug)?)
     }
 
@@ -733,20 +743,6 @@ impl Apps {
         }
         self.records.close(&Self::draft_store(slug));
         std::fs::remove_dir_all(self.dir.join(slug).join(DRAFT)).is_ok()
-    }
-
-    /// Note on `slug`'s draft, if still proposal `id`, why publishing it didn't happen.
-    pub fn draft_failed(&self, slug: &str, id: uuid::Uuid, why: &str) {
-        let _held = self.lock.lock().unwrap();
-        let Some(mut d) = self.draft(slug).filter(|d| d.id == id) else {
-            return;
-        };
-        d.error = Some(why.into());
-        let path = self.dir.join(slug).join(DRAFT).join(DRAFT_FILE);
-        let json = serde_json::to_vec(&d).expect("draft serializes");
-        if let Err(e) = crate::push::write_private(&path, &json) {
-            tracing::warn!("apps/{slug}: noting a failed publish: {e}");
-        }
     }
 
     /// Keep `held` (waiting for the owner, or a record of where it went), replacing a copy kept
@@ -877,6 +873,7 @@ impl Apps {
             role: None,
             hold_feedback: policy.hold_feedback,
             feedback: self.waiting_feedback(slug),
+            review: None,
         })
     }
 }

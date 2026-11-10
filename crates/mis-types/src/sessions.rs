@@ -19,14 +19,20 @@ pub enum Query {
         id: Uuid,
         limit: usize,
     },
-    /// Merge app draft PR `repo#number` if it passes the draft checks (see the worker's
-    /// `merge::check_draft`), only while its head is `head`; `cwd` is the apps repo, whose
-    /// GitHub repo it must be. Answered with `Answer::Merged`.
-    MergeDraft {
+    /// Look at review PR `repo#number` and merge it if it can merge now at `head` (see the
+    /// worker's `merge::assess`); `cwd` is a checkout of the repo it must be in. Answered with
+    /// `Answer::Assessed`.
+    AssessReview {
         cwd: String,
         repo: String,
         number: u64,
         head: String,
+    },
+    /// Close PR `repo#number` with `comment`. Answered with `Answer::Done`.
+    ClosePr {
+        repo: String,
+        number: u64,
+        comment: String,
     },
 }
 
@@ -48,8 +54,11 @@ pub enum Answer {
         open: bool,
     },
     NotFound,
-    /// Err: why it wasn't merged (nothing changed).
-    Merged {
+    Assessed {
+        assessment: crate::Assessment,
+    },
+    /// Err: why it didn't happen.
+    Done {
         result: Result<String, String>,
     },
 }

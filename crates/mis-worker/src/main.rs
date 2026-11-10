@@ -646,28 +646,46 @@ fn handle_incoming(
                     tokio::spawn(async move { tx.send(msg).await });
                 }
             }
+            // These run `gh`: answered from here, not the file-reading `answer`.
             Ok(OrchMsg::Query {
                 req,
-                query:
-                    Query::MergeDraft {
-                        cwd,
-                        repo,
-                        number,
-                        head,
-                    },
+                query: query @ (Query::AssessReview { .. } | Query::ClosePr { .. }),
             }) => {
                 let (tx, roots) = (ctx.pr_tx.clone(), ctx.roots.clone());
                 tokio::spawn(async move {
-                    let w = merge::Want { repo, number };
-                    let result = match roots::resolve_cwd(&roots, Some(&cwd)) {
-                        Ok(dir) => {
-                            let dir = dir.display().to_string();
-                            merge::merge_draft("gh".as_ref(), &dir, &w, &head).await
+                    let gh = std::ffi::OsStr::new("gh");
+                    let answer = match query {
+                        Query::AssessReview {
+                            cwd,
+                            repo,
+                            number,
+                            head,
+                        } => {
+                            let w = merge::Want { repo, number };
+                            let assessment = match roots::resolve_cwd(&roots, Some(&cwd)) {
+                                Ok(dir) => {
+                                    let dir = dir.display().to_string();
+                                    merge::assess_review(gh, &dir, &w, &head).await
+                                }
+                                Err(why) => Assessment::Refused {
+                                    why: format!("its checkout: {why}"),
+                                },
+                            };
+                            tracing::info!("review {}#{}: {assessment:?}", w.repo, w.number);
+                            Answer::Assessed { assessment }
                         }
-                        Err(why) => Err(format!("the apps repo: {why}")),
+                        Query::ClosePr {
+                            repo,
+                            number,
+                            comment,
+                        } => {
+                            let w = merge::Want { repo, number };
+                            Answer::Done {
+                                result: merge::close_pr(gh, &w, &comment).await,
+                            }
+                        }
+                        _ => Answer::NotFound,
                     };
-                    tracing::info!("merge draft {}#{}: {result:?}", w.repo, w.number);
-                    let answer = Answer::Merged { result };
                     let _ = tx.send(WorkerMsg::Answer { req, answer }).await;
                 });
             }
@@ -702,7 +720,7 @@ fn answer(query: Query) -> Answer {
             transcript::read(&claude, &codex, &harness, id, limit, unix_ms())
         }
         // Answered where it arrives: it runs `gh`.
-        Query::MergeDraft { .. } => Answer::NotFound,
+        Query::AssessReview { .. } | Query::ClosePr { .. } => Answer::NotFound,
     }
 }
 
