@@ -405,9 +405,10 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .appr.draft { margin: 1rem 0; background: var(--card); }
   .draft .what, .appr.draft .what { margin: .25rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .875rem/1.45 var(--sans); }
   /* A draft, live: the app itself, framed from its own origin (apps allow only this page to). */
-  .draft .preview { margin: .5rem 0 0; }
-  .draft .preview iframe { display: block; width: 100%; height: min(70svh, 44rem); border: 0; border-radius: .75rem; background: #fff; }
-  .draft .preview a { display: inline-block; margin-top: .25rem; font-size: .8125rem; color: var(--dim); }
+  .preview { margin: .5rem 0 .75rem; font-size: .8125rem; }
+  .preview > div { margin-bottom: .25rem; }
+  .preview iframe { display: block; width: 100%; height: min(70svh, 44rem); border: 0; border-radius: .75rem; background: #fff; }
+  .preview a { display: inline-block; margin-top: .25rem; font-size: .8125rem; color: var(--dim); }
   .draft .ba { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; margin: .5rem 0 0; }
   .draft figure { margin: 0; }
   .draft figure img { display: block; width: 100%; max-height: 14rem; object-fit: cover; object-position: top; border-radius: .5rem; background: var(--raised); box-shadow: 0 0 0 1px var(--raised); }
@@ -881,6 +882,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   <section id="plan" aria-label="Plan" hidden></section>
   <section id="diff" aria-label="Files changed" hidden></section>
   <div id="task-convo" class="convo"></div>
+  <div id="task-preview" class="preview" hidden></div>
   <section id="approvals" hidden></section>
   <div class="row" hidden><button type="button" id="speak">Speak</button></div>
   <section id="evidence" hidden><div class="evh"><h3>Evidence</h3><button type="button" id="refresh-ev" aria-label="Refresh PR status" hidden>↻</button></div><ul class="evl"></ul></section>
@@ -916,6 +918,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
 
 <main id="build" hidden>
   <div class="chead"><a href="#apps" class="back" aria-label="Back to apps"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a><div id="build-head"></div></div>
+  <div id="build-preview" class="preview" hidden></div>
   <ul id="build-app" class="rows"></ul>
   <button type="button" id="refs" class="refs">Drop or paste sketches, screenshots and other references, or tap to add them</button>
   <p id="build-hint" class="dim">Say who uses it, what it keeps and what they see. An agent builds it in the apps repo, then opens a PR and proposes a draft for you to try.</p>
@@ -3111,6 +3114,7 @@ function renderDetail(id) {
     const wait = inSplit() ? detail.since + 2000 - Date.now() : 0;
     if (wait > 0) seenLater = setTimeout(render, wait); else send({ type: 'seen', task: id });
   }
+  showPreview($('task-preview'), ((hosted && hosted.list) || []).find((a) => a.draft && a.draft.task === id));
   const cards = [...approvalCards(t), ...taskDrafts(id)];
   $('approvals').replaceChildren(...cards);
   $('approvals').hidden = !cards.length;
@@ -3772,8 +3776,8 @@ function askChanges(a) {
   location.hash = `#task/${a.draft.task}`;
   setTimeout(() => { const t = $('reply-text'); t.focus(); t.setSelectionRange(t.value.length, t.value.length); }, 0);
 }
-// `preview`: the draft itself, framed (on its app's or its task's page).
-function draftCard(a, inTask, preview) {
+// `alone`: on its app's own page, beside its preview and the composer that asks for changes.
+function draftCard(a, inTask, alone) {
   const d = a.draft, doing = draftBusy && draftBusy[0] === a.slug && draftBusy[1], busy = !!doing, err = draftErr.get(a.slug);
   // Its review: approved, it merges when it can, sending failures back to its task.
   const rv = a.review || { state: { state: 'open' } }, st = rv.state, merging = st.state === 'approved';
@@ -3796,31 +3800,33 @@ function draftCard(a, inTask, preview) {
     : el('div', { className: 'row' },
       tryIt,
       merging ? '' : el('button', { type: 'button', disabled: busy, onclick: () => ask('publish') }, doing === 'publish' ? 'Publishing…' : publishAs),
-      d.task && !inTask && !preview ? el('button', { type: 'button', onclick: () => askChanges(a) }, 'Request changes') : '', // beside a preview, the composer asks
+      d.task && !inTask && !alone ? el('button', { type: 'button', onclick: () => askChanges(a) }, 'Request changes') : '',
       el('button', { type: 'button', className: 'quiet', disabled: busy, onclick: () => ask('discard') }, doing === 'discard' ? 'Rejecting…' : 'Reject'));
   return el('div', { className: inTask ? 'appr draft' : 'draft' },
     el('div', { className: 'dim' }, `Draft v${d.release}${inTask ? ` of ${a.title}` : ''} · proposed `, appAge(d.at, Date.now() + skew)),
     d.note ? el('p', { className: 'what' }, d.note) : '',
-    preview && tryIt ? draftPreview(a) : '',
     d.before || d.after ? el('div', { className: 'ba' }, d.before ? draftShot(a, 'before') : el('div'), d.after ? draftShot(a, 'after') : '') : '',
     el('a', { className: 'pr', href: d.pr, target: '_blank', rel: 'noopener' }, d.pr.replace('https://github.com/', '').replace('/pull/', '#')),
     said ? el('div', { className: st.state === 'needs_you' ? 'err bad' : 'sub dim' }, said) : '',
     err ? el('div', { className: 'err bad' }, err) : '',
     actions);
 }
-// Until it's been opened once in a tab, a preview offers that: framed, the apps' sign-in page
-// can't show, so a frame left blank by it needs the tab (Access then lets the frame in too).
-const signedIn = { get() { try { return !!localStorage.getItem('mis-apps-signed-in'); } catch { return false; } } };
-function draftPreview(a) {
-  const url = `${a.url}?draft=${a.draft.release}`;
+// App `a`'s draft (none: nothing), framed into `box` for those who may try it. Outside the cards, which
+// redraw, and replaced only for another draft: moving or redrawing a frame reloads the app in it.
+// Sandboxed so it can't navigate this page; it keeps its own (apps) origin, never this one. Framed, Access's
+// sign-in page can't show: the link signs in in a tab, and coming back loads it again.
+function showPreview(box, a) {
+  const ok = a && a.draft && a.url && ['owner', 'editor'].includes(a.role);
+  const url = ok ? `${a.url}?draft=${a.draft.release}` : '';
+  box.hidden = !ok;
+  if (box.dataset.url === url) return;
+  box.dataset.url = url;
+  if (!ok) { box.replaceChildren(); return; }
   const frame = el('iframe', { src: url, title: `Draft v${a.draft.release} of ${a.title}` });
-  const signIn = signedIn.get() ? '' : el('a', { href: url, target: '_blank', rel: 'noopener', onclick: () => {
-    try { localStorage.setItem('mis-apps-signed-in', '1'); } catch {}
-    signIn.remove();
-    // Back from the tab, signed in: load it again.
-    window.addEventListener('focus', () => { frame.src = url; }, { once: true });
-  } }, 'Blank? Sign in to apps ↗');
-  return el('div', { className: 'preview' }, frame, signIn);
+  frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads');
+  const signIn = el('a', { href: url, target: '_blank', rel: 'noopener',
+    onclick: () => window.addEventListener('focus', () => { frame.src = url; }, { once: true }) }, 'Blank? Sign in to apps ↗');
+  box.replaceChildren(el('div', { className: 'dim' }, `Draft v${a.draft.release} of ${a.title}, live`), frame, signIn);
 }
 // The drafts proposed by task `id`, as cards for its page.
 // Kept while nothing they show changes, so a render doesn't redraw their screenshots.
@@ -3831,7 +3837,7 @@ function taskDrafts(id) {
     const key = JSON.stringify([a.draft, a.role, readOnly, draftAsk, draftBusy, draftErr.get(a.slug)]);
     const had = draftNodes.get(a.slug);
     if (had && had.key === key) return had.node;
-    const node = draftCard(a, true, true);
+    const node = draftCard(a, true);
     draftNodes.set(a.slug, { key, node });
     return node;
   });
@@ -3868,6 +3874,7 @@ function renderBuild(slug) {
   // Feedback on a draft carries no images, and goes to the task that made it: no references, no placement.
   $('refs').hidden = !!(a && reviewing(a));
   if (a && reviewing(a)) $('clip').disabled = true;
+  showPreview($('build-preview'), a);
   if (!slug) { delete ul.dataset.key; ul.replaceChildren(); return; }
   if (a) { drawApps(ul, [a], true); return; }
   delete ul.dataset.key;
@@ -4538,6 +4545,8 @@ $('pick').onchange = () => {
 const composing = () => !$('dock').hidden && !$('new').hidden;
 function takeImages(files) {
   if (appSending) return; // what's sent is settled
+  const a = route().view === 'build' && hosted && hosted.list && hosted.list.find((x) => x.slug === route().id);
+  if (a && reviewing(a)) { flash('feedback on a draft takes no images'); return; }
   const imgs = [...files].filter((f) => f.type.startsWith('image/')), room = MAX_SHOTS - shots.length;
   if (imgs.length < files.length) flash('only images attach');
   else if (imgs.length > room) flash(`at most ${MAX_SHOTS} images`);
@@ -4620,20 +4629,21 @@ const reviewing = (a) => (a.draft && a.role === 'owner' && !readOnly ? a.draft.r
 // `note` on app `a`'s draft as in-app feedback (the frame's size its viewport): it goes back to the task
 // that made the draft. The text stays until it's taken.
 async function sendNote(note, a) {
-  const key = promptKey, f = document.querySelector('#build-app .preview iframe');
+  const key = promptKey, f = document.querySelector('#build-preview iframe');
   const body = draftNote(note, (f && f.clientWidth) || innerWidth, (f && f.clientHeight) || innerHeight);
   appSending = true;
   render();
-  let why = '';
+  let why = '', kept = false;
   try {
-    const r = await fetch(`/api/apps/${a.slug}/feedback/new`, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const r = await fetch(`/api/apps/${encodeURIComponent(a.slug)}/feedback/new`, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    kept = r.ok || r.status === 409; // 409: it waits on the app, with why
     if (!r.ok) why = (await r.text()) || `error ${r.status}`;
   } catch { why = 'couldn’t reach the orchestrator'; }
   appSending = false;
-  if (why) { flash(`error: ${why}`); render(); return; }
+  if (!kept) { flash(`error: ${why}`); render(); return; }
   drafts.set(key, '');
   if (promptKey === key) $('prompt').value = '';
-  flash('sent to its task');
+  flash(why ? `kept: ${why}` : 'sent to its task');
   await loadApps();
 }
 async function startApp(request, slug) {

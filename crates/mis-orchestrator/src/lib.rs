@@ -1431,11 +1431,12 @@ async fn page(State(app): State<App>) -> impl IntoResponse {
         .apps
         .as_ref()
         .and_then(|a| a.base_url())
-        .unwrap_or("'none'");
-    let csp = HeaderValue::from_str(&format!("frame-ancestors 'none'; frame-src {apps}"))
-        .unwrap_or(HeaderValue::from_static(
-            "frame-ancestors 'none'; frame-src 'none'",
-        ));
+        .and_then(apps_http::origin);
+    let csp = format!(
+        "frame-ancestors 'none'; frame-src {}",
+        apps.as_deref().unwrap_or("'none'")
+    );
+    let csp = HeaderValue::from_str(&csp).expect("origin() leaves only plain characters");
     (
         [
             (header::CONTENT_SECURITY_POLICY, csp),

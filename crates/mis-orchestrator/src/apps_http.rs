@@ -39,35 +39,38 @@ pub struct Auth {
     pub frame_ancestors: Vec<String>,
 }
 
-/// The MIS page's origins, for [`Auth::frame_ancestors`]: `public_url`'s (a `ws(s)://` or
-/// `http(s)://` URL), each `allowed` browser origin, and the listener `local` when it is loopback.
-/// Anything that isn't a bare `http(s)://host[:port]` is left out, so it can't add a directive.
+/// `url`'s origin as CSP writes it, e.g. `wss://MIS.example.com:443/x` -> `https://mis.example.com`.
+/// None: not an http(s)/ws(s) URL with a plain host, so it can't add a directive.
+pub fn origin(url: &str) -> Option<String> {
+    let url = mis_types::http_url(url.trim());
+    let scheme = url.split("://").next()?.to_ascii_lowercase();
+    let host = app_access::public_authority(&url).ok()?;
+    let plain = |c: char| c.is_ascii_alphanumeric() || ".-:[]".contains(c);
+    host.chars()
+        .all(plain)
+        .then(|| format!("{scheme}://{host}"))
+}
+
+/// The MIS page's origins, for [`Auth::frame_ancestors`]: `public_url`'s, each `allowed`
+/// browser origin, and the listener `local` (and `localhost`) when it is loopback.
 pub fn frame_ancestors(
     public_url: Option<&str>,
     allowed: &[String],
     local: SocketAddr,
 ) -> Vec<String> {
-    let public = public_url.map(|u| {
-        let u = mis_types::http_url(u.trim()).to_ascii_lowercase();
-        let rest = u.find("://").map_or(0, |i| i + 3);
-        u[..u[rest..].find('/').map_or(u.len(), |i| rest + i)].to_string()
+    let loopback = local.ip().is_loopback().then(|| {
+        [
+            format!("http://{local}"),
+            format!("http://localhost:{}", local.port()),
+        ]
     });
-    let loopback = local.ip().is_loopback().then(|| format!("http://{local}"));
-    let origin = |o: &String| {
-        let host = o
-            .strip_prefix("https://")
-            .or_else(|| o.strip_prefix("http://"));
-        host.is_some_and(|h| {
-            !h.is_empty()
-                && h.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c))
-        })
-    };
-    let mut out: Vec<String> = public
+    let all = public_url
         .into_iter()
-        .chain(allowed.iter().cloned())
-        .chain(loopback)
-        .filter(origin)
+        .map(str::to_string)
+        .chain(allowed.iter().cloned());
+    let mut out: Vec<String> = all
+        .filter_map(|u| origin(&u))
+        .chain(loopback.into_iter().flatten())
         .collect();
     out.dedup();
     out
@@ -830,21 +833,20 @@ mod tests {
             "https://mis.lan".to_string(),
             "https://x.example; script-src *".to_string(),
         ];
-        let got = frame_ancestors(Some("wss://MIS.example.com/"), &allowed, local);
-        assert_eq!(
-            got,
-            [
-                "https://mis.example.com",
-                "https://mis.lan",
-                "http://127.0.0.1:7474"
-            ]
-        );
+        let got = frame_ancestors(Some("wss://MIS.example.com:443/"), &allowed, local);
+        let want = [
+            "https://mis.example.com",
+            "https://mis.lan",
+            "http://127.0.0.1:7474",
+            "http://localhost:7474",
+        ];
+        assert_eq!(got, want);
+        assert_eq!(origin("https://u@x.example"), None);
+        assert_eq!(origin("ftp://x.example"), None);
         let lan: SocketAddr = "0.0.0.0:7474".parse().unwrap();
         assert!(frame_ancestors(None, &[], lan).is_empty());
         assert!(csp(&[]).contains("frame-ancestors 'none';"));
-        assert!(csp(&got).contains(
-            "frame-ancestors https://mis.example.com https://mis.lan http://127.0.0.1:7474;"
-        ));
+        assert!(csp(&got).contains("frame-ancestors https://mis.example.com https://mis.lan http://127.0.0.1:7474 http://localhost:7474;"));
     }
 
     use super::*;
