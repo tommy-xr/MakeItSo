@@ -788,7 +788,6 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
     :root:not(.vr) #menu :is(.nsub, .ngrp button[aria-controls]) { display: none; }
     :root:not(.vr) #menu nav > a > .nc { margin-right: .375em; }
     :root.split:not(.vr) :is(#projects .chead .back, #machine .mtop) { display: none; }
-    :root.split:not(.vr) #workers :is(#fleet, #machines) { display: none; } /* listed beside it; Notify me stays */
     :root.split:not(.vr) #notify-row { justify-content: center; }
     /* A diff takes the task column's whole width, past the 48rem measure (wider than 1440px). */
     :root.split:not(.vr) #diff { margin-inline: calc((100% - (100vw - var(--side) - 2 * var(--pad))) / 2); }
@@ -1891,7 +1890,9 @@ function locate() {
   if (!isItem(r)) here = { sec: r.view === 'list' ? r.id || 'home' : homeOf(r.view), back: location.hash || '#' };
   else if (history.state?.here) here = history.state.here;
   else {
-    here = { sec: here.sec || homeOf(r.view), back: left && left.view !== r.view ? left.hash : here.back };
+    const sec = here.sec || homeOf(r.view), back = left && left.view !== r.view ? left.hash : here.back;
+    // Reached by going back to it (Esc from its run): back to its section, not itself.
+    here = { sec, back: back === location.hash ? $('menu').querySelector(`nav a[data-view="${sec}"]`)?.getAttribute('href') || '#' : back };
     history.replaceState({ here }, '');
   }
   left = r.view === 'detail' || r.view === 'session' ? null : { hash: location.hash || '#', view: r.view };
@@ -1943,11 +1944,10 @@ function render() {
   // Beside a list with nothing open (or a Notes folder, listed there): Select a …. Instead: a + form open atop Routines or
   // Apps, or a section with nothing to pick, whose page says why (no notes repo, how to add a routine). Workers keeps its
   // Notify me toggle under it.
-  const folder = r.view === 'notes' && notesTree?.entries?.some((e) => e.path === r.id && e.kind === 'dir');
-  const bare = !r.id && { notes: notesTree && !noteTops(notesTree.entries || []).length, projects: projects && !projects.projects?.length,
-    routines: routines && !routines.list?.length, apps: hosted && !hosted.list?.length }[r.view];
-  const choosing = split && (!isItem(r) || folder) && !bare && !(r.view === 'routines' && !$('routine-new').hidden) && !(r.view === 'apps' && !$('app-new').hidden);
+  const folder = listSec() === 'notes' && r.view === 'notes' && notesTree?.entries?.some((e) => e.path === r.id && e.kind === 'dir');
+  const choosing = split && (!isItem(r) || folder) && !bare(r) && !(r.view === 'routines' && !$('routine-new').hidden) && !(r.view === 'apps' && !$('app-new').hidden);
   for (const v in views) $(v).hidden = !everOpen || (v === 'list' ? !split && r.view !== 'list' : v !== r.view || (choosing && v !== 'workers'));
+  $('fleet').hidden = $('machines').hidden = choosing; // listed beside it; Notify me stays
   $('choose').hidden = !everOpen || !choosing;
   $('choose').firstChild.textContent = folder ? 'Select a note.' : CHOOSE[r.view === 'list' ? r.id : r.view] || 'Select a task, or start one below.';
   // A conversation's back link returns to the view it was opened from.
@@ -2263,9 +2263,12 @@ function renderList() {
     : sec === 'home' && tasks.length ? 'Nothing needs you or is running.' : inSplit() ? 'No tasks yet.' : 'No tasks yet. Start one below.'));
 }
 
-// A section's list came in: redraw it if it is beside the view.
 // A section's list came in: redraw if it is beside the view (whether Select a … shows may change too).
 const relistCol = (sec) => { if (inSplit() && listSec() === sec) render(); };
+// A section's own page with nothing to pick, or that couldn't be read (no notes repo, no routines, an error): it says
+// why, in place of Select a …, and its list beside it stays blank.
+const bare = (r) => !r.id && { notes: notesTree && !noteTops(notesTree.entries || []).length, projects: projects && !projects.projects?.length,
+  routines: routines && !routines.list?.length, apps: hosted && !hosted.list?.length, workers: !workers.length }[r.view];
 // The folder Notes' list shows: the one open, or the open note's; '' (the top folders) at `#notes` or elsewhere.
 function noteDir() {
   const r = route();
@@ -2279,7 +2282,8 @@ function renderCol(sec) {
   const now = Date.now() + skew, say = (cls, text) => el('p', { className: cls, style: 'padding: 1rem .375rem' }, text);
   const rows = (list, row, none, cls = 'rows') => (list.length ? el('ul', { className: cls }, ...list.map(row)) : say('dim', none));
   let body;
-  if (sec === 'workers') body = [rows(workers, (w) => { const run = runningOn(w.id); return el('li', {}, el('a', { href: `#worker/${w.id}` },
+  if (bare(route())) body = [];
+  else if (sec === 'workers') body = [rows(workers, (w) => { const run = runningOn(w.id); return el('li', {}, el('a', { href: `#worker/${w.id}` },
     el('div', { className: 'r1' }, el('span', { className: `sd ${workerState(w)}` }), el('span', { className: 'one' }, w.info.hostname), chip(workerState(w))),
     el('div', { className: 'r2 one' }, ...(run ? dots([clock(run), run.activity]) : [w.info.purpose || machineText(w)])))); }, 'No workers connected')];
   else {
@@ -2305,7 +2309,9 @@ function renderCol(sec) {
     }[sec]();
   }
   $('list').replaceChildren(...body);
-  const r = route(), proj = sec === 'projects' && r.view === 'notes' && projectOf(projects?.projects || [], r.id), h = proj ? projectHref(proj.id) : location.hash;
+  const r = route(), proj = sec === 'projects' && r.view === 'notes' && projectOf(projects?.projects || [], r.id), t = r.view === 'detail' && tasks.find((x) => x.id === r.id);
+  const h = proj ? projectHref(proj.id) : sec === 'routines' && t?.routine ? `#routines/${encodeURIComponent(t.routine)}`
+    : sec === 'workers' && (t?.worker || r.view === 'session') ? `#worker/${t?.worker || r.id.split('/')[0]}` : location.hash;
   const links = [...$('list').querySelectorAll('.rows a[href^="#"]')];
   (links.find((a) => a.getAttribute('href') === h) || links.find((a) => h.startsWith(`${a.getAttribute('href')}/`)))?.setAttribute('aria-current', 'page');
 }
@@ -4094,9 +4100,11 @@ function noteText(src, dir) {
 function renderNotes(path) {
   if (!everOpen) return; // fetch once connected, with the token in place
   const cut = path.lastIndexOf('/'), dir = cut < 0 ? '' : path.slice(0, cut);
-  // A project's own file (or the AI's on it) goes back to the project; one deeper, to its folder.
-  if (!projects && !projectsAsked && /^(?:ai\/)?(?:projects|archive)\//.test(path)) loadProjects();
-  const proj = projects?.projects && projectOf(projects.projects, path), atTop = proj && [projectDir(proj), `ai/${projectDir(proj)}`].includes(dir);
+  // Opened from Projects, a project's own file (or the AI's on it) goes back to the project; one deeper, or browsed
+  // from Notes, to its folder.
+  const fromProjects = here.sec === 'projects';
+  if (fromProjects && !projects && !projectsAsked) loadProjects();
+  const proj = fromProjects && projects?.projects && projectOf(projects.projects, path), atTop = proj && [projectDir(proj), `ai/${projectDir(proj)}`].includes(dir);
   $('notes').querySelector('.back').href = atTop ? projectHref(proj.id) : !path ? '#' : dir ? noteHref(dir) : '#notes';
   const entry = notesTree && notesTree.entries && (path ? notesTree.entries.find((e) => e.path === path) : { kind: 'dir', path: '' });
   if (entry && entry.kind === 'md' && (!noteShown || noteShown.path !== path)) loadNote(path);
@@ -4656,7 +4664,9 @@ const mac = /Mac|iPhone|iPad/.test(navigator.platform); // Cmd+B there; Ctrl+B m
 function step(d) {
   const split = inSplit();
   if (!split && route().view !== 'list') return;
-  const seen = new Set(), links = [...$('list').querySelectorAll('.rows a[href^="#"]')].filter((a) => !seen.has(a.getAttribute('href')) && seen.add(a.getAttribute('href')));
+  // In a Notes folder, its notes only: stepping into a subfolder would leave them.
+  const dirs = split && listSec() === 'notes' && noteDir() ? new Set((notesTree?.entries || []).filter((e) => e.kind === 'dir').map((e) => noteHref(e.path))) : new Set();
+  const seen = new Set(dirs), links = [...$('list').querySelectorAll('.rows a[href^="#"]')].filter((a) => !seen.has(a.getAttribute('href')) && seen.add(a.getAttribute('href')));
   const cur = split ? $('list').querySelector('a[aria-current]')?.getAttribute('href') ?? location.hash : document.activeElement?.getAttribute('href');
   const at = links.findIndex((a) => a.getAttribute('href') === cur);
   // None current (nothing open, or what is came from a link): j takes the first row, k the last.
@@ -4830,8 +4840,8 @@ for (const a of $('menu').querySelectorAll('nav a[data-view]')) a.addEventListen
   if (!h || !wide.matches || !isDesk()) return;
   if (!shows(sec, h)) { lastOpen[sec] = null; return; }
   e.preventDefault();
-  here = { sec, back: a.getAttribute('href') }; left = null;
-  if (location.hash !== h) location.hash = h;
+  here = { sec, back: a.getAttribute('href') };
+  if (location.hash !== h) { left = null; location.hash = h; } // else `left` is still this page
   else { history.replaceState({ here }, ''); remember(); render(); }
 });
 // The lists unfold as last left; the first time, the rail has Notes and Workers unfolded: short lists, and Workers carries what's running.
