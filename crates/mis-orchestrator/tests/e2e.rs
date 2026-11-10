@@ -6658,7 +6658,8 @@ async fn the_mis_page_frames_a_draft_and_its_feedback_continues_the_drafts_threa
         "{}",
         reply.prompt
     );
-    std::fs::remove_dir_all(dir).unwrap();
+    // Best effort: on Windows the still-running server holds data.sqlite open.
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
