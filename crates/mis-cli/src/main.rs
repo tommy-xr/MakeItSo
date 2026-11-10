@@ -1665,7 +1665,6 @@ mod tests {
             ],
             draft: None,
             role: None,
-            hold_feedback: false,
             feedback: vec![],
             review: None,
         };

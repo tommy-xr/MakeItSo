@@ -916,9 +916,24 @@ impl Ledger {
     /// The newest task in `task`'s app thread, for feedback to reply to. Err: one is still
     /// working (the next waits for it). None: no such task.
     pub fn thread_tip(&self, task: TaskId) -> Option<Result<TaskId, String>> {
+        let thread = self.thread_of(task);
+        if thread.iter().any(|t| !t.status.finished()) {
+            return Some(Err("its task is still working".into()));
+        }
+        thread.last().map(|t| Ok(t.task.id))
+    }
+
+    /// Every task in `task`'s thread, first to newest; empty: no such task.
+    pub fn thread(&self, task: TaskId) -> Vec<TaskId> {
+        self.thread_of(task).iter().map(|t| t.task.id).collect()
+    }
+
+    fn thread_of(&self, task: TaskId) -> Vec<&TaskEntry> {
         let find = |id: TaskId| self.tasks.iter().find(|t| t.task.id == id);
         // Up to its first task, then every reply below it (tasks are in order).
-        let mut root = find(task)?;
+        let Some(mut root) = find(task) else {
+            return vec![];
+        };
         while let Some(up) = root.parent.and_then(find) {
             root = up;
         }
@@ -930,10 +945,18 @@ impl Ledger {
                 thread.push(t);
             }
         }
-        if thread.iter().any(|t| !t.status.finished()) {
-            return Some(Err("its task is still working".into()));
-        }
-        thread.last().map(|t| Ok(t.task.id))
+        thread
+    }
+
+    /// `task`'s status. None: no such task.
+    pub fn status_of(&self, task: TaskId) -> Option<TaskStatus> {
+        Some(self.tasks.iter().find(|t| t.task.id == task)?.status)
+    }
+
+    /// The app `task` works on, finished or not. None: not an app task, or a new app's.
+    pub fn app_of(&self, task: TaskId) -> Option<String> {
+        let t = self.tasks.iter().find(|t| t.task.id == task)?;
+        t.bound.as_ref()?.slug.clone()
     }
 
     /// App `slug`'s tasks that haven't finished.

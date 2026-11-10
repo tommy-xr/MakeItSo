@@ -2,19 +2,19 @@
 //! is asked. Receiving it is `apps_http`'s; holding and sending it, the orchestrator's.
 
 use mis_types::{
-    AppDraft, AppFeedback, FeedbackState, FeedbackStatus, HeldFeedback, TaskId, MAX_FEEDBACK_CHARS,
-    MAX_FEEDBACK_TASKS,
+    AppFeedback, FeedbackEnd, FeedbackState, FeedbackStatus, HeldFeedback, TaskId, TaskStatus,
+    MAX_FEEDBACK_CHARS, MAX_FEEDBACK_TASKS,
 };
+
+/// Why an editor's feedback waits as it comes in; the owner's goes to an agent at once.
+/// The app menu (`mis.js` `feedbackSays`) shows this one as "Waiting for owner".
+pub const FOR_THE_OWNER: &str = "waiting for the owner";
+/// Longest note the owner sends back with a dismissal.
+pub const MAX_REPLY_CHARS: usize = 500;
 
 /// Err: why `f` isn't feedback to act on.
 pub fn check(f: &AppFeedback) -> Result<(), String> {
-    let note = f.note.trim();
-    if note.is_empty() {
-        return Err("say what to change".into());
-    }
-    if note.chars().count() > MAX_FEEDBACK_CHARS {
-        return Err(format!("the note is over {MAX_FEEDBACK_CHARS} characters"));
-    }
+    check_note(&f.note, MAX_FEEDBACK_CHARS)?;
     if f.route.len() > 300 || f.selector.len() > 500 {
         return Err("route or selector too long".into());
     }
@@ -33,6 +33,18 @@ pub fn check(f: &AppFeedback) -> Result<(), String> {
     Ok(())
 }
 
+/// Err: why `note` (feedback, or the owner's edit of it) isn't one to send.
+pub fn check_note(note: &str, max: usize) -> Result<(), String> {
+    let note = note.trim();
+    if note.is_empty() {
+        return Err("say what to change".into());
+    }
+    if note.chars().count() > max {
+        return Err(format!("the note is over {max} characters"));
+    }
+    Ok(())
+}
+
 /// Where feedback goes.
 #[derive(Debug, PartialEq)]
 pub enum Send {
@@ -44,45 +56,103 @@ pub enum Send {
     Change,
 }
 
-/// Where `held` goes: held (`hold`: the app holds feedback; `open`: its tasks running), a
-/// reply in the thread of the app's draft (its newest task, `tip`; Err: why not now), or a new
-/// Change task when there's no draft. A draft from no task can't take it.
+/// Where `held` goes when the owner's (or the owner sends it; `open`: the app's tasks
+/// running): a reply in the thread of the draft it was about (its newest task, `tip`; Err:
+/// why not now), while that is still the app's draft (`current`), else a new Change task. A
+/// draft from no task can't take it.
 pub fn send(
     held: &HeldFeedback,
-    hold: bool,
+    current: bool,
     open: usize,
     tip: Option<Result<TaskId, String>>,
 ) -> Send {
-    match (hold, held.draft_task, tip) {
-        (true, _, _) => Send::Hold("held for the owner".into()),
-        (false, Some(None), _) => Send::Hold("its draft came from no task to continue".into()),
-        (false, Some(Some(_)), Some(Ok(tip))) => Send::Reply(tip),
-        (false, Some(Some(_)), Some(Err(why))) => Send::Hold(why),
-        (false, Some(Some(_)), None) => Send::Hold("its draft's task is gone".into()),
-        (false, None, _) if open >= MAX_FEEDBACK_TASKS => {
+    match (held.draft_task.filter(|_| current), tip) {
+        (Some(None), _) => Send::Hold("its draft came from no task to continue".into()),
+        (Some(Some(_)), Some(Ok(tip))) => Send::Reply(tip),
+        (Some(Some(_)), Some(Err(why))) => Send::Hold(why),
+        (Some(Some(_)), None) => Send::Hold("its draft's task is gone".into()),
+        (None, _) if open >= MAX_FEEDBACK_TASKS => {
             Send::Hold("its other tasks are still running".into())
         }
-        (false, None, _) => Send::Change,
+        (None, _) => Send::Change,
     }
+}
+
+/// What happens to kept feedback. Those naming an id are about that one; the rest, about
+/// whichever went to the tasks they name.
+#[derive(Debug)]
+pub enum Event<'a> {
+    /// It couldn't go to an agent: why.
+    Held(uuid::Uuid, String),
+    /// The owner reworded it.
+    Edited(uuid::Uuid, String),
+    /// It went to this task.
+    Sent(uuid::Uuid, TaskId),
+    /// The owner dismissed it, maybe with a note to its sender.
+    Dismissed(uuid::Uuid, Option<String>),
+    /// This task ended so.
+    Ended(TaskId, TaskStatus),
+    /// A task of this thread proposed this release as the app's draft.
+    Drafted(&'a [TaskId], u32),
+    /// This thread's draft went live as `Some(release)`, or was rejected.
+    Decided(&'a [TaskId], Option<u32>),
+}
+
+/// Whether `h` waits: not with an agent, not ended.
+pub fn waiting(h: &HeldFeedback) -> bool {
+    h.task.is_none() && h.end.is_none()
+}
+
+/// `h` after `e`. None: `e` isn't about it, or comes too late (it went, or ended).
+pub fn step(h: &HeldFeedback, e: &Event) -> Option<HeldFeedback> {
+    let mut h = h.clone();
+    let ours = |thread: &[TaskId]| h.end.is_none() && h.task.is_some_and(|t| thread.contains(&t));
+    match e {
+        Event::Held(id, why) if *id == h.id && waiting(&h) => h.waiting = Some(why.clone()),
+        Event::Edited(id, note) if *id == h.id && waiting(&h) => {
+            h.edited = Some(note.trim().into())
+        }
+        Event::Sent(id, task) if *id == h.id && waiting(&h) => {
+            (h.task, h.waiting) = (Some(*task), None)
+        }
+        Event::Dismissed(id, note) if *id == h.id && waiting(&h) => {
+            let reply = note.as_deref().map(str::trim).filter(|n| !n.is_empty());
+            let reply = reply.map(Into::into);
+            (h.end, h.waiting) = (Some(FeedbackEnd::Dismissed { reply }), None)
+        }
+        // With a draft to try, its task ending changes nothing: the draft's decision ends it.
+        Event::Ended(task, status) if ours(&[*task]) && h.drafted.is_none() => {
+            h.end = Some(FeedbackEnd::Ended { status: *status })
+        }
+        Event::Drafted(thread, release) if ours(thread) => h.drafted = Some(*release),
+        // Another thread's draft replaces the one it had (an app has one).
+        Event::Drafted(_, release) if h.end.is_none() && h.drafted.is_some() => {
+            h.end = Some(FeedbackEnd::Replaced { release: *release })
+        }
+        // Only a draft it had: its work still under way isn't in it.
+        Event::Decided(thread, live) if ours(thread) && h.drafted.is_some() => {
+            h.end = Some(match live {
+                Some(release) => FeedbackEnd::Published { release: *release },
+                None => FeedbackEnd::Rejected,
+            })
+        }
+        _ => return None,
+    }
+    Some(h)
 }
 
 /// How many of someone's latest feedback their menu shows.
 pub const SHOWN: usize = 5;
 
-/// What became of `held`, given the app's current `draft`: waiting, with an agent, or the draft
-/// its task proposed since.
-pub fn status(held: &HeldFeedback, draft: Option<&AppDraft>) -> FeedbackStatus {
-    let state = match (held.task, draft) {
-        _ if held.outcome.is_some() => FeedbackState::Done {
-            what: held.outcome.clone().unwrap_or_default(),
-        },
-        (None, _) => FeedbackState::Waiting {
+/// What became of `held`: waiting, with an agent, a draft to try, or how it ended.
+pub fn status(held: &HeldFeedback) -> FeedbackStatus {
+    let state = match (&held.end, held.task, held.drafted) {
+        (Some(end), _, _) => FeedbackState::Done(end.clone()),
+        (None, None, _) => FeedbackState::Waiting {
             why: held.waiting.clone().unwrap_or_default(),
         },
-        (Some(task), Some(d)) if d.task == Some(task) && d.at > held.at => {
-            FeedbackState::DraftReady { release: d.release }
-        }
-        (Some(_), _) => FeedbackState::Working,
+        (None, Some(_), Some(release)) => FeedbackState::DraftReady { release },
+        (None, Some(_), None) => FeedbackState::Working,
     };
     FeedbackStatus {
         id: held.id,
@@ -92,15 +162,11 @@ pub fn status(held: &HeldFeedback, draft: Option<&AppDraft>) -> FeedbackStatus {
     }
 }
 
-/// `who`'s feedback among `all` (any order), newest first, at most [`SHOWN`].
-pub fn statuses(all: &[HeldFeedback], who: &str, draft: Option<&AppDraft>) -> Vec<FeedbackStatus> {
+/// `who`'s feedback among `all` (any order), newest first, at most [`SHOWN`]: no one else's.
+pub fn statuses(all: &[HeldFeedback], who: &str) -> Vec<FeedbackStatus> {
     let mut theirs: Vec<&HeldFeedback> = all.iter().filter(|h| h.by == who).collect();
     theirs.sort_by_key(|h| std::cmp::Reverse((h.at, h.id)));
-    theirs
-        .into_iter()
-        .take(SHOWN)
-        .map(|h| status(h, draft))
-        .collect()
+    theirs.into_iter().take(SHOWN).map(status).collect()
 }
 
 /// What the agent is asked: the note, where it was marked, and to reproduce it first.
@@ -111,14 +177,18 @@ pub fn request(slug: &str, held: &HeldFeedback) -> String {
         (Some(n), false) => format!("v{n} (live)"),
         (None, _) => "it".into(),
     };
-    let quoted: Vec<String> = f.note.trim().lines().map(|l| format!("> {l}")).collect();
+    let (note, edited) = match &held.edited {
+        Some(e) => (e.as_str(), ", as its owner edited it"),
+        None => (f.note.as_str(), ""),
+    };
+    let quoted: Vec<String> = note.trim().lines().map(|l| format!("> {l}")).collect();
     let (r, v) = (f.rect, f.viewport);
     let element = match f.selector.trim() {
         "" => String::new(),
         s => format!(", element `{s}`"),
     };
     format!(
-        "Feedback on `{slug}` {seen} from {}:\n\n{}\n\nWhere: route `{}`{element}, page area \
+        "Feedback on `{slug}` {seen} from {}{edited}:\n\n{}\n\nWhere: route `{}`{element}, page area \
          {:.0},{:.0} {:.0}x{:.0} in a {}x{} viewport.\n\nReproduce it first: Playwright at that \
          route and viewport (mock mode), screenshot that element: the before shot. Then fix it, \
          `npm run verify`, take the after shot at the same route and viewport, publish and \
@@ -144,7 +214,7 @@ mod tests {
         HeldFeedback {
             id: uuid::Uuid::nil(),
             at: 0,
-            by: "jen@example.com".into(),
+            by: "editor@example.com".into(),
             release: Some(3),
             draft,
             draft_task: draft.then_some(Some(uuid::Uuid::nil())),
@@ -160,9 +230,11 @@ mod tests {
                 viewport: FeedbackSize { w: 390, h: 844 },
                 note: note.into(),
             },
-            waiting: None,
+            waiting: Some(FOR_THE_OWNER.into()),
+            edited: None,
             task: None,
-            outcome: None,
+            drafted: None,
+            end: None,
         }
     }
 
@@ -184,22 +256,24 @@ mod tests {
     }
 
     #[test]
-    fn feedback_continues_the_drafts_thread_unless_held_and_new_tasks_are_capped() {
+    fn feedback_continues_the_drafts_thread_and_new_tasks_are_capped() {
         let tip = uuid::Uuid::new_v4();
         let (on_draft, on_live) = (held("x", true), held("x", false));
-        assert_eq!(send(&on_draft, false, 9, Some(Ok(tip))), Send::Reply(tip));
+        assert_eq!(send(&on_draft, true, 9, Some(Ok(tip))), Send::Reply(tip));
         let busy = Some(Err("its task is still working".into()));
         assert_eq!(
-            send(&on_draft, false, 0, busy),
+            send(&on_draft, true, 0, busy),
             Send::Hold("its task is still working".into())
         );
         assert!(
-            matches!(send(&on_draft, false, 0, None), Send::Hold(_)),
+            matches!(send(&on_draft, true, 0, None), Send::Hold(_)),
             "thread gone"
         );
         let mut no_task = held("x", true);
         no_task.draft_task = Some(None);
-        assert!(matches!(send(&no_task, false, 0, None), Send::Hold(_)));
+        assert!(matches!(send(&no_task, true, 0, None), Send::Hold(_)));
+        // Its draft was decided or replaced while it waited: new work.
+        assert_eq!(send(&on_draft, false, 0, Some(Ok(tip))), Send::Change);
         assert_eq!(
             send(&on_live, false, 0, None),
             Send::Change,
@@ -209,65 +283,191 @@ mod tests {
             send(&on_live, false, MAX_FEEDBACK_TASKS, None),
             Send::Hold(_)
         ));
-        assert!(matches!(
-            send(&on_draft, true, 0, Some(Ok(tip))),
-            Send::Hold(_)
-        ));
+    }
+
+    /// `h` after each of `events` that applies; how many did.
+    fn run(mut h: HeldFeedback, events: &[Event]) -> (HeldFeedback, usize) {
+        let mut applied = 0;
+        for e in events {
+            if let Some(next) = step(&h, e) {
+                (h, applied) = (next, applied + 1);
+            }
+        }
+        (h, applied)
     }
 
     #[test]
-    fn senders_see_their_feedback_waiting_working_or_with_a_draft_to_try() {
-        let draft = |at| AppDraft {
-            id: uuid::Uuid::nil(),
-            release: 4,
-            pr: String::new(),
-            head: String::new(),
-            note: None,
-            before: false,
-            after: false,
-            task: Some(uuid::Uuid::nil()),
-            at,
+    fn waiting_feedback_is_edited_sent_or_dismissed_only_while_it_waits() {
+        let (id, task) = (uuid::Uuid::nil(), uuid::Uuid::new_v4());
+        let other = uuid::Uuid::new_v4();
+        let h = held("Bigger.", false);
+        assert!(waiting(&h));
+        assert_eq!(
+            status(&h).state,
+            FeedbackState::Waiting {
+                why: FOR_THE_OWNER.into()
+            }
+        );
+        assert!(step(&h, &Event::Sent(other, task)).is_none(), "another's");
+
+        let (sent, n) = run(
+            h.clone(),
+            &[
+                Event::Edited(id, " Bigger, and red. ".into()),
+                Event::Held(id, "its task is still working".into()),
+                Event::Sent(id, task),
+                // Too late: it went.
+                Event::Edited(id, "x".into()),
+                Event::Dismissed(id, None),
+                Event::Held(id, "x".into()),
+            ],
+        );
+        assert_eq!(n, 3);
+        assert_eq!(
+            (sent.edited.as_deref(), sent.task, &sent.waiting),
+            (Some("Bigger, and red."), Some(task), &None)
+        );
+        assert_eq!(status(&sent).state, FeedbackState::Working);
+        assert_eq!(
+            status(&sent).note,
+            "Bigger.",
+            "its sender sees their own words"
+        );
+
+        let (dismissed, _) = run(
+            h.clone(),
+            &[Event::Dismissed(id, Some(" Done already. ".into()))],
+        );
+        let end = FeedbackEnd::Dismissed {
+            reply: Some("Done already.".into()),
         };
-        let mut waiting = held("Bigger.", false);
-        waiting.waiting = Some("held for the owner".into());
-        let mut sent = held("Red.", false);
-        (sent.at, sent.task) = (10, Some(uuid::Uuid::nil()));
-        let mut other = held("Not mine.", false);
-        (other.by, other.at) = ("me@example.com".into(), 20);
-        let shown = statuses(
-            &[waiting, sent.clone(), other],
-            "jen@example.com",
-            Some(&draft(5)),
+        assert_eq!(status(&dismissed).state, FeedbackState::Done(end));
+        assert!(!waiting(&dismissed));
+        assert!(step(&dismissed, &Event::Sent(id, task)).is_none());
+        let (blank, _) = run(h, &[Event::Dismissed(id, Some("  ".into()))]);
+        assert_eq!(blank.end, Some(FeedbackEnd::Dismissed { reply: None }));
+    }
+
+    #[test]
+    fn sent_feedback_ends_with_its_task_or_its_threads_draft() {
+        let (id, task, reply) = (
+            uuid::Uuid::nil(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
         );
-        let states: Vec<_> = shown
-            .iter()
-            .map(|s| (s.note.as_str(), s.state.clone()))
-            .collect();
+        let (sent, _) = run(held("Red.", false), &[Event::Sent(id, task)]);
+        let thread = [task, reply];
+
+        // Its task ends with no draft: so it says, not "working" for ever.
+        let (failed, _) = run(sent.clone(), &[Event::Ended(task, TaskStatus::Failed)]);
         assert_eq!(
-            states,
-            [
-                ("Red.", FeedbackState::Working),
-                (
-                    "Bigger.",
-                    FeedbackState::Waiting {
-                        why: "held for the owner".into()
-                    }
-                ),
-            ]
+            status(&failed).state,
+            FeedbackState::Done(FeedbackEnd::Ended {
+                status: TaskStatus::Failed
+            })
         );
+        assert!(
+            step(&sent, &Event::Ended(reply, TaskStatus::Done)).is_none(),
+            "another task"
+        );
+
+        // A reply in its thread proposes v4: try it; its task ending then changes nothing;
+        // publishing ends it.
+        let (drafted, n) = run(
+            sent.clone(),
+            &[
+                Event::Drafted(&thread, 4),
+                Event::Ended(task, TaskStatus::Done),
+            ],
+        );
+        assert_eq!(n, 1);
         assert_eq!(
-            status(&sent, Some(&draft(11))).state,
+            status(&drafted).state,
             FeedbackState::DraftReady { release: 4 }
         );
+        let (live, _) = run(drafted.clone(), &[Event::Decided(&thread, Some(4))]);
+        assert_eq!(
+            status(&live).state,
+            FeedbackState::Done(FeedbackEnd::Published { release: 4 })
+        );
+        let (rejected, _) = run(drafted.clone(), &[Event::Decided(&thread, None)]);
+        assert_eq!(rejected.end, Some(FeedbackEnd::Rejected));
+        // Ended stays ended; another thread's decision isn't its.
+        assert!(step(&live, &Event::Drafted(&thread, 5)).is_none());
+        assert!(step(&sent, &Event::Decided(&[reply], Some(4))).is_none());
+        // Its draft decided while its own work was still under way: not its outcome.
+        assert!(step(&sent, &Event::Decided(&thread, Some(3))).is_none());
+        // Another thread's draft replaces the one it had; one still working is untouched.
+        let (replaced, _) = run(drafted.clone(), &[Event::Drafted(&[reply], 5)]);
+        assert_eq!(replaced.end, Some(FeedbackEnd::Replaced { release: 5 }));
+        assert!(step(&sent, &Event::Drafted(&[reply], 5)).is_none());
+        // Waiting feedback has no task to end.
+        assert!(step(&held("x", false), &Event::Ended(task, TaskStatus::Done)).is_none());
+    }
+
+    #[test]
+    fn senders_see_only_their_own_newest_first() {
+        let mut waiting = held("Bigger.", false);
+        waiting.id = uuid::Uuid::new_v4();
+        let mut sent = held("Red.", false);
+        (sent.id, sent.at, sent.task) = (uuid::Uuid::new_v4(), 10, Some(uuid::Uuid::nil()));
+        let mut other = held("Not mine.", false);
+        (other.by, other.at) = ("other@example.com".into(), 20);
+        let shown = statuses(&[waiting, sent, other], "editor@example.com");
+        let notes: Vec<_> = shown.iter().map(|s| s.note.as_str()).collect();
+        assert_eq!(notes, ["Red.", "Bigger."]);
         let many: Vec<_> = (0..9).map(|_| held("x", false)).collect();
-        assert_eq!(statuses(&many, "jen@example.com", None).len(), SHOWN);
+        assert_eq!(statuses(&many, "editor@example.com").len(), SHOWN);
+    }
+
+    #[test]
+    fn a_status_says_its_state_and_how_it_ended_flat() {
+        let mut h = held("Red.", false);
+        h.end = Some(FeedbackEnd::Published { release: 4 });
+        let json = serde_json::to_value(status(&h)).unwrap();
+        assert_eq!(
+            (&json["state"], &json["end"], &json["release"]),
+            (&"done".into(), &"published".into(), &4.into())
+        );
+        let back: FeedbackStatus = serde_json::from_value(json).unwrap();
+        assert_eq!(back, status(&h));
+        // A note back doesn't hide its sender's own.
+        h.end = Some(FeedbackEnd::Dismissed {
+            reply: Some("Not now.".into()),
+        });
+        let json = serde_json::to_value(status(&h)).unwrap();
+        assert_eq!(
+            (&json["note"], &json["reply"]),
+            (&"Red.".into(), &"Not now.".into())
+        );
+    }
+
+    #[test]
+    fn records_kept_before_end_say_how_they_ended() {
+        let mut v = serde_json::to_value(held("Red.", false)).unwrap();
+        v.as_object_mut().unwrap().remove("end");
+        for (outcome, end) in [
+            ("live as v3", FeedbackEnd::Published { release: 3 }),
+            ("discarded", FeedbackEnd::Rejected),
+        ] {
+            v["outcome"] = outcome.into();
+            let h: HeldFeedback = serde_json::from_value(v.clone()).unwrap();
+            assert_eq!(h.end, Some(end));
+        }
     }
 
     #[test]
     fn the_request_says_where_and_to_reproduce_first() {
         let r = request("pool", &held("Show pH too.\nIn red.", true));
-        assert!(r.starts_with("Feedback on `pool` v3 (the draft) from jen@example.com:\n\n> Show pH too.\n> In red.\n\n"));
+        assert!(r.starts_with("Feedback on `pool` v3 (the draft) from editor@example.com:\n\n> Show pH too.\n> In red.\n\n"));
         assert!(r.contains("route `#/readings`, element `main > div.chart`, page area 12,140 366x220 in a 390x844 viewport."));
         assert!(r.contains("Reproduce it first: Playwright"));
+        let mut edited = held("Show pH too.", false);
+        edited.edited = Some("Show pH beside chlorine.".into());
+        let r = request("pool", &edited);
+        assert!(
+            r.starts_with("Feedback on `pool` v3 (live) from editor@example.com, as its owner edited it:\n\n> Show pH beside chlorine.\n\n"),
+            "{r}"
+        );
     }
 }

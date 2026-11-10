@@ -422,10 +422,13 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .draft .row { gap: .375rem; }
   .draft .row button, .draft .try { min-height: 2.25rem; padding: 0 .75rem; border-radius: .625rem; font-size: .8125rem; }
   .draft .try { display: inline-flex; align-items: center; background: var(--accent); color: var(--on-accent); font-weight: 600; text-decoration: none; }
-  .draft .row button.quiet { padding: 0 .5rem; background: none; color: var(--dim); }
+  .draft .row button.quiet, .fb .row button.quiet { padding: 0 .5rem; background: none; color: var(--dim); }
   .draftrow .r1 strong { font-weight: 600; }
-  /* In-app feedback waiting, and the owner's hold switch. */
-  .fb .hold { display: flex; align-items: center; gap: .5rem; margin-top: .75rem; font-size: .8125rem; }
+  /* In-app feedback waiting for the owner: its words, then send, edit or dismiss. 16px fields: iOS zooms smaller. */
+  .fb li { margin-top: .5rem; padding: .625rem .75rem; border-radius: .75rem; background: var(--bg); box-shadow: inset 3px 0 0 var(--warn); }
+  .fb .what { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .fb textarea { display: block; width: 100%; margin-top: .5rem; padding: .5rem .625rem; font-size: 1rem; resize: vertical; }
+  .fb .row { gap: .375rem; margin: .5rem 0 0; }
   /* A merge approval: the PR's facts as a small grid. */
   .appr dl { display: grid; grid-template-columns: auto 1fr; gap: .125rem .75rem; margin: .25rem 0 .5rem; font-size: .8125rem; }
   .appr dt { color: var(--dim); }
@@ -1810,13 +1813,15 @@ const needLabel = (n) => `${n} need${n === 1 ? 's' : ''} you`;
 // { n, att: the most urgent kind, href: its first }.
 function homeNeed() {
   const need = everOpen ? listOf('home', false).threads.filter((th) => th.sec === 'need') : [], waits = everOpen ? feed.filter(asks) : [];
-  const drafts = everOpen ? appDrafts() : [], first = need[0] && [need[0].root, ...need[0].replies].find((t) => rank(t) === need[0].rank);
-  return { n: drafts.length + need.length + waits.length, att: first ? first.attention : waits[0] ? 'approval' : 'unread',
-    href: first ? `#task/${first.id}` : waits[0] ? `#session/${liveKey(waits[0])}` : drafts[0] ? draftHref(drafts[0]) : '' };
+  const drafts = everOpen ? appDrafts() : [], fb = everOpen ? fbWaiting() : [], first = need[0] && [need[0].root, ...need[0].replies].find((t) => rank(t) === need[0].rank);
+  return { n: drafts.length + fb.length + need.length + waits.length, att: first ? first.attention : waits[0] || fb[0] ? 'approval' : 'unread',
+    href: first ? `#task/${first.id}` : waits[0] ? `#session/${liveKey(waits[0])}` : drafts[0] ? draftHref(drafts[0]) : fb[0] ? `#apps/${fb[0].a.slug}` : '' };
 }
 // Apps with a draft waiting on its owner; Home lists them first under Needs you, each opening the task that made it.
 const appDrafts = () => ((hosted && hosted.list) || []).filter((a) => a.draft);
 const draftHref = (a) => (a.draft.task ? `#task/${a.draft.task}` : '#apps');
+// Feedback waiting on its owner ({ a, f }), in apps this page owns; Home lists it under Needs you, each opening its app.
+const fbWaiting = () => (readOnly ? [] : ((hosted && hosted.list) || []).filter((a) => a.role === 'owner').flatMap((a) => (a.feedback || []).map((f) => ({ a, f }))));
 // The header badge: Home's count, lit in the most urgent one's colour; a tap opens that one.
 function renderNeed() {
   const need = homeNeed(), b = $('need');
@@ -2239,14 +2244,19 @@ function renderList() {
     el('a', { href: draftHref(a) },
       el('div', { className: 'r1' }, el('span', { className: 'sd done att-unread' }), el('strong', { className: 'one' }, `Draft v${a.draft.release} of ${a.title}`)),
       el('div', { className: 'r2 one' }, a.role === 'owner' && !readOnly ? 'Try it, then publish or ask for changes' : 'Waiting for its owner'))));
-  if (sec === 'home' && (drafted.length || sessions.length) && !groups.has('need')) groups.set('need', []);
-  // Sections in Home's order; on Home, drafts, then the tasks needing you, then sessions waiting on you.
+  const asked = sec !== 'home' ? [] : fbWaiting().map(({ a, f }) => el('li', { className: 'draftrow' },
+    el('a', { href: `#apps/${a.slug}` },
+      el('div', { className: 'r1' }, el('span', { className: 'sd done att-approval' }), el('strong', { className: 'one' }, `Feedback on ${a.title}`)),
+      el('div', { className: 'r2 one' }, ...dots([f.by, 'send it to an agent, edit or dismiss'])),
+      el('div', { className: 'r3 one' }, f.edited || f.feedback.note))));
+  if (sec === 'home' && (drafted.length || asked.length || sessions.length) && !groups.has('need')) groups.set('need', []);
+  // Sections in Home's order; on Home, drafts, feedback, then the tasks needing you, then sessions waiting on you.
   const keys = [...groups.keys()].sort((a, b) => secRank(a) - secRank(b) || b.localeCompare(a));
   // Sessions: those under way, then the rest of the last six hours.
   const body = sec === 'sessions' ? [['Live', sessions.filter(isLive)], ['Recent', sessions.filter((s) => !isLive(s))]].filter(([, g]) => g.length)
     .map(([h, g], i) => [secHead(h, ...(i ? [] : [el('a', { href: '#workers' }, 'All sessions')])), el('ul', { className: 'rows' }, ...g.map((s) => liveRow(s, now)))])
     : keys.map((k) => [secHead(label(k)), el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []),
-    ...(k === 'need' ? drafted : []), ...groups.get(k).flatMap((th) => threadRows(th, now)), ...(k === 'need' && sec === 'home' ? sessions.map((s) => liveRow(s, now)) : []))]);
+    ...(k === 'need' ? [...drafted, ...asked] : []), ...groups.get(k).flatMap((th) => threadRows(th, now)), ...(k === 'need' && sec === 'home' ? sessions.map((s) => liveRow(s, now)) : []))]);
   const focused = $('list').contains(document.activeElement) && document.activeElement.getAttribute('href');
   $('list').replaceChildren(...(inSplit() ? [el('a', { href: '#new', className: 'newtask', title: 'New task (c)' }, '+ New task')] : []), ...body.flat());
   // The open task's or session's links (its row, or a message under a live session), beside the list when wide.
@@ -3701,20 +3711,36 @@ async function appPost(slug, path, body, done) {
   appBusy = null;
   await loadApps();
 }
-// Feedback from the app's own button that waits (held for the owner, or its agent was busy),
-// and the owner's switch to hold it all for them first.
+// Feedback from the app's own button that waits for the owner (an editor's, or the owner's whose agent was busy).
+// The owner sends it to an agent, edits it first (the agent gets the edit), or dismisses it with a note back.
+let fbAsk = null; // [id, 'edit' | 'dismiss'] open on one feedback
+const fbText = new Map(); // id -> the edit or note being typed
 function appFeedback(a, busy) {
   const owner = !readOnly && a.role === 'owner', base = `/api/apps/${encodeURIComponent(a.slug)}/feedback`;
-  const items = (a.feedback || []).map((f) => el('li', {},
-    el('div', { className: 'one' }, `${f.by}: ${f.feedback.note}`),
-    el('div', { className: 'sub dim' }, ...dots([f.draft ? `draft v${f.release}` : f.release && `v${f.release}`, f.feedback.route, f.waiting])),
-    owner ? el('div', { className: 'row' },
-      el('button', { type: 'button', disabled: busy, onclick: () => appPost(a.slug, `${base}/${f.id}/send`) }, 'Send to agent'),
-      el('button', { type: 'button', disabled: busy, onclick: () => appPost(a.slug, `${base}/${f.id}/dismiss`) }, 'Dismiss')) : ''));
-  const hold = owner && el('label', { className: 'hold dim' },
-    el('input', { type: 'checkbox', checked: !!a.hold_feedback, disabled: busy, onchange: (e) => appPost(a.slug, base, { hold: e.target.checked }) }),
-    ' Hold feedback for me before an agent works on it');
-  return el('div', { className: 'fb' }, items.length ? el('ul', { className: 'members' }, ...items) : '', hold || '');
+  const items = (a.feedback || []).map((f) => {
+    const asking = fbAsk && fbAsk[0] === f.id ? fbAsk[1] : null;
+    const ask = (what) => { fbAsk = what && [f.id, what]; fbText.delete(f.id); render(); if (what) setTimeout(() => document.getElementById(`fb-${f.id}`)?.focus(), 0); };
+    const decide = (action, note) => { fbAsk = null; appPost(a.slug, `${base}/${f.id}/${action}`, note === undefined ? {} : { note }, () => fbText.delete(f.id)); };
+    const words = f.edited || f.feedback.note, typed = () => (fbText.get(f.id) ?? words).trim();
+    const field = (init, label) => el('textarea', { id: `fb-${f.id}`, rows: 3, ariaLabel: label, value: fbText.has(f.id) ? fbText.get(f.id) : init, oninput: (e) => fbText.set(f.id, e.target.value) });
+    // An edit goes only if it changed the words: unchanged, the agent gets them as they were.
+    const actions = !owner ? '' : asking === 'edit' ? [field(words, 'Feedback to send'), el('div', { className: 'row' },
+      el('button', { type: 'button', disabled: busy, onclick: () => decide('send', typed() !== words.trim() ? typed() : undefined) }, 'Send to agent'),
+      el('button', { type: 'button', className: 'quiet', onclick: () => ask(null) }, 'Cancel'))]
+      : asking === 'dismiss' ? [field('', `Note to ${f.by} (optional)`), el('div', { className: 'row' },
+        el('button', { type: 'button', disabled: busy, onclick: () => decide('dismiss', fbText.get(f.id)?.trim() || undefined) }, 'Dismiss'),
+        el('button', { type: 'button', className: 'quiet', onclick: () => ask(null) }, 'Keep'))]
+      : [el('div', { className: 'row' },
+        el('button', { type: 'button', disabled: busy, onclick: () => decide('send') }, 'Send to agent'),
+        el('button', { type: 'button', disabled: busy, onclick: () => ask('edit') }, 'Edit'),
+        el('button', { type: 'button', className: 'quiet', disabled: busy, onclick: () => ask('dismiss') }, 'Dismiss'))];
+    return el('li', {},
+      el('div', { className: 'sub dim' }, ...dots([f.by, f.draft ? `draft v${f.release}` : f.release && `v${f.release}`, f.feedback.route])),
+      el('p', { className: 'what' }, words),
+      el('div', { className: 'sub dim' }, ...dots([f.edited && 'edited', f.waiting])),
+      ...[actions].flat());
+  });
+  return items.length ? el('div', { className: 'fb' }, el('ul', { className: 'members' }, ...items)) : '';
 }
 // A relative time that renderApps refreshes in place.
 function appAge(at, now) {
@@ -3859,7 +3885,7 @@ function renderApps() {
 // `list`'s rows into `ul`. Rebuilt only when something shown changes, so a share form being typed into survives
 // other updates; else just their ages. Whether it was rebuilt.
 function drawApps(ul, list, alone) {
-  const key = JSON.stringify([list, alone, appAsk, appBusy, memberAsk, [...appErr], readOnly, draftAsk, draftBusy, [...draftErr]]);
+  const key = JSON.stringify([list, alone, appAsk, appBusy, memberAsk, [...appErr], readOnly, draftAsk, draftBusy, [...draftErr], fbAsk]);
   const now = Date.now() + skew;
   if (ul.dataset.key === key) {
     for (const s of ul.querySelectorAll('[data-at]')) s.textContent = ago(now - Number(s.dataset.at));

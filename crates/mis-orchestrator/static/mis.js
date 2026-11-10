@@ -256,11 +256,13 @@
         if (draft) item(`Trying draft v${draft} · back to live`, `/a/${slug}/?draft=off`);
         else if (me.drafted) item(`Draft v${me.drafted} ready · Try it`, `/a/${slug}/?draft=${me.drafted}`);
         if (writes && !mocked) {
+          if (me.feedback?.length) el.append(make('div', 'mis-dim', 'Your feedback'));
           for (const f of me.feedback || []) {
-            const row = make('div', 'mis-fb', f.note);
-            const state = f.state === 'draft_ready' ? `draft v${f.release} ready` : f.state === 'working' ? 'an agent is on it'
-              : f.state === 'done' ? f.what : `waiting: ${f.why}`;
-            row.append(make('span', '', state));
+            // A draft to try opens it (owners and editors may).
+            const tryIt = f.state === 'draft_ready' && String(f.release) !== String(draft);
+            const row = make(tryIt ? 'a' : 'div', 'mis-fb', f.note);
+            if (tryIt) row.href = `/a/${slug}/?draft=${f.release}`;
+            row.append(make('span', '', feedbackSays(f)));
             el.append(row);
           }
           item('Give feedback…', () => mark());
@@ -329,7 +331,7 @@
         const res = await fetch(`/a/${slug}/api/v1/feedback`, { method: 'POST', headers, body: JSON.stringify(body) }).catch(() => null);
         if (res && res.ok) {
           done();
-          toast('Feedback sent');
+          toast(me?.role === 'owner' ? 'Feedback sent' : 'Feedback sent to the owner');
           return;
         }
         said.textContent = res ? (await res.text()) || `error ${res.status}` : 'not sent: no connection';
@@ -343,6 +345,18 @@
       watch(f) { watchers.push(f); if (me) f(me); },
       set items(list) { items = list; if (loaded && !btn && list.length) button(); },
     };
+  }
+
+  // What became of feedback `f` (a FeedbackStatus), as its sender's menu says it.
+  function feedbackSays(f) {
+    if (f.state === 'waiting') return f.why === 'waiting for the owner' ? 'Waiting for owner' : `Waiting: ${f.why}`;
+    if (f.state === 'working') return 'Agent working';
+    if (f.state === 'draft_ready') return `Draft v${f.release} ready · try it`;
+    if (f.end === 'published') return `Published as v${f.release}`;
+    if (f.end === 'rejected') return 'Draft rejected';
+    if (f.end === 'replaced') return `Draft replaced by v${f.release}`;
+    if (f.end === 'dismissed') return f.reply ? `Dismissed: ${f.reply}` : 'Dismissed';
+    return { done: 'Agent finished without a draft', failed: 'Agent failed', cancelled: 'Cancelled' }[f.status] || 'Ended';
   }
 
   // Shell core, pure. The section a hash names: `#/log/for/ann` -> {id: 'log', path: ['log',
@@ -449,7 +463,7 @@
   }
 
   // Tests reach the pure shell core here.
-  if (typeof globalThis.__misTest === 'function') globalThis.__misTest({ route, layout });
+  if (typeof globalThis.__misTest === 'function') globalThis.__misTest({ route, layout, feedbackSays });
   // Last: everything it uses is defined by now.
   if (typeof document === 'object' && document.addEventListener) onBody(() => menu.start());
 })();

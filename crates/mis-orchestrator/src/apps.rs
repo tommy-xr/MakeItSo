@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 
 use crate::app_access::{self, Policy};
 use crate::backups::{self, BackupError, Take};
+use crate::feedback;
 use crate::records_db::Records;
 
 /// Largest bundle, its files' bytes added up.
@@ -770,42 +771,44 @@ impl Apps {
         let mut all: Vec<HeldFeedback> = (entries.flatten())
             .filter_map(|e| serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok())
             .collect();
-        // Records of sent feedback go once old.
+        // Records of sent or dismissed feedback go once old.
         let now = crate::unix_ms();
         all.retain(|h| {
-            let old = h.task.is_some() && now.saturating_sub(h.at) > SENT_KEPT_MS;
+            let old = !feedback::waiting(h) && now.saturating_sub(h.at) > SENT_KEPT_MS;
             !(old && self.drop_held(slug, h.id))
         });
         all.sort_by_key(|h| (h.at, h.id));
         all
     }
 
-    /// Mark `slug`'s feedback whose work is `task`'s thread decided: `what` (`live as v3`).
-    pub fn settle_feedback(&self, slug: &str, task: Option<uuid::Uuid>, what: &str) {
-        let Some(task) = task else { return };
-        for mut h in self
-            .feedback(slug)
-            .into_iter()
-            .filter(|h| h.task == Some(task))
-        {
-            h.outcome = Some(what.into());
-            if let Err(e) = self.keep_feedback(slug, &h) {
-                tracing::warn!("apps/{slug}: settling feedback: {e:#}");
-            }
-        }
+    /// Apply `e` to `slug`'s kept feedback (one at a time, so none is lost): those it changed
+    /// and were kept so.
+    pub fn feedback_step(&self, slug: &str, e: &feedback::Event) -> Vec<HeldFeedback> {
+        let _held = self.lock.lock().unwrap();
+        (self.feedback(slug).iter())
+            .filter_map(|h| feedback::step(h, e))
+            .filter(|h| match self.keep_feedback(slug, h) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!("apps/{slug}: keeping feedback: {e:#}");
+                    false
+                }
+            })
+            .collect()
     }
 
     /// `slug`'s feedback waiting for its owner, oldest first.
     pub fn waiting_feedback(&self, slug: &str) -> Vec<HeldFeedback> {
         self.feedback(slug)
             .into_iter()
-            .filter(|h| h.task.is_none())
+            .filter(feedback::waiting)
             .collect()
     }
 
-    /// Kept feedback `id` of `slug`. None: not there.
-    pub fn held(&self, slug: &str, id: uuid::Uuid) -> Option<HeldFeedback> {
-        serde_json::from_slice(&std::fs::read(self.held_path(slug, id)).ok()?).ok()
+    /// Kept feedback `id` of `slug` while it waits. None: not there, or not waiting.
+    pub fn waiting_one(&self, slug: &str, id: uuid::Uuid) -> Option<HeldFeedback> {
+        let h = serde_json::from_slice(&std::fs::read(self.held_path(slug, id)).ok()?).ok()?;
+        Some(h).filter(feedback::waiting)
     }
 
     /// Drop kept feedback `id` of `slug`: whether it was there.
@@ -818,17 +821,6 @@ impl Apps {
             .join(slug)
             .join(FEEDBACK)
             .join(format!("{id}.json"))
-    }
-
-    /// Whether `slug`'s feedback waits for its owner.
-    pub fn set_hold_feedback(&self, slug: &str, hold: bool) -> Result<(), MemberError> {
-        let _held = self.lock.lock().unwrap();
-        if self.release_ns(slug).is_empty() {
-            return Err(MemberError::NoSuchApp);
-        }
-        let mut policy = self.read_policy(slug).map_err(MemberError::Io)?;
-        policy.hold_feedback = hold;
-        (self.write_policy(slug, &policy)).map_err(|e| MemberError::Io(e.to_string()))
     }
 
     /// `/a/<slug>/` on this server, if it is served.
@@ -876,7 +868,6 @@ impl Apps {
             members: policy.list(),
             draft: self.draft(slug),
             role: None,
-            hold_feedback: policy.hold_feedback,
             feedback: self.waiting_feedback(slug),
             review: None,
         })

@@ -3760,9 +3760,8 @@ async fn app_tasks_and_feedback_run_on_the_settings_machine_and_wait_for_it() {
     while (status(&mut client).await.0.iter()).any(|w| w.id == studio && w.online) {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    let editor = "\r\nX-Mis-Dev-Role: editor";
     let path = "/a/demo/api/v1/feedback";
-    let sent = app_post(&apps, path, editor, &feedback_body("Show pH too.")).await;
+    let sent = app_post(&apps, path, "", &feedback_body("Show pH too.")).await;
     assert_eq!(sent.0, 202);
     let waiting = loop {
         let (_, tasks) = status(&mut client).await;
@@ -6716,6 +6715,19 @@ async fn finish_seen(mis: &str, worker: &mut Ws, task: TaskId) {
     status_until(&mut client, done).await;
 }
 
+/// `GET /me` on the apps listener (as `extra` says who) until it says `want`: what it said.
+async fn me_until(apps: &str, extra: &str, want: &str) -> String {
+    let mut said = String::new();
+    for _ in 0..100 {
+        said = app_get(apps, "/a/demo/api/v1/me", extra).await.2;
+        if said.contains(want) {
+            return said;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("never {want}: {said}")
+}
+
 /// Feedback marking `div.chart` on route `#/readings` at 390x844.
 fn feedback_body(note: &str) -> String {
     serde_json::json!({"route": "#/readings", "selector": "main > div.chart",
@@ -6725,7 +6737,7 @@ fn feedback_body(note: &str) -> String {
 }
 
 #[tokio::test]
-async fn feedback_from_an_editor_becomes_a_change_task_and_a_viewer_cant_send_any() {
+async fn the_owners_feedback_becomes_a_change_task_at_once_and_a_viewer_cant_send_any() {
     let dev = mis_orchestrator::apps_http::Auth {
         dev: true,
         ..Default::default()
@@ -6743,9 +6755,8 @@ async fn feedback_from_an_editor_becomes_a_change_task_and_a_viewer_cant_send_an
     assert_eq!(status, 403);
     let (status, why) = app_post(&apps, path, "", &feedback_body(" ")).await;
     assert!(status == 400 && why.contains("say what"), "{status} {why}");
-    let editor = "\r\nX-Mis-Dev-Role: editor";
     assert_eq!(
-        app_post(&apps, path, editor, &feedback_body("Show pH too."))
+        app_post(&apps, path, "", &feedback_body("Show pH too."))
             .await
             .0,
         202
@@ -6772,7 +6783,7 @@ async fn feedback_from_an_editor_becomes_a_change_task_and_a_viewer_cant_send_an
     let me = "/a/demo/api/v1/me";
     let mut said = String::new();
     for _ in 0..100 {
-        said = app_get(&apps, me, editor).await.2;
+        said = app_get(&apps, me, "").await.2;
         if said.contains(r#""state":"working""#) {
             break;
         }
@@ -6909,7 +6920,7 @@ async fn the_mis_page_frames_a_draft_and_its_feedback_continues_the_drafts_threa
 }
 
 #[tokio::test]
-async fn feedback_on_a_draft_continues_its_thread_and_the_owner_can_hold_it() {
+async fn feedback_on_a_draft_continues_its_thread_and_says_when_its_draft_is_ready() {
     let dev = mis_orchestrator::apps_http::Auth {
         dev: true,
         ..Default::default()
@@ -6945,7 +6956,10 @@ async fn feedback_on_a_draft_continues_its_thread_and_the_owner_can_hold_it() {
             .0,
         202
     );
-    let OrchMsg::Assign { task: reply, .. } = recv(&mut worker).await else {
+    let OrchMsg::Assign {
+        task: reply, token, ..
+    } = recv(&mut worker).await
+    else {
         panic!("assign")
     };
     assert_eq!(reply.resume.as_deref(), Some("sess"));
@@ -6956,59 +6970,114 @@ async fn feedback_on_a_draft_continues_its_thread_and_the_owner_can_hold_it() {
         "{}",
         reply.prompt
     );
-    finish_seen(&mis, &mut worker, reply.id).await;
+    // On it, then the reply proposes v3 (replacing v2): its sender has that to try.
+    me_until(&apps, "", r#""state":"working""#).await;
+    let token = token.expect("a reply stages releases too");
+    assert_eq!(
+        publish(&mis, "/api/apps/demo/releases", &token, &demo("v3"))
+            .await
+            .0,
+        201
+    );
+    let v3 = propose.replace(r#""release":2"#, r#""release":3"#);
+    assert_eq!(
+        post_json(&mis, "/api/apps/demo/draft", &token, &v3).await.0,
+        201
+    );
+    me_until(&apps, "", r#""state":"draft_ready","release":3"#).await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
 
-    // Held: it waits on the app for the owner, who sends one and dismisses another.
-    assert_eq!(
-        post_json(&mis, "/api/apps/demo/feedback", "r", r#"{"hold":true}"#)
-            .await
-            .0,
-        403
-    );
-    assert_eq!(
-        post_json(&mis, "/api/apps/demo/feedback", "s", r#"{"hold":true}"#)
-            .await
-            .0,
-        204
-    );
-    for note in ["Rename it.", "Never mind."] {
-        assert_eq!(app_post(&apps, path, "", &feedback_body(note)).await.0, 202);
+#[tokio::test]
+async fn an_editors_feedback_waits_for_the_owner_who_edits_and_sends_or_dismisses_it() {
+    let app = behind_access().with_read_tokens(vec!["r".into()]);
+    let (mis, apps, dir) = live_demo(app, apps_auth()).await;
+    let (_, mut worker) = join_as(&mis).await;
+    for email in ["editor@example.com", "other@example.com"] {
+        let share = format!(r#"{{"email":"{email}","role":"editor"}}"#);
+        let (status, _) = post_json(&mis, "/api/apps/demo/members", "s", &share).await;
+        assert_eq!(status, 200);
     }
-    let mut held = vec![];
-    for _ in 0..100 {
-        let (_, list) = get_json(&mis, "/api/apps", "s").await;
-        let list: Vec<AppView> = serde_json::from_str(&list).unwrap();
-        held = list[0].feedback.clone();
-        if held.len() == 2 {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let who = |email: &str| {
+        format!(
+            "{}\r\nOrigin: https://{HOME}",
+            via_home(&access_jwt_for(APPS_AUD, email))
+        )
+    };
+    let (editor, other) = (who("editor@example.com"), who("other@example.com"));
+
+    // An editor's feedback starts no agent: it waits on the app for the owner.
+    let path = "/a/demo/api/v1/feedback";
+    for note in ["Show pH too.", "Make it purple."] {
+        let (status, why) = app_post(&apps, path, &editor, &feedback_body(note)).await;
+        assert_eq!(status, 202, "{why}");
     }
+    idle(&mut worker).await;
+    let (_, list) = get_json(&mis, "/api/apps", "s").await;
+    let held = serde_json::from_str::<Vec<AppView>>(&list).unwrap()[0]
+        .feedback
+        .clone();
     assert_eq!(held.len(), 2, "{held:?}");
-    assert_eq!(held[0].waiting.as_deref(), Some("held for the owner"));
-    let first = held
+    assert!(held
         .iter()
-        .find(|h| h.feedback.note == "Rename it.")
-        .unwrap()
-        .id;
-    let other = held
-        .iter()
-        .find(|h| h.feedback.note == "Never mind.")
-        .unwrap()
-        .id;
+        .all(|h| h.by == "editor@example.com"
+            && h.waiting.as_deref() == Some("waiting for the owner")));
+    let id = |note: &str| held.iter().find(|h| h.feedback.note == note).unwrap().id;
+    let (ph, purple) = (id("Show pH too."), id("Make it purple."));
+    // Its sender sees it waiting; another editor sees none of it.
+    let said = me_until(&apps, &editor, r#""state":"waiting""#).await;
+    assert_eq!(said.matches("waiting for the owner").count(), 2, "{said}");
+    assert!(!me_until(&apps, &other, "other@").await.contains("feedback"));
+
+    // The owner rewords one and sends it: the agent gets the owner's words.
     let url = |id, action| format!("/api/apps/demo/feedback/{id}/{action}");
-    assert_eq!(post_json(&mis, &url(first, "send"), "r", "").await.0, 403);
-    assert_eq!(post_json(&mis, &url(first, "send"), "s", "").await.0, 204);
-    let OrchMsg::Assign { task: sent, .. } = recv(&mut worker).await else {
+    let edit = r#"{"note":"Show pH beside chlorine."}"#;
+    assert_eq!(post_json(&mis, &url(ph, "send"), "r", edit).await.0, 403);
+    let blank = r#"{"note":" "}"#;
+    assert_eq!(post_json(&mis, &url(ph, "send"), "s", blank).await.0, 400);
+    assert_eq!(post_json(&mis, &url(ph, "send"), "s", edit).await.0, 204);
+    let OrchMsg::Assign { task, .. } = recv(&mut worker).await else {
         panic!("assign")
     };
-    assert!(sent.prompt.contains("> Rename it."), "{}", sent.prompt);
+    assert!(
+        task.prompt.contains(
+            "from editor@example.com, as its owner edited it:\n\n> Show pH beside chlorine."
+        ),
+        "{}",
+        task.prompt
+    );
+    assert!(!task.prompt.contains("Show pH too."), "{}", task.prompt);
+    // Sent once: it no longer waits.
+    assert_eq!(post_json(&mis, &url(ph, "send"), "s", "").await.0, 404);
+
+    // The other is dismissed with a note back to its sender.
+    let note = r#"{"note":"The brand colour stays."}"#;
     assert_eq!(
-        post_json(&mis, &url(other, "dismiss"), "s", "").await.0,
+        post_json(&mis, &url(purple, "dismiss"), "s", note).await.0,
         204
     );
+    assert_eq!(
+        post_json(&mis, &url(purple, "dismiss"), "s", "").await.0,
+        404
+    );
     let (_, list) = get_json(&mis, "/api/apps", "s").await;
-    let list: Vec<AppView> = serde_json::from_str(&list).unwrap();
-    assert!(list[0].feedback.is_empty() && list[0].hold_feedback);
-    std::fs::remove_dir_all(dir).unwrap();
+    assert!(serde_json::from_str::<Vec<AppView>>(&list).unwrap()[0]
+        .feedback
+        .is_empty());
+    let said = me_until(&apps, &editor, r#""state":"working""#).await;
+    assert!(
+        said.contains(r#""state":"done","end":"dismissed","reply":"The brand colour stays.""#),
+        "{said}"
+    );
+
+    // Its task ends without a draft: its sender sees that, not "working" for ever.
+    finish_seen(&mis, &mut worker, task.id).await;
+    let said = me_until(&apps, &editor, r#""end":"ended","status":"done""#).await;
+    assert!(
+        said.contains(r#""note":"Show pH too.""#),
+        "their own words: {said}"
+    );
+    assert!(!me_until(&apps, &other, "other@").await.contains("feedback"));
+    // Best effort: on Windows the still-running server holds data.sqlite open.
+    let _ = std::fs::remove_dir_all(dir);
 }

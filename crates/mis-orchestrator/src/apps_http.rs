@@ -12,7 +12,8 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use mis_types::{
-    AppFeedback, AppMe, BatchWritten, Conflict, Export, HeldFeedback, RecordQuery, Space, Written,
+    AppFeedback, AppMe, AppRole, BatchWritten, Conflict, Export, HeldFeedback, RecordQuery, Space,
+    Written,
 };
 
 use crate::access_gate::{AccessGate, JWT_HEADER};
@@ -482,9 +483,7 @@ async fn me(
         role: m.role,
         drafted: draft.as_ref().map(|d| d.release),
         feedback: match may_try {
-            true => {
-                crate::feedback::statuses(&apps.feedback(&slug), m.subject.name(), draft.as_ref())
-            }
+            true => crate::feedback::statuses(&apps.feedback(&slug), m.subject.name()),
             false => vec![],
         },
         app: slug,
@@ -669,7 +668,8 @@ async fn get_record(
 }
 
 /// `POST /a/{slug}/api/v1/feedback`: an [`AppFeedback`] from an owner or editor (viewers
-/// can't), about the release they see; 202 once it is on its way to an agent or the owner.
+/// can't), about the release they see; 202 once kept. The owner's goes to an agent; an
+/// editor's waits for the owner, as it becomes the prompt of an agent working as them.
 async fn feedback(
     State(apps): State<Arc<Apps>>,
     Extension(auth): Extension<Arc<Auth>>,
@@ -690,6 +690,7 @@ async fn feedback(
     let Some(inbox) = &auth.feedback else {
         return (StatusCode::SERVICE_UNAVAILABLE, "feedback is off").into_response();
     };
+    let owner = m.role == AppRole::Owner;
     let held = HeldFeedback {
         id: uuid::Uuid::new_v4(),
         at: crate::unix_ms(),
@@ -700,14 +701,20 @@ async fn feedback(
         // later draft from elsewhere doesn't get it).
         draft_task: apps.draft(&slug).map(|d| d.task),
         feedback: f,
-        waiting: Some("on its way to an agent".into()),
+        waiting: Some(match owner {
+            true => "on its way to an agent".into(),
+            false => crate::feedback::FOR_THE_OWNER.into(),
+        }),
+        edited: None,
         task: None,
-        outcome: None,
+        drafted: None,
+        end: None,
     };
     // Kept before it is acknowledged, so a restart can't lose it; the owner sees it until it goes.
     let (a, s) = (apps.clone(), slug.clone());
     let keep = tokio::task::spawn_blocking(move || {
-        if a.waiting_feedback(&s).len() >= mis_types::MAX_HELD_FEEDBACK {
+        // Only what waits for the owner: the owner's own goes on at once.
+        if !owner && a.waiting_feedback(&s).len() >= mis_types::MAX_HELD_FEEDBACK {
             let why = "too much feedback is waiting for the owner".to_string();
             return Err((StatusCode::TOO_MANY_REQUESTS, why));
         }
@@ -716,7 +723,9 @@ async fn feedback(
     });
     match keep.await.expect("keeping feedback doesn't panic") {
         Ok(held) => {
-            let _ = inbox.send((slug, held));
+            if owner {
+                let _ = inbox.send((slug, held));
+            }
             StatusCode::ACCEPTED.into_response()
         }
         Err(refused) => refused.into_response(),

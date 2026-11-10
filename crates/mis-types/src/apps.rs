@@ -60,10 +60,7 @@ pub struct AppView {
     /// The asker's role in it: only an owner publishes or discards its draft. None: not a member.
     #[serde(default)]
     pub role: Option<AppRole>,
-    /// Feedback waits for the owner to send it to an agent, rather than going at once.
-    #[serde(default)]
-    pub hold_feedback: bool,
-    /// Feedback waiting, oldest first.
+    /// Feedback waiting for the owner (an editor's, or the owner's that couldn't go), oldest first.
     #[serde(default)]
     pub feedback: Vec<HeldFeedback>,
     /// The draft's review: where publishing it is (merging when it can, a fix ready, …).
@@ -117,15 +114,57 @@ pub struct HeldFeedback {
     #[serde(default)]
     pub draft_task: Option<Option<uuid::Uuid>>,
     pub feedback: AppFeedback,
-    /// Why it wasn't sent to an agent when it came in (held, or the agent was busy).
+    /// Why it isn't with an agent (waiting for the owner, or its work was busy).
     #[serde(default)]
     pub waiting: Option<String>,
+    /// The owner's rewording, sent in place of `feedback.note`.
+    #[serde(default)]
+    pub edited: Option<String>,
     /// The task it went to. None: it waits.
     #[serde(default)]
     pub task: Option<uuid::Uuid>,
-    /// How its task's draft was decided, e.g. `live as v3`, `discarded`.
+    /// The draft its task's thread proposed since, to try.
     #[serde(default)]
-    pub outcome: Option<String>,
+    pub drafted: Option<u32>,
+    /// How it ended. None: it hasn't.
+    #[serde(default, alias = "outcome", deserialize_with = "end_or_outcome")]
+    pub end: Option<FeedbackEnd>,
+}
+
+/// `end`, or a record's `outcome` from before it: `live as v3`, `discarded`.
+fn end_or_outcome<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<FeedbackEnd>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Kept {
+        End(FeedbackEnd),
+        Outcome(String),
+    }
+    Ok(Option::<Kept>::deserialize(d)?.map(|k| match k {
+        Kept::End(e) => e,
+        Kept::Outcome(o) => match o.strip_prefix("live as v").and_then(|n| n.parse().ok()) {
+            Some(release) => FeedbackEnd::Published { release },
+            None => FeedbackEnd::Rejected,
+        },
+    }))
+}
+
+/// How feedback ended.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "end", rename_all = "snake_case")]
+pub enum FeedbackEnd {
+    /// Its draft went live.
+    Published { release: u32 },
+    /// Its draft was rejected.
+    Rejected,
+    /// Another thread's draft (this release) replaced its.
+    Replaced { release: u32 },
+    /// The owner dismissed it, maybe with a note back.
+    Dismissed {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply: Option<String>,
+    },
+    /// Its task ended (done, failed or cancelled) with no draft.
+    Ended { status: crate::TaskStatus },
 }
 
 /// What became of feedback someone sent, as their app's menu shows it (`/me`).
@@ -142,14 +181,17 @@ pub struct FeedbackStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum FeedbackState {
-    /// Not with an agent yet: held for the owner, or its work was busy.
-    Waiting { why: String },
+    /// Not with an agent yet: waiting for the owner, or its work was busy.
+    Waiting {
+        why: String,
+    },
     /// An agent is on it.
     Working,
     /// A draft came after it: try it.
-    DraftReady { release: u32 },
-    /// Its draft was decided (`what`: `live as v3`, `discarded`).
-    Done { what: String },
+    DraftReady {
+        release: u32,
+    },
+    Done(FeedbackEnd),
 }
 
 /// Longest feedback note.
