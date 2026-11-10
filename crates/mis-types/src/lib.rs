@@ -812,7 +812,7 @@ pub enum ServerMsg {
         now_ms: Option<u64>,
         #[serde(default)]
         update: Update,
-        /// `Settings::default_harness`, so composers follow it as it changes.
+        /// `Settings::default_harness`: under Auto, composers list the models it would run.
         #[serde(default)]
         default_harness: Option<String>,
     },

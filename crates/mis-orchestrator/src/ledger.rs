@@ -593,7 +593,7 @@ impl Ledger {
         }
     }
 
-    /// Settings' default harness is now `h`: every client's composer follows it.
+    /// Settings' default harness is now `h`; clients hear of it.
     pub fn set_default_harness(&mut self, h: Option<String>) -> Vec<Effect> {
         self.default_harness = h;
         vec![Effect::Broadcast(self.status())]

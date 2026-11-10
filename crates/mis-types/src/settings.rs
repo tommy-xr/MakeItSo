@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct Settings {
     pub apps: AppSettings,
-    /// The harness a new task starts on in the composer, and runs when it names none and isn't
-    /// planned (no planner, or a model chosen). None: Auto, the planner picks; claude unplanned.
+    /// What a task naming no harness runs: the planner's default, and the harness of one that
+    /// skips it (no planner, or a model chosen), wherever the fleet runs it. None: claude.
     pub default_harness: Option<String>,
 }
 
