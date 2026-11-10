@@ -36,8 +36,10 @@ pub(crate) const POLICY: &str = "policy.json";
 /// `<slug>/draft/`: the current draft (`draft.json`, `before`, `after`), replaced whole.
 const DRAFT: &str = "draft";
 const DRAFT_FILE: &str = "draft.json";
-/// `<slug>/feedback/<id>.json`: feedback waiting for the owner.
+/// `<slug>/feedback/<id>.json`: feedback waiting for the owner, and where sent feedback went.
 const FEEDBACK: &str = "feedback";
+/// How long a record of sent feedback is kept, for its sender's menu: two weeks.
+const SENT_KEPT_MS: u64 = 14 * 24 * 3600 * 1000;
 use mis_types::MAX_APP_TITLE_CHARS as MAX_TITLE_CHARS;
 
 pub use mis_types::valid_slug;
@@ -747,19 +749,23 @@ impl Apps {
         }
     }
 
-    /// Keep `held` for `slug`'s owner (replacing a copy kept before).
+    /// Keep `held` (waiting for the owner, or a record of where it went), replacing a copy kept
+    /// before; records of sent feedback older than [`SENT_KEPT_MS`] go.
     pub fn keep_feedback(&self, slug: &str, held: &HeldFeedback) -> anyhow::Result<()> {
         let dir = self.dir.join(slug).join(FEEDBACK);
         crate::images::private_dir(&dir)?;
         let json = serde_json::to_vec(held).expect("feedback serializes");
-        Ok(crate::push::write_private(
-            &self.held_path(slug, held.id),
-            &json,
-        )?)
+        crate::push::write_private(&self.held_path(slug, held.id), &json)?;
+        for old in self.feedback(slug) {
+            if old.task.is_some() && held.at.saturating_sub(old.at) > SENT_KEPT_MS {
+                self.drop_held(slug, old.id);
+            }
+        }
+        Ok(())
     }
 
-    /// Feedback kept for `slug`'s owner, oldest first.
-    pub fn held_feedback(&self, slug: &str) -> Vec<HeldFeedback> {
+    /// All `slug`'s feedback kept: waiting, and records of what went where, oldest first.
+    pub fn feedback(&self, slug: &str) -> Vec<HeldFeedback> {
         let Ok(entries) = std::fs::read_dir(self.dir.join(slug).join(FEEDBACK)) else {
             return vec![];
         };
@@ -768,6 +774,14 @@ impl Apps {
             .collect();
         all.sort_by_key(|h| (h.at, h.id));
         all
+    }
+
+    /// `slug`'s feedback waiting for its owner, oldest first.
+    pub fn waiting_feedback(&self, slug: &str) -> Vec<HeldFeedback> {
+        self.feedback(slug)
+            .into_iter()
+            .filter(|h| h.task.is_none())
+            .collect()
     }
 
     /// Kept feedback `id` of `slug`. None: not there.
@@ -844,7 +858,7 @@ impl Apps {
             draft: self.draft(slug),
             role: None,
             hold_feedback: policy.hold_feedback,
-            feedback: self.held_feedback(slug),
+            feedback: self.waiting_feedback(slug),
         })
     }
 }

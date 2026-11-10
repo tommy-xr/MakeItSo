@@ -911,14 +911,12 @@ impl App {
         };
         tracing::info!("apps/{slug}: feedback {}: {sent:?}", held.id);
         let ok = sent.is_ok();
-        held.waiting = sent.err();
-        let kept = tokio::task::spawn_blocking(move || match ok {
-            true => {
-                apps.drop_held(&slug, held.id);
-                Ok(())
-            }
-            false => apps.keep_feedback(&slug, &held),
-        });
+        // Gone to a task: kept as a record, for its sender's menu.
+        (held.task, held.waiting) = match sent {
+            Ok(task) => (Some(task), None),
+            Err(why) => (None, Some(why)),
+        };
+        let kept = tokio::task::spawn_blocking(move || apps.keep_feedback(&slug, &held));
         if let Ok(Err(e)) = kept.await {
             tracing::warn!("keeping feedback: {e:#}");
         }
@@ -2118,9 +2116,13 @@ async fn decide_feedback(
         Err(refused) => return refused.into_response(),
     };
     let s = slug.clone();
-    let read = tokio::task::spawn_blocking(move || match send {
-        true => apps.held(&s, id),
-        false => apps.held(&s, id).filter(|_| apps.drop_held(&s, id)),
+    // Only feedback still waiting.
+    let read = tokio::task::spawn_blocking(move || {
+        let waiting = apps.held(&s, id).filter(|h| h.task.is_none());
+        match send {
+            true => waiting,
+            false => waiting.filter(|_| apps.drop_held(&s, id)),
+        }
     });
     let Some(held) = read.await.expect("reading feedback doesn't panic") else {
         return (StatusCode::NOT_FOUND, "no such feedback").into_response();

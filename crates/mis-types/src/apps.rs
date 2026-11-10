@@ -114,6 +114,31 @@ pub struct HeldFeedback {
     /// Why it wasn't sent to an agent when it came in (held, or the agent was busy).
     #[serde(default)]
     pub waiting: Option<String>,
+    /// The task it went to. None: it waits.
+    #[serde(default)]
+    pub task: Option<uuid::Uuid>,
+}
+
+/// What became of feedback someone sent, as their app's menu shows it (`/me`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeedbackStatus {
+    pub id: uuid::Uuid,
+    /// Unix millis they sent it.
+    pub at: u64,
+    pub note: String,
+    #[serde(flatten)]
+    pub state: FeedbackState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum FeedbackState {
+    /// Not with an agent yet: held for the owner, or its work was busy.
+    Waiting { why: String },
+    /// An agent is on it.
+    Working,
+    /// A draft came after it: try it.
+    DraftReady { release: u32 },
 }
 
 /// Longest feedback note.
@@ -222,6 +247,9 @@ pub struct AppMe {
     /// The app's current draft, which owners and editors may try. None: none, or a viewer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drafted: Option<u32>,
+    /// Their latest feedback on the app and what became of it, newest first (owners, editors).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feedback: Vec<FeedbackStatus>,
 }
 
 /// One published bundle.

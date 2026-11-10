@@ -6284,6 +6284,24 @@ async fn feedback_from_an_editor_becomes_a_change_task_and_a_viewer_cant_send_an
     }
     assert_eq!(task.merge, MergeRule::Never);
     assert!(token.is_some(), "it can stage the app's next release");
+    // Its sender's menu says where it is; a viewer's says nothing.
+    let me = "/a/demo/api/v1/me";
+    let mut said = String::new();
+    for _ in 0..100 {
+        said = app_get(&apps, me, editor).await.2;
+        if said.contains(r#""state":"working""#) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        said.contains(r#""note":"Show pH too.","state":"working""#),
+        "{said}"
+    );
+    assert!(!app_get(&apps, me, "\r\nX-Mis-Dev-Role: viewer")
+        .await
+        .2
+        .contains("feedback"));
     std::fs::remove_dir_all(dir).unwrap();
 }
 

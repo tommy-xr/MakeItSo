@@ -1,7 +1,10 @@
 //! In-app feedback (pure): what an owner or editor may send, where it goes, and what the agent
 //! is asked. Receiving it is `apps_http`'s; holding and sending it, the orchestrator's.
 
-use mis_types::{AppFeedback, HeldFeedback, TaskId, MAX_FEEDBACK_CHARS, MAX_FEEDBACK_TASKS};
+use mis_types::{
+    AppDraft, AppFeedback, FeedbackState, FeedbackStatus, HeldFeedback, TaskId, MAX_FEEDBACK_CHARS,
+    MAX_FEEDBACK_TASKS,
+};
 
 /// Err: why `f` isn't feedback to act on.
 pub fn check(f: &AppFeedback) -> Result<(), String> {
@@ -63,6 +66,38 @@ pub fn send(
     }
 }
 
+/// How many of someone's latest feedback their menu shows.
+pub const SHOWN: usize = 5;
+
+/// What became of `held`, given the app's current `draft`: waiting, with an agent, or a draft
+/// proposed since (its result, or close enough to try).
+pub fn status(held: &HeldFeedback, draft: Option<&AppDraft>) -> FeedbackStatus {
+    let state = match (held.task, draft) {
+        (None, _) => FeedbackState::Waiting {
+            why: held.waiting.clone().unwrap_or_default(),
+        },
+        (Some(_), Some(d)) if d.at > held.at => FeedbackState::DraftReady { release: d.release },
+        (Some(_), _) => FeedbackState::Working,
+    };
+    FeedbackStatus {
+        id: held.id,
+        at: held.at,
+        note: held.feedback.note.trim().chars().take(140).collect(),
+        state,
+    }
+}
+
+/// `who`'s feedback among `all` (any order), newest first, at most [`SHOWN`].
+pub fn statuses(all: &[HeldFeedback], who: &str, draft: Option<&AppDraft>) -> Vec<FeedbackStatus> {
+    let mut theirs: Vec<&HeldFeedback> = all.iter().filter(|h| h.by == who).collect();
+    theirs.sort_by_key(|h| std::cmp::Reverse((h.at, h.id)));
+    theirs
+        .into_iter()
+        .take(SHOWN)
+        .map(|h| status(h, draft))
+        .collect()
+}
+
 /// What the agent is asked: the note, where it was marked, and to reproduce it first.
 pub fn request(slug: &str, held: &HeldFeedback) -> String {
     let f = &held.feedback;
@@ -121,6 +156,7 @@ mod tests {
                 note: note.into(),
             },
             waiting: None,
+            task: None,
         }
     }
 
@@ -171,6 +207,55 @@ mod tests {
             send(&on_draft, true, 0, Some(Ok(tip))),
             Send::Hold(_)
         ));
+    }
+
+    #[test]
+    fn senders_see_their_feedback_waiting_working_or_with_a_draft_to_try() {
+        let draft = |at| AppDraft {
+            id: uuid::Uuid::nil(),
+            release: 4,
+            pr: String::new(),
+            head: String::new(),
+            note: None,
+            before: false,
+            after: false,
+            task: None,
+            at,
+            error: None,
+        };
+        let mut waiting = held("Bigger.", false);
+        waiting.waiting = Some("held for the owner".into());
+        let mut sent = held("Red.", false);
+        (sent.at, sent.task) = (10, Some(uuid::Uuid::nil()));
+        let mut other = held("Not mine.", false);
+        (other.by, other.at) = ("me@example.com".into(), 20);
+        let shown = statuses(
+            &[waiting, sent.clone(), other],
+            "jen@example.com",
+            Some(&draft(5)),
+        );
+        let states: Vec<_> = shown
+            .iter()
+            .map(|s| (s.note.as_str(), s.state.clone()))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                ("Red.", FeedbackState::Working),
+                (
+                    "Bigger.",
+                    FeedbackState::Waiting {
+                        why: "held for the owner".into()
+                    }
+                ),
+            ]
+        );
+        assert_eq!(
+            status(&sent, Some(&draft(11))).state,
+            FeedbackState::DraftReady { release: 4 }
+        );
+        let many: Vec<_> = (0..9).map(|_| held("x", false)).collect();
+        assert_eq!(statuses(&many, "jen@example.com", None).len(), SHOWN);
     }
 
     #[test]

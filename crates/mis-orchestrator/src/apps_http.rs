@@ -414,6 +414,13 @@ async fn me(
         drafted: (app_access::may_try(m.role))
             .then(|| apps.draft(&slug).map(|d| d.release))
             .flatten(),
+        feedback: match app_access::may_try(m.role) {
+            true => {
+                let draft = apps.draft(&slug);
+                crate::feedback::statuses(&apps.feedback(&slug), m.subject.name(), draft.as_ref())
+            }
+            false => vec![],
+        },
         app: slug,
         draft: m.draft,
     })
@@ -625,11 +632,12 @@ async fn feedback(
         draft_task: apps.draft(&slug).map(|d| d.task),
         feedback: f,
         waiting: Some("on its way to an agent".into()),
+        task: None,
     };
     // Kept before it is acknowledged, so a restart can't lose it; the owner sees it until it goes.
     let (a, s) = (apps.clone(), slug.clone());
     let keep = tokio::task::spawn_blocking(move || {
-        if a.held_feedback(&s).len() >= mis_types::MAX_HELD_FEEDBACK {
+        if a.waiting_feedback(&s).len() >= mis_types::MAX_HELD_FEEDBACK {
             let why = "too much feedback is waiting for the owner".to_string();
             return Err((StatusCode::TOO_MANY_REQUESTS, why));
         }
