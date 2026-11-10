@@ -4061,9 +4061,10 @@ function noteDestLabel(dest, dests, list) {
 }
 // A refused filing's reason without the note's path: `inbox/a.md changed since it was read`: `Changed since it was read`.
 const noteWhy = (path, why) => { const t = why.startsWith(`${path} `) ? why.slice(path.length + 1) : why; return t.charAt(0).toUpperCase() + t.slice(1); };
-// What an inbox note's suggestion `s` (absent until made) offers, given the server's `dests`: 'file' in its folder;
-// 'none' when nothing fit or the reply was bad; else 'wait' (a suggestion whose folder is gone is made again).
-const noteSuggested = (s, dests) => (!s ? 'wait' : s.error || s.dest === 'none' ? 'none' : dests.includes(s.dest) ? 'file' : 'wait');
+// What an inbox note's suggestion `s` (if any) offers, given the server's `dests` and whether one is `pending` (being
+// asked for): 'file' in its folder; else 'wait' while pending, or 'none' (nothing fit, a bad reply, its folder gone,
+// or suggestions off).
+const noteSuggested = (s, dests, pending) => (s && !s.error && s.dest !== 'none' && dests.includes(s.dest) ? 'file' : pending ? 'wait' : 'none');
 // A GitHub `owner/repo`'s page; null for anything else.
 const repoHref = (r) => (/^[\w.-]+\/[\w.-]+$/.test(r) && !/(^|\/)\.\.?($|\/)/.test(r) ? `https://github.com/${r}` : null);
 // notes:end
@@ -4076,6 +4077,8 @@ let notesDrawn = null; // what #notes-body shows, so redraws that change nothing
 function forgetNotes() {
   notesTree = notesAsked = noteShown = notesDrawn = projects = projectsAsked = projectsDrawn = null;
   noteSugs = sugsAsked = null; // summaries quote notes
+  sugsError = '';
+  sugsTries = 0;
   noteFiles = {};
   noteMove = { path: '' };
   clearTimeout(sugsTimer);
@@ -4097,34 +4100,41 @@ async function loadNotes() {
   renderNav();
   pollSuggestions();
 }
-// Where the server suggests each inbox note goes (path -> { hash, dest, summary, error? }): fetched with the tree, and
-// every 10s while the inbox or an inbox note shown still waits on one.
-let noteSugs = null, sugsAsked = null, sugsTimer = 0;
+// Where the server suggests each inbox note goes, and which it is still asking about:
+// { pending: [path], notes: { path: { hash, dest, summary, error? } } }. Fetched with the tree, and every 10s while the
+// inbox or an inbox note shown has one pending. A failed read says so, and is tried again after 5, 10, 20 and 40s.
+let noteSugs = null, sugsAsked = null, sugsTimer = 0, sugsError = '', sugsTries = 0;
+const sugOf = (path) => (noteSugs ? noteSugs.notes[path] : undefined);
+const sugPending = (path) => !!noteSugs && noteSugs.pending.includes(path);
+const sugsLater = (ms) => { if (!sugsTimer) sugsTimer = setTimeout(() => { sugsTimer = 0; if (route().view === 'notes') loadSuggestions(); }, ms); };
 async function loadSuggestions() {
   const ask = {};
   sugsAsked = ask;
   const res = await getJson('/api/notes/suggestions', loadSuggestions);
-  if (sugsAsked !== ask || !res || res.error) return; // rows say Suggesting… meanwhile
-  if (JSON.stringify(res.ok) !== JSON.stringify(noteSugs)) {
-    noteSugs = res.ok;
+  if (sugsAsked !== ask || !res) return;
+  const error = res.error || '';
+  sugsTries = error ? sugsTries + 1 : 0;
+  if (error !== sugsError || (!error && JSON.stringify(res.ok) !== JSON.stringify(noteSugs))) {
+    sugsError = error;
+    if (!error) noteSugs = res.ok;
     if (route().view === 'notes') renderNotes(route().id);
   }
-  pollSuggestions();
+  if (!error) pollSuggestions();
+  else if (sugsTries <= 4) sugsLater(5000 * 2 ** (sugsTries - 1));
 }
 function pollSuggestions() {
   const r = route();
-  const waits = r.view === 'notes' && ((notesTree && notesTree.entries) || []).some((e) => isInboxNote(e) && (r.id === 'inbox' || r.id === e.path) && sugWaits(e.path));
-  if (waits && !sugsTimer) sugsTimer = setTimeout(() => { sugsTimer = 0; if (route().view === 'notes') loadSuggestions(); }, 10000);
+  if (r.view === 'notes' && ((notesTree && notesTree.entries) || []).some((e) => isInboxNote(e) && (r.id === 'inbox' || r.id === e.path) && sugPending(e.path))) sugsLater(10000);
 }
 const isInboxNote = (e) => e.kind === 'md' && /^inbox\/[^/]+$/.test(e.path);
-// Whether `path`'s suggestion is yet to come: none made, or the one made was refused (409) or is for other bytes than
-// shown; the server makes a new one on its next run.
-function sugWaits(path) {
-  const s = noteSugs && noteSugs[path], has = noteSuggested(s, (notesTree && notesTree.dests) || []);
-  if (has !== 'file') return has === 'wait';
-  const f = noteFiles[path] || {}, shown = noteShown && noteShown.path === path && noteShown.got && noteShown.got.hash;
-  return (f.status === 409 && f.hash === s.hash) || (!!shown && shown !== s.hash);
+// Whether `path`'s suggestion is out of date: refused (409), or made for other bytes than shown. The server makes a
+// new one on its next pass.
+function sugStale(path) {
+  const s = sugOf(path), f = noteFiles[path] || {}, shown = noteShown && noteShown.path === path && noteShown.got && noteShown.got.hash;
+  return !!s && ((f.status === 409 && f.hash === s.hash) || (!!shown && shown !== s.hash));
 }
+// What `path` offers now: 'file' with a suggestion that's current, else 'wait' or 'none' (noteSuggested).
+const sugHas = (path) => { const has = noteSuggested(sugOf(path), (notesTree && notesTree.dests) || [], sugPending(path)); return has === 'file' && sugStale(path) ? (sugPending(path) ? 'wait' : 'none') : has; };
 function loadNote(path) {
   const shown = { path, got: null };
   noteShown = shown;
@@ -4144,8 +4154,8 @@ function noteMover(path, hash) {
   if (noteMove.path !== path) noteMove = fresh;
   else if (noteMove.hash !== hash) Object.assign(noteMove, noteMove.edited ? { hash, changed: true } : { ...fresh, error: noteMove.error });
   if (!projects && !projectsAsked) loadProjects(); // for project titles
-  const m = noteMove, dests = notesTree.dests || [], s = noteSugs && noteSugs[path];
-  if (!m.edited && noteSuggested(s, dests) === 'file' && !sugWaits(path)) { m.dest = s.dest; m.summary = s.summary; }
+  const m = noteMove, dests = notesTree.dests || [], s = sugOf(path), has = sugHas(path);
+  if (!m.edited && has === 'file') { m.dest = s.dest; m.summary = s.summary; }
   const go = el('button', { disabled: m.busy || !m.dest }, m.busy ? 'Filing…' : 'File');
   const groups = noteDestGroups(dests, projects && projects.projects);
   const pick = el('select', { id: 'nm-dest', disabled: m.busy, onchange: () => { m.dest = pick.value; m.edited = true; go.disabled = !m.dest; } },
@@ -4157,7 +4167,7 @@ function noteMover(path, hash) {
     onfocusout: () => setTimeout(() => { if (route().view === 'notes') renderNotes(route().id); }) },
   el('label', { htmlFor: 'nm-dest' }, 'Folder'), pick, el('label', { htmlFor: 'nm-sum' }, 'Summary'), sum, el('div', { className: 'row' }, go),
   m.error ? el('p', { className: 'bad' }, m.error) : '', m.changed ? el('p', { className: 'warn' }, 'Note changed; check before filing') : '',
-  sugWaits(path) && !m.edited ? el('p', { className: 'dim', role: 'status' }, 'Suggesting…') : '');
+  has === 'wait' && !m.edited ? el('p', { className: 'dim', role: 'status' }, 'Suggesting…') : '');
 }
 // POST /api/notes/move: { moved } once filed, else { status, error } (status 0: unreachable).
 async function postMove(body) {
@@ -4222,13 +4232,13 @@ function noteRow(e, entries) {
   // An inbox note: where it'd go and why (→ Make It So · summary), File beside it. Nothing fits, or File was refused
   // (409, until a new suggestion): Move to…, the link itself, opening the card. A failed File's error shows until then.
   if (!projects && !projectsAsked) loadProjects(); // for project titles
-  const dests = notesTree.dests, s = noteSugs && noteSugs[e.path], f = noteFiles[e.path] || {};
-  const has = noteSuggested(s, dests), ready = has === 'file' && !sugWaits(e.path), where = has === 'file' && noteDestLabel(s.dest, dests, projects && projects.projects);
+  const dests = notesTree.dests, s = sugOf(e.path), f = noteFiles[e.path] || {};
+  const has = sugHas(e.path), ready = has === 'file', where = ready && noteDestLabel(s.dest, dests, projects && projects.projects);
   const error = f.error && s && f.hash === s.hash ? f.error : '';
   a.append(error ? el('div', { className: 'r2 bad' }, error)
     : ready ? el('div', { className: 'r2' }, `→ ${where}${s.summary ? ` · ${s.summary}` : ''}`)
-    : has !== 'none' ? el('div', { className: 'r2', role: 'status' }, 'Suggesting…') : '');
-  if (has === 'none' || (has === 'file' && !ready)) Object.assign(a.querySelector('.n'), { className: 'n mv', textContent: 'Move to…' });
+    : has === 'wait' ? el('div', { className: 'r2', role: 'status' }, 'Suggesting…') : '');
+  if (has === 'none') Object.assign(a.querySelector('.n'), { className: 'n mv', textContent: 'Move to…' });
   return el('li', { className: 'nfile' }, a, ready
     ? el('button', { disabled: !!f.busy, ariaLabel: `File ${noteLabel(e.path)} in ${where}`, onclick: () => fileNote(e.path, s) }, f.busy ? 'Filing…' : 'File') : '');
 }
@@ -4264,7 +4274,7 @@ function renderNotes(path) {
   const got = entry && entry.kind === 'md' ? noteShown.got : null;
   // A note's view depends on its own suggestion only. While its card has focus, only the card's state (or the note
   // going) redraws it: a tree, suggestion or project titles coming in wait.
-  const one = !!got, drawn = [path, got, noteMove, notesTree, projects, one ? noteSugs && noteSugs[path] : noteSugs, one ? null : noteFiles];
+  const one = !!got, drawn = [path, got, noteMove, notesTree, projects, one ? sugOf(path) : noteSugs, one && sugPending(path), one ? null : noteFiles, sugsError];
   if (notesDrawn && drawn.every((x, i) => x === notesDrawn[i])) return;
   if (notesDrawn && entry && $('notes-body').querySelector('.nmove')?.contains(document.activeElement) && drawn.slice(0, 3).every((x, i) => x === notesDrawn[i])) return;
   notesDrawn = drawn;
@@ -4276,7 +4286,8 @@ function renderNotes(path) {
   if (notesTree.error) return say('bad', notesTree.error);
   if (notesTree.state === 'off') return say('dim', 'Notes repo not configured (MIS_NOTES_REMOTE)');
   if (!entry) return say('dim', 'Not in the notes repo');
-  const stale = ['offline', 'conflict'].includes(notesTree.state) ? el('p', { className: 'dim' }, `Notes repo ${notesTree.state}: showing the last copy`) : '';
+  const stale = [['offline', 'conflict'].includes(notesTree.state) ? el('p', { className: 'dim' }, `Notes repo ${notesTree.state}: showing the last copy`) : '',
+    sugsError && /^inbox(\/[^/]+)?$/.test(path) ? el('p', { className: 'bad' }, `Couldn’t read suggestions: ${sugsError}`) : ''];
   if (entry.kind === 'dir') {
     const rows = path ? noteRows(notesTree.entries, path)
       : NOTE_FOLDERS.map(([f]) => notesTree.entries.find((e) => e.path === f)).filter(Boolean);
@@ -4284,19 +4295,19 @@ function renderNotes(path) {
     if (!rows.length) ul.append(el('li', { className: 'dim' }, path ? 'Empty' : 'No notes yet'));
     // Focus on a row (its link or File) stays there across the redraw.
     const at = document.activeElement, li = at && at.closest('#notes-body li'), href = li && li.querySelector('a').getAttribute('href');
-    body.replaceChildren(stale, ul);
+    body.replaceChildren(...stale, ul);
     const again = href && [...ul.children].find((x) => x.querySelector('a')?.getAttribute('href') === href);
     if (again) ((at.tagName === 'BUTTON' && again.querySelector(':scope > button')) || again.querySelector('a')).focus();
     return;
   }
-  if (entry.kind === 'image') return body.replaceChildren(stale, noteFig(path));
+  if (entry.kind === 'image') return body.replaceChildren(...stale, noteFig(path));
   if (entry.kind !== 'md') return say('dim', 'Can’t show this file here');
   if (!got) return body.replaceChildren(el('div', { className: 'rows' }, skel()));
   if (got.error) return say('bad', got.error);
   const text = noteText(front.body, dir);
   const assets = (Array.isArray(front.meta.assets) ? front.meta.assets : []).map((a) => notePath(dir, String(a))).filter(Boolean);
   const mover = /^inbox\/[^/]+$/.test(path) && !readOnly ? noteMover(path, got.hash) : '';
-  body.replaceChildren(stale, mover, noteChips(path, front.meta), text, ...assets.map((a) => noteFig(a, noteHref(a))));
+  body.replaceChildren(...stale, mover, noteChips(path, front.meta), text, ...assets.map((a) => noteFig(a, noteHref(a))));
 }
 
 // The notes repo's project records, fetched on open and on each move within Projects.
@@ -5075,7 +5086,7 @@ function fileKey() {
   const r = route();
   if (r.view !== 'notes') return false;
   const row = document.activeElement?.closest('li.nfile');
-  const open = !row && /^inbox\/[^/]+$/.test(r.id) && noteSuggested(noteSugs && noteSugs[r.id], (notesTree && notesTree.dests) || []) === 'file' && !sugWaits(r.id);
+  const open = !row && /^inbox\/[^/]+$/.test(r.id) && sugHas(r.id) === 'file';
   const b = row ? row.querySelector(':scope > button') : open ? $('notes-body').querySelector('.nmove button') : null;
   if (!b || b.disabled) return false;
   b.click();
