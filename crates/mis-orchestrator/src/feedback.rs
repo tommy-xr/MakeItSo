@@ -56,17 +56,16 @@ pub enum Send {
     Change,
 }
 
-/// Where `held` goes when the owner's (or the owner sends it; `open`: the app's tasks
-/// running): a reply in the thread of the draft it was about (its newest task, `tip`; Err:
-/// why not now), while that is still the app's draft (`current`), else a new Change task. A
-/// draft from no task can't take it.
+/// Where feedback (or a board's update) goes (the owner's, or the owner sends it; `open`: the
+/// app's tasks running): a reply in the thread of the draft it is about while that is still the
+/// app's draft (`draft_task`: its task; its newest, `tip`; Err: why not now), else a new Change
+/// task. A draft from no task can't take it.
 pub fn send(
-    held: &HeldFeedback,
-    current: bool,
+    draft_task: Option<Option<TaskId>>,
     open: usize,
     tip: Option<Result<TaskId, String>>,
 ) -> Send {
-    match (held.draft_task.filter(|_| current), tip) {
+    match (draft_task, tip) {
         (Some(None), _) => Send::Hold("its draft came from no task to continue".into()),
         (Some(Some(_)), Some(Ok(tip))) => Send::Reply(tip),
         (Some(Some(_)), Some(Err(why))) => Send::Hold(why),
@@ -259,28 +258,31 @@ mod tests {
     fn feedback_continues_the_drafts_thread_and_new_tasks_are_capped() {
         let tip = uuid::Uuid::new_v4();
         let (on_draft, on_live) = (held("x", true), held("x", false));
-        assert_eq!(send(&on_draft, true, 9, Some(Ok(tip))), Send::Reply(tip));
+        assert_eq!(
+            send(on_draft.draft_task, 9, Some(Ok(tip))),
+            Send::Reply(tip)
+        );
         let busy = Some(Err("its task is still working".into()));
         assert_eq!(
-            send(&on_draft, true, 0, busy),
+            send(on_draft.draft_task, 0, busy),
             Send::Hold("its task is still working".into())
         );
         assert!(
-            matches!(send(&on_draft, true, 0, None), Send::Hold(_)),
+            matches!(send(on_draft.draft_task, 0, None), Send::Hold(_)),
             "thread gone"
         );
         let mut no_task = held("x", true);
         no_task.draft_task = Some(None);
-        assert!(matches!(send(&no_task, true, 0, None), Send::Hold(_)));
-        // Its draft was decided or replaced while it waited: new work.
-        assert_eq!(send(&on_draft, false, 0, Some(Ok(tip))), Send::Change);
+        assert!(matches!(send(no_task.draft_task, 0, None), Send::Hold(_)));
+        // Its draft was decided or replaced while it waited (the caller passes none): new work.
+        assert_eq!(send(None, 0, Some(Ok(tip))), Send::Change);
         assert_eq!(
-            send(&on_live, false, 0, None),
+            send(on_live.draft_task, 0, None),
             Send::Change,
             "no draft: new work"
         );
         assert!(matches!(
-            send(&on_live, false, MAX_FEEDBACK_TASKS, None),
+            send(on_live.draft_task, MAX_FEEDBACK_TASKS, None),
             Send::Hold(_)
         ));
     }

@@ -470,6 +470,10 @@ async fn main() -> anyhow::Result<()> {
                 Ok(images) => app = app.with_images(images),
                 Err(e) => tracing::warn!("image attachments off: {e:#}"),
             }
+            match mis_orchestrator::boards::Boards::open(dir.join("boards")) {
+                Ok(boards) => app = app.with_boards(boards),
+                Err(e) => tracing::warn!("boards off: {e:#}"),
+            }
             match evidence::Store::open(dir.join("evidence")) {
                 Ok(store) => app = app.with_evidence(store),
                 Err(e) => tracing::warn!("evidence files off: {e:#}"),

@@ -234,9 +234,57 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   :is(#routine-new, #settings-form) input { min-height: 2.75rem; padding: 0 .75rem; }
   :is(#routine-new, #settings-form) p { margin: 0; font-size: .8125rem; overflow-wrap: anywhere; }
   :is(#routine-new, #settings-form) .row { margin: 0; }
-  /* Building an app: references dropped anywhere on the page (or pasted, or picked here) attach to its request. */
+  /* An app's board: references dropped anywhere on the page (or pasted, or picked) float as tilted cards, gently
+     bobbing (none with reduced motion); Catalog sets them in tidy columns. Notes and documents are paper in either theme. */
   .refs { display: block; width: 100%; margin: 1rem 0 .5rem; padding: 1.5rem 1rem; border: 1.5px dashed var(--sep); border-radius: 1rem; background: none; color: var(--dim); font-size: .9375rem; }
-  body.over .refs, body.over #new .box { box-shadow: 0 0 0 2px var(--accent); }
+  body.over .refs, body.over #board, body.over #new .box { box-shadow: 0 0 0 2px var(--accent); }
+  .chead > .bseg { flex: none; display: flex; gap: .125rem; padding: .1875rem; border-radius: .75rem; background: var(--card); }
+  .bseg button { min-height: 2.25rem; padding: 0 .75rem; border-radius: .5625rem; background: none; color: var(--dim); font: 500 .8125rem var(--sans); }
+  .bseg button[aria-pressed=true] { background: var(--seg-on); color: var(--fg); }
+  #board-hint { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .5rem; margin: .75rem 0 0; font-size: .8125rem; }
+  #board-hint .new { color: var(--accent); }
+  #board-hint button { min-height: 2rem; padding: 0 .625rem; border-radius: 999px; background: var(--raised); color: var(--fg2); font: 500 .75rem var(--sans); }
+  #board-note { display: grid; gap: .5rem; margin: .5rem 0 0; }
+  #board-note textarea { width: 100%; min-height: 4.5rem; font-size: 1rem; }
+  #board-note .row { margin: 0; }
+  .bchips { display: flex; flex-wrap: wrap; gap: .375rem; margin: .75rem 0 0; }
+  .bchips button { min-height: 2rem; padding: 0 .75rem; border-radius: 999px; border: 1px solid var(--sep); background: none; color: var(--soft); font: 500 .8125rem var(--sans); }
+  .bchips button[aria-pressed=true] { border-color: transparent; background: var(--seg-on); color: var(--fg); }
+  #board { display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start; gap: 1.25rem .75rem; margin: .5rem 0 1rem; padding: 1.25rem .25rem; border-radius: 1rem; perspective: 1400px; }
+  #board:empty { display: none; }
+  #board.catalog { display: block; columns: 2 10rem; column-gap: .75rem; padding: .25rem 0; }
+  .card { position: relative; flex: none; width: var(--w, 10rem); max-width: 46%; margin: var(--y, 0) 0 0; border-radius: .75rem; overflow: hidden; background: var(--card); box-shadow: 0 1rem 2rem rgba(0, 0, 0, .45);
+    transform: rotate(var(--r, 0deg)); animation: bob 7s ease-in-out infinite; animation-delay: var(--d, 0s); transition: transform .35s cubic-bezier(.2, .8, .2, 1), box-shadow .35s; }
+  .card:hover, .card:focus-within { z-index: 2; transform: rotate(0deg) translateY(-.5rem) scale(1.04); box-shadow: 0 1.5rem 3rem rgba(0, 0, 0, .55), 0 0 0 2px var(--accent); animation-play-state: paused; }
+  #board.catalog .card { width: auto; max-width: none; margin: 0 0 .75rem; break-inside: avoid; transform: none; animation: none; box-shadow: 0 .5rem 1.25rem rgba(0, 0, 0, .3); }
+  #board.catalog .card:hover { transform: translateY(-.25rem); }
+  #board.catalog .card .note { max-height: none; }
+  @keyframes bob { 0%, 100% { translate: 0 0; } 50% { translate: 0 -.375rem; } }
+  .card img { display: block; width: 100%; min-height: 4rem; background: var(--raised); }
+  .card .x { position: absolute; top: .375rem; right: .375rem; z-index: 1; width: 2rem; height: 2rem; min-height: 0; padding: 0; border-radius: 50%; background: rgba(13, 17, 23, .8); color: #fff; font: .875rem/1 var(--sans); opacity: 0; transition: opacity .2s; }
+  .card:hover .x, .card:focus-within .x, .card .x:focus-visible { opacity: 1; }
+  @media (hover: none) { .card .x { opacity: .85; } }
+  .card .new { position: absolute; top: .5rem; left: .5rem; z-index: 1; padding: .1875rem .5rem; border-radius: 999px; background: var(--accent); color: var(--on-accent); font: 600 .6875rem var(--sans); }
+  .card.fresh > :is(.note, .doc, .link) { padding-top: 2.25rem; }
+  .card.fresh { box-shadow: 0 1rem 2rem rgba(0, 0, 0, .45), 0 0 0 2px var(--accent); }
+  .card figcaption { display: flex; gap: .25rem; padding: .4375rem .625rem; font-size: .75rem; color: var(--fg); background: var(--card); }
+  .card figcaption span:first-child { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 500; }
+  .card figcaption span + span { flex: none; color: var(--dim); }
+  .card .note { padding: 1rem .875rem; background: #F4E9B8; color: #3B3112; font: 1.125rem/1.25 "Bradley Hand", "Segoe Print", "Comic Sans MS", cursive; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 14rem; overflow: hidden; }
+  .card .doc { display: grid; gap: .375rem; padding: .875rem; background: #fff; color: #1D232B; text-decoration: none; }
+  .card .doc b { justify-self: start; padding: .125rem .375rem; border-radius: .25rem; background: #FDE7E4; color: #B42318; font: 600 .6875rem var(--sans); text-transform: uppercase; }
+  .card .doc span { font: 600 .875rem/1.3 var(--sans); overflow-wrap: anywhere; }
+  .card .doc i { display: block; height: .375rem; border-radius: .1875rem; background: #E3E6EA; }
+  .card .link { display: grid; gap: .25rem; padding: .875rem; color: var(--fg); text-decoration: none; background: linear-gradient(160deg, var(--raised), var(--card)); }
+  .card .link b { font: 600 .875rem/1.3 var(--sans); overflow-wrap: anywhere; }
+  .card .link span { font-size: .75rem; color: var(--link); overflow-wrap: anywhere; }
+  #o-name { color: var(--soft); }
+  #o-name b { font-weight: 600; color: var(--fg); }
+  #name-in { width: 10rem; height: 1.75rem; min-height: 0; padding: 0 .625rem; border-radius: 999px; font-size: 1rem; }
+  .go .lbl { display: none; }
+  #new.build .go { width: auto; padding: 0 1rem; border-radius: .75rem; font: 600 .9375rem var(--sans); }
+  #new.build .go .lbl { display: inline; }
+  #new.build .go svg { display: none; }
   #build-app:empty { display: none; }
   #settings-form fieldset { display: grid; gap: .5rem; min-width: 0; margin: 0; padding: 0; border: 0; }
   #settings-form label { margin-top: .25rem; font-size: .8125rem; color: var(--dim); }
@@ -940,11 +988,14 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
 </main>
 
 <main id="build" hidden>
-  <div class="chead"><a href="#apps" class="back" aria-label="Back to apps"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a><div id="build-head"></div></div>
+  <div class="chead"><a href="#apps" class="back" aria-label="Back to apps"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></a><div id="build-head"></div><div id="board-view" class="bseg" role="group" aria-label="View"><button type="button" data-v="collage" aria-pressed="true">Collage</button><button type="button" data-v="catalog" aria-pressed="false">Catalog</button></div></div>
   <div id="build-preview" class="preview" hidden></div>
   <ul id="build-app" class="rows"></ul>
-  <button type="button" id="refs" class="refs">Drop or paste sketches, screenshots and other references, or tap to add them</button>
-  <p id="build-hint" class="dim">Say who uses it, what it keeps and what they see. An agent builds it in the apps repo, then opens a PR and proposes a draft for you to try.</p>
+  <p id="board-hint" class="dim"></p>
+  <form id="board-note" hidden><textarea id="bn-text" aria-label="Note or link" placeholder="A note, or a link (https://…)"></textarea><div class="row"><button>Add</button><button type="button" id="bn-cancel">Cancel</button></div></form>
+  <div id="board-chips" class="bchips" role="group" aria-label="Show" hidden></div>
+  <button type="button" id="refs" class="refs">Drop, paste or tap + to add photos, screenshots, docs, links and notes. The agent reads every one.</button>
+  <div id="board"></div>
 </main>
 
 <main id="settings" hidden>
@@ -996,13 +1047,14 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   <form id="new" class="composer">
     <div id="shots" class="shots" hidden></div>
     <div class="ctx">
+      <button type="button" id="o-name" class="optc" hidden></button><input id="name-in" aria-label="App name" placeholder="e.g. chores" autocapitalize="off" autocorrect="off" spellcheck="false" hidden>
       <div id="opts" role="group" aria-label="Where it runs">
         <button type="button" id="o-worker" class="optc" aria-expanded="false" aria-controls="opt-menu"></button><span aria-hidden="true">›</span><button type="button" id="o-harness" class="optc" aria-expanded="false" aria-controls="opt-menu"></button><span aria-hidden="true">›</span><button type="button" id="o-model" class="optc" aria-expanded="false" aria-controls="opt-menu"></button>
       </div>
       <div id="opt-menu" role="group" hidden></div>
       <input id="model" aria-label="Other model" placeholder="Other model" autocapitalize="off" autocorrect="off" spellcheck="false" hidden>
     </div>
-    <div class="box"><button type="button" id="clip" class="clip" aria-label="Attach photos and files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><input type="file" id="pick" accept="image/*,.pdf,.txt,.md,.csv,.json" multiple hidden><textarea id="prompt" rows="1" aria-label="new task" placeholder="Start a task or ask anything" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button><button id="send" class="go" aria-label="Submit" title="Submit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button></div>
+    <div class="box"><button type="button" id="clip" class="clip" aria-label="Attach photos and files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><input type="file" id="pick" accept="image/*,.pdf,.txt,.md,.csv,.json" multiple hidden><textarea id="prompt" rows="1" aria-label="new task" placeholder="Start a task or ask anything" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button><button id="send" class="go" aria-label="Submit" title="Submit"><span class="lbl"></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button></div>
   </form>
   <form id="reply" class="composer" hidden>
     <div class="ctx"><p id="reply-error" class="bad" hidden></p></div>
@@ -1966,7 +2018,7 @@ function render() {
   document.body.classList.toggle('stale', everOpen && offline);
   // Sending needs a socket and no submit in flight; drafts stay in their fields meanwhile.
   $('send').disabled = $('send-reply').disabled = !live || !!pending || appSending;
-  if (shots.some((x) => !x.id)) $('send').disabled = true; // photos still uploading
+  if (shots.some((x) => !x.id) || (r.view === 'build' && boardBusy)) $('send').disabled = true; // still uploading
   $('clip').disabled = shots.length >= MAX_SHOTS || !!pending || appSending;
   $('prompt').readOnly = appSending;
   for (const v in views) $(v).hidden = !everOpen || (v !== r.view && !(split && v === 'list'));
@@ -3910,19 +3962,15 @@ function drawApps(ul, list, alone) {
   ul.dataset.key = key;
   return true;
 }
-// `#new-app` (`slug` null) or `#apps/<slug>`: one app being built or changed from the composer below, and
-// nothing else. A change shows its app (drafts, releases); references dropped or pasted on the page attach.
+// `#new-app` (`slug` null) or `#apps/<slug>`: one app being built or changed from its board and the composer
+// below, and nothing else. A change shows its app (drafts, releases) above its board.
 function renderBuild(slug) {
   if (!everOpen) return;
   if (!settingsAsked) loadSettings(); // the composer's harness and model
   const ul = $('build-app'), a = slug && hosted && hosted.list && hosted.list.find((x) => x.slug === slug);
   $('build-head').replaceChildren(el('div', { className: 'ttl' }, el('span', {}, slug ? (a ? a.title : slug) : 'New app')));
-  $('build-hint').hidden = !!slug;
-  $('refs').disabled = shots.length >= MAX_SHOTS || appSending;
-  // Feedback on a draft carries no images, and goes to the task that made it: no references, no placement.
-  $('refs').hidden = !!(a && reviewing(a));
-  if (a && reviewing(a)) $('clip').disabled = true;
   showPreview($('build-preview'), a);
+  renderBoard(slug, a);
   if (!slug) { delete ul.dataset.key; ul.replaceChildren(); return; }
   if (a) { drawApps(ul, [a], true); return; }
   delete ul.dataset.key;
@@ -3930,6 +3978,133 @@ function renderBuild(slug) {
   else ul.replaceChildren(el('li', { className: hosted.error ? 'bad' : 'dim' }, hosted.error || `No app called ${slug}`));
 }
 $('refs').onclick = () => $('pick').click();
+
+// The open app's board (`#new-app`'s or `#apps/<slug>`'s): { path, items, error } once read, else null. Its cards
+// are redrawn only when what they show changes, so they keep bobbing; photo thumbnails are fetched once each.
+let board = null, boardAsked = '', boardBusy = 0, boardView = 'collage', boardFilter = 'all';
+const thumbs = new Map(); // item id -> its <img>, filled from an object URL
+async function loadBoard(path) {
+  boardAsked = path;
+  const res = await getJson(path, () => loadBoard(path));
+  if (boardAsked !== path || !res) return;
+  board = res.error ? { path, items: [], error: res.error } : { path, items: res.ok.items || [] };
+  render();
+}
+// Whether this page may change the board: a new app's, or its app's owner (read-only tokens never).
+const boardOwned = (slug, a) => !readOnly && (!slug || !!(a && a.role === 'owner'));
+const boardUnsent = () => (route().view === 'build' && board && board.path === boardPath(route().id) ? board.items.filter((i) => !i.sent).length : 0);
+function renderBoard(slug, a) {
+  const path = boardPath(slug);
+  if ((!board || board.path !== path) && boardAsked !== path) {
+    board = null;
+    for (const img of thumbs.values()) if (img.src) URL.revokeObjectURL(img.src);
+    thumbs.clear();
+    loadBoard(path);
+  }
+  const mine = board && board.path === path ? board : null, items = mine ? mine.items : [], owned = boardOwned(slug, a);
+  const counts = boardCounts(items);
+  for (const b of $('board-view').children) b.setAttribute('aria-pressed', String(b.dataset.v === boardView));
+  $('board-view').hidden = !items.length;
+  $('refs').hidden = !mine || !!items.length || !owned;
+  $('refs').disabled = appSending;
+  const busy = boardBusy ? [el('span', {}, `· adding ${boardBusy}…`)] : [];
+  const add = owned && mine ? [el('button', { type: 'button', onclick: () => { $('board-note').hidden = false; $('bn-text').focus(); } }, '+ Note or link')] : [];
+  const line = mine && mine.error ? [el('span', { className: 'bad' }, mine.error)] : boardLine(items, !!slug).map(([t, c]) => el('span', { className: c || '' }, t));
+  $('board-hint').replaceChildren(...line, ...busy, ...add);
+  $('board-hint').hidden = !mine;
+  const catalog = boardView === 'catalog' && items.length > 0;
+  if (!counts[boardFilter]) boardFilter = 'all'; // its last one went
+  $('board-chips').hidden = !catalog;
+  if (catalog) {
+    $('board-chips').replaceChildren(...BOARD_KINDS.filter(([k]) => k === 'all' || counts[k]).map(([k, label]) =>
+      el('button', { type: 'button', ariaPressed: String(boardFilter === k), onclick: () => { boardFilter = k; render(); } }, `${label} ${counts[k]}`)));
+  }
+  const shown = items.filter((i) => !catalog || boardFilter === 'all' || boardKind(i) === boardFilter);
+  const key = JSON.stringify([path, shown, catalog, owned, !!slug]);
+  const stage = $('board');
+  stage.classList.toggle('catalog', catalog);
+  if (stage.dataset.key === key) return;
+  stage.dataset.key = key;
+  // Newest first: what was just added, or is new since the last update, leads.
+  stage.replaceChildren(...shown.slice().reverse().map((item) => boardCard(item, path, owned, !!slug && !item.sent)));
+}
+function boardCard(item, path, owned, fresh) {
+  const w = item.what, k = boardKind(item);
+  let body, label = '';
+  if (k === 'image') {
+    if (!thumbs.has(item.id)) {
+      const img = el('img', { alt: w.name });
+      thumbs.set(item.id, img);
+      fetch(`${path}/items/${item.id}`, { headers: authHeaders() }).then(async (r) => { if (r.ok) img.src = URL.createObjectURL(await r.blob()); else thumbs.delete(item.id); })
+        .catch(() => thumbs.delete(item.id));
+    }
+    body = thumbs.get(item.id);
+    label = photoName(w.name);
+  } else if (k === 'doc') {
+    body = el('a', { className: 'doc', href: '#', onclick: (e) => { e.preventDefault(); openBoardFile(path, item); } },
+      el('b', {}, docExt(w.name)), el('span', {}, w.name), ...[92, 78, 85, 60].map((n) => el('i', { style: `width:${n}%` })));
+    label = w.name;
+  } else if (k === 'link') {
+    const { host, rest } = linkParts(w.url);
+    body = el('a', { className: 'link', href: /^https?:\/\//i.test(w.url) ? w.url : '#', target: '_blank', rel: 'noopener noreferrer' }, el('b', {}, w.title || host), el('span', {}, host + rest));
+    label = w.title || host;
+  } else {
+    body = el('div', { className: 'note' }, w.text);
+  }
+  const kind = { doc: 'doc', image: 'photo', link: 'link', note: 'note' }[k];
+  const card = el('figure', { className: `card${fresh ? ' fresh' : ''}` }, body, el('figcaption', {}, ...(label ? [el('span', {}, label), el('span', {}, `· ${kind}`)] : [el('span', {}, kind)])));
+  card.style.cssText = cardLook(item.id);
+  if (fresh) card.prepend(el('span', { className: 'new' }, 'New'));
+  if (owned) card.prepend(el('button', { type: 'button', className: 'x', ariaLabel: `Remove ${label || kind}`, onclick: () => removeBoardItem(path, item.id) }, '×'));
+  return card;
+}
+// A document opens in a tab of its own, fetched with the token. The tab opens first: after an await it'd be blocked.
+async function openBoardFile(path, item) {
+  const tab = window.open('', '_blank');
+  try {
+    const url = URL.createObjectURL(await (await boardFetch(`${path}/items/${item.id}`, 'GET')).blob());
+    if (tab) tab.location = url; else location.assign(url);
+  } catch (e) { if (tab) tab.close(); flash(`couldn’t open ${item.what.name}: ${e.message}`); }
+}
+async function boardFetch(path, method, body) {
+  const r = await fetch(path, { method, headers: { ...authHeaders(), ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body && JSON.stringify(body) });
+  if (!r.ok) throw new Error((await r.text()) || `error ${r.status}`);
+  return r;
+}
+async function removeBoardItem(path, id) {
+  try { await boardFetch(`${path}/items/${id}`, 'DELETE'); } catch (e) { flash(`not removed: ${e.message}`); }
+  loadBoard(path);
+}
+// Files onto the board at `path`: each uploaded (photos shrunk to JPEG, as for a task), then kept with the board.
+async function addFiles(path, files) {
+  for (const f of files) {
+    boardBusy++;
+    render();
+    try {
+      const id = await upload(f, refKind(f) === 'doc' ? null : await shrink(f));
+      await boardFetch(`${path}/items`, 'POST', { kind: 'upload', upload: id });
+    } catch (e) { flash(`${f.name || 'file'} not added: ${e.message}`); }
+    boardBusy--;
+    if (board && board.path === path) loadBoard(path);
+  }
+  render();
+}
+async function addText(path, text) {
+  const item = textItem(text);
+  if (!item) return false;
+  boardBusy++;
+  let ok = true;
+  try { await boardFetch(`${path}/items`, 'POST', item); } catch (e) { flash(`not added: ${e.message}`); ok = false; }
+  boardBusy--;
+  loadBoard(path);
+  return ok;
+}
+for (const b of $('board-view').children) b.onclick = () => { boardView = b.dataset.v; boardFilter = 'all'; render(); };
+$('board-note').onsubmit = async (e) => {
+  e.preventDefault();
+  if (await addText(boardPath(route().id), $('bn-text').value)) { $('bn-text').value = ''; $('board-note').hidden = true; }
+};
+$('bn-cancel').onclick = () => { $('board-note').hidden = true; };
 
 // Settings (full access only), fetched each time the page opens. Its fields stay disabled until
 // they hold what was fetched, and while a save is in flight, so nothing typed is overwritten.
@@ -3990,19 +4165,56 @@ $('settings-form').onsubmit = async (e) => {
 // `draft`: the release of its draft being reviewed, which the composer then sends feedback on.
 function composerFor(view, slug, title, draft) {
   if (view !== 'build') return { key: 'draft:new', placeholder: 'Start a task or ask anything', label: 'new task' };
-  if (!slug) return { key: 'draft:app', placeholder: 'Create an app: what should it do?', label: 'new app' };
+  if (!slug) return { key: 'draft:app', placeholder: 'Anything else? Who it’s for, what matters most', label: 'new app' };
   const name = title || slug;
-  if (draft) return { key: `draft:app:${slug}`, placeholder: `What should change in draft v${draft}?`, label: `feedback on ${name} v${draft}` };
-  return { key: `draft:app:${slug}`, placeholder: `Change ${name}: what should change?`, label: `change ${name}` };
+  if (draft) return { key: `draft:app:${slug}`, placeholder: `What should change in draft v${draft}?`, label: `update ${name} v${draft}` };
+  return { key: `draft:app:${slug}`, placeholder: `What should change in ${name}?`, label: `update ${name}` };
 }
-// In-app feedback (`AppFeedback`) on a draft from beside its preview, `w`×`h`: about the whole page at its entry.
-const draftNote = (note, w, h) => ({ route: '/', selector: '', rect: { x: 0, y: 0, w, h }, viewport: { w, h }, note });
-// `POST /api/apps/tasks`: `request` building (`slug` null) or changing app `slug`, where the chips (`pick`) say,
-// else on Settings' apps harness (`apps`), with uploaded `images`.
-function appTaskBody(request, slug, pick, apps, images) {
-  return { request, slug, change: !!slug, harness: pick.harness || (apps && apps.harness) || 'claude', model: pick.model || null,
-    worker: pick.worker ? pick.worker.id : null, images };
+// An `AppTask` for a board's send: `request` building app `slug` (null: the agent names it), or changing it
+// (`change`), where the chips (`pick`) say, else on Settings' apps harness (`apps`). The board adds its references.
+function appTaskBody(request, slug, change, pick, apps) {
+  return { request, slug, change, harness: pick.harness || (apps && apps.harness) || 'claude', model: pick.model || null,
+    worker: pick.worker ? pick.worker.id : null };
 }
+// The new app's board (`_new`), or app `slug`'s.
+const boardPath = (slug) => `/api/boards/app/${slug ? encodeURIComponent(slug) : '_new'}`;
+// What a board item shows as: 'image', 'doc', 'link' or 'note'.
+const boardKind = (item) => (item.what.kind === 'file' ? (docExt(item.what.name) ? 'doc' : 'image') : item.what.kind);
+const BOARD_KINDS = [['all', 'All'], ['image', 'Images'], ['doc', 'Docs'], ['link', 'Links'], ['note', 'Notes']];
+function boardCounts(items) {
+  const c = { all: items.length, image: 0, doc: 0, link: 0, note: 0 };
+  for (const i of items) c[boardKind(i)]++;
+  return c;
+}
+// The line over a board, as [text, class] parts: how many it holds and, on an app's, how many are new since it was sent.
+function boardLine(items, app) {
+  const n = items.length, fresh = items.filter((i) => !i.sent).length;
+  if (!n) return [];
+  const parts = [[`${n} reference${n === 1 ? '' : 's'}`]];
+  if (app && fresh) parts.push([`· ${fresh} new since the last update`, 'new']);
+  else if (!app) parts.push(['· the agent reads every one']);
+  return parts;
+}
+// A card's collage look, picked by its item's id so it keeps it as others come and go: tilt, drop, width, bob delay.
+const LOOKS = [[-6, 1.5, 11], [4, 0, 9.5], [-2, 2.5, 10.5], [5, .5, 10], [3, 1, 11.5], [-5, 2, 10], [2, 0, 9], [-3, 1.5, 10.5]];
+function cardLook(id) {
+  const i = parseInt(id.slice(0, 8), 16) || 0, [r, y, w] = LOOKS[i % LOOKS.length];
+  return `--r:${r}deg;--y:${y}rem;--w:${w}rem;--d:-${((i % 8) * 0.9).toFixed(1)}s`;
+}
+// Typed or dropped text as a board item: one http(s) link alone is a link, else a note; blank is none.
+function textItem(text) {
+  const t = (text || '').trim();
+  if (!t) return null;
+  return /^https?:\/\/\S+$/i.test(t) ? { kind: 'link', url: t } : { kind: 'note', text: t };
+}
+// A link card's domain and the rest: `https://www.example.com/habit-grid` -> example.com, /habit-grid.
+function linkParts(url) {
+  try { const u = new URL(url); return { host: u.hostname.replace(/^www\./, ''), rest: (u.pathname + u.search).replace(/^\/$/, '') }; } catch { return { host: url, rest: '' }; }
+}
+// A photo's caption: its name without the extension; one named only by its upload id is just a photo.
+const photoName = (name) => (/^[0-9a-f-]{36}\.\w+$/.test(name) ? 'Photo' : name.replace(/\.[^.]*$/, ''));
+// A name typed for a new app as a slug: `Chore Chart!` -> `chore-chart`; '' if none.
+const slugify = (name) => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+/, '').slice(0, 32).replace(/-+$/, '');
 // apps:end
 
 // notes:begin. The Notes view, pure: a note's frontmatter, who wrote it, a folder's rows. tests/md.test.mjs runs this block.
@@ -4741,20 +4953,24 @@ async function shrink(file) {
   if (src.close) src.close();
   return new Promise((ok, no) => c.toBlob((b) => (b ? ok(b) : no(new Error('could not encode'))), 'image/jpeg', 0.85));
 }
+// `file` uploaded: a document as it is, a photo as `blob` (shrunk to JPEG), named `<stem>.jpg`. Its upload id.
+async function upload(file, blob) {
+  if (!blob && file.size > MAX_DOC) throw new Error(`files are limited to ${MAX_DOC >> 20} MB`);
+  const name = blob ? `${(file.name || '').replace(/\.[^.]*$/, '') || 'photo'}.jpg` : file.name;
+  const r = await fetch(`/api/upload?name=${encodeURIComponent(name)}`, { method: 'POST', headers: { ...authHeaders(), 'content-type': blob ? 'image/jpeg' : 'application/octet-stream' }, body: blob || file });
+  if (!r.ok) throw new Error((await r.text()) || r.statusText);
+  return (await r.json()).id;
+}
 async function attach(file) {
   const doc = refKind(file) === 'doc', shot = { url: '', name: doc ? file.name : '', id: null, bytes: doc ? file.size : 0 };
   const held = shots.reduce((n, x) => n + (x.bytes || 0), 0);
   shots.push(shot);
   try {
-    if (doc && file.size > MAX_DOC) throw new Error(`files are limited to ${MAX_DOC >> 20} MB`);
     if (held + shot.bytes > MAX_DOCS) throw new Error(`at most ${MAX_DOCS >> 20} MB of files`);
-    const blob = doc ? file : await shrink(file);
-    if (!doc) shot.url = URL.createObjectURL(blob);
+    const blob = doc ? null : await shrink(file);
+    if (blob) shot.url = URL.createObjectURL(blob);
     renderShots();
-    const to = doc ? `/api/upload?name=${encodeURIComponent(file.name)}` : '/api/upload';
-    const r = await fetch(to, { method: 'POST', headers: { ...authHeaders(), 'content-type': doc ? 'application/octet-stream' : 'image/jpeg' }, body: blob });
-    if (!r.ok) throw new Error((await r.text()) || r.statusText);
-    shot.id = (await r.json()).id;
+    shot.id = await upload(file, blob);
   } catch (e) {
     dropShot(shot);
     flash(`${doc ? file.name : 'photo'} not attached: ${e.message}`);
@@ -4784,18 +5000,25 @@ $('pick').onchange = () => {
   takeImages($('pick').files);
   $('pick').value = '';
 };
-// References for the new task or app: images and documents dropped on its page or pasted into the field attach (up to
-// MAX_SHOTS). Building an app, text or a link dropped off the field goes into it (on it, the field takes it itself).
+// References for the new task: images and documents dropped on its page or pasted into the field attach (up to
+// MAX_SHOTS). Building an app, they and text or a link dropped off the field go on its board.
 const composing = () => !$('dock').hidden && !$('new').hidden;
 function takeImages(files) {
   if (appSending) return; // what's sent is settled
-  const a = route().view === 'build' && hosted && hosted.list && hosted.list.find((x) => x.slug === route().id);
-  if (a && reviewing(a)) { flash('feedback on a draft takes no images'); return; }
+  if (route().view === 'build') { takeRefs(files); return; }
   const imgs = [...files].filter(refKind), room = MAX_SHOTS - shots.length;
   if (imgs.length < files.length) flash(`only images and .${DOC_EXTS.join(', .')} files attach`);
   else if (imgs.length > room) flash(`at most ${MAX_SHOTS} images and files`);
   for (const f of imgs.slice(0, Math.max(0, room))) attach(f);
   render();
+}
+// Building an app, they go on its board instead.
+function takeRefs(files) {
+  const r = route(), a = r.id && hosted && hosted.list && hosted.list.find((x) => x.slug === r.id);
+  if (!boardOwned(r.id, a)) { flash('only the app’s owner adds to its board'); return; }
+  const ok = [...files].filter(refKind);
+  if (ok.length < files.length) flash(`only images and .${DOC_EXTS.join(', .')} files go on a board`);
+  addFiles(boardPath(r.id), ok);
 }
 let overTimer = 0;
 document.addEventListener('dragover', (e) => {
@@ -4811,13 +5034,8 @@ document.addEventListener('drop', (e) => {
   if (dt.files.length) { e.preventDefault(); takeImages(dt.files); return; }
   if (e.target.closest('input, textarea')) return;
   e.preventDefault(); // else a dropped link opens in place of the page
-  if (route().view !== 'build') return;
-  const text = dt.getData('text/plain').trim(), f = $('prompt');
-  if (!text) return;
-  f.value = f.value.trim() ? `${f.value.trimEnd()}\n${text}` : text;
-  keepDraft(f);
-  fit(f);
-  f.focus();
+  const r = route(), a = r.id && hosted && hosted.list && hosted.list.find((x) => x.slug === r.id);
+  if (r.view === 'build' && boardOwned(r.id, a)) addText(boardPath(r.id), dt.getData('text/plain'));
 });
 $('prompt').addEventListener('paste', (e) => {
   const files = e.clipboardData ? e.clipboardData.files : [];
@@ -4861,56 +5079,37 @@ $('new').onsubmit = (e) => {
   micOff();
   unlock();
   const prompt = $('prompt').value.trim();
-  if (!prompt || pending || appSending) return;
-  const a = route().view === 'build' && hosted && hosted.list && hosted.list.find((x) => x.slug === route().id);
-  if (a && reviewing(a)) { sendNote(prompt, a); return; }
-  if (route().view === 'build') { startApp(prompt, route().id); return; }
+  if ((!prompt && !boardUnsent()) || pending || appSending || boardBusy) return;
+  if (route().view === 'build') { sendBoard(prompt, route().id); return; }
   pending = { key: 'draft:new', text: prompt };
   send({ type: 'submit', prompt, cwd: null, harness: pick.harness || null, model: pick.model || null, worker: pick.worker ? pick.worker.id : null, images: shots.map((x) => x.id) });
   $('prompt').value = '';
   render();
 };
-// Build (`slug` null) or change app `slug` from the composer, then open its task. The text and images stay
-// until it starts, so a refusal (e.g. no worker runs the harness) loses nothing.
+// Create the new app (`slug` null) from its board, then open its task; or update app `slug` with what's new on its
+// board, and stay for its draft. The text stays until it's taken, so a refusal (e.g. no worker runs the harness)
+// loses nothing.
 let appSending = false;
-// App `a`'s draft, while its owner is on its page: the composer sends feedback on it.
+// App `a`'s draft, while its owner is on its page: an update goes to the task that made it.
 const reviewing = (a) => (a.draft && a.role === 'owner' && !readOnly ? a.draft.release : null);
-// `note` on app `a`'s draft as in-app feedback (the frame's size its viewport): it goes back to the task
-// that made the draft. The text stays until it's taken.
-async function sendNote(note, a) {
-  const key = promptKey, f = document.querySelector('#build-preview iframe');
-  const body = draftNote(note, (f && f.clientWidth) || innerWidth, (f && f.clientHeight) || innerHeight);
-  appSending = true;
-  render();
-  let why = '', kept = false;
-  try {
-    const r = await fetch(`/api/apps/${encodeURIComponent(a.slug)}/feedback/new`, { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    kept = r.ok || r.status === 409; // 409: it waits on the app, with why
-    if (!r.ok) why = (await r.text()) || `error ${r.status}`;
-  } catch { why = 'couldn’t reach the orchestrator'; }
-  appSending = false;
-  if (!kept) { flash(`error: ${why}`); render(); return; }
-  drafts.set(key, '');
-  if (promptKey === key) $('prompt').value = '';
-  flash(why ? `kept: ${why}` : 'sent to its task');
-  await loadApps();
-}
-async function startApp(request, slug) {
-  const key = promptKey;
-  const body = appTaskBody(request, slug, pick, settings && settings.s && settings.s.apps, shots.map((x) => x.id));
+let newName = drafts.get('draft:app:name'); // the new app's name, if one was given; else the agent picks
+async function sendBoard(request, slug) {
+  const key = promptKey, path = boardPath(slug);
+  const body = appTaskBody(request, slug || newName || null, !!slug, pick, settings && settings.s && settings.s.apps);
   appSending = true;
   render();
   let why = '', task = null;
-  try {
-    const r = await fetch('/api/apps/tasks', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    if (r.ok) task = (await r.json()).task; else why = (await r.text()) || `error ${r.status}`;
-  } catch { why = 'couldn’t reach the orchestrator'; }
+  try { task = (await (await boardFetch(`${path}/send`, 'POST', body)).json()).task; } catch (e) { why = e.message; }
   appSending = false;
-  if (why) { flash(`error: ${why}`); render(); return; }
+  if (why) { flash(`not sent: ${why}`); render(); return; }
   drafts.set(key, '');
   if (promptKey === key) $('prompt').value = '';
-  clearShotsOf(key);
-  here = { sec: null, back: slug ? `#apps/${slug}` : '#apps' }; // its page's back link
+  if (slug) { flash('sent to its task: its draft shows here to try'); loadBoard(path); loadApps(); return; }
+  newName = '';
+  drafts.set('draft:app:name', '');
+  board = null;
+  boardAsked = '';
+  here = { sec: null, back: '#apps' }; // its page's back link
   location.hash = `#task/${task}`;
 }
 $('reply').onsubmit = (e) => {
@@ -5008,11 +5207,32 @@ function composeFor(r) {
   }
   $('prompt').placeholder = c.placeholder;
   $('prompt').setAttribute('aria-label', c.label);
+  // On a board: Create or Update, which may go with only what's new on it; a new app's name, if given.
+  const build = r.view === 'build';
+  $('new').classList.toggle('build', build);
+  $('send').querySelector('.lbl').textContent = r.id ? 'Update app' : 'Create app';
+  $('prompt').required = !boardUnsent();
+  $('o-name').hidden = !build || !!r.id || !$('name-in').hidden;
+  if (build && !r.id) $('o-name').replaceChildren('Name: ', el('b', {}, newName || 'auto'), newName ? ' · rename' : ' (the agent picks) · rename');
   const want = r.view === 'build' ? appPick : taskPick, filled = appDefaults();
   if (want === pick && !filled) return;
   pick = want;
   optLabel();
 }
+$('o-name').onclick = () => {
+  $('o-name').hidden = true;
+  Object.assign($('name-in'), { hidden: false, value: newName });
+  $('name-in').focus();
+};
+function setName() {
+  if ($('name-in').hidden) return;
+  newName = slugify($('name-in').value);
+  drafts.set('draft:app:name', newName);
+  $('name-in').hidden = true;
+  render();
+}
+$('name-in').onblur = setName;
+$('name-in').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); setName(); } else if (e.key === 'Escape') { $('name-in').value = newName; setName(); } };
 let menuFor = ''; // the chip whose list is open: 'worker', 'harness', 'model' or ''
 const modelField = $('model'); // moves into the model list, so it's held here
 // Hostname, plus its id's start where two workers share one (as the planner names them): `mac-1a2b3c4d`.
@@ -5043,7 +5263,7 @@ function optLabel() {
   };
   chip('worker', 'Machine', w ? workerName(w) : 'Any machine', w ? [stateDot(w)] : [], w && !w.online ? ' · offline' : '');
   $('o-worker').classList.toggle('off', !!w && !w.online);
-  chip('harness', 'Harness', pick.harness || (pick === appPick ? appTaskBody('', null, pick, settings && settings.s && settings.s.apps, []).harness : 'Auto'));
+  chip('harness', 'Harness', pick.harness || (pick === appPick ? appTaskBody('', null, false, pick, settings && settings.s && settings.s.apps).harness : 'Auto'));
   chip('model', 'Model', pick.model || 'Default model');
 }
 optLabel();

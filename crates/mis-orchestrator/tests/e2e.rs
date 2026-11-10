@@ -4282,6 +4282,8 @@ async fn refused_everywhere_else(base: &str, headers: &[(&'static str, &str)]) {
         ("GET", "/api/apps/a/backups".into()),
         ("POST", "/api/apps/a/backups".into()),
         ("POST", "/api/apps/a/restore".into()),
+        ("GET", "/api/boards/app/_new".into()),
+        ("POST", "/api/boards/app/a/send".into()),
         ("GET", "/api/sessions".into()),
         ("GET", format!("/api/workers/{id}/sessions")),
         ("GET", format!("/api/workers/{id}/sessions/claude/{id}")),
@@ -7547,4 +7549,161 @@ async fn an_editors_feedback_waits_for_the_owner_who_edits_and_sends_or_dismisse
     assert!(!me_until(&apps, &other, "other@").await.contains("feedback"));
     // Best effort: on Windows the still-running server holds data.sqlite open.
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn a_board_persists_creates_its_app_and_updates_it_with_whats_new() {
+    use base64ct::{Base64, Encoding};
+    let (uploads, kept) = (image_dir(), image_dir());
+    let images = mis_orchestrator::images::Images::open(uploads.clone()).unwrap();
+    let boards = mis_orchestrator::boards::Boards::open(kept.clone()).unwrap();
+    let app = with_read_token().with_images(images).with_boards(boards);
+    let (mis, _, dir) = start_with_apps(app).await;
+    let (_, mut worker) = join_as(&mis).await;
+    let pdf = b"%PDF-1.4\n1 0 obj".to_vec();
+    let head = "POST /api/upload?name=Chore%20list.pdf HTTP/1.1\r\nAuthorization: Bearer s";
+    let (status, _, body) = http(&mis, head, &pdf).await;
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let upload = v["id"].as_str().unwrap().to_string();
+
+    // A new app's board: an upload (kept with it), a link and a note.
+    let new = "/api/boards/app/_new";
+    let add = |board: &str, item: serde_json::Value| {
+        let (mis, path) = (mis.clone(), format!("{board}/items"));
+        async move { post_json(&mis, &path, "s", &item.to_string()).await }
+    };
+    for item in [
+        serde_json::json!({ "kind": "upload", "upload": upload }),
+        serde_json::json!({ "kind": "link", "url": "https://example.com/grid", "title": "Grid" }),
+        serde_json::json!({ "kind": "note", "text": "10 stars = $1." }),
+    ] {
+        let (status, body) = add(new, item).await;
+        assert_eq!(status, 201, "{body}");
+    }
+    let (status, why) = add(new, serde_json::json!({ "kind": "note", "text": " " })).await;
+    assert!(status == 400 && why.contains("empty"), "{status} {why}");
+    let note = serde_json::json!({ "kind": "note", "text": "x" }).to_string();
+    let (status, _) = post_json(&mis, &format!("{new}/items"), "r", &note).await;
+    assert_eq!(status, 403, "a read token can't add");
+    let (status, _) = post_json(&mis, "/api/boards/app/_x/items", "s", &note).await;
+    assert_eq!(status, 404);
+    let (_, got) = get_json(&mis, new, "r").await;
+    let board: Board = serde_json::from_str(&got).unwrap();
+    assert_eq!(board.items.len(), 3);
+    assert!(board.items.iter().all(|i| !i.sent));
+    let file = board.items[0].id;
+    let (status, head, served) = http(
+        &mis,
+        &format!("GET {new}/items/{file} HTTP/1.1\r\nAuthorization: Bearer r"),
+        b"",
+    )
+    .await;
+    assert_eq!((status, served), (200, pdf.clone()));
+    assert!(head.contains("filename*=UTF-8''Chore%20list.pdf"), "{head}");
+
+    // Create sends all of it; the next new app starts empty.
+    let create = serde_json::json!({ "request": "Chores for the kids.", "harness": "claude" });
+    let (status, body) = post_json(&mis, &format!("{new}/send"), "s", &create.to_string()).await;
+    assert_eq!(status, 201, "{body}");
+    let OrchMsg::Assign {
+        task, files, token, ..
+    } = recv(&mut worker).await
+    else {
+        panic!("assign")
+    };
+    let token = token.unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, "Chore list.pdf");
+    assert_eq!(Base64::decode_vec(&files[0].data).unwrap(), pdf);
+    assert!(task.prompt.contains(
+        "Request:\nChores for the kids.\n\nReferences:\n- Link: Grid <https://example.com/grid>\n\
+         - Note:\n  > 10 stars = $1.\n\n"
+    ), "{}", task.prompt);
+    let (_, got) = get_json(&mis, new, "s").await;
+    assert_eq!(
+        serde_json::from_str::<Board>(&got).unwrap(),
+        Board::default()
+    );
+
+    // The app its task creates gets the board, all sent; it survives a restart.
+    let (status, _) = publish(&mis, "/api/apps/chores/releases", &token, &demo("v1")).await;
+    assert_eq!(status, 201);
+    let (_, got) = get_json(&mis, "/api/boards/app/chores", "s").await;
+    let board: Board = serde_json::from_str(&got).unwrap();
+    assert!(
+        board.items.len() == 3 && board.items.iter().all(|i| i.sent),
+        "{got}"
+    );
+    let again = mis_orchestrator::boards::Boards::open(kept.clone()).unwrap();
+    let restarted = start_app(App::new(None).with_boards(again)).await;
+    let (_, got) = get_json(&restarted, "/api/boards/app/chores", "").await;
+    assert_eq!(serde_json::from_str::<Board>(&got).unwrap(), board);
+
+    // Update sends only what's new since, as a change (no draft to continue).
+    finish_app_task(&mis, &mut worker, task.id, &token).await;
+    let chores = "/api/boards/app/chores";
+    let (status, _) = add(
+        chores,
+        serde_json::json!({ "kind": "note", "text": "Bonus stars on weekends?" }),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let update = serde_json::json!({ "request": "", "harness": "claude" }).to_string();
+    let (status, body) = post_json(&mis, &format!("{chores}/send"), "s", &update).await;
+    assert_eq!(status, 201, "{body}");
+    let OrchMsg::Assign {
+        task, files, token, ..
+    } = recv(&mut worker).await
+    else {
+        panic!("assign")
+    };
+    assert!(files.is_empty());
+    assert!(
+        task.prompt
+            .starts_with("Change the Make It So app `chores`"),
+        "{}",
+        task.prompt
+    );
+    assert!(task.prompt.contains("> Bonus stars on weekends?"));
+    assert!(!task.prompt.contains("example.com/grid"), "sent before");
+
+    // With a draft, an update goes into its thread, once its task is done.
+    let token = token.unwrap();
+    let (status, _) = publish(&mis, "/api/apps/chores/releases", &token, &demo("v2")).await;
+    assert_eq!(status, 201);
+    let propose = serde_json::json!({ "release": 2, "pr": "https://github.com/demo/apps/pull/7",
+        "head": "d68ea1f8a9b4b0890914ce16e5539e480e68c07b", "note": "Weekend bonus.",
+        "before": Base64::encode_string(&PNG), "after": Base64::encode_string(&PNG) });
+    let (status, body) =
+        post_json(&mis, "/api/apps/chores/draft", &token, &propose.to_string()).await;
+    assert_eq!(status, 201, "{body}");
+    let sticker = serde_json::json!({ "kind": "note", "text": "Stickers instead?" });
+    assert_eq!(add(chores, sticker).await.0, 201);
+    let (status, why) = post_json(&mis, &format!("{chores}/send"), "s", &update).await;
+    assert!(
+        status == 409 && why.contains("still working"),
+        "{status} {why}"
+    );
+    finish_app_task(&mis, &mut worker, task.id, &token).await;
+    let (status, body) = post_json(&mis, &format!("{chores}/send"), "s", &update).await;
+    assert_eq!(status, 201, "{body}");
+    let OrchMsg::Assign { task: reply, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    assert_eq!(
+        reply.resume.as_deref(),
+        Some("sess"),
+        "its thread's session"
+    );
+    let want = "Use the new references below.\n\nReferences:\n- Note:\n  > Stickers instead?";
+    assert!(reply.prompt.contains(want), "{}", reply.prompt);
+    let (status, why) = post_json(&mis, &format!("{chores}/send"), "s", &update).await;
+    assert!(
+        status == 400 && why.contains("nothing new"),
+        "{status} {why}"
+    );
+    for d in [uploads, kept, dir] {
+        let _ = std::fs::remove_dir_all(d);
+    }
 }

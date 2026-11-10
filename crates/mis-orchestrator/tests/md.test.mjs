@@ -18,8 +18,8 @@ const notesBlock = page.slice(page.indexOf('// notes:begin'), page.indexOf('// n
 const netBlock = page.slice(page.indexOf('// net:begin'), page.indexOf('// net:end'));
 const awayStatus = new Function(`${netBlock}; return awayStatus;`)();
 const appsBlock = page.slice(page.indexOf('// apps:begin'), page.indexOf('// apps:end'));
-const ap = new Function(`${appsBlock}; return { composerFor, appTaskBody, draftNote };`)();
 const refsBlock = page.slice(page.indexOf('// refs:begin'), page.indexOf('// refs:end'));
+const ap = new Function(`${refsBlock}; ${appsBlock}; return { composerFor, appTaskBody, boardPath, boardKind, boardCounts, boardLine, cardLook, textItem, linkParts, photoName, slugify };`)();
 const rf = new Function(`${refsBlock}; return { refKind, docExt, servedName };`)();
 const nt = { ...new Function(`${notesBlock}; return { noteFront, noteAuthor, noteRows, noteDestGroups, noteDestLabel, noteSuggested, noteWhy, projectDir, projectActive, projectFiles, projectFind, repoHref };`)(), notePath: new Function(`${block}; return notePath;`)() };
 
@@ -451,25 +451,52 @@ test('the composer builds or changes an app on the apps view, each with its own 
   assert.equal(ap.composerFor('apps', null).placeholder, 'Start a task or ask anything');
   const made = ap.composerFor('build', null);
   assert.equal(made.key, 'draft:app');
-  assert.match(made.placeholder, /^Create an app: what should it do\?/);
-  assert.deepEqual(ap.composerFor('build', 'pool', 'Pool'), { key: 'draft:app:pool', placeholder: 'Change Pool: what should change?', label: 'change Pool' });
-  assert.equal(ap.composerFor('build', 'pool').placeholder, 'Change pool: what should change?');
+  assert.match(made.placeholder, /^Anything else\?/);
+  assert.deepEqual(ap.composerFor('build', 'pool', 'Pool'), { key: 'draft:app:pool', placeholder: 'What should change in Pool?', label: 'update Pool' });
+  assert.equal(ap.composerFor('build', 'pool').placeholder, 'What should change in pool?');
 });
 
-test('an app task runs where the chips say, else on Settings\' apps harness, with its images', () => {
+test('a board sends an app task that runs where the chips say, else on Settings\' apps harness', () => {
   const apps = { harness: 'codex', model: 'gpt-5-codex', repo: '~/apps' };
-  const img = '00000000-0000-4000-8000-000000000001';
-  assert.deepEqual(ap.appTaskBody('Track chlorine.', null, { worker: null, harness: '', model: '' }, apps, [img]),
-    { request: 'Track chlorine.', slug: null, change: false, harness: 'codex', model: null, worker: null, images: [img] });
-  assert.deepEqual(ap.appTaskBody('Add pH.', 'pool', { worker: { id: 'w1' }, harness: 'claude', model: 'opus' }, apps, []),
-    { request: 'Add pH.', slug: 'pool', change: true, harness: 'claude', model: 'opus', worker: 'w1', images: [] });
-  assert.equal(ap.appTaskBody('x', null, { worker: null, harness: '', model: '' }, null, []).harness, 'claude'); // Settings unread
+  assert.deepEqual(ap.appTaskBody('Track chlorine.', null, false, { worker: null, harness: '', model: '' }, apps),
+    { request: 'Track chlorine.', slug: null, change: false, harness: 'codex', model: null, worker: null });
+  assert.deepEqual(ap.appTaskBody('Add pH.', 'pool', true, { worker: { id: 'w1' }, harness: 'claude', model: 'opus' }, apps),
+    { request: 'Add pH.', slug: 'pool', change: true, harness: 'claude', model: 'opus', worker: 'w1' });
+  assert.equal(ap.appTaskBody('x', 'chores', false, { worker: null, harness: '', model: '' }, null).harness, 'claude'); // Settings unread
+  assert.deepEqual(ap.composerFor('build', 'pool', 'Pool', 2), { key: 'draft:app:pool', placeholder: 'What should change in draft v2?', label: 'update Pool v2' });
 });
 
-test('beside a draft, the composer sends in-app feedback on it', () => {
-  assert.deepEqual(ap.composerFor('build', 'pool', 'Pool', 2), { key: 'draft:app:pool', placeholder: 'What should change in draft v2?', label: 'feedback on Pool v2' });
-  assert.deepEqual(ap.draftNote('Bars too thin.', 358, 600),
-    { route: '/', selector: '', rect: { x: 0, y: 0, w: 358, h: 600 }, viewport: { w: 358, h: 600 }, note: 'Bars too thin.' });
+test('a board: its owner path, kinds and counts, the line over it, and each card\'s look', () => {
+  assert.equal(ap.boardPath(null), '/api/boards/app/_new');
+  assert.equal(ap.boardPath('pool'), '/api/boards/app/pool');
+  const item = (what, sent = false) => ({ id: 'x', at: 0, sent, what });
+  const items = [item({ kind: 'file', name: 'sketch.jpg', bytes: 1 }, true), item({ kind: 'file', name: 'Rules.PDF', bytes: 1 }, true),
+    item({ kind: 'link', url: 'https://x' }), item({ kind: 'note', text: 'hi' })];
+  assert.deepEqual(items.map(ap.boardKind), ['image', 'doc', 'link', 'note']);
+  assert.deepEqual(ap.boardCounts(items), { all: 4, image: 1, doc: 1, link: 1, note: 1 });
+  assert.deepEqual(ap.boardLine(items, true), [['4 references'], ['· 2 new since the last update', 'new']]);
+  assert.deepEqual(ap.boardLine(items.slice(0, 1), false), [['1 reference'], ['· the agent reads every one']]);
+  assert.deepEqual(ap.boardLine(items.slice(0, 2), true), [['2 references']]);
+  assert.deepEqual(ap.boardLine([], false), []);
+  const id = '00000009-0000-4000-8000-000000000000';
+  assert.equal(ap.cardLook(id), ap.cardLook(id), 'an item keeps its look');
+  assert.equal(ap.cardLook(id), '--r:4deg;--y:0rem;--w:9.5rem;--d:-0.9s');
+  assert.match(ap.cardLook('zz'), /^--r:-6deg/);
+});
+
+test('typed or dropped text is a link alone, else a note; names become slugs', () => {
+  assert.deepEqual(ap.textItem(' https://example.com/grid '), { kind: 'link', url: 'https://example.com/grid' });
+  assert.deepEqual(ap.textItem('see https://example.com'), { kind: 'note', text: 'see https://example.com' });
+  assert.deepEqual(ap.textItem('javascript:alert(1)'), { kind: 'note', text: 'javascript:alert(1)' });
+  assert.equal(ap.textItem('  '), null);
+  assert.deepEqual(ap.linkParts('https://www.example.com/habit-grid?a=1'), { host: 'example.com', rest: '/habit-grid?a=1' });
+  assert.deepEqual(ap.linkParts('https://example.com/'), { host: 'example.com', rest: '' });
+  assert.equal(ap.photoName('00000000-0000-4000-8000-000000000001.jpg'), 'Photo');
+  assert.equal(ap.photoName('fridge chart.jpg'), 'fridge chart');
+  assert.equal(ap.slugify('Chore Chart!'), 'chore-chart');
+  assert.equal(ap.slugify('--Pool--'), 'pool');
+  assert.equal(ap.slugify('!!'), '');
+  assert.equal(ap.slugify('a'.repeat(40)).length, 32);
 });
 
 test('images go by type and documents by the extensions the server takes', () => {
