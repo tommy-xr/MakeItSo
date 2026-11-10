@@ -43,10 +43,10 @@ impl DocKind {
 
     /// From a file name's extension, ignoring case: `Rules.MD`.
     pub fn from_name(name: &str) -> Option<Self> {
-        let (_, ext) = name.rsplit_once('.')?;
-        Self::ALL
-            .into_iter()
-            .find(|k| k.ext().eq_ignore_ascii_case(ext))
+        match UploadKind::from_name(name)? {
+            UploadKind::Doc(k) => Some(k),
+            UploadKind::Image(_) => None,
+        }
     }
 
     /// Whether `bytes` are this kind: a PDF's magic number, else UTF-8 text without NULs.
@@ -76,6 +76,12 @@ pub enum UploadKind {
 impl UploadKind {
     pub fn all() -> impl Iterator<Item = Self> {
         (ImageKind::ALL.into_iter().map(Self::Image)).chain(DocKind::ALL.into_iter().map(Self::Doc))
+    }
+
+    /// From a file name's extension, ignoring case: `Chores.pdf`, `<id>.JPG`.
+    pub fn from_name(name: &str) -> Option<Self> {
+        let (_, ext) = name.rsplit_once('.')?;
+        Self::all().find(|k| k.ext().eq_ignore_ascii_case(ext))
     }
 
     pub fn ext(self) -> &'static str {
@@ -210,6 +216,11 @@ mod tests {
         unique.sort();
         unique.dedup();
         assert_eq!((exts.len(), unique.len()), (9, 9), "{exts:?}");
+        assert_eq!(
+            UploadKind::from_name("x.JPG"),
+            Some(UploadKind::Image(ImageKind::Jpeg))
+        );
+        assert_eq!(UploadKind::from_name("x.html"), None);
     }
 
     #[test]

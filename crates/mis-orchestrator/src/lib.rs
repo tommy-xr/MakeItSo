@@ -30,6 +30,7 @@ pub mod app_tasks;
 pub mod apps;
 pub mod apps_http;
 pub mod backups;
+pub mod boards;
 pub mod capture;
 pub mod drafts;
 pub mod email;
@@ -156,8 +157,12 @@ pub struct App {
     apps: Option<Arc<apps::Apps>>,
     /// This machine's hostname: app tasks default to a worker reporting it. Empty: none does.
     host: String,
+    /// Apps' boards of references. None: boards are off.
+    boards: Option<Arc<boards::Boards>>,
     /// Held while an app task's token creates its app, so a thread creates only one.
     creating: Arc<tokio::sync::Mutex<()>>,
+    /// Held while a board is sent, so what's new on it goes to one task.
+    sending: Arc<tokio::sync::Mutex<()>>,
     /// Held by each draft proposal and decision: a publish's merge-then-activate isn't
     /// overtaken by a replacement or a discard.
     drafting: Arc<tokio::sync::Mutex<()>>,
@@ -208,7 +213,9 @@ impl App {
             watchers: Default::default(),
             apps: None,
             host: String::new(),
+            boards: None,
             creating: Default::default(),
+            sending: Default::default(),
             drafting: Default::default(),
             deciding_feedback: Default::default(),
         }
@@ -301,6 +308,12 @@ impl App {
     /// This machine is `host`, as its worker names it (see `app_tasks::machine`).
     pub fn with_host(mut self, host: String) -> Self {
         self.host = host;
+        self
+    }
+
+    /// Keep apps' boards of references.
+    pub fn with_boards(mut self, boards: boards::Boards) -> Self {
+        self.boards = Some(Arc::new(boards));
         self
     }
 
@@ -1002,6 +1015,76 @@ impl App {
         })
     }
 
+    /// Update app `slug` with `t`, what's new on its board: into its draft's thread, else a
+    /// change task, as feedback goes. Err: the status and why not (409: not now).
+    async fn update_app(
+        &self,
+        slug: &str,
+        mut t: mis_types::AppTask,
+    ) -> Result<TaskId, (StatusCode, String)> {
+        let bad = |why| (StatusCode::BAD_REQUEST, why);
+        if t.request.trim().is_empty() {
+            if t.images.is_empty() && t.references.is_empty() {
+                return Err(bad(
+                    "nothing new: add references or say what to change".into()
+                ));
+            }
+            t.request = "Use the new references below.".into();
+        }
+        let Some(apps) = self.apps.clone() else {
+            return Err((StatusCode::SERVICE_UNAVAILABLE, "apps are off".into()));
+        };
+        let s = slug.to_string();
+        let draft = tokio::task::spawn_blocking(move || apps.draft(&s)).await;
+        let draft_task = draft
+            .expect("reading a draft doesn't panic")
+            .map(|d| d.task);
+        check_references(&t.references).map_err(bad)?;
+        self.check_images(&t.images).map_err(bad)?;
+        let reply = match references_text(&t.references) {
+            r if r.is_empty() => t.request.clone(),
+            r => format!("{}\n\n{r}", t.request.trim()),
+        };
+        let images = t.images.clone();
+        (t.slug, t.change) = (Some(slug.into()), true);
+        let sent = self.to_app(slug, draft_task, reply, images, t).await;
+        sent.map_err(|(held, why)| match held {
+            true => (StatusCode::CONFLICT, why),
+            false => bad(why),
+        })
+    }
+
+    /// Send work on app `slug` where its feedback goes ([`feedback::send`]): `reply`, with
+    /// uploads `images`, into the thread of its current draft's task (`draft_task`), else
+    /// `change` as a new task. Err: whether it only can't go now, and why.
+    async fn to_app(
+        &self,
+        slug: &str,
+        draft_task: Option<Option<TaskId>>,
+        reply: String,
+        images: Vec<uuid::Uuid>,
+        change: mis_types::AppTask,
+    ) -> Result<TaskId, (bool, String)> {
+        let (open, tip) = {
+            let l = self.ledger();
+            let tip = draft_task.flatten().and_then(|t| l.thread_tip(t));
+            (l.open_app_tasks(slug), tip)
+        };
+        match feedback::send(draft_task, open, tip) {
+            feedback::Send::Hold(why) => Err((true, why)),
+            feedback::Send::Reply(task) => {
+                let planner = self.planner.is_some();
+                self.transition(|l| match l.reply(task, reply, images, planner) {
+                    Ok((id, effects)) => (Ok(id), effects),
+                    Err(why) => (Err((false, why)), vec![]),
+                })
+            }
+            feedback::Send::Change => {
+                (self.start_app_task(change, None).await).map_err(|w| (false, w))
+            }
+        }
+    }
+
     /// Where the owner's in-app feedback (`apps_http`) goes: each is sent to an agent.
     pub fn feedback_inbox(&self) -> mpsc::UnboundedSender<(String, HeldFeedback)> {
         let (tx, mut rx) = mpsc::unbounded_channel::<(String, HeldFeedback)>();
@@ -1024,42 +1107,27 @@ impl App {
         let (a, s) = (apps.clone(), slug.clone());
         let now = tokio::task::spawn_blocking(move || a.draft(&s).map(|d| d.task)).await;
         let now = now.expect("reading a draft doesn't panic");
-        let (current, open, tip) = {
-            let l = self.ledger();
-            // The draft it was about is still the app's: its thread's, or the same task-less one.
-            let current = match (held.draft_task, now) {
-                (Some(Some(t)), Some(Some(d))) => l.thread(t).contains(&d),
-                (Some(None), Some(None)) => true,
-                _ => false,
-            };
-            let tip = held.draft_task.flatten().and_then(|t| l.thread_tip(t));
-            (current, l.open_app_tasks(&slug), tip)
+        // The draft it was about is still the app's: its thread's, or the same task-less one.
+        let current = match (held.draft_task, now) {
+            (Some(Some(t)), Some(Some(d))) => self.ledger().thread(t).contains(&d),
+            (Some(None), Some(None)) => true,
+            _ => false,
         };
         let text = feedback::request(&slug, &held);
-        let sent = match feedback::send(&held, current, open, tip) {
-            feedback::Send::Hold(why) => Err(why),
-            feedback::Send::Reply(task) => {
-                let planner = self.planner.is_some();
-                self.transition(|l| match l.reply(task, text, vec![], planner) {
-                    Ok((id, effects)) => (Ok(id), effects),
-                    Err(why) => (Err(why), vec![]),
-                })
-            }
-            feedback::Send::Change => {
-                let s = self.settings().unwrap_or_default();
-                let t = mis_types::AppTask {
-                    request: text,
-                    slug: Some(slug.clone()),
-                    change: true,
-                    harness: s.apps.harness,
-                    model: Some(s.apps.model),
-                    worker: None,
-                    images: vec![],
-                    references: vec![],
-                };
-                self.start_app_task(t, None).await
-            }
+        let st = self.settings().unwrap_or_default();
+        let change = mis_types::AppTask {
+            request: text.clone(),
+            slug: Some(slug.clone()),
+            change: true,
+            harness: st.apps.harness,
+            model: Some(st.apps.model),
+            worker: None,
+            images: vec![],
+            references: vec![],
         };
+        let draft_task = held.draft_task.filter(|_| current);
+        let sent = self.to_app(&slug, draft_task, text, vec![], change).await;
+        let sent = sent.map_err(|(_, why)| why);
         tracing::info!("apps/{slug}: feedback {}: {sent:?}", held.id);
         let ok = sent.is_ok();
         // Gone to a task: kept as a record, for its sender's menu.
@@ -1086,6 +1154,14 @@ impl App {
         };
         let e = feedback::Event::Ended(task, status);
         let _ = tokio::task::spawn_blocking(move || apps.feedback_step(&slug, &e)).await;
+    }
+
+    /// Who owns the app a request creates: an Access login's email, else no one but the MIS.
+    async fn requester(&self, headers: &HeaderMap) -> Option<String> {
+        match self.access_check(headers, Route::Other).await {
+            Access::Passed(id) => app_access::email(&id.subject),
+            _ => None,
+        }
     }
 
     /// Who asks, as apps know members: an Access login, else (the full token, a direct local
@@ -1482,6 +1558,13 @@ pub fn router(app: App) -> Router {
             get(draft_shot).post(decide_draft),
         )
         .route("/api/apps/{slug}/feedback/new", post(new_feedback))
+        .route("/api/boards/{kind}/{id}", get(get_board))
+        .route("/api/boards/{kind}/{id}/items", post(add_board_item))
+        .route(
+            "/api/boards/{kind}/{id}/items/{item}",
+            get(board_file).delete(remove_board_item),
+        )
+        .route("/api/boards/{kind}/{id}/send", post(send_board))
         .route(
             "/api/apps/{slug}/feedback/{id}/{action}",
             post(decide_feedback),
@@ -2619,11 +2702,7 @@ async fn new_app_task(
         Ok(t) => t,
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
-    // Who asked owns the app it creates: an Access login's email, else no one but the MIS.
-    let requester = match app.access_check(&headers, Route::Other).await {
-        Access::Passed(id) => app_access::email(&id.subject),
-        _ => None,
-    };
+    let requester = app.requester(&headers).await;
     match app.start_app_task(t, requester).await {
         Ok(task) => (
             StatusCode::CREATED,
@@ -2632,6 +2711,200 @@ async fn new_app_task(
             .into_response(),
         Err(why) => (StatusCode::BAD_REQUEST, why).into_response(),
     }
+}
+
+/// The board `/api/boards/{kind}/{id}` names, if boards are on. Reading takes any scope;
+/// changing one takes full scope, and an app's its owner.
+async fn admit_board(
+    app: &App,
+    headers: &HeaderMap,
+    peer: SocketAddr,
+    (kind, id): (&str, &str),
+    change: bool,
+) -> Result<(Arc<boards::Boards>, boards::Owner), (StatusCode, &'static str)> {
+    let owner = boards::Owner::parse(kind, id).ok_or((StatusCode::NOT_FOUND, "no such board"))?;
+    match (&owner, change) {
+        (_, false) if app.admit(headers, peer, "/api/boards").await => {}
+        (_, false) => return Err((StatusCode::UNAUTHORIZED, "")),
+        (boards::Owner::NewApp, true) => app.admit_full(headers, peer, "/api/boards").await?,
+        (boards::Owner::App(slug), true) => {
+            // Only an app that exists: else its folder would keep the board its Create sends.
+            let (apps, s) = (admit_owner(app, headers, peer, slug).await?, slug.clone());
+            let exists = tokio::task::spawn_blocking(move || apps.exists(&s)).await;
+            if !exists.expect("listing releases doesn't panic") {
+                return Err((StatusCode::NOT_FOUND, "no such app"));
+            }
+        }
+    }
+    let boards = app.boards.clone();
+    let boards = boards.ok_or((StatusCode::SERVICE_UNAVAILABLE, "boards need a state dir"))?;
+    Ok((boards, owner))
+}
+
+/// A board ([`Board`]), oldest item first; empty if nothing was added.
+async fn get_board(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path((kind, id)): Path<(String, String)>,
+) -> Response {
+    match admit_board(&app, &headers, peer, (&kind, &id), false).await {
+        Ok((boards, owner)) => {
+            let board = tokio::task::spawn_blocking(move || boards.get(&owner)).await;
+            Json(board.expect("reading a board doesn't panic")).into_response()
+        }
+        Err(refused) => refused.into_response(),
+    }
+}
+
+/// Add a [`NewBoardItem`]: an upload is kept with the board (it no longer expires). 201 with
+/// the [`BoardItem`], or 400 with why not.
+async fn add_board_item(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path((kind, id)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let (boards, owner) = match admit_board(&app, &headers, peer, (&kind, &id), true).await {
+        Ok(b) => b,
+        Err(refused) => return refused.into_response(),
+    };
+    let new: NewBoardItem = match serde_json::from_slice(&body) {
+        Ok(n) => n,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let uploads = app.images.clone();
+    let added = tokio::task::spawn_blocking(move || {
+        let (what, bytes) = match new {
+            NewBoardItem::Ref(r) => (BoardRef::Ref(r), None),
+            NewBoardItem::Upload { upload } => {
+                let store = uploads.ok_or("attachments are off")?;
+                let (kind, bytes) = store.read(upload).ok_or("no such upload")?;
+                let name = store.name(upload, kind);
+                let what = BoardRef::File {
+                    name,
+                    bytes: bytes.len() as u64,
+                };
+                (what, Some(bytes))
+            }
+        };
+        boards.add(&owner, what, bytes.as_deref(), unix_ms())
+    });
+    match added.await.expect("adding to a board doesn't panic") {
+        Ok(item) => (StatusCode::CREATED, Json(item)).into_response(),
+        Err(why) => (StatusCode::BAD_REQUEST, why).into_response(),
+    }
+}
+
+/// A board file item's bytes, served as uploads are ([`image`]).
+async fn board_file(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path((kind, id, item)): Path<(String, String, uuid::Uuid)>,
+) -> Response {
+    let (boards, owner) = match admit_board(&app, &headers, peer, (&kind, &id), false).await {
+        Ok(b) => b,
+        Err(refused) => return refused.into_response(),
+    };
+    let file = tokio::task::spawn_blocking(move || boards.file(&owner, item)).await;
+    match file.expect("reading a board doesn't panic") {
+        Some((kind, name, bytes)) => served(kind, &name, bytes),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Drop an item and its file: 204, or 404.
+async fn remove_board_item(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path((kind, id, item)): Path<(String, String, uuid::Uuid)>,
+) -> Response {
+    let (boards, owner) = match admit_board(&app, &headers, peer, (&kind, &id), true).await {
+        Ok(b) => b,
+        Err(refused) => return refused.into_response(),
+    };
+    let gone = tokio::task::spawn_blocking(move || boards.remove(&owner, item)).await;
+    match gone.expect("changing a board doesn't panic") {
+        true => StatusCode::NO_CONTENT.into_response(),
+        false => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Send what's new on a board, with an [`AppTask`] (its request may be blank if there is some):
+/// the new app's board creates the app (its board from then on); an app's goes as feedback
+/// does ([`feedback::send`]), into its draft's thread, else a change task. 201 `{"task"}`,
+/// its items marked sent; 409 if it can't go now (nothing marked); 400 with why not.
+async fn send_board(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path((kind, id)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let (boards, owner) = match admit_board(&app, &headers, peer, (&kind, &id), true).await {
+        Ok(b) => b,
+        Err(refused) => return refused.into_response(),
+    };
+    let mut t: AppTask = match serde_json::from_slice(&body) {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let uploads = app.images.clone();
+    let _sending = app.sending.lock().await;
+    // Its new files go as uploads, like any task's; one that can't be read stops it all.
+    let (b, o) = (boards.clone(), owner.clone());
+    let copied = tokio::task::spawn_blocking(move || {
+        let (ids, files, refs) = boards::unsent(&b.get(&o));
+        let uploaded = (files.iter())
+            .map(|(id, name)| match (b.file(&o, *id), &uploads) {
+                (Some((kind, name, bytes)), Some(up)) => up.store(kind, &bytes, Some(&name)),
+                (None, _) => Err(std::io::Error::other(format!("{name} is gone"))),
+                (_, None) => Err(std::io::Error::other("attachments are off")),
+            })
+            .collect::<std::io::Result<Vec<_>>>();
+        uploaded.map(|up| (ids, up, refs))
+    });
+    let (sent, uploaded, refs) = match copied.await.expect("reading a board doesn't panic") {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("sending a board: {e}");
+            let why = format!("couldn't send its files: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, why).into_response();
+        }
+    };
+    t.images.extend(uploaded);
+    t.references.extend(refs);
+    let started = match &owner {
+        boards::Owner::NewApp => {
+            t.change = false;
+            let refs = !t.images.is_empty() || !t.references.is_empty();
+            if t.request.trim().is_empty() && refs {
+                t.request = "Make the app these references describe.".into();
+            }
+            let requester = app.requester(&headers).await;
+            app.start_app_task(t, requester)
+                .await
+                .map_err(|w| (StatusCode::BAD_REQUEST, w))
+        }
+        boards::Owner::App(slug) => app.update_app(slug, t).await,
+    };
+    let task = match started {
+        Ok(task) => task,
+        Err((status, why)) => return (status, why).into_response(),
+    };
+    let thread = (owner == boards::Owner::NewApp).then_some(task);
+    let marked = tokio::task::spawn_blocking(move || boards.sent(&owner, &sent, thread)).await;
+    if let Ok(Err(e)) = marked {
+        tracing::warn!("marking a board sent: {e}");
+    }
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "task": task })),
+    )
+        .into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -2778,6 +3051,10 @@ async fn publish_app(
         };
         app.ledger().rebind(&b);
         app.save();
+        // The board its Create sent becomes the new app's.
+        if let (Some(boards), Ok(_)) = (&app.boards, &published) {
+            boards.adopt(b.thread, &slug);
+        }
     }
     match published {
         Ok(n) => (
@@ -2987,21 +3264,23 @@ async fn image(
         return StatusCode::NOT_FOUND.into_response();
     };
     match store.read(id) {
-        Some((kind, bytes)) => (
-            [
-                (header::CONTENT_TYPE, kind.mime().to_string()),
-                (header::X_CONTENT_TYPE_OPTIONS, "nosniff".into()),
-                (header::CONTENT_SECURITY_POLICY, "default-src 'none'".into()),
-                (
-                    header::CONTENT_DISPOSITION,
-                    disposition(&store.name(id, kind)),
-                ),
-            ],
-            bytes,
-        )
-            .into_response(),
+        Some((kind, bytes)) => served(kind, &store.name(id, kind), bytes),
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// An upload's `bytes`, typed, named, and never run as a page.
+fn served(kind: UploadKind, name: &str, bytes: Vec<u8>) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, kind.mime().to_string()),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".into()),
+            (header::CONTENT_SECURITY_POLICY, "default-src 'none'".into()),
+            (header::CONTENT_DISPOSITION, disposition(name)),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 /// `inline` with `name` as RFC 5987 `filename*`. A kept name holds no `/` (`images::clean_name`).

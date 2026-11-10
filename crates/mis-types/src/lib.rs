@@ -29,6 +29,8 @@ pub use evidence::{Evidence, EvidenceDraft, TaskResult};
 mod image;
 mod inventory;
 pub use image::{ImageFile, ImageKind, MAX_IMAGES, MAX_IMAGE_BYTES};
+mod boards;
+pub use boards::{Board, BoardItem, BoardRef, NewBoardItem, MAX_BOARD_BYTES, MAX_BOARD_ITEMS};
 mod refs;
 pub use inventory::{InstalledApp, Inventory, Machine};
 pub use refs::{
