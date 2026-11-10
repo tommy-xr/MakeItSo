@@ -162,7 +162,7 @@
 .mis-tag{position:fixed;left:calc(8px + env(safe-area-inset-left));bottom:calc(8px + env(safe-area-inset-bottom));z-index:2147483646;padding:4px 10px;border-radius:999px;background:color-mix(in srgb,var(--s) 80%,transparent);color:var(--t);box-shadow:0 0 0 1px var(--mis-menu-dot,#e8a33d);font:12px/1.5 system-ui,sans-serif;text-decoration:none;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
 .mis-pop a[aria-current=page]{font-weight:600}
 .mis-head{box-sizing:border-box;display:flex;align-items:center;gap:10px;max-width:560px;margin:0 auto;padding:calc(14px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right)) 6px calc(16px + env(safe-area-inset-left))}
-.mis-head h1{flex:1;min-width:0;margin:0;font-size:28px;line-height:1.2;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mis-head h1{flex:1;min-width:0;margin:0;font-size:28px;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mis-head .mis-back{padding-right:2px;color:inherit;font-size:30px;line-height:1;text-decoration:none}
 .mis-head [hidden]{display:none}
 .mis-badge{padding:2px 10px;border-radius:99px;background:var(--l);color:var(--d);font-size:13px;white-space:nowrap}

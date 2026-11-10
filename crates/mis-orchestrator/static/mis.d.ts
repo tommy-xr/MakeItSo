@@ -186,8 +186,8 @@ declare namespace Mis {
     /**
      * The app's frame, appended to the body, once per page: a header (the section's label,
      * View only for viewers, the ⋯ menu), `main` for the content, and a bottom tab bar for `tab`
-     * sections (two or more); the other sections go in the menu above its platform items. One section: just
-     * the header. Hash routes (`#/<id>`), light and dark, safe areas; the header takes the page's
+     * sections (two or more); the other sections go in the menu above its platform items. One
+     * section: just the header. Hash routes (`#/<id>`), light and dark, safe areas; the header takes the page's
      * colours and font, the tab bar and menu the --mis-menu-* variables (see Menu) plus
      * --mis-menu-line and --mis-menu-accent (the current tab).
      */
