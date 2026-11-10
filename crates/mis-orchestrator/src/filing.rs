@@ -486,6 +486,19 @@ mod tests {
     const ID: &str = "id: 00000000-0000-0000-0000-000000000001\ncaptured: 2026-11-08T09:12:00Z\n";
 
     #[test]
+    fn each_picture_is_renamed_once() {
+        // `a.jpg` takes `a-2.jpg`'s old name; `a-2.jpg` must not follow it.
+        let m = mv("inbox/a.md", "archive", None);
+        let inbox = files(&["inbox/a.md", "inbox/a.jpg", "inbox/a-2.jpg"]);
+        let md = format!("---\n{ID}assets:\n  - path: a.jpg\n  - path: a-2.jpg\n---\n");
+        let got = plan(&m, &md, &inbox, &[], &names(&["a.md"])).unwrap();
+        assert_eq!(got.moves[1].1, "archive/a-2.jpg");
+        assert_eq!(got.moves[2].1, "archive/a-2-2.jpg");
+        let want = format!("---\n{ID}assets:\n  - path: a-2.jpg\n  - path: a-2-2.jpg\n---\n");
+        assert_eq!(got.md, want);
+    }
+
+    #[test]
     fn a_picture_listed_twice_moves_once() {
         let m = mv("inbox/a.md", "archive", None);
         let inbox = files(&["inbox/a.md", "inbox/a-1.jpg"]);

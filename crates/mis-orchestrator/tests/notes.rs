@@ -1000,7 +1000,8 @@ fn a_file_the_clone_doesnt_track_in_the_way_stops_the_filing() {
     let Err(Refused::Stale(why)) = got else {
         panic!("{got:?}")
     };
-    assert!(why.starts_with("merge:"), "{why}");
+    // Caught before the commit is built (the fast-forward would refuse too).
+    assert_eq!(why, format!("archive/{} exists", a.file));
     assert_eq!(
         std::fs::read_to_string(clone.join("archive")).unwrap(),
         "mine"
@@ -1022,11 +1023,12 @@ fn a_filing_cut_short_before_it_lands_changes_nothing() {
     notes.run();
     w.folders(&["projects/amf/README.md"]);
     notes.run();
-    // What a run stopped between `commit-tree` and the merge leaves: its index, its note,
-    // an unreferenced commit.
+    // What a run stopped mid-filing leaves: its index, its note, the index's lock, an
+    // unreferenced commit.
     let clone = w.state.join("notes");
-    std::fs::write(clone.join(".git/mis-filing-index"), "garbage").unwrap();
-    std::fs::write(clone.join(".git/mis-filed"), "half").unwrap();
+    for f in ["mis-filing-index", "mis-filed", "mis-filing-index.lock"] {
+        std::fs::write(clone.join(".git").join(f), "left over").unwrap();
+    }
     let tree = git(&clone, &["rev-parse", "HEAD^{tree}"]);
     let who = [
         "-c",
@@ -1049,9 +1051,12 @@ fn a_filing_cut_short_before_it_lands_changes_nothing() {
     let files = w.files();
     assert!(files.contains(&got.path) && !files.contains(&md));
     assert!(files.contains(&format!("projects/amf/{}", image_of(&a.file))));
-    assert!(
-        !clone.join(".git/mis-filing-index").exists() && !clone.join(".git/mis-filed").exists()
-    );
+    // It left nothing of its own behind.
+    let left: Vec<String> = (std::fs::read_dir(clone.join(".git")).unwrap().flatten())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("mis-fil"))
+        .collect();
+    assert_eq!(left.len(), 3, "{left:?}");
 }
 
 #[test]
@@ -1073,4 +1078,57 @@ fn a_note_too_large_to_hash_as_shown_is_refused_not_cut() {
     assert!(why.ends_with("is over 20 MiB"), "{why}");
     assert_eq!(w.head(), head);
     assert_eq!(w.show("inbox/big.md").len(), big.len());
+}
+
+#[test]
+fn an_ignored_file_is_never_overwritten() {
+    let w = World::new();
+    let a = w.capture("ignored in the way", &[]);
+    let notes = w.notes();
+    w.folders(&["areas/home/boiler.md"]);
+    w.human_pull();
+    let name = format!("areas/home/{}", a.file);
+    std::fs::write(w.human.join(".gitignore"), format!("/archive\n/{name}\n")).unwrap();
+    w.human_commit("ignore some");
+    notes.run();
+    let clone = w.state.join("notes");
+    std::fs::write(clone.join("archive"), "mine").unwrap();
+    std::fs::write(clone.join(&name), "mine too").unwrap();
+    let md = format!("inbox/{}", a.file);
+    // A file where `archive/` would go.
+    let got = w.file(&notes, &md, "archive", None);
+    assert!(matches!(got, Err(Refused::Stale(_))), "{got:?}");
+    assert_eq!(
+        std::fs::read_to_string(clone.join("archive")).unwrap(),
+        "mine"
+    );
+    // One at the note's name: it takes the next.
+    let got = w.file(&notes, &md, "areas/home", None).unwrap();
+    assert_eq!(got.path, name.replace(".md", "-2.md"));
+    assert_eq!(
+        std::fs::read_to_string(clone.join(&name)).unwrap(),
+        "mine too"
+    );
+}
+
+#[test]
+fn a_folder_converting_line_endings_differently_is_refused() {
+    let w = World::new();
+    let notes = w.notes();
+    w.human_pull();
+    let attrs = "inbox/*.md -text\narchive/*.md text eol=lf\n";
+    std::fs::write(w.human.join(".gitattributes"), attrs).unwrap();
+    std::fs::write(w.human.join("inbox/crlf.md"), "kept as is\r\n").unwrap();
+    std::fs::create_dir_all(w.human.join("archive")).unwrap();
+    std::fs::write(w.human.join("archive/.keep"), "").unwrap();
+    w.human_commit("attributes");
+    notes.run();
+    let head = w.head();
+    let got = w.file(&notes, "inbox/crlf.md", "archive", None);
+    let Err(Refused::Stale(why)) = got else {
+        panic!("{got:?}")
+    };
+    assert!(why.contains("line endings"), "{why}");
+    assert_eq!(w.head(), head);
+    assert_eq!(git(&w.state.join("notes"), &["status", "--porcelain"]), "");
 }

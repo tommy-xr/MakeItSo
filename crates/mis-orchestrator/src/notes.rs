@@ -113,14 +113,25 @@ pub(crate) fn renamed(asset: &str, from: &str, to: &str) -> String {
 }
 
 /// Frontmatter `lines` (ending in `eol`) with each image line `  - path: <a>` naming `b`
-/// instead, for each (a, b) in `renames`.
+/// instead, for each (a, b) in `renames`. Each line is renamed once: `a.jpg` -> `a-2.jpg`
+/// never then follows `a-2.jpg` -> `a-2-2.jpg`.
 pub(crate) fn rename_images<'a>(
     lines: &str,
     eol: &str,
     renames: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> String {
-    let line = |name: &str| format!("  - path: {name}{eol}");
-    (renames.into_iter()).fold(lines.to_string(), |f, (a, b)| f.replace(&line(a), &line(b)))
+    let renames: BTreeMap<&str, &str> = renames.into_iter().collect();
+    (lines.split_inclusive('\n'))
+        .map(|l| {
+            let name = l
+                .strip_prefix("  - path: ")
+                .and_then(|n| n.strip_suffix(eol));
+            match name.and_then(|n| renames.get(n)) {
+                Some(b) => format!("  - path: {b}{eol}"),
+                None => l.to_string(),
+            }
+        })
+        .collect()
 }
 
 /// Receipt `r` (text `md`) written as `path`: the record's text, and each image as
@@ -636,8 +647,46 @@ impl Notes {
         let created: Vec<String> = f.moves.iter().map(|(_, to)| to.clone()).collect();
         self.absent(&created)
             .map_err(|f| Refused::Stale(f.why().to_string()))?;
+        // Git's attributes for a moved file must be its source's, or the checkout converts
+        // it (line endings, a filter) and leaves the clone dirty.
+        let paths: Vec<&str> = (f.moves.iter())
+            .flat_map(|(from, to)| [from.as_str(), to.as_str()])
+            .collect();
+        let check = [
+            &["check-attr", "-z", "text", "eol", "filter", "--"],
+            paths.as_slice(),
+        ];
+        let attrs = self
+            .git(&check.concat())?
+            .check("check-attr", Failure::Other)?;
+        // `<path> NUL <attribute> NUL <value> NUL`, per path and attribute.
+        let attrs: BTreeMap<(String, String), String> = (attrs.stdout.split(|b| *b == 0))
+            .map(|f| String::from_utf8_lossy(f).into_owned())
+            .collect::<Vec<_>>()
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|[path, attr, value]| ((path.clone(), attr.clone()), value.clone()))
+            .collect();
+        let differ = |(from, to): &&(String, String)| {
+            ["text", "eol", "filter"].iter().any(|a| {
+                attrs.get(&(from.clone(), a.to_string())) != attrs.get(&(to.clone(), a.to_string()))
+            })
+        };
+        if let Some((from, to)) = f.moves.iter().find(differ) {
+            let why = format!("{to} converts line endings differently from {from}");
+            return Err(Refused::Stale(why));
+        }
         let commit = self.commit_filing(&f, &inbox)?;
-        let merge = self.git(&["merge", "--ff-only", "--quiet", &commit])?;
+        // Never over an ignored file either.
+        let ff = [
+            "merge",
+            "--ff-only",
+            "--no-overwrite-ignore",
+            "--quiet",
+            &commit,
+        ];
+        let merge = self.git(&ff)?;
         if !merge.ok {
             return Err(Refused::Stale(format!("merge: {}", merge.stderr.trim())));
         }
@@ -652,10 +701,20 @@ impl Notes {
         f: &crate::filing::Filing,
         inbox: &crate::filing::Modes,
     ) -> Result<String, Failure> {
-        // Relative to the clone, where git runs.
-        let (index, note) = (".git/mis-filing-index", ".git/mis-filed");
+        // In a folder of this run's own, removed however it ends, so nothing an earlier run
+        // left (a lock) is in the way. Paths relative to the clone, where git runs.
+        let dir = format!(".git/mis-filing-{}", Uuid::new_v4());
+        std::fs::create_dir(self.clone.join(&dir))?;
+        struct Remove(PathBuf);
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _remove = Remove(self.clone.join(&dir));
+        let (index, note) = (format!("{dir}/index"), format!("{dir}/note"));
         let git = |args: &[&str]| -> Result<String, Failure> {
-            let mut out = run_git(&self.clone, args, GIT_DEADLINE, Some(Path::new(index)))?;
+            let mut out = run_git(&self.clone, args, GIT_DEADLINE, Some(Path::new(&index)))?;
             out.stderr = out.stderr.replace(&self.remote, "<remote>");
             Ok(out.check(args[0], Failure::Other)?.text())
         };
@@ -667,8 +726,8 @@ impl Notes {
         ]
         .concat())?;
         // The note as edited, byte for byte; its pictures as HEAD has them.
-        crate::push::write_private(&self.clone.join(note), f.md.as_bytes())?;
-        let mut blobs = vec![git(&["hash-object", "-w", "--no-filters", "--", note])?];
+        crate::push::write_private(&self.clone.join(&note), f.md.as_bytes())?;
+        let mut blobs = vec![git(&["hash-object", "-w", "--no-filters", "--", &note])?];
         for (from, _) in &f.moves[1..] {
             blobs.push(git(&["rev-parse", "--verify", &format!("HEAD:{from}")])?);
         }
@@ -677,18 +736,17 @@ impl Notes {
             git(&["update-index", "--add", "--cacheinfo", &entry])?;
         }
         let tree = git(&["write-tree"])?;
-        let commit = git(&["commit-tree", &tree, "-p", "HEAD", "-m", &f.message])?;
-        let _ = std::fs::remove_file(self.clone.join(index));
-        let _ = std::fs::remove_file(self.clone.join(note));
-        Ok(commit)
+        git(&["commit-tree", &tree, "-p", "HEAD", "-m", &f.message])
     }
 
-    /// Ok if none of `paths` is in the clone (not even as a dangling link).
+    /// Ok if none of `paths` is in the clone (not even as a dangling link, or a file where
+    /// one of its folders would be).
     fn absent(&self, paths: &[String]) -> Result<(), Failure> {
-        match paths
-            .iter()
-            .find(|p| std::fs::symlink_metadata(self.clone.join(p)).is_ok())
-        {
+        let gone = |p: &&String| {
+            let at = std::fs::symlink_metadata(self.clone.join(p));
+            at.is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+        };
+        match paths.iter().find(|p| !gone(p)) {
             Some(p) => Err(Failure::Other(format!("{p} exists"))),
             None => Ok(()),
         }
