@@ -21,7 +21,7 @@ pub struct Note {
     pub path: String,
     /// sha256 (hex) of its bytes, as a filing checks them.
     pub hash: String,
-    /// Its first [`MAX_NOTE_BYTES`] or so.
+    /// Its first [`MAX_NOTE_BYTES`] bytes, as text.
     pub text: String,
 }
 
