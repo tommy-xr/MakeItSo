@@ -491,6 +491,13 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .draft .row button, .draft .try { min-height: 2.25rem; padding: 0 .75rem; border-radius: .625rem; font-size: .8125rem; }
   .draft .try { display: inline-flex; align-items: center; background: var(--accent); color: var(--on-accent); font-weight: 600; text-decoration: none; }
   .draft .row button.quiet, .fb .row button.quiet { padding: 0 .5rem; background: none; color: var(--dim); }
+  /* The core's update, atop Home: its commits, each with its PR (or sha) and CI. */
+  .core .commits { margin: .5rem 0 0; padding: 0; list-style: none; font-size: .8125rem; }
+  .core .commits li { display: flex; gap: .5rem; padding: .1875rem 0; }
+  .core .commits .subj { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .core .commits li > a { display: inline; padding: 0; color: var(--link); background: none; }
+  .core .commits code { font: .75rem/1.6 var(--mono); color: var(--dim); }
+  .core .ci { white-space: nowrap; color: var(--dim); } .core .ci.ok { color: var(--ok); } .core .ci.bad { color: var(--bad); }
   .draftrow .r1 strong { font-weight: 600; }
   /* In-app feedback waiting for the owner: its words, then send, edit or dismiss. 16px fields: iOS zooms smaller. */
   .fb li { margin-top: .5rem; padding: .625rem .75rem; border-radius: .75rem; background: var(--bg); box-shadow: inset 3px 0 0 var(--warn); }
@@ -1902,8 +1909,9 @@ const needLabel = (n) => `${n} need${n === 1 ? 's' : ''} you`;
 function homeNeed() {
   const need = everOpen ? listOf('home', false).threads.filter((th) => th.sec === 'need') : [], waits = everOpen ? feed.filter(asksYou) : [];
   const drafts = everOpen ? homeDrafts(false) : [], fb = everOpen ? fbWaiting() : [], first = need[0] && [need[0].root, ...need[0].replies].find((t) => rank(t) === need[0].rank);
-  return { n: drafts.length + fb.length + need.length + waits.length, att: first ? first.attention : waits[0] || fb[0] ? 'approval' : 'unread',
-    href: first ? `#task/${first.id}` : waits[0] ? `#session/${liveKey(waits[0])}` : drafts[0] ? draftHref(drafts[0]) : fb[0] ? `#apps/${fb[0].a.slug}` : '' };
+  const core = everOpen && coreShown() && !coreShown()[2] ? 1 : 0; // one waiting for no task needs nothing
+  return { n: core + drafts.length + fb.length + need.length + waits.length, att: first ? first.attention : waits[0] || fb[0] ? 'approval' : 'unread',
+    href: first ? `#task/${first.id}` : waits[0] ? `#session/${liveKey(waits[0])}` : drafts[0] ? draftHref(drafts[0]) : fb[0] ? `#apps/${fb[0].a.slug}` : core ? '#' : '' };
 }
 // Apps with a draft; Home lists them first under Needs you, each opening the task that made it.
 const appDrafts = () => ((hosted && hosted.list) || []).filter((a) => a.draft);
@@ -2004,6 +2012,60 @@ $('upd').onclick = (e) => {
   u.setAttribute('aria-expanded', String(u.getAttribute('aria-expanded') !== 'true'));
   renderUpdate();
 };
+
+// The core's builds (Status `core_update`, from `mis-up --watch`). Owner only, atop Home's Needs you: Update ready and what
+// it brings; or, after an Update, what came, to keep or roll back. MIS restarts on the choice once no task runs.
+let coreUpdate = null, coreBusy = false, coreErr = '';
+// [change, 'ready' or 'updated', whether it waits for no task to run]. A Roll back asked for shows even once a newer build is ready.
+function coreShown() {
+  const c = coreUpdate;
+  if (!c || readOnly) return null;
+  const back = c.back && (c.asked === c.back.sha || (c.started === 'update' && !c.kept)) ? c.back : null;
+  if (c.ready && !(back && c.asked === back.sha)) return [c.ready, 'ready', c.asked === c.ready.sha || c.auto];
+  return back ? [back, 'updated', c.asked === back.sha] : null;
+}
+// "2 features, 1 fix": commits by their Conventional Commits type.
+function changeSummary(commits) {
+  const n = (t) => commits.filter((c) => new RegExp(`^${t}(\\(.*?\\))?!?:`).test(c.subject)).length;
+  const feat = n('feat'), fix = n('fix'), rest = commits.length - feat - fix;
+  return feat || fix ? [feat && plural(feat, 'feature'), fix && `${fix} fix${fix === 1 ? '' : 'es'}`, rest && plural(rest, 'other')].filter(Boolean).join(', ') : '';
+}
+const CI = { passing: ['CI ✓', 'ok', 'CI passed'], failing: ['CI ✗', 'bad', 'CI failed'], pending: ['CI …', '', 'CI running'] };
+function commitRow(c, repo) {
+  const ci = CI[c.ci], mark = ci ? el('span', { className: `ci ${ci[1]}`, title: ci[2] }, ci[0]) : '';
+  if (ci) mark.setAttribute('aria-label', ci[2]);
+  const pr = c.pr && repo ? el('a', { href: `https://github.com/${repo}/pull/${c.pr}`, target: '_blank', rel: 'noopener' }, `#${c.pr}`) : el('code', {}, c.sha.slice(0, 7));
+  return el('li', {}, pr, el('span', { className: 'subj' }, c.subject), mark);
+}
+async function chooseBuild(sha) {
+  coreBusy = true; coreErr = '';
+  render();
+  try {
+    const r = await fetch('/api/update/choose', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ sha }) });
+    if (!r.ok) coreErr = (await r.text()) || `error ${r.status}`;
+  } catch { coreErr = 'couldn’t reach the orchestrator'; }
+  coreBusy = false;
+  render();
+}
+function coreCard() {
+  const shown = coreShown();
+  if (!shown) return '';
+  const [change, kind, waits] = shown, c = coreUpdate, list = change.commits, ready = kind === 'ready', short = (s) => s.slice(0, 7);
+  const busy = tasks.filter((t) => t.status === 'running' || t.status === 'planning').length;
+  const btn = (label, sha, quiet) => el('button', { type: 'button', className: quiet ? 'quiet' : '', disabled: coreBusy, onclick: () => chooseBuild(sha) }, label);
+  const said = !waits ? (ready ? 'MIS restarts on it once no task runs.' : '')
+    : `${ready ? 'Updating' : 'Rolling back'} once no task runs${busy ? ` (${busy} running)` : ''}…${ready && c.auto ? ' Updates on their own (--auto-update).' : ''}`;
+  const actions = waits ? (c.auto && ready ? '' : el('div', { className: 'row' }, btn('Cancel', c.running, true)))
+    : el('div', { className: 'row' }, ...(ready ? [btn('Update', change.sha)] : [btn('Keep', c.running), btn('Roll back', change.sha, true)]));
+  return el('div', { className: 'appr draft core' },
+    el('div', { className: 'dim' }, ready ? `Update ready · ${short(c.running)} → ${short(change.sha)}` : `Updated to ${short(c.running)} · Roll back returns to ${short(change.sha)}`),
+    el('p', { className: 'what' }, [plural(list.length, 'change'), changeSummary(list)].filter(Boolean).join(': ')),
+    el('ul', { className: 'commits' }, ...list.map((x) => commitRow(x, c.repo))),
+    ready && c.started === 'roll_back' ? el('div', { className: 'sub dim' }, 'Rolled back from it; Update brings it back.') : '',
+    said ? el('div', { className: 'sub dim' }, said) : '',
+    coreErr ? el('div', { className: 'err bad' }, coreErr) : '',
+    actions);
+}
 
 // `#` Home, `#tasks`, `#sessions`, `#task/<id>`, `#routines`, `#routines/<name>`, `#apps`, `#new-app`, `#apps/<slug>`, `#settings`,
 // `#workers`, `#worker/<id>`, `#session/<worker>/<harness>/<id>`, `#notes/<repo path>` (each segment URI-encoded), `#projects`,
@@ -2429,7 +2491,8 @@ function renderList() {
     return rows;
   };
   const needLive = (s) => needRow(liveRow(s, now), !asksYou(s), asksYou(s) && clr([], [clearKey.session(s)]));
-  if (sec === 'home' && (drafted.length || asked.length || sessions.length) && !groups.has('need')) groups.set('need', []);
+  const core = sec === 'home' ? coreCard() : '';
+  if (sec === 'home' && (core || drafted.length || asked.length || sessions.length) && !groups.has('need')) groups.set('need', []);
   // Sections in Home's order; on Home, drafts, feedback, then the tasks needing you, then sessions waiting on you.
   const keys = [...groups.keys()].sort((a, b) => secRank(a) - secRank(b) || b.localeCompare(a));
   // Sessions: those under way, then the rest of the last six hours.
@@ -2439,7 +2502,7 @@ function renderList() {
       const ul = el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []), ...(k === 'need' ? [...drafted, ...asked] : []),
         ...groups.get(k).flatMap((th) => (k === 'need' && sec === 'home' ? needThread(th) : threadRows(th, now))), ...(k === 'need' && sec === 'home' ? sessions.map(needLive) : []));
       const clearAll = k === 'need' && sec === 'home' && !readOnly && clrAll.n > 1 && el('button', { type: 'button', onclick: () => clearNeed(clrAll.seen, clrAll.keys) }, 'Clear all');
-      return [secHead(label(k), ...(clearAll ? [clearAll] : [])), ul];
+      return [secHead(label(k), ...(clearAll ? [clearAll] : [])), k === 'need' ? core : '', ul];
     });
   const act = document.activeElement, onX = act?.classList.contains('x'), focused = $('list').contains(act) && (onX ? act.parentNode.querySelector('a')?.getAttribute('href') : act.getAttribute('href'));
   $('list').replaceChildren(...(inSplit() ? [el('a', { href: '#new', className: 'newtask', title: 'New task (c)' }, '+ New task')] : []), ...body.flat());
@@ -4938,6 +5001,7 @@ function onMessage(msg) {
       tasks = msg.tasks;
       for (const id of live.keys()) if (!tasks.some((t) => t.id === id && t.status === 'running')) live.delete(id);
       update = msg.update || { state: 'none' };
+      coreUpdate = msg.core_update || null;
       if (num(msg.now_ms) !== null) skew = msg.now_ms - Date.now();
       // The server's order is unstable; sort so rows don't jump on refresh.
       workers = [...msg.workers].sort((a, b) => a.info.hostname.localeCompare(b.info.hostname) || a.id.localeCompare(b.id));
