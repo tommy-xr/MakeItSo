@@ -756,7 +756,8 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
     :root:not(.vr) #toast { max-width: calc(100vw - var(--side) - 2rem); }
   }
   @media (min-width: 75rem) {
-    :root.split:not(.vr) { --list: 26rem; }
+    /* The list grows with the window, up to 26rem; the task column stays the wider one (≈600px at 1200px). */
+    :root.split:not(.vr) { --list: clamp(21rem, 29vw, 26rem); }
     /* The list scrolls in its own column; the window still scrolls the task, so following a reply works as before. */
     :root.split:not(.vr) body > #list { position: fixed; z-index: 1; inset: var(--head) auto 0 var(--rail); box-sizing: border-box; width: var(--list); max-width: none; margin: 0;
       padding: 0 var(--pad) 1.5rem; overflow-y: auto; overscroll-behavior: contain; border-right: 1px solid var(--sep); }
