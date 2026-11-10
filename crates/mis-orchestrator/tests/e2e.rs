@@ -4060,6 +4060,7 @@ async fn refused_everywhere_else(base: &str, headers: &[(&'static str, &str)]) {
         ("GET", "/api/notes/sync".into()),
         ("GET", "/api/notes/tree".into()),
         ("GET", "/api/notes/file?path=inbox/a.md".into()),
+        ("POST", "/api/notes/move".into()),
         ("GET", "/api/projects".into()),
         ("GET", "/api/apps".into()),
         ("POST", "/api/apps/a/releases".into()),
@@ -4381,6 +4382,115 @@ async fn the_notes_view_reads_the_clone_for_full_scope_only() {
     assert_eq!(http(&off, head, b"").await.0, 404);
     // The first run's `git fetch` may still be in the clone (Windows won't delete it).
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn filing_a_note_answers_how_it_went_for_full_scope_only() {
+    use std::time::Duration;
+    let dir = std::env::temp_dir().join(format!("mis-e2e-notes-move-{}", uuid::Uuid::new_v4()));
+    let human = dir.join("human");
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args([
+                "-c",
+                "user.name=Human",
+                "-c",
+                "user.email=human@example.com",
+            ])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "git {args:?}: {err}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    git(&["init", "--quiet", "--bare", "-b", "main", "remote.git"]);
+    git(&["clone", "--quiet", "remote.git", "human"]);
+    let files: [(&str, &[u8]); 3] = [
+        ("inbox/a.md", b"# a\n"),
+        ("inbox/b.md", b"# b\n"),
+        ("projects/amf/README.md", b"# All Must Fall\n"),
+    ];
+    for (path, bytes) in files {
+        let at = human.join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, bytes).unwrap();
+    }
+    git(&["-C", "human", "add", "-A"]);
+    git(&["-C", "human", "commit", "--quiet", "-m", "init"]);
+    git(&["-C", "human", "push", "--quiet", "origin", "HEAD:main"]);
+    let state = dir.join("state");
+    let notes =
+        mis_orchestrator::notes::Notes::new(dir.join("remote.git").display().to_string(), &state)
+            .with_timing(Duration::from_secs(3600), Duration::from_secs(3600));
+    let base = start_app(capturing(&state).with_notes(notes)).await;
+    let mv = |token: &'static str, body: String| {
+        let base = base.clone();
+        async move { post_json(&base, "/api/notes/move", token, &body).await }
+    };
+    let body = |path: &str, dest: &str, hash: &str| {
+        serde_json::json!({ "path": path, "dest": dest, "hash": hash, "summary": "Short" })
+            .to_string()
+    };
+    // Filed and pushed at once: no waiting on the publisher's timer.
+    let (status, got) = mv("s", body("inbox/a.md", "projects/amf", "")).await;
+    assert_eq!(status, 409, "a wrong hash: {got}");
+    let (status, got) = mv("s", body("inbox/a.md", "projects/amf", &sha_hex(b"# a\n"))).await;
+    assert_eq!(status, 200, "{got}");
+    let moved: mis_types::NoteMoved = serde_json::from_str(&got).unwrap();
+    assert_eq!(
+        (moved.path.as_str(), moved.error),
+        ("projects/amf/a.md", None)
+    );
+    let shown = git(&["--git-dir", "remote.git", "show", "main:projects/amf/a.md"]);
+    assert_eq!(
+        shown,
+        "---\nsummary: \"Short\"\nproject: \"amf\"\n---\n# a\n"
+    );
+    // Gone now.
+    let (status, _) = mv("s", body("inbox/a.md", "archive", "")).await;
+    assert_eq!(status, 409);
+    for (bad, why) in [
+        (body("inbox/b.md", "ai", ""), "not a dest"),
+        (
+            body("projects/amf/README.md", "archive", ""),
+            "not in the inbox",
+        ),
+        (
+            r#"{"path":"inbox/b.md","dest":"archive","oops":1}"#.into(),
+            "unknown field",
+        ),
+        (r#"{"path":"inbox/b.md"}"#.into(), "no dest"),
+    ] {
+        let (status, got) = mv("s", bad).await;
+        assert_eq!(status, 400, "{why}: {got}");
+    }
+    for token in ["r", "c"] {
+        let (status, _) = mv(token, body("inbox/b.md", "archive", "")).await;
+        assert!(matches!(status, 401 | 403), "{token}: {status}");
+    }
+    let off = start_app(capturing(&dir.join("off"))).await;
+    let (status, _) = post_json(
+        &off,
+        "/api/notes/move",
+        "s",
+        &body("inbox/b.md", "archive", ""),
+    )
+    .await;
+    assert_eq!(status, 404);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// sha256 hex of `bytes`.
+fn sha_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[tokio::test]

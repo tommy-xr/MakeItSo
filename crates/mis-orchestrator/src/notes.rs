@@ -1,7 +1,8 @@
 //! Publishes capture receipts (`<state>/captures/inbox/`) as records in a clone of the
 //! notes repo (`inbox/`), by capture id: each is written once, then left to the human,
 //! who may edit, rename, file or delete it. Choosing what to write is pure ([`plan`],
-//! [`record`]); [`Notes`] is the `git` shell around it.
+//! [`record`]); [`Notes`] is the `git` shell around it, and also files inbox notes
+//! ([`Notes::file`], laid out by [`crate::filing`]), so all its `git` runs one at a time.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -11,8 +12,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use mis_types::{NotesSync, SyncState};
+use mis_types::{NoteMove, NoteMoved, NotesSync, SyncState};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 /// Where records go in the repo.
@@ -103,7 +106,7 @@ fn stem(file: &str) -> &str {
 }
 
 /// `asset` of a receipt named `from` renamed for `to`: `a-1.jpg` -> `a-2-1.jpg`.
-fn renamed(asset: &str, from: &str, to: &str) -> String {
+pub(crate) fn renamed(asset: &str, from: &str, to: &str) -> String {
     match asset.strip_prefix(from) {
         Some(rest) => format!("{to}{rest}"),
         None => asset.to_string(),
@@ -184,6 +187,26 @@ fn state(pending: usize, run: &Result<bool, Failure>) -> SyncState {
     }
 }
 
+/// Why a note wasn't filed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// Not a folder to file in, or not text.
+    Invalid(String),
+    /// Gone, changed since it was read, edited in the clone, or its image's name is taken.
+    Stale(String),
+    /// The clone couldn't be used: offline before its first clone, a conflict, git failing.
+    Failed(String),
+}
+
+impl From<Failure> for Refused {
+    fn from(f: Failure) -> Self {
+        Self::Failed(f.why().to_string())
+    }
+}
+
+/// How a queued filing went: filed (pushed, or committed for a later run to push) or not.
+pub type Filed = Result<NoteMoved, Refused>;
+
 #[derive(Debug)]
 enum Failure {
     /// The remote couldn't be reached.
@@ -238,6 +261,10 @@ pub struct Notes {
     arrived: AtomicUsize,
     /// Woken by each new capture.
     kick: tokio::sync::Notify,
+    /// Filings for the next run, each with whoever awaits it.
+    moves: Mutex<Vec<(NoteMove, oneshot::Sender<Filed>)>>,
+    /// Woken by each filing queued.
+    queued: tokio::sync::Notify,
     after_capture: Duration,
     every: Duration,
 }
@@ -256,6 +283,8 @@ impl Notes {
             }),
             arrived: AtomicUsize::new(0),
             kick: Default::default(),
+            moves: Default::default(),
+            queued: Default::default(),
             after_capture: AFTER_CAPTURE,
             every: EVERY,
         }
@@ -289,25 +318,53 @@ impl Notes {
         self.kick.notify_one();
     }
 
-    /// Publish at start, `after_capture` after each capture, and every `every`. The only
-    /// caller of [`Self::run`], so runs never overlap.
+    /// File `m` ([`crate::filing::check`]ed) on the next run, which starts now.
+    pub fn file(&self, m: NoteMove) -> oneshot::Receiver<Filed> {
+        let (tx, rx) = oneshot::channel();
+        self.moves.lock().unwrap().push((m, tx));
+        self.queued.notify_one();
+        rx
+    }
+
+    /// Publish at start, `after_capture` after each capture, every `every`, and at once
+    /// when a filing is queued. The only caller of [`Self::run`], so runs never overlap.
     pub async fn publish_loop(self: std::sync::Arc<Self>) {
         let mut every = tokio::time::interval(self.every);
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 _ = every.tick() => {}
-                _ = self.kick.notified() => tokio::time::sleep(self.after_capture).await,
+                _ = self.queued.notified() => {}
+                _ = self.kick.notified() => tokio::select! {
+                    _ = tokio::time::sleep(self.after_capture) => {}
+                    _ = self.queued.notified() => {}
+                },
             }
             let notes = self.clone();
             let _ = tokio::task::spawn_blocking(move || notes.run()).await;
         }
     }
 
-    /// One publish (blocking: runs `git`), then the status it leaves.
+    /// The queued filings, then one publish (blocking: runs `git`), then the status it leaves.
     pub fn run(&self) -> NotesSync {
+        let moves = std::mem::take(&mut *self.moves.lock().unwrap());
+        let mut filed = Vec::new();
+        for (m, tx) in moves {
+            match self.file_now(&m) {
+                Ok(path) => filed.push((path, tx)),
+                Err(r) => {
+                    tracing::warn!(path = %m.path, dest = %m.dest, "filing a note: {r:?}");
+                    let _ = tx.send(Err(r));
+                }
+            }
+        }
         let before = self.arrived.load(Ordering::SeqCst);
         let (pending, run) = self.publish();
+        // The publish pushes the filings' commits, or leaves them for a later run.
+        for (path, tx) in filed {
+            let error = run.as_ref().err().map(|f| f.why().to_string());
+            let _ = tx.send(Ok(NoteMoved { path, error }));
+        }
         let mut s = self.status.lock().unwrap();
         // Captures kept mid-run may postdate the receipts it read. Counted before
         // reading them, so at worst one is counted twice until the next run.
@@ -492,7 +549,113 @@ impl Notes {
         self.fetch_rebase()
     }
 
-    /// Unstage and delete the files a run cut short was writing, unless it committed them.
+    /// File `m` in a commit of its own, left for [`Self::publish`] to push: the note's new
+    /// path. Offline, it files onto the clone as it is.
+    fn file_now(&self, m: &NoteMove) -> Result<String, Refused> {
+        match self.sync() {
+            Err(Failure::Offline(_)) if self.clone.join(".git").exists() => {}
+            r => r?,
+        }
+        let inbox = self.names_in(INBOX)?;
+        if !inbox.iter().any(|n| format!("{INBOX}/{n}") == m.path) {
+            return Err(Refused::Stale(format!("{} is gone", m.path)));
+        }
+        let dirs = self.ls(true, &["projects/", "areas/", "resources/"])?;
+        if !crate::filing::dests(&dirs).contains(&m.dest) {
+            return Err(Refused::Invalid(format!(
+                "{} is not a folder to file in",
+                m.dest
+            )));
+        }
+        let blob = self.git(&["cat-file", "blob", &format!("HEAD:{}", m.path)])?;
+        let bytes = blob.check("cat-file", Failure::Other)?.stdout;
+        let hash: String = Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        if m.hash
+            .as_ref()
+            .is_some_and(|h| !h.eq_ignore_ascii_case(&hash))
+        {
+            return Err(Refused::Stale(format!(
+                "{} changed since it was read",
+                m.path
+            )));
+        }
+        let md = String::from_utf8(bytes).map_err(|_| Refused::Invalid("not UTF-8".into()))?;
+        // What's in the folder, committed or not, so a filing never lands on a human's file.
+        let mut taken = self.names_in(&m.dest)?;
+        if let Ok(read) = std::fs::read_dir(self.clone.join(&m.dest)) {
+            taken.extend(
+                read.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned()),
+            );
+        }
+        let f = crate::filing::plan(m, &md, &inbox, &taken).map_err(Refused::Stale)?;
+        let sources: Vec<&str> = f.moves.iter().map(|(from, _)| from.as_str()).collect();
+        // A human's uncommitted edit would be carried along, or lost to the rewrite.
+        let status =
+            self.git(&[&["status", "--porcelain", "-z", "--"], sources.as_slice()].concat())?;
+        if !status.check("status", Failure::Other)?.stdout.is_empty() {
+            let why = format!(
+                "{} has uncommitted changes in {}",
+                m.path,
+                self.clone.display()
+            );
+            return Err(Refused::Stale(why));
+        }
+        let paths: Vec<&str> = (f.moves.iter())
+            .flat_map(|(from, to)| [from.as_str(), to.as_str()])
+            .collect();
+        let marker = self.clone.join(".git").join(WRITING);
+        crate::push::write_private(&marker, paths.join("\n").as_bytes()).map_err(Failure::from)?;
+        std::fs::create_dir_all(self.clone.join(&m.dest)).map_err(Failure::from)?;
+        for (from, to) in &f.moves {
+            self.git(&["mv", "--", from, to])?
+                .check("mv", Failure::Other)?;
+        }
+        if f.md != md {
+            std::fs::write(self.clone.join(&f.moves[0].1), &f.md).map_err(Failure::from)?;
+        }
+        // Only these paths, as the working tree has them.
+        let commit = [
+            &["commit", "--quiet", "-m", &f.message, "--"],
+            paths.as_slice(),
+        ]
+        .concat();
+        self.git(&commit)?.check("commit", Failure::Other)?;
+        std::fs::remove_file(marker).map_err(Failure::from)?;
+        Ok(f.moves[0].1.clone())
+    }
+
+    /// The names in HEAD's folder `dir`, e.g. `a.md` for `inbox/a.md`.
+    fn names_in(&self, dir: &str) -> Result<Vec<String>, Failure> {
+        let pre = format!("{dir}/");
+        let paths = self.ls(false, &[&pre])?;
+        Ok((paths.iter())
+            .map(|p| p.strip_prefix(&pre).unwrap_or(p).to_string())
+            .collect())
+    }
+
+    /// HEAD's paths that are `paths` or directly in folders named `x/`; only folders if `folders`.
+    fn ls(&self, folders: bool, paths: &[&str]) -> Result<Vec<String>, Failure> {
+        let flags: &[&str] = if folders { &["-d"] } else { &[] };
+        let args = [
+            &["ls-tree", "-z", "--name-only"],
+            flags,
+            &["HEAD", "--"],
+            paths,
+        ]
+        .concat();
+        let ls = self.git(&args)?.check("ls-tree", Failure::Other)?;
+        Ok((ls.stdout.split(|b| *b == 0))
+            .filter(|p| !p.is_empty())
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .collect())
+    }
+
+    /// Put back the files a run cut short was writing or filing, unless it committed them:
+    /// new ones unstaged and deleted, moved ones restored from HEAD.
     fn undo_writing(&self) -> Result<(), Failure> {
         let marker = self.clone.join(".git").join(WRITING);
         let paths = match std::fs::read_to_string(&marker) {
@@ -505,6 +668,12 @@ impl Notes {
             for cmd in [["reset", "-q"].as_slice(), &["clean", "-fq"]] {
                 let args: Vec<&str> = [cmd, &["--"], &paths].concat();
                 self.git(&args)?.check(cmd[0], Failure::Other)?;
+            }
+            let held = self.ls(false, &paths)?;
+            if !held.is_empty() {
+                let held: Vec<&str> = held.iter().map(String::as_str).collect();
+                let args = [&["checkout", "HEAD", "--"], held.as_slice()].concat();
+                self.git(&args)?.check("checkout", Failure::Other)?;
             }
         }
         std::fs::remove_file(marker)?;

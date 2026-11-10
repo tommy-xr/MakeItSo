@@ -225,6 +225,8 @@ pub fn slug(text: Option<&str>, url: Option<&str>) -> String {
 /// `stem-1.jpg`. Also taken by `stem-2.jpg`, so `stem-2.md` never sits beside
 /// another capture's image of that name. Case-insensitive, like macOS file names.
 fn taken(stem: &str, existing: &[String]) -> bool {
+    let stem = stem.to_ascii_lowercase();
+    let stem = stem.as_str();
     existing.iter().any(|name| {
         let base = name.split('.').next().unwrap_or(name).to_ascii_lowercase();
         base == stem

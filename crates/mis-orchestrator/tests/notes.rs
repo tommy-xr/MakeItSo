@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use mis_orchestrator::capture::{Capture, Inbox, Saved};
-use mis_orchestrator::notes::{Notes, Published};
+use mis_orchestrator::notes::{Filed, Notes, Published, Refused};
+use mis_types::NoteMove;
 use mis_types::SyncState::{Conflict, Idle, Offline};
 
 const JPEG: &[u8] = b"\xFF\xD8\xFF\xE0 photo";
@@ -152,6 +153,30 @@ impl World {
         let clone = self.state.join("notes");
         let wrapper = wrapper.to_str().unwrap();
         git(&clone, &["config", "remote.origin.receivepack", wrapper]);
+    }
+
+    /// Queue filing `path` in `dest` and run: how it went.
+    fn file(&self, notes: &Notes, path: &str, dest: &str, hash: Option<&str>) -> Filed {
+        let m = NoteMove {
+            path: path.into(),
+            dest: dest.into(),
+            summary: Some("Pure cores".into()),
+            hash: hash.map(Into::into),
+        };
+        let filed = notes.file(m);
+        notes.run();
+        filed.blocking_recv().unwrap()
+    }
+
+    /// Folders a note may be filed in, pushed by the human.
+    fn folders(&self, files: &[&str]) {
+        self.human_pull();
+        for f in files {
+            let at = self.human.join(f);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, "# here\n").unwrap();
+        }
+        self.human_commit("folders");
     }
 
     fn raced(&self) -> bool {
@@ -636,4 +661,186 @@ fn a_run_with_nothing_to_publish_pushes_a_commit_left_unpushed() {
     assert_eq!((s.state, s.pending, &s.last_error), (Idle, 0, &None));
     assert!(s.last_push.is_some());
     assert_eq!(w.log()[0], "offline");
+}
+
+/// sha256 hex of `bytes`, as `POST /api/notes/move` takes it.
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(bytes);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[test]
+fn filing_moves_a_note_and_its_image_in_one_pushed_commit() {
+    let w = World::new();
+    let a = w.capture("liminal inspiration for amf #mis", &[JPEG]);
+    let notes = w.notes();
+    notes.run();
+    w.folders(&["projects/amf/README.md"]);
+    let (md, jpg) = (
+        format!("inbox/{}", a.file),
+        format!("inbox/{}", image_of(&a.file)),
+    );
+    let hash = sha256(&w.show(&md));
+    let got = w.file(&notes, &md, "projects/amf", Some(&hash)).unwrap();
+    let to = format!("projects/amf/{}", a.file);
+    assert_eq!((got.path.as_str(), got.error), (to.as_str(), None));
+    let files = w.files();
+    assert!(!files.contains(&md) && !files.contains(&jpg), "{files:?}");
+    assert_eq!(w.show(&format!("projects/amf/{}", image_of(&a.file))), JPEG);
+    // The frontmatter gains a summary and the project; the rest is as captured.
+    let receipt = String::from_utf8(w.receipt(&a.file)).unwrap();
+    let want = receipt.replace("project: \"mis\"\n", "").replacen(
+        "\n---\n",
+        "\nsummary: \"Pure cores\"\nproject: \"amf\"\n---\n",
+        1,
+    );
+    assert_eq!(String::from_utf8(w.show(&to)).unwrap(), want);
+    assert_eq!(
+        w.log()[..2],
+        [format!("file: {md} -> projects/amf/"), "folders".into()]
+    );
+    let trailers = w.remote_git(&["log", "-1", "--format=%(trailers)", "main"]);
+    assert_eq!(
+        trailers,
+        format!("MIS-Writer: human\nMIS-Filed: {} {md} {to}", a.id)
+    );
+    let s = notes.status();
+    assert_eq!((s.state, s.pending, &s.last_error), (Idle, 0, &None));
+    // Published once: a later run doesn't bring it back to the inbox.
+    let head = w.head();
+    notes.run();
+    assert_eq!(w.head(), head);
+}
+
+#[test]
+fn a_name_taken_where_a_note_is_filed_gets_a_number() {
+    let w = World::new();
+    let a = w.capture("same name", &[JPEG]);
+    let notes = w.notes();
+    notes.run();
+    let stem = a.file.strip_suffix(".md").unwrap();
+    w.folders(&[&format!("archive/{}", a.file)]);
+    let got = w
+        .file(&notes, &format!("inbox/{}", a.file), "archive", None)
+        .unwrap();
+    assert_eq!(got.path, format!("archive/{stem}-2.md"));
+    assert_eq!(
+        w.show(&format!("archive/{}", a.file)),
+        b"# here\n",
+        "untouched"
+    );
+    assert_eq!(w.show(&format!("archive/{stem}-2-1.jpg")), JPEG);
+    let filed = String::from_utf8(w.show(&got.path)).unwrap();
+    assert!(
+        filed.contains(&format!("  - path: {stem}-2-1.jpg\n")),
+        "{filed}"
+    );
+}
+
+#[test]
+fn a_note_changed_gone_or_edited_in_the_clone_is_not_filed() {
+    let w = World::new();
+    let a = w.capture("changing", &[]);
+    let b = w.capture("going", &[]);
+    let notes = w.notes();
+    notes.run();
+    w.folders(&["areas/home/boiler.md"]);
+    let (a_md, b_md) = (format!("inbox/{}", a.file), format!("inbox/{}", b.file));
+    let read = sha256(&w.show(&a_md));
+    // The human edits one and deletes the other after the view read them.
+    w.human_pull();
+    std::fs::write(w.human.join(&a_md), "edited\n").unwrap();
+    std::fs::remove_file(w.human.join(&b_md)).unwrap();
+    w.human_commit("edit and delete");
+    let head = w.head();
+    let stale = |f: Filed| matches!(f, Err(Refused::Stale(_)));
+    assert!(stale(w.file(&notes, &a_md, "areas/home", Some(&read))));
+    assert!(stale(w.file(&notes, &b_md, "areas/home", None)));
+    // Only folders under projects/, areas/ and resources/, and the archive.
+    for dest in ["areas/nope", "ai", "inbox", "areas/home/deeper"] {
+        let got = w.file(&notes, &a_md, dest, None);
+        assert!(matches!(got, Err(Refused::Invalid(_))), "{dest}: {got:?}");
+    }
+    // An edit not committed in the clone (the rebase stops first).
+    let clone = w.state.join("notes");
+    std::fs::write(clone.join(&a_md), "uncommitted\n").unwrap();
+    assert!(w.file(&notes, &a_md, "areas/home", None).is_err());
+    assert_eq!(
+        std::fs::read_to_string(clone.join(&a_md)).unwrap(),
+        "uncommitted\n"
+    );
+    assert_eq!(w.head(), head, "nothing filed");
+    git(&clone, &["checkout", "--", &a_md]);
+    let current = sha256(b"edited\n");
+    let got = w.file(&notes, &a_md, "areas/home", Some(&current)).unwrap();
+    assert_eq!(got.path, format!("areas/home/{}", a.file));
+}
+
+#[test]
+fn filing_offline_commits_and_the_next_run_pushes_it() {
+    let w = World::new();
+    let a = w.capture("filed on a plane", &[]);
+    let b = w.capture("edited on a plane", &[]);
+    let notes = w.notes();
+    notes.run();
+    w.folders(&["resources/rust/tips.md"]);
+    notes.run();
+    let away = w.dir.join("away.git");
+    std::fs::rename(&w.remote, &away).unwrap();
+    // Offline nothing stops at a rebase, so an edit not committed is seen here.
+    let clone = w.state.join("notes");
+    let b_md = format!("inbox/{}", b.file);
+    std::fs::write(clone.join(&b_md), "uncommitted\n").unwrap();
+    let got = w.file(&notes, &b_md, "resources/rust", None);
+    assert!(matches!(got, Err(Refused::Stale(_))), "{got:?}");
+    git(&clone, &["checkout", "--", &b_md]);
+    let md = format!("inbox/{}", a.file);
+    let got = w.file(&notes, &md, "resources/rust", None).unwrap();
+    assert_eq!(got.path, format!("resources/rust/{}", a.file));
+    assert!(got.error.unwrap().starts_with("fetch:"));
+    assert_eq!(notes.status().state, Offline);
+    let subject = format!("file: {md} -> resources/rust/");
+    assert_eq!(git(&clone, &["log", "-1", "--format=%s"]), subject);
+    std::fs::rename(&away, &w.remote).unwrap();
+    // Nothing to publish, but the filing is pushed.
+    let s = notes.run();
+    assert_eq!((s.state, s.pending, &s.last_error), (Idle, 0, &None));
+    assert_eq!(w.log()[0], subject);
+    assert!(w.files().contains(&got.path));
+}
+
+#[test]
+fn a_filing_cut_short_is_put_back() {
+    let w = World::new();
+    let a = w.capture("cut short", &[JPEG]);
+    let notes = w.notes();
+    notes.run();
+    w.folders(&["projects/amf/README.md"]);
+    notes.run();
+    // As if a run stopped after moving the files, before committing.
+    let clone = w.state.join("notes");
+    let (md, jpg) = (
+        format!("inbox/{}", a.file),
+        format!("inbox/{}", image_of(&a.file)),
+    );
+    let (to_md, to_jpg) = (
+        format!("projects/amf/{}", a.file),
+        format!("projects/amf/{}", image_of(&a.file)),
+    );
+    git(&clone, &["mv", "--", &md, &to_md]);
+    git(&clone, &["mv", "--", &jpg, &to_jpg]);
+    std::fs::write(clone.join(&to_md), "half rewritten").unwrap();
+    std::fs::write(
+        clone.join(".git/mis-writing"),
+        [&md, &to_md, &jpg, &to_jpg].map(|s| s.as_str()).join("\n"),
+    )
+    .unwrap();
+    let s = notes.run();
+    assert_eq!((s.state, &s.last_error), (Idle, &None));
+    assert_eq!(std::fs::read(clone.join(&md)).unwrap(), w.receipt(&a.file));
+    assert_eq!(std::fs::read(clone.join(&jpg)).unwrap(), JPEG);
+    assert!(!clone.join(&to_md).exists() && !clone.join(&to_jpg).exists());
+    assert_eq!(git(&clone, &["status", "--porcelain"]), "");
+    assert!(!clone.join(".git/mis-writing").exists());
 }
