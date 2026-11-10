@@ -148,19 +148,24 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .box .go { flex: none; display: grid; place-items: center; width: 2.5rem; height: 2.5rem; min-height: 0; padding: 0; border-radius: 50%; }
   .go svg { width: 1.125rem; height: 1.125rem; }
   button.go:disabled { opacity: .35; }
-  /* Above the pill: the harness chip, a reply's error, a session's delivery note. */
+  /* Above the pill: where a new task runs, a reply's error, a session's delivery note. */
   .ctx { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .75rem; margin: 0 .25rem .5rem; font-size: .8125rem; overflow-wrap: anywhere; }
   .ctx p { flex: 1 1 10rem; margin: 0; }
   .ctx:not(:has(> :not([hidden]))) { display: none; }
-  /* Harness/model chip; its ::after widens the tap target. The popover opens above it. */
-  #opt { position: relative; max-width: 100%; min-height: 0; height: 1.75rem; padding: 0 .625rem; border-radius: 999px; background: var(--raised); color: var(--soft); font: 500 .75rem/1 var(--sans); }
-  #opt span { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-  #opt::after { content: ""; position: absolute; inset: -.5rem -.25rem; }
-  #opt[aria-expanded=true] { color: var(--fg); background: var(--seg-on); }
-  #opts { position: absolute; z-index: 1; left: 0; bottom: calc(100% + .375rem); display: grid; gap: .5rem; width: min(20rem, 100%); box-sizing: border-box; padding: .625rem; border-radius: 1rem; background: var(--card); box-shadow: var(--shadow); animation: rise .15s ease-out; }
+  /* Machine › harness › model: one row of chips that shrink (ellipsis) to fit a phone; ::after widens each tap target.
+     A chip opens its menu above the row. */
+  #opts { display: flex; align-items: center; gap: .25rem; min-width: 0; max-width: 100%; color: var(--faint); font-size: .75rem; }
+  .optc { position: relative; display: flex; align-items: center; gap: .375rem; flex: 0 1 auto; min-width: 2.5rem; min-height: 0; height: 1.75rem; padding: 0 .625rem; border-radius: 999px; background: var(--raised); color: var(--soft); font: 500 .75rem/1 var(--sans); }
+  .optc .v { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .optc::after { content: ""; position: absolute; inset: -.5rem -.125rem; }
+  .optc[aria-expanded=true] { color: var(--fg); background: var(--seg-on); }
+  #opt-menu { position: absolute; z-index: 1; bottom: calc(100% + .375rem); display: grid; min-width: 10rem; max-width: min(20rem, 100%); box-sizing: border-box; padding: .375rem; border-radius: 1rem; background: var(--card); box-shadow: var(--shadow); animation: rise .15s ease-out; }
+  #opt-menu .oi { display: flex; align-items: center; gap: .625rem; min-height: 2.5rem; padding: 0 .75rem; border-radius: .625rem; background: none; color: var(--fg2); font: 400 .9375rem var(--sans); text-align: left; }
+  #opt-menu .oi:hover { background: var(--hover); }
+  #opt-menu .oi[aria-checked=true] { color: var(--fg); font-weight: 600; }
+  #opt-menu .oi[aria-checked=true]::after { content: "✓"; margin-left: auto; padding-left: .75rem; color: var(--accent); }
   /* 16px: iOS zooms the page into smaller fields. */
-  #opts select, #opts input { font-size: 1rem; }
-  #opts input { min-height: 2.5rem; padding: 0 .75rem; width: 100%; }
+  #model { min-height: 2.5rem; margin-top: .25rem; padding: 0 .75rem; width: 100%; font-size: 1rem; }
   @keyframes rise { from { opacity: 0; transform: translateY(.25rem); } }
   /* Menu: a sheet from the left over a dimmed page; Escape, a backdrop tap or ✕ close it. */
   #menu { inset: 0; margin: 0 auto 0 0; width: min(18rem, 86vw); max-width: none; height: 100%; max-height: none; padding: 0; border: 0; color: var(--fg); background: var(--card); box-shadow: 12px 0 40px rgba(0, 0, 0, .3); }
@@ -927,11 +932,11 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   <form id="new" class="composer">
     <div id="shots" class="shots" hidden></div>
     <div class="ctx">
-      <button type="button" id="opt" aria-expanded="false" aria-controls="opts"><span>Auto · any machine ▾</span></button>
-      <div id="opts" role="group" aria-label="Harness and model" hidden>
-        <select id="harness" aria-label="harness"><option value="">Auto</option></select>
-        <input id="model" aria-label="model" placeholder="Model (optional)" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <div id="opts" role="group" aria-label="Where it runs">
+        <button type="button" id="o-worker" class="optc" aria-haspopup="menu" aria-expanded="false" aria-controls="opt-menu"></button><span aria-hidden="true">›</span><button type="button" id="o-harness" class="optc" aria-haspopup="menu" aria-expanded="false" aria-controls="opt-menu"></button><span aria-hidden="true">›</span><button type="button" id="o-model" class="optc" aria-haspopup="menu" aria-expanded="false" aria-controls="opt-menu"></button>
       </div>
+      <div id="opt-menu" role="menu" hidden></div>
+      <input id="model" aria-label="Other model" placeholder="Other model" autocapitalize="off" autocorrect="off" spellcheck="false" hidden>
     </div>
     <div class="box"><button type="button" id="clip" class="clip" aria-label="Attach photos"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><input type="file" id="pick" accept="image/*" multiple hidden><textarea id="prompt" rows="1" aria-label="new task" placeholder="Start a task or ask anything" required></textarea><div class="recbar" hidden><button type="button" class="x" aria-label="Discard dictation">✕</button><span class="dots" aria-hidden="true"></span><span class="label" aria-live="polite"><span class="start">Starting…</span><span class="send">Release to send</span><span class="tap">Tap mic to send</span><span class="cancel">Release to cancel</span></span></div><button type="button" class="mic" aria-pressed="false" aria-label="Start dictation" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button><button id="send" class="go" aria-label="Submit" title="Submit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button></div>
   </form>
@@ -3971,10 +3976,9 @@ function onMessage(msg) {
       if (num(msg.now_ms) !== null) skew = msg.now_ms - Date.now();
       // The server's order is unstable; sort so rows don't jump on refresh.
       workers = [...msg.workers].sort((a, b) => a.info.hostname.localeCompare(b.info.hostname) || a.id.localeCompare(b.id));
-      const harnesses = [...new Set(msg.workers.flatMap((w) => w.info.harnesses))].sort();
-      const sel = $('harness'), keep = sel.value;
-      sel.replaceChildren(el('option', { value: '' }, 'Auto'), ...harnesses.map((h) => el('option', { value: h }, h)));
-      sel.value = harnesses.includes(keep) ? keep : '';
+      // A machine that left, or a harness no longer offered, goes back to Any / Auto.
+      if (!pickWorker()) pick.worker = '';
+      if (!pickHarnesses().includes(pick.harness)) pick.harness = '';
       optLabel();
       break;
     }
@@ -4247,7 +4251,7 @@ $('new').onsubmit = (e) => {
   const prompt = $('prompt').value.trim();
   if (!prompt || pending) return;
   pending = { key: 'draft:new', text: prompt };
-  send({ type: 'submit', prompt, cwd: null, harness: $('harness').value || null, model: $('model').value.trim() || null, images: shots.map((x) => x.id) });
+  send({ type: 'submit', prompt, cwd: null, harness: pick.harness || null, model: pick.model || null, worker: pick.worker || null, images: shots.map((x) => x.id) });
   $('prompt').value = '';
   render();
 };
@@ -4314,14 +4318,69 @@ for (const f of composerFields) {
   });
 }
 
-// Harness and model behind one chip: `Auto · any machine ▾`, `codex ▾`, `claude · opus ▾`; a popover holds the fields.
-function optLabel() { $('opt').firstChild.textContent = `${[$('harness').value || 'Auto', $('model').value.trim() || (!$('harness').value && 'any machine')].filter(Boolean).join(' · ')} ▾`; }
-function showOpts(on) { $('opts').hidden = !on; $('opt').setAttribute('aria-expanded', String(on)); }
-$('opt').onclick = () => { const on = $('opts').hidden; showOpts(on); if (on) $('harness').focus(); };
-$('harness').addEventListener('change', optLabel);
-$('model').addEventListener('input', optLabel);
-document.addEventListener('pointerdown', (e) => { if (!$('opts').hidden && !e.target.closest('#opts, #opt')) showOpts(false); });
-$('new').addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('opts').hidden) { e.preventDefault(); showOpts(false); $('opt').focus(); } });
+// Where a new task runs, as chips `Any machine ▾ › Auto ▾ › Default model ▾`, each opening a menu above them.
+// '' is the default: any machine, Auto (the planner picks the harness), the harness's own model. Kept until reload.
+const pick = { worker: '', harness: '', model: '' };
+let menuFor = ''; // the chip whose menu is open: 'worker', 'harness', 'model' or ''
+const modelField = $('model'); // moves into the model menu, so it's held here
+const pickWorker = () => workers.find((w) => w.id === pick.worker);
+// The chosen machine's harnesses, else every machine's.
+const pickHarnesses = () => [...new Set((pickWorker() ? [pickWorker()] : workers).flatMap((w) => w.info.harnesses))].sort();
+// Models those machines list for the harness; a model under Auto runs on claude (the server's default).
+const pickModels = () => [...new Set((pickWorker() ? [pickWorker()] : workers).flatMap((w) => w.info.models[pick.harness || 'claude'] || []))];
+function optLabel() {
+  const w = pickWorker();
+  const chip = (k, name, text, dot) => {
+    $(`o-${k}`).replaceChildren(...(dot ? [el('span', { className: `sd ${dot}` })] : []), el('span', { className: 'v' }, text), ' ▾');
+    $(`o-${k}`).setAttribute('aria-label', `${name}: ${text}`);
+  };
+  chip('worker', 'Machine', w ? shortHost(w.info.hostname) : 'Any machine', w && workerState(w));
+  chip('harness', 'Harness', pick.harness || 'Auto');
+  chip('model', 'Model', pick.model || 'Default model');
+}
+optLabel();
+// Open chip `k`'s menu (falsy: close it). Model's ends in a field for one not listed.
+function showOpts(k) {
+  menuFor = k || '';
+  for (const c of ['worker', 'harness', 'model']) $(`o-${c}`).setAttribute('aria-expanded', String(c === menuFor));
+  const m = $('opt-menu');
+  m.hidden = !menuFor;
+  if (!menuFor) return;
+  const item = (value, text, dot) => {
+    const b = el('button', { type: 'button', className: 'oi', onclick: () => choose(k, value) }, ...(dot ? [el('span', { className: `sd ${dot}` })] : []), el('span', { className: 'one' }, text));
+    b.setAttribute('role', 'menuitemradio');
+    b.setAttribute('aria-checked', String(pick[k] === value));
+    return b;
+  };
+  const listed = pickModels();
+  m.replaceChildren(...(k === 'worker' ? [item('', 'Any machine'), ...workers.map((w) => item(w.id, w.info.hostname, workerState(w)))]
+    : k === 'harness' ? [item('', 'Auto'), ...pickHarnesses().map((h) => item(h, h))]
+    : [item('', 'Default model'), ...listed.map((x) => item(x, x)), modelField]));
+  modelField.hidden = k !== 'model';
+  modelField.value = listed.includes(pick.model) ? '' : pick.model;
+  const chip = $(`o-${k}`);
+  m.style.left = `${Math.max(0, Math.min(chip.offsetLeft, m.offsetParent.clientWidth - m.offsetWidth))}px`;
+  (m.querySelector('[aria-checked=true]') || modelField).focus();
+}
+function choose(k, value) {
+  const was = pick.harness;
+  pick[k] = value;
+  if (!pickHarnesses().includes(pick.harness)) pick.harness = ''; // the new machine doesn't run it
+  if (pick.harness !== was) pick.model = ''; // a model belongs to its harness
+  optLabel();
+  showOpts('');
+  $(`o-${k}`).focus();
+}
+for (const k of ['worker', 'harness', 'model']) $(`o-${k}`).onclick = () => showOpts(menuFor === k ? '' : k);
+modelField.addEventListener('input', () => {
+  pick.model = modelField.value.trim();
+  for (const b of $('opt-menu').querySelectorAll('.oi')) b.setAttribute('aria-checked', 'false');
+  optLabel();
+});
+// Enter in the field takes the model typed, not the form.
+modelField.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); choose('model', pick.model); } });
+document.addEventListener('pointerdown', (e) => { if (menuFor && !e.target.closest('#opt-menu, #opts')) showOpts(''); });
+$('new').addEventListener('keydown', (e) => { if (e.key === 'Escape' && menuFor) { e.preventDefault(); const k = menuFor; showOpts(''); $(`o-${k}`).focus(); } });
 
 // Keyboard shortcuts: c a new task, j/k the next/previous task, Esc back (or out of a field), Cmd/Ctrl+B the menu.
 const mac = /Mac|iPhone|iPad/.test(navigator.platform); // Cmd+B there; Ctrl+B moves the cursor in a field
