@@ -152,8 +152,10 @@ struct Writing {
 }
 
 impl Writing {
-    /// A marker's text: JSON, or (older runs) one created path per line. Paths that aren't
-    /// under the shown folders, or hold control characters, are left out: never acted on.
+    /// A marker's text: JSON, or (older runs) one created path per line. Only capture runs
+    /// wrote those, so their lines are created paths, recovered as before: removed, never
+    /// restored. Paths that aren't under the shown folders, or hold control characters, are
+    /// left out (a capture never wrote one): never acted on.
     fn parse(text: &str) -> Self {
         let mut w = serde_json::from_str(text).unwrap_or_else(|_| Writing {
             created: text.lines().map(Into::into).collect(),
@@ -620,8 +622,11 @@ impl Notes {
             let why = format!("{} is not a folder to file in", m.dest);
             return Err(Refused::Stale(why));
         }
-        let blob = self.git(&["cat-file", "blob", &format!("HEAD:{}", m.path)])?;
-        let bytes = blob.check("cat-file", Failure::Other)?.stdout;
+        // The clean tree's bytes, as the view read them (HEAD's blob may differ, by an
+        // `eol` or smudge filter), and as they're rewritten.
+        let Some(bytes) = crate::apps::read_file(&self.clone, &m.path) else {
+            return Err(Refused::Stale(format!("{} can't be read", m.path)));
+        };
         let hash = crate::capture::sha256(&bytes);
         if m.hash
             .as_ref()
@@ -632,11 +637,14 @@ impl Notes {
         }
         let md = String::from_utf8(bytes).map_err(|_| Refused::Invalid("not UTF-8".into()))?;
         // The pictures the inbox's other notes list (read as the Notes view reads files).
-        let others = (inbox.keys()).filter(|p| *p != &m.path && p.ends_with(".md"));
+        let note = |p: &&String| crate::notes_view::kind(p, false) == mis_types::NoteKind::Md;
+        let others = (inbox.keys()).filter(|p| *p != &m.path).filter(note);
         let claimed: Vec<String> = others
             .filter_map(|p| crate::apps::read_file(&self.clone, p))
-            .filter_map(|b| crate::capture::parse(&String::from_utf8_lossy(&b)))
-            .flat_map(|k| k.assets)
+            .flat_map(|b| {
+                let md = String::from_utf8_lossy(&b);
+                crate::capture::front(&md).map_or(vec![], |f| crate::capture::assets(f.lines))
+            })
             .collect();
         // What's in the folder, committed or not, so a filing never lands on a human's file.
         let pre = format!("{}/", m.dest);
@@ -667,15 +675,21 @@ impl Notes {
         let created: Vec<String> = f.moves.iter().map(|(_, to)| to.clone()).collect();
         self.absent(&created)
             .map_err(|f| Refused::Stale(f.why().to_string()))?;
-        let marker = Writing {
+        let mut marker = Writing {
             created,
             moved: f.moves.iter().map(|(from, _)| from.clone()).collect(),
         };
         self.mark(&marker)?;
         std::fs::create_dir_all(self.clone.join(&m.dest)).map_err(Failure::from)?;
-        for (from, to) in &f.moves {
-            self.git(&["mv", "--", from, to])?
-                .check("mv", Failure::Other)?;
+        for (i, (from, to)) in f.moves.iter().enumerate() {
+            let mv = self.git(&["mv", "--", from, to])?;
+            if !mv.ok {
+                // Only what moved is the run's: a file now at `to` may be a human's.
+                marker.created.truncate(i);
+                marker.moved.truncate(i);
+                self.mark(&marker)?;
+                return Err(mv.check("mv", Failure::Other).err().expect("failed").into());
+            }
         }
         if f.md != md {
             let mut open = std::fs::OpenOptions::new();
@@ -765,11 +779,13 @@ impl Notes {
             let clean = [&["clean", "-fq", "--"], created.as_slice()].concat();
             self.git(&clean)?.check("clean", Failure::Other)?;
         }
-        // What HEAD has: a moved file, or one committed before the run stopped.
-        let held = if all.is_empty() {
+        // A moved file HEAD still has (not one committed before the run stopped). Never a
+        // created path: HEAD having it means it was committed, and may be edited since.
+        let moved: Vec<&str> = w.moved.iter().map(String::as_str).collect();
+        let held = if moved.is_empty() {
             Default::default()
         } else {
-            self.modes(&all)?
+            self.modes(&moved)?
         };
         if !held.is_empty() {
             let held: Vec<&str> = held.keys().map(String::as_str).collect();
@@ -864,21 +880,37 @@ impl Notes {
         })?;
         let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
         std::fs::create_dir_all(self.clone.join(INBOX))?;
-        // New files only: a name taken since `scan` fails the run rather than lose a file.
-        let create = |to: &str| {
-            std::fs::OpenOptions::new()
+        // New files only: a name taken since `scan` fails the run rather than lose a file,
+        // and the marker then names only the files this run made.
+        let mut made = Vec::new();
+        let mut create = |to: &str| {
+            let file = (std::fs::OpenOptions::new())
                 .write(true)
                 .create_new(true)
-                .open(self.clone.join(to))
-        };
-        for (to, from) in &files {
-            if let Some(from) = from {
-                let mut src = std::fs::File::open(self.receipts.join(from))?;
-                std::io::copy(&mut src, &mut create(to)?)?;
+                .open(self.clone.join(to));
+            if file.is_ok() {
+                made.push(to.to_string());
             }
-        }
-        for (_, _, path, md) in &writes {
-            std::io::Write::write_all(&mut create(path)?, md.as_bytes())?;
+            file
+        };
+        let wrote = (|| -> std::io::Result<()> {
+            for (to, from) in &files {
+                if let Some(from) = from {
+                    let mut src = std::fs::File::open(self.receipts.join(from))?;
+                    std::io::copy(&mut src, &mut create(to)?)?;
+                }
+            }
+            for (_, _, path, md) in &writes {
+                std::io::Write::write_all(&mut create(path)?, md.as_bytes())?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = wrote {
+            self.mark(&Writing {
+                created: made,
+                moved: vec![],
+            })?;
+            return Err(e.into());
         }
         let add: Vec<&str> = [&["add", "--"], paths.as_slice()].concat();
         self.git(&add)?.check("add", Failure::Other)?;

@@ -99,18 +99,24 @@ pub fn plan(
     }
     let name = &m.path["inbox/".len()..];
     let (from, ext) = name.split_at(name.len() - ".md".len());
-    let kept = crate::capture::parse(md);
+    let listed = crate::capture::front(md).map(|f| crate::capture::assets(f.lines));
+    let mut seen = std::collections::BTreeSet::new();
     let picture = |a: &&String| {
         crate::notes_view::kind(a, false) == NoteKind::Image
             && !a.contains('/')
             && !a.chars().any(char::is_control)
             && file(&format!("inbox/{a}"))
+            && seen.insert(a.to_string())
     };
-    let images: Vec<&String> = kept
-        .iter()
-        .flat_map(|k| &k.assets)
-        .filter(picture)
-        .collect();
+    let images: Vec<&String> = listed.iter().flatten().filter(picture).collect();
+    if let Some(n) = std::iter::once(name)
+        .chain(images.iter().map(|a| a.as_str()))
+        .find(|n| decomposed(n))
+    {
+        let why =
+            format!("inbox/{n} has a decomposed (NFD) name git on macOS can't move; rename it");
+        return Err(why);
+    }
     if let Some(a) = images.iter().find(|a| claimed.contains(a)) {
         return Err(format!("another inbox note shows inbox/{a} too"));
     }
@@ -142,7 +148,7 @@ pub fn plan(
         .into_iter()
         .filter_map(|(k, v)| Some((k, v?)))
         .collect();
-    let id = kept.as_ref().map_or("-".into(), |k| k.id.to_string());
+    let id = crate::capture::parse(md).map_or("-".into(), |k| k.id.to_string());
     let message = format!(
         "file: {} -> {}/\n\nMIS-Writer: human\nMIS-Filed: {id} {} {}\n",
         m.path, m.dest, moves[0].0, moves[0].1
@@ -158,22 +164,43 @@ pub fn plan(
 /// YAML reads as strings. A note without frontmatter gets one; one never closed is refused.
 /// Line endings are the note's. The text below is the human's words: never touched.
 fn edit(md: &str, renames: &[(&str, String)], adds: &[(&str, &str)]) -> Result<String, String> {
+    // A byte order mark stays first.
+    let bom = if md.starts_with('\u{feff}') {
+        "\u{feff}"
+    } else {
+        ""
+    };
+    let opens = md[bom.len()..].starts_with("---\n") || md[bom.len()..].starts_with("---\r\n");
+    let front = crate::capture::front(md);
+    if opens && front.is_none() {
+        return Err("its frontmatter has no closing ---".into());
+    }
     if renames.is_empty() && adds.is_empty() {
         return Ok(md.to_string());
     }
-    let (lines, body, eol) = match crate::capture::front(md) {
+    let (lines, body, eol) = match front {
         Some(f) => (f.lines, &md[f.body..], f.eol),
-        None if md.starts_with("---\n") || md.starts_with("---\r\n") => {
-            return Err("its frontmatter has no closing ---".into());
-        }
-        None => ("", md, if md.contains("\r\n") { "\r\n" } else { "\n" }),
+        None => (
+            "",
+            &md[bom.len()..],
+            if md.contains("\r\n") { "\r\n" } else { "\n" },
+        ),
     };
     let renames = renames.iter().map(|(a, b)| (*a, b.as_str()));
     let mut lines = crate::notes::rename_images(lines, eol, renames);
     for (key, value) in adds {
         lines = set(&lines, eol, key, value);
     }
-    Ok(format!("---{eol}{lines}---{eol}{body}"))
+    Ok(format!("{bom}---{eol}{lines}---{eol}{body}"))
+}
+
+/// Whether `s` holds combining marks or conjoining jamo, as decomposed (NFD) names do. Git
+/// on macOS precomposes the paths it's given, so it can't move such a file by name.
+fn decomposed(s: &str) -> bool {
+    s.chars().any(|c| {
+        matches!(c, '\u{300}'..='\u{36f}' | '\u{1ab0}'..='\u{1aff}' | '\u{1dc0}'..='\u{1dff}'
+            | '\u{20d0}'..='\u{20ff}' | '\u{fe20}'..='\u{fe2f}' | '\u{1160}'..='\u{11ff}')
+    })
 }
 
 /// Frontmatter `lines` (each ending in `eol`) with `key: <value>` last, in place of any
@@ -454,6 +481,46 @@ mod tests {
             set("projects: [a]\n", "\n", "project", "b"),
             "projects: [a]\nproject: \"b\"\n"
         );
+    }
+
+    const ID: &str = "id: 00000000-0000-0000-0000-000000000001\ncaptured: 2026-11-08T09:12:00Z\n";
+
+    #[test]
+    fn a_picture_listed_twice_moves_once() {
+        let m = mv("inbox/a.md", "archive", None);
+        let inbox = files(&["inbox/a.md", "inbox/a-1.jpg"]);
+        let twice = format!("---\n{ID}assets:\n  - path: a-1.jpg\n  - path: a-1.jpg\n---\n");
+        assert_eq!(plan(&m, &twice, &inbox, &[], &[]).unwrap().moves.len(), 2);
+    }
+
+    #[test]
+    fn frontmatter_never_closed_is_refused_even_with_nothing_to_add() {
+        let m = mv("inbox/a.md", "archive", None);
+        assert!(plan(&m, "---\ntitle: x\nhi\n", &files(&["inbox/a.md"]), &[], &[]).is_err());
+    }
+
+    #[test]
+    fn a_byte_order_mark_stays_first() {
+        let m = mv("inbox/a.md", "projects/amf", None);
+        let got = plan(
+            &m,
+            "\u{feff}---\ntitle: x\n---\nhi\n",
+            &files(&["inbox/a.md"]),
+            &[],
+            &[],
+        );
+        assert_eq!(
+            got.unwrap().md,
+            "\u{feff}---\ntitle: x\nproject: \"amf\"\n---\nhi\n"
+        );
+    }
+
+    #[test]
+    fn a_decomposed_name_is_refused_saying_why() {
+        // NFD, as Linux may commit it: git on macOS can't move it.
+        let nfd = "inbox/cafe\u{301}.md";
+        let got = plan(&mv(nfd, "archive", None), "hi", &files(&[nfd]), &[], &[]);
+        assert!(got.is_err_and(|e| e.contains("rename")));
     }
 
     #[test]

@@ -330,13 +330,17 @@ pub(crate) struct Front<'a> {
     pub body: usize,
 }
 
-/// `md`'s frontmatter: an opening `---` line, then lines up to a closing `---` line or a
-/// `---` ending the note. None if it has none, or nothing closes it.
+/// `md`'s frontmatter: an opening `---` line (after a byte order mark, if any), then lines
+/// up to a closing `---` line or a `---` ending the note. None if it has none, or nothing
+/// closes it.
 pub(crate) fn front(md: &str) -> Option<Front<'_>> {
+    let bom = md
+        .strip_prefix('\u{feff}')
+        .map_or(0, |_| '\u{feff}'.len_utf8());
     let eol = ["\n", "\r\n"]
         .into_iter()
-        .find(|e| md.starts_with(&format!("---{e}")))?;
-    let start = 3 + eol.len();
+        .find(|e| md[bom..].starts_with(&format!("---{e}")))?;
+    let start = bom + 3 + eol.len();
     let rest = &md[start..];
     let close = format!("---{eol}");
     let (len, body) = if rest.starts_with(&close) || rest == "---" {
@@ -356,12 +360,20 @@ pub(crate) fn front(md: &str) -> Option<Front<'_>> {
     })
 }
 
+/// The images frontmatter `lines` lists, as [`plan`] writes them: `  - path: <name>`.
+pub(crate) fn assets(lines: &str) -> Vec<String> {
+    (lines.lines())
+        .filter_map(|l| l.strip_prefix("  - path: "))
+        .map(Into::into)
+        .collect()
+}
+
 /// Read back a capture [`plan`] wrote; None if it isn't one.
 pub fn parse(md: &str) -> Option<Kept> {
     let f = front(md)?;
     let (front, body) = (f.lines, &md[f.body..]);
     let (mut id, mut captured, mut url, mut shared) = (None, None, None, None);
-    let (mut hashes, mut assets) = (Vec::new(), Vec::new());
+    let mut hashes = Vec::new();
     for line in front.lines() {
         if let Some(v) = line.strip_prefix("id: ") {
             id = v.parse().ok();
@@ -373,8 +385,6 @@ pub fn parse(md: &str) -> Option<Kept> {
             shared = Some(serde_json::from_str::<String>(v).ok()?);
         } else if let Some(v) = line.strip_prefix("    sha256: ") {
             hashes.push(v.to_string());
-        } else if let Some(v) = line.strip_prefix("  - path: ") {
-            assets.push(v.to_string());
         }
     }
     let text = (!body.is_empty()).then_some(body);
@@ -382,7 +392,7 @@ pub fn parse(md: &str) -> Option<Kept> {
         id: id?,
         captured: captured?.to_utc(),
         key: key(url.as_deref(), text, shared.as_deref(), &hashes),
-        assets,
+        assets: assets(front),
     })
 }
 

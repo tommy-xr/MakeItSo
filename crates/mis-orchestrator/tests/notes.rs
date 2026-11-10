@@ -990,3 +990,94 @@ fn a_filing_cut_short_is_put_back() {
     assert_eq!(git(&clone, &["status", "--porcelain"]), "");
     assert!(!clone.join(".git/mis-writing").exists());
 }
+
+#[test]
+fn a_failed_move_leaves_recovery_no_claim_on_its_destination() {
+    use std::os::unix::fs::PermissionsExt;
+    let w = World::new();
+    let a = w.capture("the move fails", &[]);
+    let notes = w.notes();
+    notes.run();
+    w.folders(&["archive/2025/retro.md"]);
+    notes.run();
+    let clone = w.state.join("notes");
+    let archive = clone.join("archive");
+    let mode = |m| std::fs::set_permissions(&archive, std::fs::Permissions::from_mode(m)).unwrap();
+    // `git mv` fails; an unreadable map stops the run before it recovers.
+    mode(0o555);
+    let map = w.state.join("captures/published.json");
+    std::fs::write(&map, "not json").unwrap();
+    assert!(w
+        .file(&notes, &format!("inbox/{}", a.file), "archive", None)
+        .is_err());
+    mode(0o755);
+    // A human's file at that name since: never the run's to remove.
+    std::fs::write(archive.join(&a.file), "mine").unwrap();
+    std::fs::remove_file(&map).unwrap();
+    notes.run();
+    assert_eq!(
+        std::fs::read_to_string(archive.join(&a.file)).unwrap(),
+        "mine"
+    );
+}
+
+#[test]
+fn a_picture_any_other_note_lists_stays() {
+    let w = World::new();
+    let a = w.capture("shared picture", &[JPEG]);
+    let notes = w.notes();
+    notes.run();
+    w.folders(&["areas/home/boiler.md"]);
+    // A human's note, no capture id, named `.MD`.
+    w.human_pull();
+    let other = format!(
+        "---\ntitle: mine\nassets:\n  - path: {}\n---\n",
+        image_of(&a.file)
+    );
+    std::fs::write(w.human.join("inbox/Other.MD"), other).unwrap();
+    w.human_commit("another note shows it");
+    let got = w.file(&notes, &format!("inbox/{}", a.file), "areas/home", None);
+    assert!(matches!(got, Err(Refused::Stale(_))), "{got:?}");
+}
+
+#[test]
+fn a_note_checked_out_with_crlf_is_hashed_as_the_view_reads_it() {
+    let w = World::new();
+    w.human_pull();
+    std::fs::write(w.human.join(".gitattributes"), "*.md text eol=crlf\n").unwrap();
+    std::fs::write(w.human.join("inbox/n.md"), "---\ntitle: x\n---\nhi\n").unwrap();
+    std::fs::create_dir_all(w.human.join("archive")).unwrap();
+    std::fs::write(w.human.join("archive/.keep"), "").unwrap();
+    w.human_commit("crlf on checkout");
+    let notes = w.notes();
+    notes.run();
+    let clone = w.state.join("notes");
+    let shown = std::fs::read(clone.join("inbox/n.md")).unwrap();
+    assert_eq!(shown, b"---\r\ntitle: x\r\n---\r\nhi\r\n");
+    let got = w
+        .file(&notes, "inbox/n.md", "archive", Some(&sha256(&shown)))
+        .unwrap();
+    let want = "---\ntitle: x\nsummary: \"Pure cores\"\n---\nhi\n";
+    assert_eq!(String::from_utf8(w.show(&got.path)).unwrap(), want);
+}
+
+#[test]
+fn recovery_after_a_filing_committed_keeps_an_edit_to_the_filed_note() {
+    let w = World::new();
+    let a = w.capture("filed, then edited", &[]);
+    let notes = w.notes();
+    notes.run();
+    w.folders(&["archive/2025/retro.md"]);
+    let from = format!("inbox/{}", a.file);
+    let got = w.file(&notes, &from, "archive", None).unwrap();
+    // As if it stopped after committing, before removing its marker; then an edit.
+    let clone = w.state.join("notes");
+    let marker = serde_json::json!({ "created": [&got.path], "moved": [&from] });
+    std::fs::write(clone.join(".git/mis-writing"), marker.to_string()).unwrap();
+    std::fs::write(clone.join(&got.path), "my edit").unwrap();
+    notes.run();
+    assert_eq!(
+        std::fs::read_to_string(clone.join(&got.path)).unwrap(),
+        "my edit"
+    );
+}
