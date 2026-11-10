@@ -282,7 +282,8 @@ test('mis.d.ts declares exactly what mis.js and the mock define', async () => {
   assert.deepEqual(keys(mocked.mock), members('MockControls'));
   await assert.rejects(mocked.me()); // no mis-mock.js at /nowhere
   const m = createMock();
-  const top = members('Sdk').filter((k) => !['MisError', 'mock'].includes(k));
+  // The menu is the page's, not data: the mock has no part in it.
+  const top = members('Sdk').filter((k) => !['MisError', 'mock', 'menu'].includes(k));
   assert.deepEqual(keys(m), [...top, ...members('MockControls')].sort());
   assert.deepEqual(keys(m.records), members('Records'));
   const err = new mis.MisError(409, 'conflict', null, 2);

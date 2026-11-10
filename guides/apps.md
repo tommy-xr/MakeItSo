@@ -41,6 +41,15 @@ live. Nothing you do goes live.
    publish a new release and propose it again; it replaces the draft.
 8. Report the PR URL, the release number and what the owner should try.
 
+## Feedback tasks
+
+Owners and editors send feedback from the app's menu (Give feedback): a note, the route, a
+selector and area they marked, their viewport, and the release (live or the draft). It arrives
+as the request (a reply in this thread when it is about your draft). Reproduce it before
+changing anything: Playwright in mock mode at that route and viewport, a screenshot of that
+element or area (the before shot). Fix it in the same branch, `npm run verify`, take the after
+shot at the same route and viewport, publish, and propose again: it replaces the draft.
+
 ## Layout: functional core, thin shell
 
 - `src/domain/*.ts`: every rule the app has (parsing, validation, totals, schedules, what a
@@ -72,6 +81,12 @@ own page.
   `viewer` reads only: give viewers a read-only UI, and show a 403 as "you can only view".
 - `records.batch(ops)`: up to 100 ops, each id once, all or nothing; a refusal carries `index`.
   Use it for imports and anything that must land together.
+- The platform menu (`⋯`: signed in as, All apps; for owners and editors the app's draft to
+  try, their feedback's status and Give feedback) belongs to the SDK. Place it at the right of
+  your header: `mis.menu.mount(el)` (React: a `ref` on an empty `<span>`); unplaced, it floats
+  top-right. Leave it neutral; to match the app, set `--mis-menu-fg`/`--mis-menu-bg` (its
+  button), `--mis-menu-surface`/`--mis-menu-text` (the menu) and `--mis-menu-dot`. Keep that
+  corner free.
 - `records.list(space, collection, q)`: `where` with `eq`/`gt`/`gte`/`lt`/`lte` (a bound matches
   only values of its JSON type), one `order_by`, `limit` up to 100; follow `cursor` to the end.
 

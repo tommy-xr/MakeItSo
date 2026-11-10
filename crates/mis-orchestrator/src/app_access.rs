@@ -52,6 +52,9 @@ pub struct Policy {
     /// The app task thread that created the app, which may go on staging its releases.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<uuid::Uuid>,
+    /// Feedback waits for the owner instead of going to an agent at once.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hold_feedback: bool,
 }
 
 impl Policy {

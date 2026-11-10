@@ -433,11 +433,13 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(mis_orchestrator::backups::run_daily(apps.clone()));
     }
     if let (Some(listener), Some(apps)) = (apps_listener, apps) {
+        let inbox = app.feedback_inbox();
         tokio::spawn(async move {
             let auth = mis_orchestrator::apps_http::Auth {
                 gate: apps_gate,
                 public_host: apps_public_host,
                 dev: args.apps_dev,
+                feedback: Some(inbox),
             };
             if let Err(e) = mis_orchestrator::serve_apps(listener, apps, auth).await {
                 tracing::error!("apps listener stopped: {e:#}");

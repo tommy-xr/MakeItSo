@@ -57,7 +57,101 @@ pub struct AppView {
     /// The asker's role in it: only an owner publishes or discards its draft. None: not a member.
     #[serde(default)]
     pub role: Option<AppRole>,
+    /// Feedback waits for the owner to send it to an agent, rather than going at once.
+    #[serde(default)]
+    pub hold_feedback: bool,
+    /// Feedback waiting, oldest first.
+    #[serde(default)]
+    pub feedback: Vec<HeldFeedback>,
 }
+
+/// `POST /a/{slug}/api/v1/feedback`: an owner's or editor's note on what they see, from the
+/// app's feedback button. No screenshot: the agent reproduces the view with Playwright.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AppFeedback {
+    /// Where in the app: its `#hash` route, else the path after `/a/<slug>/`.
+    pub route: String,
+    /// A CSS selector for the element marked (the one tapped, or under the circle's middle).
+    #[serde(default)]
+    pub selector: String,
+    /// What was marked, in CSS pixels of the page (scroll included).
+    pub rect: FeedbackRect,
+    pub viewport: FeedbackSize,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct FeedbackRect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct FeedbackSize {
+    pub w: u32,
+    pub h: u32,
+}
+
+/// Feedback as the orchestrator has it: who sent it, about which release.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HeldFeedback {
+    pub id: uuid::Uuid,
+    /// Unix millis it came in.
+    pub at: u64,
+    /// Their email, or `local`.
+    pub by: String,
+    /// The release they saw; None: none was live.
+    pub release: Option<u32>,
+    /// They saw the draft (`release` is it).
+    pub draft: bool,
+    /// The app had a draft then: the task that proposed it (None: from no task), whose
+    /// thread the feedback continues rather than starting work the draft would replace.
+    #[serde(default)]
+    pub draft_task: Option<Option<uuid::Uuid>>,
+    pub feedback: AppFeedback,
+    /// Why it wasn't sent to an agent when it came in (held, or the agent was busy).
+    #[serde(default)]
+    pub waiting: Option<String>,
+    /// The task it went to. None: it waits.
+    #[serde(default)]
+    pub task: Option<uuid::Uuid>,
+    /// How its task's draft was decided, e.g. `live as v3`, `discarded`.
+    #[serde(default)]
+    pub outcome: Option<String>,
+}
+
+/// What became of feedback someone sent, as their app's menu shows it (`/me`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeedbackStatus {
+    pub id: uuid::Uuid,
+    /// Unix millis they sent it.
+    pub at: u64,
+    pub note: String,
+    #[serde(flatten)]
+    pub state: FeedbackState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum FeedbackState {
+    /// Not with an agent yet: held for the owner, or its work was busy.
+    Waiting { why: String },
+    /// An agent is on it.
+    Working,
+    /// A draft came after it: try it.
+    DraftReady { release: u32 },
+    /// Its draft was decided (`what`: `live as v3`, `discarded`).
+    Done { what: String },
+}
+
+/// Longest feedback note.
+pub const MAX_FEEDBACK_CHARS: usize = 2000;
+/// Most feedback an app keeps waiting; more is refused (429) until some is sent or dismissed.
+pub const MAX_HELD_FEEDBACK: usize = 50;
+/// Most open tasks feedback starts for one app; past it, feedback waits for the owner.
+pub const MAX_FEEDBACK_TASKS: usize = 3;
 
 /// An app's draft: a staged release and the PR it was built from (`mis apps propose`). One
 /// per app; a newer proposal replaces it. Publishing merges the PR, then makes it live.
@@ -158,6 +252,9 @@ pub struct AppMe {
     /// The app's current draft, which owners and editors may try. None: none, or a viewer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drafted: Option<u32>,
+    /// Their latest feedback on the app and what became of it, newest first (owners, editors).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feedback: Vec<FeedbackStatus>,
 }
 
 /// One published bundle.

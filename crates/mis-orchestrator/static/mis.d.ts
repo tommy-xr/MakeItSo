@@ -55,7 +55,16 @@ declare namespace Mis {
     draft?: number;
     /** The app's current draft, which owners and editors may try (`/a/<slug>/?draft=<n>`). */
     drafted?: number;
+    /** Their latest feedback and what became of it, newest first (owners, editors). */
+    feedback?: FeedbackStatus[];
   }
+
+  type FeedbackStatus = { id: string; at: number; note: string } & (
+    | { state: 'waiting'; why: string }
+    | { state: 'working' }
+    | { state: 'draft_ready'; release: number }
+    | { state: 'done'; what: string }
+  );
 
   /** Every record the caller can see, by collection. */
   interface Export {
@@ -115,11 +124,22 @@ declare namespace Mis {
     setRole(role: Role): Promise<void>;
   }
 
+  /**
+   * The platform menu (signed in as, All apps; for owners and editors the app's draft, their
+   * feedback and Give feedback). Neutral; theme it with --mis-menu-fg, --mis-menu-bg (its
+   * button) and --mis-menu-surface, --mis-menu-text (the menu); --mis-menu-dot (a draft is ready).
+   */
+  interface Menu {
+    /** Put its button in `el` (the app's header); unplaced, it floats top-right. */
+    mount(el: Element | null): void;
+  }
+
   interface Sdk {
     MisError: MisErrorClass;
     me(): Promise<Me>;
     records: Records;
     export(): Promise<Export>;
+    menu: Menu;
     mock?: MockControls;
   }
 }

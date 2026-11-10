@@ -789,6 +789,29 @@ impl Ledger {
         t.bound.clone().filter(|_| !t.status.finished())
     }
 
+    /// The newest task in `task`'s app thread, for feedback to reply to. Err: one is still
+    /// working (the next waits for it). None: no such task.
+    pub fn thread_tip(&self, task: TaskId) -> Option<Result<TaskId, String>> {
+        let t = self.tasks.iter().find(|t| t.task.id == task)?;
+        let thread = t.bound.as_ref().map_or(task, |b| b.thread);
+        let mut tasks = (self.tasks.iter())
+            .filter(|t| t.task.id == task || t.bound.as_ref().is_some_and(|b| b.thread == thread));
+        if tasks.clone().any(|t| !t.status.finished()) {
+            return Some(Err("its draft's task is still working".into()));
+        }
+        tasks.next_back().map(|t| Ok(t.task.id))
+    }
+
+    /// App `slug`'s tasks that haven't finished.
+    pub fn open_app_tasks(&self, slug: &str) -> usize {
+        let of = |t: &&TaskEntry| t.bound.as_ref().and_then(|b| b.slug.as_deref()) == Some(slug);
+        self.tasks
+            .iter()
+            .filter(of)
+            .filter(|t| !t.status.finished())
+            .count()
+    }
+
     /// Bind every task in `bound.thread` to `bound` (a create reserving or binding its slug).
     pub fn rebind(&mut self, bound: &app_grant::Binding) {
         for b in (self.tasks.iter_mut()).filter_map(|t| t.bound.as_mut()) {
@@ -2031,6 +2054,33 @@ mod tests {
         assert!(!eff
             .iter()
             .any(|e| matches!(e, Effect::Assign { token: Some(_), .. })));
+    }
+
+    #[test]
+    fn feedback_goes_to_the_newest_task_of_a_thread_once_none_is_working() {
+        let mut l = Ledger::default();
+        let wid = Uuid::new_v4();
+        l.connect(wid, info(), &[], 1, T0);
+        let (first, _) = (l.submit_app_task(
+            "p".into(),
+            "~/a".into(),
+            "claude".into(),
+            None,
+            None,
+            new_app(),
+        ))
+        .unwrap();
+        assert!(l.thread_tip(first).unwrap().is_err(), "still running");
+        let done = |l: &mut Ledger, id| {
+            let t = l.tasks.iter_mut().find(|t| t.task.id == id).unwrap();
+            (t.status, t.session, t.worker) = (TaskStatus::Done, Some("s".into()), Some(wid));
+        };
+        done(&mut l, first);
+        assert_eq!(l.thread_tip(first), Some(Ok(first)));
+        let (reply, _) = l.reply(first, "more".into(), vec![], false).unwrap();
+        done(&mut l, reply);
+        assert_eq!(l.thread_tip(first), Some(Ok(reply)));
+        assert_eq!(l.thread_tip(Uuid::new_v4()), None);
     }
 
     #[test]

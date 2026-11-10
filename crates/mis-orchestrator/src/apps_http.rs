@@ -11,7 +11,9 @@ use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
-use mis_types::{AppMe, BatchWritten, Conflict, Export, RecordQuery, Space, Written};
+use mis_types::{
+    AppFeedback, AppMe, BatchWritten, Conflict, Export, HeldFeedback, RecordQuery, Space, Written,
+};
 
 use crate::access_gate::{AccessGate, JWT_HEADER};
 use crate::app_access::{self, Action, Member, Serve, Subject};
@@ -30,6 +32,8 @@ pub struct Auth {
     pub public_host: Option<String>,
     /// `--apps-dev`: `local` requests may take a lesser role ([`app_access::DEV_ROLE`]).
     pub dev: bool,
+    /// Where in-app feedback goes (`App::feedback_inbox`). None: refused.
+    pub feedback: Option<tokio::sync::mpsc::UnboundedSender<(String, HeldFeedback)>>,
 }
 
 /// Pages load scripts, styles and fonts only from, and connect only to, this origin. Every app
@@ -91,8 +95,16 @@ pub fn router(apps: Arc<Apps>, auth: Arc<Auth>) -> Router {
             get(get_record),
         )
         .route("/a/{slug}/api/v1/export", get(export))
+        .route(
+            "/a/{slug}/api/v1/feedback",
+            post(feedback).layer(axum::middleware::from_fn_with_state(
+                auth.clone(),
+                from_own_page,
+            )),
+        )
         .route("/a/{slug}/{*path}", get(file))
         .layer(Extension(records))
+        .layer(Extension(auth.clone()))
         .layer(axum::middleware::from_fn_with_state(
             (apps.clone(), auth),
             guard,
@@ -396,12 +408,18 @@ async fn me(
     if let Some(r) = denied(&apps, &slug, &m, Action::Read) {
         return r;
     }
+    let may_try = app_access::may_try(m.role);
+    let draft = may_try.then(|| apps.draft(&slug)).flatten();
     Json(AppMe {
         user: m.subject.name().into(),
         role: m.role,
-        drafted: (app_access::may_try(m.role))
-            .then(|| apps.draft(&slug).map(|d| d.release))
-            .flatten(),
+        drafted: draft.as_ref().map(|d| d.release),
+        feedback: match may_try {
+            true => {
+                crate::feedback::statuses(&apps.feedback(&slug), m.subject.name(), draft.as_ref())
+            }
+            false => vec![],
+        },
         app: slug,
         draft: m.draft,
     })
@@ -578,6 +596,61 @@ async fn get_record(
         }
     })
     .await
+}
+
+/// `POST /a/{slug}/api/v1/feedback`: an [`AppFeedback`] from an owner or editor (viewers
+/// can't), about the release they see; 202 once it is on its way to an agent or the owner.
+async fn feedback(
+    State(apps): State<Arc<Apps>>,
+    Extension(auth): Extension<Arc<Auth>>,
+    Extension(m): Extension<Member>,
+    Path(slug): Path<String>,
+    body: Bytes,
+) -> Response {
+    if let Some(r) = denied(&apps, &slug, &m, Action::Write) {
+        return r;
+    }
+    let f: AppFeedback = match serde_json::from_slice(&body) {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    if let Err(why) = crate::feedback::check(&f) {
+        return (StatusCode::BAD_REQUEST, why).into_response();
+    }
+    let Some(inbox) = &auth.feedback else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "feedback is off").into_response();
+    };
+    let held = HeldFeedback {
+        id: uuid::Uuid::new_v4(),
+        at: crate::unix_ms(),
+        by: m.subject.name().into(),
+        release: m.draft.or_else(|| apps.active_n(&slug)),
+        draft: m.draft.is_some(),
+        // The draft's thread, if the app has one: feedback continues it (captured now, so a
+        // later draft from elsewhere doesn't get it).
+        draft_task: apps.draft(&slug).map(|d| d.task),
+        feedback: f,
+        waiting: Some("on its way to an agent".into()),
+        task: None,
+        outcome: None,
+    };
+    // Kept before it is acknowledged, so a restart can't lose it; the owner sees it until it goes.
+    let (a, s) = (apps.clone(), slug.clone());
+    let keep = tokio::task::spawn_blocking(move || {
+        if a.waiting_feedback(&s).len() >= mis_types::MAX_HELD_FEEDBACK {
+            let why = "too much feedback is waiting for the owner".to_string();
+            return Err((StatusCode::TOO_MANY_REQUESTS, why));
+        }
+        let kept = a.keep_feedback(&s, &held).map(|()| held);
+        kept.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))
+    });
+    match keep.await.expect("keeping feedback doesn't panic") {
+        Ok(held) => {
+            let _ = inbox.send((slug, held));
+            StatusCode::ACCEPTED.into_response()
+        }
+        Err(refused) => refused.into_response(),
+    }
 }
 
 /// `GET /a/{slug}/api/v1/export`: an [`Export`] of what the asker can see.

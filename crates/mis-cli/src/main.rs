@@ -1633,6 +1633,8 @@ mod tests {
             ],
             draft: None,
             role: None,
+            hold_feedback: false,
+            feedback: vec![],
         };
         assert_eq!(
             app_lines(&a, 120_000),
