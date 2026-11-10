@@ -1,7 +1,7 @@
 // The page's pure renderers (index.html): markdown between `md:begin` and `md:end`, evidence helpers between `ev:begin`
 // and `ev:end`, diff helpers between `diff:begin` and `diff:end`, notes helpers between `notes:begin` and `notes:end`,
 // the network check between `net:begin` and `net:end`, the app composer between `apps:begin` and `apps:end`, upload kinds
-// between `refs:begin` and `refs:end`.
+// between `refs:begin` and `refs:end`, Needs you clearing between `clear:begin` and `clear:end`.
 // Run: node --test crates/mis-orchestrator/tests
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,6 +21,8 @@ const appsBlock = page.slice(page.indexOf('// apps:begin'), page.indexOf('// app
 const refsBlock = page.slice(page.indexOf('// refs:begin'), page.indexOf('// refs:end'));
 const ap = new Function(`${refsBlock}; ${appsBlock}; return { composerFor, appTaskBody, boardPath, boardKind, boardCounts, boardLine, cardLook, textItem, linkParts, photoName, slugify };`)();
 const rf = new Function(`${refsBlock}; return { refKind, docExt, servedName };`)();
+const clearBlock = page.slice(page.indexOf('// clear:begin'), page.indexOf('// clear:end'));
+const cl = new Function(`${clearBlock}; return { clearKey, draftWaits, withCleared, CLEARED_MAX };`)();
 const nt = { ...new Function(`${notesBlock}; return { noteFront, noteAuthor, noteRows, noteDestGroups, noteDestLabel, noteSuggested, noteWhy, noteTops, projectOf, projectDir, projectActive, projectFiles, projectFind, repoHref };`)(), notePath: new Function(`${block}; return notePath;`)() };
 
 // Every tag in the output, e.g. ['p', 'a', 'code'].
@@ -517,4 +519,29 @@ test('a served upload\'s name comes from its Content-Disposition', () => {
   assert.equal(rf.servedName("inline; filename*=UTF-8''%E2%9C%93.md"), '✓.md');
   assert.equal(rf.servedName("inline; filename*=UTF-8''%E2"), '');
   assert.equal(rf.servedName(null), '');
+});
+
+test('a cleared Needs you row comes back when its state changes', () => {
+  const s = { worker: 'w', harness: 'claude', id: 's1', state: 'waiting', updated_ms: 5 };
+  assert.notEqual(cl.clearKey.session(s), cl.clearKey.session({ ...s, updated_ms: 6 }));
+  assert.notEqual(cl.clearKey.session(s), cl.clearKey.session({ ...s, state: 'stalled' }));
+  const a = { draft: { id: 'd1' }, review: { state: { state: 'open' } } };
+  assert.notEqual(cl.clearKey.draft(a), cl.clearKey.draft({ ...a, review: { state: { state: 'fix_ready', approved: 'x', fixes: 1 } } }));
+  assert.equal(cl.clearKey.draft({ draft: { id: 'd1' } }), 'd|d1|{}');
+  const f = { id: 'f1', waiting: 'waiting for the owner' };
+  assert.notEqual(cl.clearKey.feedback(f), cl.clearKey.feedback({ ...f, edited: 'make it bigger' }));
+  assert.notEqual(cl.clearKey.feedback(f), cl.clearKey.feedback({ ...f, waiting: 'its work was busy' }));
+});
+
+test('an approved draft no longer waits on its owner', () => {
+  assert.equal(cl.draftWaits({ draft: {} }), true);
+  assert.equal(cl.draftWaits({ draft: {}, review: { state: { state: 'needs_you', why: 'x' } } }), true);
+  assert.equal(cl.draftWaits({ draft: {}, review: { state: { state: 'approved', fixes: 0 } } }), false);
+});
+
+test('cleared keys stay unique and capped, newest kept', () => {
+  assert.deepEqual(cl.withCleared(['a', 'b'], ['a', 'c']), ['b', 'a', 'c']);
+  const many = cl.withCleared([], Array.from({ length: cl.CLEARED_MAX + 5 }, (_, i) => `k${i}`));
+  assert.equal(many.length, cl.CLEARED_MAX);
+  assert.equal(many.at(-1), `k${cl.CLEARED_MAX + 4}`);
 });

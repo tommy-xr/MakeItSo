@@ -544,6 +544,14 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .sec { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
   .sec h3 { margin: 1.25rem 0 .5rem; }
   .sec a { display: inline-flex; align-items: center; min-height: 2.25rem; padding-right: .375rem; color: var(--link); font-size: .8125rem; text-decoration: none; }
+  .sec button { min-height: 2.25rem; padding: 0 .375rem; background: none; color: var(--link); font: .8125rem var(--sans); }
+  /* Needs you: a row only held in place (it no longer needs you) dims; a clearable one's × shows on hover or focus. */
+  .rows > li.settled > :is(a, .more) { opacity: .5; }
+  .rows > li.clr > a { padding-right: 2.75rem; }
+  .rows > li > .x { position: absolute; top: .375rem; right: .25rem; width: 2.25rem; height: 2.25rem; padding: 0; border-radius: 50%; background: none; color: var(--dim); font: 1.125rem/1 var(--sans); opacity: 0; }
+  .rows > li:is(:hover, :focus-within) > .x { opacity: 1; }
+  @media (hover: none) { .rows > li > .x { opacity: 1; } }
+  @media (hover: hover) { .rows > li > .x:hover { background: var(--hover); color: var(--fg); } }
   .one { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .r1 { display: flex; align-items: center; gap: .75rem; }
   .r1 .one { flex: 1; min-width: 0; font-size: .9375rem; font-weight: 500; }
@@ -1887,16 +1895,52 @@ const needLabel = (n) => `${n} need${n === 1 ? 's' : ''} you`;
 // Home's Needs you rows (app drafts, tasks, sessions waiting on you), not counting rows only held there:
 // { n, att: the most urgent kind, href: its first }.
 function homeNeed() {
-  const need = everOpen ? listOf('home', false).threads.filter((th) => th.sec === 'need') : [], waits = everOpen ? feed.filter(asks) : [];
-  const drafts = everOpen ? appDrafts() : [], fb = everOpen ? fbWaiting() : [], first = need[0] && [need[0].root, ...need[0].replies].find((t) => rank(t) === need[0].rank);
+  const need = everOpen ? listOf('home', false).threads.filter((th) => th.sec === 'need') : [], waits = everOpen ? feed.filter(asksYou) : [];
+  const drafts = everOpen ? homeDrafts(false) : [], fb = everOpen ? fbWaiting() : [], first = need[0] && [need[0].root, ...need[0].replies].find((t) => rank(t) === need[0].rank);
   return { n: drafts.length + fb.length + need.length + waits.length, att: first ? first.attention : waits[0] || fb[0] ? 'approval' : 'unread',
     href: first ? `#task/${first.id}` : waits[0] ? `#session/${liveKey(waits[0])}` : drafts[0] ? draftHref(drafts[0]) : fb[0] ? `#apps/${fb[0].a.slug}` : '' };
 }
-// Apps with a draft waiting on its owner; Home lists them first under Needs you, each opening the task that made it.
+// Apps with a draft; Home lists them first under Needs you, each opening the task that made it.
 const appDrafts = () => ((hosted && hosted.list) || []).filter((a) => a.draft);
+// clear:begin. Pure. Needs you rows cleared on this browser, keyed by what they showed: a new state is a new key, so
+// new attention brings a row back. tests/md.test.mjs runs this block.
+const CLEARED_MAX = 200;
+const clearKey = { session: (s) => `s|${s.worker}/${s.harness}/${s.id}|${s.state}|${s.updated_ms}`,
+  draft: (a) => `d|${a.draft.id}|${JSON.stringify(a.review?.state || {})}`, feedback: (f) => `f|${JSON.stringify([f.id, f.edited, f.waiting])}` };
+// Approved (merging when it can), a draft no longer waits on its owner.
+const draftWaits = (a) => a.review?.state?.state !== 'approved';
+// `keys` with `add` appended (newest last), at most CLEARED_MAX.
+const withCleared = (keys, add) => [...keys.filter((k) => !add.includes(k)), ...add].slice(-CLEARED_MAX);
+// clear:end
+let cleared = [];
+const readCleared = () => { try { cleared = JSON.parse(localStorage.getItem('mis-cleared')) || []; } catch {} };
+readCleared();
+const isCleared = (k) => cleared.includes(k);
+// Home's draft rows: those waiting and not cleared; with `holds`, also the one open beside it, settled.
+const homeDrafts = (holds) => appDrafts().filter((a) => !isCleared(clearKey.draft(a)) && (draftWaits(a) || (holds && location.hash === draftHref(a))));
+// Clears Needs you rows: finished tasks are marked seen (on the server), the rest hidden here by key.
+function clearNeed(seen, keys) {
+  if (seen.length && !(ws && ws.readyState === WebSocket.OPEN)) { toast('Offline: not cleared'); return; } // `seen` would be dropped
+  for (const t of seen) {
+    send({ type: 'seen', task: t.id });
+    t.attention = 'none'; // counts drop now, not at the next Status
+  }
+  if (keys.length) {
+    readCleared(); // another tab's clears too
+    cleared = withCleared(cleared, keys);
+    try { localStorage.setItem('mis-cleared', JSON.stringify(cleared)); } catch {}
+  }
+  // The keyboard moves on to the next row (else the one before), as the cleared one leaves.
+  const rows = [...$('list').querySelectorAll('.rows > li')], at = rows.indexOf(document.activeElement?.closest('.rows > li'));
+  const next = at < 0 ? null : (rows[at + 1] || rows[at - 1])?.querySelector(':scope > a')?.getAttribute('href');
+  clearTimeout(clickTimer); clickTimer = 0; // this tap is the change: draw it now
+  render();
+  if (next) $('list').querySelector(`.rows > li > a[href="${CSS.escape(next)}"]`)?.focus({ preventScroll: true });
+}
 const draftHref = (a) => (a.draft.task ? `#task/${a.draft.task}` : '#apps');
 // Feedback waiting on its owner ({ a, f }), in apps this page owns; Home lists it under Needs you, each opening its app.
-const fbWaiting = () => (readOnly ? [] : ((hosted && hosted.list) || []).filter((a) => a.role === 'owner').flatMap((a) => (a.feedback || []).map((f) => ({ a, f }))));
+const fbWaiting = () => (readOnly ? [] : ((hosted && hosted.list) || []).filter((a) => a.role === 'owner').flatMap((a) => (a.feedback || []).map((f) => ({ a, f }))))
+  .filter(({ f }) => !isCleared(clearKey.feedback(f)));
 // The header badge: Home's count, lit in the most urgent one's colour; a tap opens that one.
 function renderNeed() {
   const need = homeNeed(), b = $('need');
@@ -2307,15 +2351,22 @@ function liveRow(s, now) {
     s.last ? el('div', { className: 'r3 one' }, snippet(s.last)) : ''), ...you);
 }
 const secHead = (label, ...end) => el('div', { className: 'sec' }, el('h3', {}, label), ...end);
+// A Needs you row: dimmed when only held there (it no longer needs you); else, given `clear`, with a × that clears it.
+function needRow(li, settled, clear) {
+  if (settled) li.classList.add('settled');
+  else if (clear && !readOnly) li.classList.add('clr'), li.append(el('button', { type: 'button', className: 'x', ariaLabel: 'Clear', title: 'Clear', onclick: clear }, '×'));
+  return li;
+}
 // Waiting on you, or stalled mid-turn (as the orchestrator ranks them): Home lists these.
 const asks = (s) => s.online && (s.state === 'waiting' || s.state === 'stalled');
+const asksYou = (s) => asks(s) && !isCleared(clearKey.session(s)); // and not cleared from Home
 // Under way: Sessions' Live; the rest (idle, in shell, offline) are Recent, as the orchestrator ranks them.
 const isLive = (s) => s.online && ['working', 'waiting', 'stalled'].includes(s.state);
 // A list's threads (Home shows those `onHome`) and live sessions. Home holds the row of a session open beside it;
 // `holds` false leaves held rows out (counts).
 function listOf(sec, holds = true) {
   building = holds ? sec : null;
-  const fed = sec === 'home' ? feed.filter((s) => asks(s) || (holds && here.sec === 'home' && location.hash === `#session/${liveKey(s)}`)) : sec === 'sessions' ? feed : [];
+  const fed = sec === 'home' ? feed.filter((s) => asksYou(s) || (holds && here.sec === 'home' && location.hash === `#session/${liveKey(s)}`)) : sec === 'sessions' ? feed : [];
   const threads = sec === 'sessions' ? [] : homeThreads(tasks, new Set(fed.flatMap((s) => s.messages.map((m) => m.task))));
   building = null;
   return { fed, threads };
@@ -2332,7 +2383,7 @@ function shows(sec, h) {
       routines: r.view === 'routines' && has(routines, 'list', (x) => x.name === r.id), apps: r.view === 'build' && !!r.id && has(hosted, 'list', (a) => a.slug === r.id) }[sec];
   }
   const { fed, threads } = listOf(sec);
-  return (sec === 'home' && appDrafts().some((a) => draftHref(a) === h)) || threads.some((th) => (sec !== 'home' || onHome(th)) && [th.root, ...th.replies].some((t) => `#task/${t.id}` === h))
+  return (sec === 'home' && homeDrafts(true).some((a) => draftHref(a) === h)) || threads.some((th) => (sec !== 'home' || onHome(th)) && [th.root, ...th.replies].some((t) => `#task/${t.id}` === h))
     || fed.some((s) => `#session/${liveKey(s)}` === h || shownMessages(s).some((m) => `#task/${m.task}` === h));
 }
 function renderList() {
@@ -2351,28 +2402,46 @@ function renderList() {
   if (sending && !groups.has('flight')) groups.set('flight', []);
   // Home: drafts waiting on a decision need you too, first.
   if (sec === 'home' && !hosted && !hostedAsked && everOpen) loadApps();
-  const drafted = sec !== 'home' ? [] : appDrafts().map((a) => el('li', { className: 'draftrow' },
+  // Each clearable Needs you row's part of Clear all: tasks to mark seen, keys to hide.
+  const clrAll = { n: 0, seen: [], keys: [] }, clr = (seen, keys) => { clrAll.n++; clrAll.seen.push(...seen); clrAll.keys.push(...keys); return () => clearNeed(seen, keys); };
+  const drafted = sec !== 'home' ? [] : homeDrafts(true).map((a) => needRow(el('li', { className: 'draftrow' },
     el('a', { href: draftHref(a) },
-      el('div', { className: 'r1' }, el('span', { className: 'sd done att-unread' }), el('strong', { className: 'one' }, `Draft v${a.draft.release} of ${a.title}`)),
-      el('div', { className: 'r2 one' }, a.role === 'owner' && !readOnly ? 'Try it, then publish or ask for changes' : 'Waiting for its owner'))));
-  const asked = sec !== 'home' ? [] : fbWaiting().map(({ a, f }) => el('li', { className: 'draftrow' },
+      el('div', { className: 'r1' }, el('span', { className: `sd done${draftWaits(a) ? ' att-unread' : ''}` }), el('strong', { className: 'one' }, `Draft v${a.draft.release} of ${a.title}`)),
+      el('div', { className: 'r2 one' }, !draftWaits(a) ? `Merging when it can: ${a.review.status || 'starting'}`
+        : a.role === 'owner' && !readOnly ? 'Try it, then publish or ask for changes' : 'Waiting for its owner'))),
+    !draftWaits(a), draftWaits(a) && clr([], [clearKey.draft(a)])));
+  const asked = sec !== 'home' ? [] : fbWaiting().map(({ a, f }) => needRow(el('li', { className: 'draftrow' },
     el('a', { href: `#apps/${a.slug}` },
       el('div', { className: 'r1' }, el('span', { className: 'sd done att-approval' }), el('strong', { className: 'one' }, `Feedback on ${a.title}`)),
       el('div', { className: 'r2 one' }, ...dots([f.by, 'send it to an agent, edit or dismiss'])),
-      el('div', { className: 'r3 one' }, f.edited || f.feedback.note))));
+      el('div', { className: 'r3 one' }, f.edited || f.feedback.note))), false, clr([], [clearKey.feedback(f)])));
+  // A thread under Needs you: settled (dimmed) once none of it needs you (only held there); clearable unless a task
+  // in it waits on an approval, which clearing can't answer.
+  const needThread = (th) => {
+    const rows = threadRows(th, now), own = [th.root, ...th.replies].filter((t) => ATTENTION[t.attention]);
+    if (!own.length) for (const li of rows) li.classList.add('settled');
+    else if (own.every((t) => isFinished(t))) needRow(rows[0], false, clr(own, []));
+    return rows;
+  };
+  const needLive = (s) => needRow(liveRow(s, now), !asksYou(s), asksYou(s) && clr([], [clearKey.session(s)]));
   if (sec === 'home' && (drafted.length || asked.length || sessions.length) && !groups.has('need')) groups.set('need', []);
   // Sections in Home's order; on Home, drafts, feedback, then the tasks needing you, then sessions waiting on you.
   const keys = [...groups.keys()].sort((a, b) => secRank(a) - secRank(b) || b.localeCompare(a));
   // Sessions: those under way, then the rest of the last six hours.
   const body = sec === 'sessions' ? [['Live', sessions.filter(isLive)], ['Recent', sessions.filter((s) => !isLive(s))]].filter(([, g]) => g.length)
     .map(([h, g], i) => [secHead(h, ...(i ? [] : [el('a', { href: '#workers' }, 'All sessions')])), el('ul', { className: 'rows' }, ...g.map((s) => liveRow(s, now)))])
-    : keys.map((k) => [secHead(label(k)), el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []),
-    ...(k === 'need' ? [...drafted, ...asked] : []), ...groups.get(k).flatMap((th) => threadRows(th, now)), ...(k === 'need' && sec === 'home' ? sessions.map((s) => liveRow(s, now)) : []))]);
-  const focused = $('list').contains(document.activeElement) && document.activeElement.getAttribute('href');
+    : keys.map((k) => {
+      const ul = el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []), ...(k === 'need' ? [...drafted, ...asked] : []),
+        ...groups.get(k).flatMap((th) => (k === 'need' && sec === 'home' ? needThread(th) : threadRows(th, now))), ...(k === 'need' && sec === 'home' ? sessions.map(needLive) : []));
+      const clearAll = k === 'need' && sec === 'home' && !readOnly && clrAll.n > 1 && el('button', { type: 'button', onclick: () => clearNeed(clrAll.seen, clrAll.keys) }, 'Clear all');
+      return [secHead(label(k), ...(clearAll ? [clearAll] : [])), ul];
+    });
+  const act = document.activeElement, onX = act?.classList.contains('x'), focused = $('list').contains(act) && (onX ? act.parentNode.querySelector('a')?.getAttribute('href') : act.getAttribute('href'));
   $('list').replaceChildren(...(inSplit() ? [el('a', { href: '#new', className: 'newtask', title: 'New task (c)' }, '+ New task')] : []), ...body.flat());
   // The open task's or session's links (its row, or a message under a live session), beside the list when wide.
   if (route().view !== 'list') for (const a of $('list').querySelectorAll(`a[href="${location.hash}"]`)) a.setAttribute('aria-current', 'page');
-  if (focused) $('list').querySelector(`a[href="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true }); // a redraw keeps j/k's (or Tab's) place
+  const back = focused ? $('list').querySelector(`a[href="${CSS.escape(focused)}"]`) : null;
+  (onX ? back?.parentNode.querySelector(':scope > .x') : back)?.focus({ preventScroll: true }); // a redraw keeps j/k's (or Tab's) place
   if (!body.length) $('list').append(el('p', { className: 'dim', style: 'padding: 1rem .375rem' }, sec === 'sessions' ? 'No live sessions.'
     : sec === 'home' && tasks.length ? 'Nothing needs you or is running.' : inSplit() ? 'No tasks yet.' : 'No tasks yet. Start one below.'));
 }
