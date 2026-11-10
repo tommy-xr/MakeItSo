@@ -154,6 +154,8 @@ pub struct App {
     /// Held by each draft proposal and decision: a publish's merge-then-activate isn't
     /// overtaken by a replacement or a discard.
     drafting: Arc<tokio::sync::Mutex<()>>,
+    /// Held by each owner's send or dismiss of waiting feedback, so none goes twice.
+    deciding_feedback: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl App {
@@ -199,6 +201,7 @@ impl App {
             host: String::new(),
             creating: Default::default(),
             drafting: Default::default(),
+            deciding_feedback: Default::default(),
         }
     }
 
@@ -408,6 +411,24 @@ impl App {
                     }
                 }
                 Effect::Broadcast(msg) => {
+                    // Every way a task ends says so to clients: its feedback hears it too.
+                    let ended = match &msg {
+                        ServerMsg::Event { task, event, .. } => match event {
+                            AgentEvent::Finished { ok: true, .. } => {
+                                Some((*task, TaskStatus::Done))
+                            }
+                            AgentEvent::Finished { ok: false, .. } => {
+                                Some((*task, TaskStatus::Failed))
+                            }
+                            AgentEvent::Cancelled => Some((*task, TaskStatus::Cancelled)),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let (Some((task, status)), true) = (ended, self.apps.is_some()) {
+                        let app = self.clone();
+                        tokio::spawn(async move { app.feedback_ended(task, status).await });
+                    }
                     let _ = self.events.send(msg);
                 }
                 Effect::AdvanceReview { id, after } => {
@@ -889,35 +910,41 @@ impl App {
         })
     }
 
-    /// Where in-app feedback (`apps_http`) goes: each is sent to an agent, or kept for the owner.
+    /// Where the owner's in-app feedback (`apps_http`) goes: each is sent to an agent.
     pub fn feedback_inbox(&self) -> mpsc::UnboundedSender<(String, HeldFeedback)> {
         let (tx, mut rx) = mpsc::unbounded_channel::<(String, HeldFeedback)>();
         let app = self.clone();
         tokio::spawn(async move {
             while let Some((slug, held)) = rx.recv().await {
-                app.take_feedback(slug, held, false).await;
+                app.take_feedback(slug, held).await;
             }
         });
         tx
     }
 
-    /// Send `held` (kept on its app as it came in) to an agent unless its app holds feedback
-    /// (`force`: the owner sent it), then keep it as a record of its task; else, or if it can't
-    /// go now, keep it for the owner with why. Whether it went.
-    async fn take_feedback(&self, slug: String, mut held: HeldFeedback, force: bool) -> bool {
+    /// Send `held` (kept on its app, waiting) to an agent, the owner's or with the owner's
+    /// go-ahead, and keep it as a record of its task; if it can't go now, it waits with why.
+    /// Whether it went.
+    async fn take_feedback(&self, slug: String, held: HeldFeedback) -> bool {
         let Some(apps) = self.apps.clone() else {
             return false;
         };
         let (a, s) = (apps.clone(), slug.clone());
-        let hold = tokio::task::spawn_blocking(move || a.policy(&s).hold_feedback).await;
-        let hold = hold.expect("reading a policy doesn't panic") && !force;
-        let (open, tip) = {
+        let now = tokio::task::spawn_blocking(move || a.draft(&s).map(|d| d.task)).await;
+        let now = now.expect("reading a draft doesn't panic");
+        let (current, open, tip) = {
             let l = self.ledger();
+            // The draft it was about is still the app's: its thread's, or the same task-less one.
+            let current = match (held.draft_task, now) {
+                (Some(Some(t)), Some(Some(d))) => l.thread(t).contains(&d),
+                (Some(None), Some(None)) => true,
+                _ => false,
+            };
             let tip = held.draft_task.flatten().and_then(|t| l.thread_tip(t));
-            (l.open_app_tasks(&slug), tip)
+            (current, l.open_app_tasks(&slug), tip)
         };
         let text = feedback::request(&slug, &held);
-        let sent = match feedback::send(&held, hold, open, tip) {
+        let sent = match feedback::send(&held, current, open, tip) {
             feedback::Send::Hold(why) => Err(why),
             feedback::Send::Reply(task) => {
                 let planner = self.planner.is_some();
@@ -943,15 +970,29 @@ impl App {
         tracing::info!("apps/{slug}: feedback {}: {sent:?}", held.id);
         let ok = sent.is_ok();
         // Gone to a task: kept as a record, for its sender's menu.
-        (held.task, held.waiting) = match sent {
-            Ok(task) => (Some(task), None),
-            Err(why) => (None, Some(why)),
+        let task = sent.as_ref().ok().copied();
+        let e = match sent {
+            Ok(task) => feedback::Event::Sent(held.id, task),
+            Err(why) => feedback::Event::Held(held.id, why),
         };
-        let kept = tokio::task::spawn_blocking(move || apps.keep_feedback(&slug, &held));
-        if let Ok(Err(e)) = kept.await {
-            tracing::warn!("keeping feedback: {e:#}");
+        let (a, s) = (apps.clone(), slug.clone());
+        let _ = tokio::task::spawn_blocking(move || a.feedback_step(&s, &e)).await;
+        // Its task may have ended before it was marked sent (failing at once): say so now.
+        let ended = task.and_then(|t| Some((t, self.ledger().status_of(t)?)));
+        if let Some((t, status)) = ended.filter(|(_, s)| s.finished()) {
+            let e = feedback::Event::Ended(t, status);
+            let _ = tokio::task::spawn_blocking(move || apps.feedback_step(&slug, &e)).await;
         }
         ok
+    }
+
+    /// Feedback whose task (if an app's) just ended says how, unless it has a draft to try.
+    async fn feedback_ended(&self, task: TaskId, status: TaskStatus) {
+        let (Some(apps), Some(slug)) = (self.apps.clone(), self.ledger().app_of(task)) else {
+            return;
+        };
+        let e = feedback::Event::Ended(task, status);
+        let _ = tokio::task::spawn_blocking(move || apps.feedback_step(&slug, &e)).await;
     }
 
     /// Who asks, as apps know members: an Access login, else (the full token, a direct local
@@ -1016,7 +1057,8 @@ impl App {
     async fn review_done(&self, r: Review) {
         let merged = r.state == ReviewState::Merged;
         if let (ReviewKind::AppDraft { slug, release }, Some(apps)) = (&r.kind, self.apps.clone()) {
-            let (slug, n, task, id) = (slug.clone(), *release, r.task, r.id);
+            let (slug, n, id) = (slug.clone(), *release, r.id);
+            let thread = r.task.map(|t| self.ledger().thread(t)).unwrap_or_default();
             let done = tokio::task::spawn_blocking(move || {
                 if merged {
                     apps.activate(&slug, n, unix_ms())
@@ -1025,12 +1067,8 @@ impl App {
                 // Gone only once live (or rejected): a release that didn't go live keeps its
                 // draft, and publishing again retries.
                 apps.end_draft(&slug, id);
-                let what = if merged {
-                    format!("live as v{n}")
-                } else {
-                    "discarded".into()
-                };
-                apps.settle_feedback(&slug, task, &what);
+                let live = merged.then_some(n);
+                apps.feedback_step(&slug, &feedback::Event::Decided(&thread, live));
                 Ok::<(), String>(())
             });
             if let Ok(Err(e)) = done.await {
@@ -1349,7 +1387,6 @@ pub fn router(app: App) -> Router {
             "/api/apps/{slug}/draft/{which}",
             get(draft_shot).post(decide_draft),
         )
-        .route("/api/apps/{slug}/feedback", post(hold_feedback))
         .route("/api/apps/{slug}/feedback/new", post(new_feedback))
         .route(
             "/api/apps/{slug}/feedback/{id}/{action}",
@@ -2155,6 +2192,13 @@ async fn propose_draft(
             if let Some(r) = review {
                 app.ledger().open_review(r);
             }
+            // Feedback its thread took on now has a draft to try.
+            let thread = d.task.map(|t| app.ledger().thread(t)).unwrap_or_default();
+            let (apps, s, n) = (app.apps.clone(), slug.clone(), d.release);
+            if let (Some(apps), false) = (apps, thread.is_empty()) {
+                let e = move || apps.feedback_step(&s, &feedback::Event::Drafted(&thread, n));
+                let _ = tokio::task::spawn_blocking(e).await;
+            }
             (StatusCode::CREATED, Json(d)).into_response()
         }
         Err(apps::DraftError::NoSuchApp) => (StatusCode::NOT_FOUND, "no such app").into_response(),
@@ -2232,35 +2276,6 @@ async fn admit_owner(
     }
 }
 
-/// `{"hold": bool}`: whether the app's in-app feedback waits for its owner rather than going
-/// to an agent at once. Owner only.
-async fn hold_feedback(
-    State(app): State<App>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    Path(slug): Path<String>,
-    body: Bytes,
-) -> Response {
-    let apps = match admit_owner(&app, &headers, peer, &slug).await {
-        Ok(a) => a,
-        Err(refused) => return refused.into_response(),
-    };
-    #[derive(serde::Deserialize)]
-    struct Hold {
-        hold: bool,
-    }
-    let hold = match serde_json::from_slice::<Hold>(&body) {
-        Ok(h) => h.hold,
-        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-    };
-    let set = tokio::task::spawn_blocking(move || apps.set_hold_feedback(&slug, hold)).await;
-    match set.expect("setting doesn't panic") {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(apps::MemberError::NoSuchApp) => (StatusCode::NOT_FOUND, "no such app").into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")).into_response(),
-    }
-}
-
 /// An [`AppFeedback`] from the owner on this page, beside the app's draft preview: it goes as
 /// in-app feedback does ([`App::take_feedback`]), into the draft's thread, else a change task.
 /// 202 once sent; 409 if it can't go now (kept on the app, with why). Owner only.
@@ -2295,10 +2310,17 @@ async fn new_feedback(
         draft_task: draft.map(|d| d.task),
         feedback: f,
         waiting: Some("on its way to an agent".into()),
+        edited: None,
         task: None,
-        outcome: None,
+        drafted: None,
+        end: None,
     };
-    if !app.take_feedback(slug, held, true).await {
+    let (apps, s, h) = (app.apps.clone(), slug.clone(), held.clone());
+    let kept = tokio::task::spawn_blocking(move || apps.map(|a| a.keep_feedback(&s, &h)));
+    if let Ok(Some(Err(e))) = kept.await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response();
+    }
+    if !app.take_feedback(slug, held).await {
         return (
             StatusCode::CONFLICT,
             "it couldn't go now; see why on the app",
@@ -2309,12 +2331,14 @@ async fn new_feedback(
 }
 
 /// Send waiting feedback `id` to an agent now (`send`; 409 if it still can't go, kept with
-/// why) or drop it (`dismiss`). Owner only.
+/// why), as `{"note": …}` if given (the owner's edit of it), or dismiss it, `{"note": …}` then
+/// telling its sender why. Owner only.
 async fn decide_feedback(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path((slug, id, action)): Path<(String, uuid::Uuid, String)>,
+    body: Bytes,
 ) -> Response {
     let send = match action.as_str() {
         "send" => true,
@@ -2325,20 +2349,41 @@ async fn decide_feedback(
         Ok(a) => a,
         Err(refused) => return refused.into_response(),
     };
+    #[derive(serde::Deserialize, Default)]
+    struct Decision {
+        note: Option<String>,
+    }
+    let note = match body.is_empty() {
+        true => None,
+        false => match serde_json::from_slice::<Decision>(&body) {
+            Ok(d) => d.note,
+            Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        },
+    };
+    let checked = match (send, &note) {
+        (true, Some(n)) => feedback::check_note(n, mis_types::MAX_FEEDBACK_CHARS),
+        (false, Some(n)) if n.chars().count() > feedback::MAX_REPLY_CHARS => Err(format!(
+            "the note is over {} characters",
+            feedback::MAX_REPLY_CHARS
+        )),
+        _ => Ok(()),
+    };
+    if let Err(why) = checked {
+        return (StatusCode::BAD_REQUEST, why).into_response();
+    }
     let s = slug.clone();
-    // Only feedback still waiting.
-    let read = tokio::task::spawn_blocking(move || {
-        let waiting = apps.held(&s, id).filter(|h| h.task.is_none());
-        match send {
-            true => waiting,
-            false => waiting.filter(|_| apps.drop_held(&s, id)),
-        }
+    // Only feedback still waiting, one decision at a time: a second Send finds it gone.
+    let _deciding = app.deciding_feedback.lock().await;
+    let decided = tokio::task::spawn_blocking(move || match (send, note) {
+        (true, Some(n)) => (apps.feedback_step(&s, &feedback::Event::Edited(id, n))).pop(),
+        (true, None) => apps.waiting_one(&s, id),
+        (false, note) => (apps.feedback_step(&s, &feedback::Event::Dismissed(id, note))).pop(),
     });
-    let Some(held) = read.await.expect("reading feedback doesn't panic") else {
-        return (StatusCode::NOT_FOUND, "no such feedback").into_response();
+    let Some(held) = decided.await.expect("deciding feedback doesn't panic") else {
+        return (StatusCode::NOT_FOUND, "no such feedback waiting").into_response();
     };
     // Sent, it stays as a record of its task; if it can't go, it waits, with why.
-    if send && !app.take_feedback(slug, held, true).await {
+    if send && !app.take_feedback(slug, held).await {
         return (StatusCode::CONFLICT, "it couldn't go now; see why on it").into_response();
     }
     StatusCode::NO_CONTENT.into_response()

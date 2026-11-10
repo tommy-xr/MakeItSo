@@ -384,3 +384,19 @@ test('mis.d.ts declares exactly what mis.js and the mock define', async () => {
   assert.deepEqual([err.name, err.status, err.current, err.index], ['MisError', 409, null, 2]);
   assert.deepEqual(members('MisError'), ['current', 'index', 'name', 'status']);
 });
+
+test('menu: a sender sees their feedback waiting for the owner, then with an agent, a draft, or how it ended', () => {
+  const { feedbackSays } = core();
+  const says = (s) => feedbackSays({ id: 'f', at: 1, note: 'Show pH too.', ...s });
+  assert.equal(says({ state: 'waiting', why: 'waiting for the owner' }), 'Waiting for owner');
+  assert.equal(says({ state: 'waiting', why: 'its task is still working' }), 'Waiting: its task is still working');
+  assert.equal(says({ state: 'working' }), 'Agent working');
+  assert.equal(says({ state: 'draft_ready', release: 4 }), 'Draft v4 ready · try it');
+  assert.equal(says({ state: 'done', end: 'published', release: 4 }), 'Published as v4');
+  assert.equal(says({ state: 'done', end: 'rejected' }), 'Draft rejected');
+  assert.equal(says({ state: 'done', end: 'replaced', release: 5 }), 'Draft replaced by v5');
+  assert.equal(says({ state: 'done', end: 'dismissed', reply: 'The brand colour stays.' }), 'Dismissed: The brand colour stays.');
+  assert.equal(says({ state: 'done', end: 'dismissed' }), 'Dismissed');
+  assert.equal(says({ state: 'done', end: 'ended', status: 'failed' }), 'Agent failed');
+  assert.equal(says({ state: 'done', end: 'ended', status: 'done' }), 'Agent finished without a draft');
+});

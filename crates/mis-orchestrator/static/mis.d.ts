@@ -63,7 +63,11 @@ declare namespace Mis {
     | { state: 'waiting'; why: string }
     | { state: 'working' }
     | { state: 'draft_ready'; release: number }
-    | { state: 'done'; what: string }
+    | { state: 'done'; end: 'published'; release: number }
+    | { state: 'done'; end: 'rejected' }
+    | { state: 'done'; end: 'replaced'; release: number }
+    | { state: 'done'; end: 'dismissed'; reply?: string }
+    | { state: 'done'; end: 'ended'; status: 'done' | 'failed' | 'cancelled' }
   );
 
   /** Every record the caller can see, by collection. */
