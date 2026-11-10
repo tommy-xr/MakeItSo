@@ -509,6 +509,10 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(model = %args.summary_model, "summaries: local claude (tool-less)");
         app = app.with_summarizer(one_shot_claude(&args.summary_model, &[]));
     }
+    if nonempty(&args.notes_remote).is_some() && mis_agent::which("claude") {
+        tracing::info!(model = %args.summary_model, "inbox suggestions: local claude (tool-less)");
+        app = app.with_suggester(one_shot_claude(&args.summary_model, &[]));
+    }
     // Shut down on a signal, or once the updater has swapped in a new build: then restart on it.
     let restarting = std::cell::Cell::new(false);
     let watched = app.clone();

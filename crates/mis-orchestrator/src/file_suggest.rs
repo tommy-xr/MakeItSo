@@ -206,7 +206,10 @@ mod tests {
 
     fn some_dests() -> Vec<Dest> {
         let paths = ["projects/mis", "areas/home", "archive"].map(String::from);
-        dests(&paths, &[project("mis", &["make-it-so"], "# MIS\n\nPhone.\n")])
+        dests(
+            &paths,
+            &[project("mis", &["make-it-so"], "# MIS\n\nPhone.\n")],
+        )
     }
 
     fn note(path: &str, hash: &str) -> Note {
@@ -305,7 +308,10 @@ mod tests {
 
     #[test]
     fn a_summary_is_one_line_of_at_most_200_characters() {
-        let long = format!("{{\"dest\":\"archive\",\"summary\":\"a\\nb  {}\"}}", "x".repeat(300));
+        let long = format!(
+            "{{\"dest\":\"archive\",\"summary\":\"a\\nb  {}\"}}",
+            "x".repeat(300)
+        );
         let r = parse(&long, &some_dests());
         assert_eq!(r.summary.chars().count(), MAX_SUMMARY_CHARS);
         assert!(r.summary.starts_with("a b xx"));

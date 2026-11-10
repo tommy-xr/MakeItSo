@@ -4179,6 +4179,7 @@ async fn refused_everywhere_else(base: &str, headers: &[(&'static str, &str)]) {
         ("GET", "/api/notes/tree".into()),
         ("GET", "/api/notes/file?path=inbox/a.md".into()),
         ("POST", "/api/notes/move".into()),
+        ("GET", "/api/notes/suggestions".into()),
         ("GET", "/api/projects".into()),
         ("GET", "/api/apps".into()),
         ("POST", "/api/apps/a/releases".into()),
@@ -4743,6 +4744,165 @@ async fn projects_are_read_from_the_notes_clone_for_full_scope_only() {
     };
     assert_eq!(serde_json::from_str::<Projects>(&body).unwrap(), want);
     // The running app may still hold files in it (Windows refuses to delete them).
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Suggester stub: a note tagged `#offlist` goes to a folder that isn't one, any other to
+/// `projects/amf` (fenced, as models sometimes reply). Keeps each prompt.
+struct FakeSuggester(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+impl mis_agent::Agent for FakeSuggester {
+    fn name(&self) -> &'static str {
+        "fake"
+    }
+    fn models(&self) -> Vec<String> {
+        vec![]
+    }
+    fn run<'a>(
+        &'a self,
+        _task: TaskId,
+        prompt: &'a str,
+        _opts: mis_agent::RunOpts<'a>,
+        tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> mis_agent::BoxFut<'a> {
+        Box::pin(async move {
+            self.0.lock().unwrap().push(prompt.to_string());
+            let reply = match prompt {
+                p if p.contains("#offlist") => r#"{"dest":"projects/nope","summary":"Off"}"#,
+                p if p.contains("v2") => {
+                    "```json\n{\"dest\":\"projects/amf\",\"summary\":\"Second\"}\n```"
+                }
+                _ => r#"{"dest":"projects/amf","summary":"First"}"#,
+            };
+            let summary = Some(reply.into());
+            tx.send(AgentEvent::Finished { ok: true, summary }).await?;
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn inbox_notes_get_a_suggestion_per_text_held_to_the_folders() {
+    use std::time::Duration;
+    let dir = std::env::temp_dir().join(format!("mis-e2e-suggest-{}", uuid::Uuid::new_v4()));
+    let human = dir.join("human");
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["-c", "user.name=Human", "-c", "user.email=h@example.com"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "git {args:?}: {err}");
+    };
+    git(&["init", "--quiet", "--bare", "-b", "main", "remote.git"]);
+    git(&["clone", "--quiet", "remote.git", "human"]);
+    let write = |path: &str, text: &str| {
+        let at = human.join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, text).unwrap();
+    };
+    let push = |msg: &str| {
+        git(&["-C", "human", "add", "-A"]);
+        git(&["-C", "human", "commit", "--quiet", "-m", msg]);
+        git(&["-C", "human", "push", "--quiet", "origin", "HEAD:main"]);
+    };
+    write(".gitattributes", "* -text\n");
+    write("inbox/a.md", "# a\n");
+    let amf = "---\ntitle: All Must Fall\naliases: [allmustfall]\n---\nA game.\n";
+    write("projects/amf/README.md", amf);
+    write("areas/home/boiler.md", "# Boiler\n");
+    push("init");
+    let remote = dir.join("remote.git").display().to_string();
+    // A run every second: suggestions follow the human's pushes.
+    let notes = |state: &std::path::Path| {
+        mis_orchestrator::notes::Notes::new(remote.clone(), state)
+            .with_timing(Duration::from_secs(3600), Duration::from_secs(1))
+    };
+    let state = dir.join("state");
+    let prompts = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+    let suggester = std::sync::Arc::new(FakeSuggester(prompts.clone()));
+    let app = capturing(&state).with_notes(notes(&state));
+    let base = start_app(app.with_suggester(suggester)).await;
+    let suggestions = |token: &'static str| {
+        let base = base.clone();
+        async move {
+            let (status, body) = get_json(&base, "/api/notes/suggestions", token).await;
+            assert_eq!(status, 200, "{body}");
+            serde_json::from_str::<NoteSuggestions>(&body).unwrap()
+        }
+    };
+    let until = |done: fn(&NoteSuggestions) -> bool| async move {
+        for _ in 0..100 {
+            let s = suggestions("r").await;
+            if done(&s) {
+                return s;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("{:?}", suggestions("r").await);
+    };
+    let s = until(|s| s.contains_key("inbox/a.md")).await;
+    let a = &s["inbox/a.md"];
+    assert_eq!(
+        (a.dest.as_str(), a.summary.as_str(), &a.hash, &a.error),
+        ("projects/amf", "First", &sha_hex(b"# a\n"), &None)
+    );
+    let first = prompts.lock().unwrap()[0].clone();
+    assert!(
+        first.contains("- projects/amf: All Must Fall (also allmustfall): A game.\n"),
+        "{first}"
+    );
+    assert!(first.contains("- areas/home\n") && first.ends_with("Note:\n# a\n"));
+    // An edit gets a new suggestion; an off-list folder becomes none.
+    write("inbox/a.md", "# a v2\n");
+    write("inbox/b.md", "#offlist\n");
+    push("edit");
+    let s = until(|s| s.contains_key("inbox/b.md") && s["inbox/a.md"].summary == "Second").await;
+    assert_eq!(s["inbox/a.md"].hash, sha_hex(b"# a v2\n"));
+    let b = &s["inbox/b.md"];
+    assert_eq!((b.dest.as_str(), b.summary.as_str()), ("none", "Off"));
+    let why = b.error.as_deref().unwrap();
+    assert_eq!(why, "projects/nope is not a folder to file in");
+    // Unchanged notes aren't asked about again, however many runs pass.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(prompts.lock().unwrap().len(), 3);
+    // A note gone from the inbox loses its suggestion; the file is what's served.
+    std::fs::remove_file(human.join("inbox/b.md")).unwrap();
+    push("filed");
+    let s = until(|s| !s.contains_key("inbox/b.md")).await;
+    let saved = std::fs::read(state.join("captures/suggestions.json")).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<NoteSuggestions>(&saved).unwrap(),
+        s
+    );
+    // A capture token sees none of it.
+    let (status, _) = get_json(&base, "/api/notes/suggestions", "c").await;
+    assert!(matches!(status, 401 | 403), "{status}");
+    // No claude: the clone is read, but nothing is suggested.
+    let quiet = dir.join("quiet");
+    let base = start_app(capturing(&quiet).with_notes(notes(&quiet))).await;
+    for _ in 0..100 {
+        let (_, body) = get_json(&base, "/api/notes/tree", "s").await;
+        if body.contains("inbox/a.md") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        get_json(&base, "/api/notes/suggestions", "r").await,
+        (200, "{}".into())
+    );
+    assert!(!quiet.join("captures/suggestions.json").exists());
+    // No notes remote: none either.
+    let off = start_app(capturing(&dir.join("off"))).await;
+    assert_eq!(
+        get_json(&off, "/api/notes/suggestions", "r").await,
+        (200, "{}".into())
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
