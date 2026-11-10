@@ -6067,25 +6067,7 @@ async fn an_app_task_proposes_a_draft_that_only_the_owner_publishes_or_rejects()
     assert_eq!(call(&mis, "GET", &stale, &auth, None).await.0, 404);
 
     // Publish approves its review: failing checks go back to the task, nothing goes live.
-    for event in [
-        AgentEvent::Started {
-            session: Some("sess".into()),
-            model: None,
-        },
-        AgentEvent::Finished {
-            ok: true,
-            summary: None,
-        },
-    ] {
-        send(
-            &mut worker,
-            &WorkerMsg::Event {
-                task: task.id,
-                event,
-            },
-        )
-        .await;
-    }
+    finish_seen(&mis, &mut worker, task.id).await;
     let failing = Assessment::Failing {
         checks: vec!["verify".into()],
         log: "boom".into(),

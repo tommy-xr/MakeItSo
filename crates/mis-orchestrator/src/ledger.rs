@@ -814,7 +814,9 @@ impl Ledger {
         }
         let mut thread = vec![root];
         for t in &self.tasks {
-            if t.parent.is_some_and(|p| thread.iter().any(|x| x.task.id == p)) {
+            if t.parent
+                .is_some_and(|p| thread.iter().any(|x| x.task.id == p))
+            {
                 thread.push(t);
             }
         }
