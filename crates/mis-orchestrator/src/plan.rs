@@ -202,7 +202,7 @@ pub fn parse(
         serde_json::from_str(&reply[start..=end]).map_err(|e| format!("bad planner reply: {e}"))?;
     plan.answer = plan.answer.filter(|a| !a.trim().is_empty());
     if plan.harness.is_empty() && cards.is_none() {
-        plan.harness = default_harness(fleet.keys()).unwrap_or_default();
+        plan.harness = default_harness(fleet.keys()).ok_or("the chosen worker runs no harness")?;
     }
     if plan.harness.is_empty() {
         return match plan.answer {
@@ -393,6 +393,8 @@ mod tests {
                 .harness,
             "codex"
         );
+        let e = parse(r#"{"answer":"4"}"#, "q", &Fleet::new(), None).unwrap_err();
+        assert_eq!(e, "the chosen worker runs no harness");
         // A named worker is ignored, known or not.
         for name in ["studio", "mars"] {
             let reply = format!(r#"{{"harness":"codex","worker":"{name}"}}"#);

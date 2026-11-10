@@ -2637,6 +2637,25 @@ mod tests {
     }
 
     #[test]
+    fn a_chosen_worker_back_with_no_harness_fails_its_planned_task() {
+        let mut l = Ledger::default();
+        let mac = Uuid::new_v4();
+        l.connect(mac, info(), &[], 1, T0);
+        let task = submit_to(&mut l, "what is 2+2?", None, mac);
+        // It reconnects running nothing while the plan is out; the answer must not stand.
+        l.disconnect(mac, 1);
+        let bare = WorkerInfo {
+            harnesses: vec![],
+            ..info()
+        };
+        l.connect(mac, bare, &[], 2, T0);
+        finish_plan(&mut l, task, r#"{"answer":"4","reason":"trivial"}"#);
+        assert_eq!(task_status(&l, task), TaskStatus::Failed);
+        let why = status_of(&l, task).summary.unwrap();
+        assert_eq!(why, "the chosen worker runs no harness");
+    }
+
+    #[test]
     fn a_reply_without_a_session_stays_on_the_chosen_worker() {
         let mut l = Ledger::default();
         let (mac, box_) = (Uuid::new_v4(), Uuid::new_v4());
