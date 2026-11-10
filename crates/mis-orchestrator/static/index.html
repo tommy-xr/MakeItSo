@@ -1861,7 +1861,7 @@ function render() {
   // A conversation's back link returns to the view it was opened from.
   if (r.view === 'detail' || r.view === 'session') $(r.view).querySelector('.back').href = from;
   else from = location.hash || '#';
-  if (r.view !== 'detail' && r.view !== 'session') { follow.key = null; $('latest').hidden = true; if (detail) detail.sig = null; }
+  if (r.view !== 'detail' && r.view !== 'session') { follow.key = null; $('latest').hidden = true; if (detail) { detail.sig = null; detail.since = 0; } }
   if (r.view !== 'session') closeSession();
   const onWorkers = r.view === 'workers' || r.view === 'machine' || r.view === 'session';
   const area = onWorkers ? 'workers' : ['routines', 'apps', 'settings', 'notes', 'projects'].includes(r.view) ? r.view : 'list';
@@ -2982,13 +2982,14 @@ function renderDetail(id) {
   if (!detail || detail.id !== id) {
     // A draft belongs to the thread it was typed in.
     if (replyFor !== id) { replyFor = id; $('reply-text').value = drafts.get(replyDraft(id)); $('reply-error').hidden = true; }
-    detail = { id, since: Date.now(), task: null, events: [], truncated: false, note: '', ready: false, sig: null, open: { earlier: false, runs: new Set() } };
+    detail = { id, since: 0, task: null, events: [], truncated: false, note: '', ready: false, sig: null, open: { earlier: false, runs: new Set() } };
     send({ type: 'show', task: id });
   }
   const t = tasks.find((x) => x.id === id) || detail.task;
   // Looking at a finished task that needs the user settles it; repeats until the Status says so are harmless.
   // Beside the list it must stay open 2s first, so stepping through Needs you with j/k doesn't settle every task passed.
   clearTimeout(seenLater);
+  if (document.hidden) detail.since = 0; else detail.since ||= Date.now(); // the 2s run from (re)opening it, while in view
   if (!readOnly && t && ATTENTION[t.attention] && ['done', 'failed'].includes(t.status) && !document.hidden) {
     const wait = inSplit() ? detail.since + 2000 - Date.now() : 0;
     if (wait > 0) seenLater = setTimeout(render, wait); else send({ type: 'seen', task: id });
