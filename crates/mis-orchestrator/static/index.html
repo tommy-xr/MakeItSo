@@ -756,7 +756,8 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
     :root:not(.vr) #toast { max-width: calc(100vw - var(--side) - 2rem); }
   }
   @media (min-width: 75rem) {
-    :root.split:not(.vr) { --list: 26rem; }
+    /* The list grows with the window, up to 26rem; the task column stays the wider one (≈600px at 1200px). */
+    :root.split:not(.vr) { --list: clamp(21rem, 29vw, 26rem); }
     /* The list scrolls in its own column; the window still scrolls the task, so following a reply works as before. */
     :root.split:not(.vr) body > #list { position: fixed; z-index: 1; inset: var(--head) auto 0 var(--rail); box-sizing: border-box; width: var(--list); max-width: none; margin: 0;
       padding: 0 var(--pad) 1.5rem; overflow-y: auto; overscroll-behavior: contain; border-right: 1px solid var(--sep); }
@@ -1860,7 +1861,7 @@ function render() {
   // A conversation's back link returns to the view it was opened from.
   if (r.view === 'detail' || r.view === 'session') $(r.view).querySelector('.back').href = from;
   else from = location.hash || '#';
-  if (r.view !== 'detail' && r.view !== 'session') { follow.key = null; $('latest').hidden = true; if (detail) detail.sig = null; }
+  if (r.view !== 'detail' && r.view !== 'session') { follow.key = null; $('latest').hidden = true; if (detail) { detail.sig = null; detail.since = 0; } }
   if (r.view !== 'session') closeSession();
   const onWorkers = r.view === 'workers' || r.view === 'machine' || r.view === 'session';
   const area = onWorkers ? 'workers' : ['routines', 'apps', 'settings', 'notes', 'projects'].includes(r.view) ? r.view : 'list';
@@ -2976,16 +2977,23 @@ function ancestors(t) {
 const rootOf = (t) => ancestors(t)[0] || t; // whose prompt titles the thread
 // Grey bars standing in for content that is loading.
 const skel = (n = 6) => el('div', { className: 'skel', ariaBusy: 'true' }, ...Array.from({ length: n }, () => el('i')));
+let seenLater;
 function renderDetail(id) {
   if (!detail || detail.id !== id) {
     // A draft belongs to the thread it was typed in.
     if (replyFor !== id) { replyFor = id; $('reply-text').value = drafts.get(replyDraft(id)); $('reply-error').hidden = true; }
-    detail = { id, task: null, events: [], truncated: false, note: '', ready: false, sig: null, open: { earlier: false, runs: new Set() } };
+    detail = { id, since: 0, task: null, events: [], truncated: false, note: '', ready: false, sig: null, open: { earlier: false, runs: new Set() } };
     send({ type: 'show', task: id });
   }
   const t = tasks.find((x) => x.id === id) || detail.task;
   // Looking at a finished task that needs the user settles it; repeats until the Status says so are harmless.
-  if (!readOnly && t && ATTENTION[t.attention] && ['done', 'failed'].includes(t.status) && !document.hidden) send({ type: 'seen', task: id });
+  // Beside the list it must stay open 2s first, so stepping through Needs you with j/k doesn't settle every task passed.
+  clearTimeout(seenLater);
+  if (document.hidden) detail.since = 0; else detail.since ||= Date.now(); // the 2s run from (re)opening it, while in view
+  if (!readOnly && t && ATTENTION[t.attention] && ['done', 'failed'].includes(t.status) && !document.hidden) {
+    const wait = inSplit() ? detail.since + 2000 - Date.now() : 0;
+    if (wait > 0) seenLater = setTimeout(render, wait); else send({ type: 'seen', task: id });
+  }
   const cards = approvalCards(t);
   $('approvals').replaceChildren(...cards);
   $('approvals').hidden = !cards.length;
