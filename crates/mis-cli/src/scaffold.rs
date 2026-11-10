@@ -35,7 +35,7 @@ fn lf(text: &str) -> String {
     text.replace("\r\n", "\n")
 }
 
-/// `0.1.0+<first 12 hex of a sha256 of the sources>`: changes exactly when what is written does.
+/// `0.1.0+<first 12 hex of a sha256 of the sources>`: changes when any source does.
 pub fn sdk_version() -> String {
     let mut h = Sha256::new();
     for (name, body) in SOURCES {
@@ -75,7 +75,7 @@ pub fn write_sdk(dir: &Path) -> Result<()> {
 }
 
 /// How `dir` differs from what [`write_sdk`] would write: `mis.js: differs`, `vite.ts: missing`,
-/// `records.ts: not generated`. Empty: current.
+/// `records.ts: not generated`. Empty: current. Dot files (`.DS_Store`) are not its business.
 pub fn check_sdk(dir: &Path) -> Result<Vec<String>> {
     let files = sdk_files();
     let mut problems = Vec::new();
@@ -93,7 +93,7 @@ pub fn check_sdk(dir: &Path) -> Result<Vec<String>> {
         .with_context(|| format!("reading {}", dir.display()))?
         .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
         .collect::<Result<_, _>>()?;
-    extra.retain(|n| !files.iter().any(|(name, _)| name == n));
+    extra.retain(|n| !n.starts_with('.') && !files.iter().any(|(name, _)| name == n));
     extra.sort();
     problems.extend(extra.into_iter().map(|n| format!("{n}: not generated")));
     Ok(problems)
@@ -264,6 +264,7 @@ mod tests {
         std::fs::write(dir.join("mis.js"), js.replace("MisError", "Oops")).unwrap();
         std::fs::remove_file(dir.join("shots.mjs")).unwrap();
         std::fs::write(dir.join("records.ts"), "mine").unwrap();
+        std::fs::write(dir.join(".DS_Store"), "finder").unwrap();
         assert_eq!(
             check_sdk(&dir).unwrap(),
             [

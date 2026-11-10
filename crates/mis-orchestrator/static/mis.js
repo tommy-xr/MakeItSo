@@ -167,7 +167,8 @@
 .mis-head [hidden]{display:none}
 .mis-badge{padding:2px 10px;border-radius:99px;background:var(--l);color:var(--d);font-size:13px;white-space:nowrap}
 .mis-main{display:block;max-width:560px;margin:0 auto}
-.mis-main.mis-tabbed{padding-bottom:calc(64px + env(safe-area-inset-bottom))}
+.mis-tabbed .mis-main{padding-bottom:calc(64px + env(safe-area-inset-bottom))}
+.mis-tabbed .mis-tag{bottom:calc(64px + env(safe-area-inset-bottom))}
 .mis-tabs{position:fixed;left:0;right:0;bottom:0;z-index:5;display:flex;justify-content:center;padding:0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);background:var(--s);border-top:1px solid var(--l)}
 .mis-tabs[hidden]{display:none}
 .mis-tabs a{flex:1;max-width:160px;min-height:56px;display:flex;align-items:center;justify-content:center;color:var(--d);font-size:15px;text-decoration:none}
@@ -364,7 +365,7 @@
     };
   }
   const sectioned = (list) => {
-    const ok = Array.isArray(list) && list.length && list.every((x) => /^[A-Za-z0-9_-]+$/.test(x?.id) && typeof x.label === 'string');
+    const ok = Array.isArray(list) && list.length && list.every((x) => typeof x?.id === 'string' && /^[A-Za-z0-9_-]+$/.test(x.id) && typeof x.label === 'string');
     if (!ok) throw new TypeError('mis.shell: sections are [{id: [A-Za-z0-9_-]+, label, tab?}], at least one');
   };
 
@@ -376,7 +377,7 @@
     if (framed) throw new Error('mis.shell: once per page');
     framed = true;
     style();
-    let s = { title: document.title, ...opts };
+    let s = { ...opts, title: opts.title ?? document.title };
     const head = make('header', 'mis-head mis-ui'), back = make('a', 'mis-back', '‹'), h1 = make('h1');
     const badge = make('span', 'mis-badge', 'View only'), slot = make('span');
     const main = make('main', 'mis-main'), tabs = make('nav', 'mis-tabs mis-ui');
@@ -398,7 +399,7 @@
       if (v.back) back.href = v.back;
       tabs.replaceChildren(...v.tabs.map(link));
       tabs.hidden = !v.tabs.length;
-      main.classList.toggle('mis-tabbed', v.tabs.length > 0);
+      document.body.classList.toggle('mis-tabbed', v.tabs.length > 0);
       menu.items = v.items;
     };
     // On a new hash, or new sections moving it (a viewer's without `log`): render, then tell the app.
@@ -447,7 +448,7 @@
   }
 
   // Tests reach the pure shell core here.
-  globalThis.__misTest?.({ route, layout });
+  if (typeof globalThis.__misTest === 'function') globalThis.__misTest({ route, layout });
   // Last: everything it uses is defined by now.
   if (typeof document === 'object' && document.addEventListener) onBody(() => menu.start());
 })();

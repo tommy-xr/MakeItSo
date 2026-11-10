@@ -350,7 +350,7 @@ test('shell: tabs below, the other sections in the menu; one section is just a h
 
 test('mis.shell refuses sections it could not route to', () => {
   const { mis } = load(() => json(200, null));
-  for (const sections of [undefined, [], [{ id: 'a/b', label: 'A' }], [{ id: '', label: 'A' }], [{ id: 'a' }]]) {
+  for (const sections of [undefined, [], [{ id: 'a/b', label: 'A' }], [{ id: '', label: 'A' }], [{ id: 'a' }], [{ label: 'A' }], [{ id: 12, label: 'A' }]]) {
     assert.throws(() => mis.shell({ sections }), TypeError);
   }
 });

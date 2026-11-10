@@ -118,7 +118,8 @@ declare namespace Mis {
     all<T = unknown>(space: Space, collection: string, q?: Omit<Query, 'cursor'>): Promise<Envelope<T>[]>;
     /** Creates each row (rev 0), 100 to a batch, so a retry or a re-import writes nothing twice:
      * `present` counts ids already there (skipped), `added` the rest (with a retry whose reply was
-     * lost: the same data, by you). */
+     * lost: the same data, by you). Each id already there costs a request: leave out ids you
+     * know are stored, so it only meets ids added meanwhile. */
     createAll(space: Space, collection: string, rows: { id: string; data: unknown }[]): Promise<{ added: number; present: number }>;
   }
 
@@ -148,7 +149,8 @@ declare namespace Mis {
     tab?: boolean;
   }
   /** `#/log/for/ann` -> `{id: 'log', path: ['log', 'for', 'ann']}`. An empty or unknown hash is
-   * the first section, its path kept (`#/p/ann` -> `{id: <first>, path: ['p', 'ann']}`). */
+   * the first section, its path kept (`#/p/ann` -> `{id: <first>, path: ['p', 'ann']}`). Parts
+   * are as in the hash, percent-encoded. */
   interface Route {
     id: string;
     path: string[];
