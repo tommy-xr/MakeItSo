@@ -299,12 +299,15 @@ async fn admit(
     let role = app_access::role_of(&policy.unwrap_or_default(), &subject)
         .ok_or((StatusCode::FORBIDDEN, "this app isn't shared with you"))?;
     let role = dev_role.unwrap_or(role);
-    // A page goes by its cookie, an API call by the header its page's `mis.js` sends.
+    // A page goes by its cookie (or a preview's URL), an API call by the header its page's
+    // `mis.js` sends.
     let h = |name| req.headers().get(name).and_then(|v| v.to_str().ok());
     let api = apps::reserved(req.uri().path().splitn(4, '/').nth(3).unwrap_or(""));
     let asked = match api {
         true => h(app_access::DRAFT_HEADER).map(|v| v.parse().unwrap_or(0)),
-        false => app_access::cookie_draft(h(header::COOKIE.as_str()), slug),
+        false => app_access::cookie_draft(h(header::COOKIE.as_str()), slug).or_else(|| {
+            app_access::preview_of(req.uri().query(), h(header::REFERER.as_str()), slug)
+        }),
     };
     // Read only when a draft is asked for.
     let current = asked.and_then(|_| apps.draft(slug)).map(|d| d.release);
@@ -797,6 +800,18 @@ async fn blocking(apps: Arc<Apps>, slug: String, path: String, m: Member) -> Res
     off_thread(move || serve(&apps, &slug, &path, &m)).await
 }
 
+/// `path` from the app's draft, for one who may try it, when the release served lacks it: a
+/// file a preview's own files load (e.g. a chunk its script imports), whose request names no
+/// draft. A live page never asks for a file live lacks.
+fn draft_only(apps: &Apps, slug: &str, path: &str, m: &Member) -> Option<(String, Vec<u8>)> {
+    if m.draft.is_some() || !app_access::may_try(m.role) || apps::wants_entry_fallback(path) {
+        return None;
+    }
+    let rel = apps::clean_path(path)?;
+    let draft = apps.release_at(slug, apps.draft(slug)?.release)?;
+    Some((rel.to_string(), apps::read_file(&draft.dir, &rel)?))
+}
+
 /// `path` (empty: the entry) from the release `m` is served; an extensionless miss gets the entry.
 fn serve(apps: &Apps, slug: &str, path: &str, m: &Member) -> Response {
     let live = apps::valid_slug(slug)
@@ -810,6 +825,7 @@ fn serve(apps: &Apps, slug: &str, path: &str, m: &Member) -> Response {
     let web = live.manifest.clients.web.as_str();
     let found = apps::clean_path(path.trim_end_matches('/'))
         .and_then(read)
+        .or_else(|| draft_only(apps, slug, path, m))
         .or_else(|| {
             apps::wants_entry_fallback(path)
                 .then(|| read(web))

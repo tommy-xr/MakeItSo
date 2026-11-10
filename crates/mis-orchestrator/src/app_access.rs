@@ -90,6 +90,26 @@ pub fn draft_cookie_name(slug: &str) -> String {
 /// tab left it) can't write to the live records.
 pub const DRAFT_HEADER: &str = "x-mis-draft";
 
+/// Query parameter that previews a draft without entering it: the MIS page frames
+/// `/a/<slug>/?mis-preview=<n>`. Nothing is stored, so the app opened normally stays live.
+pub const PREVIEW_PARAM: &str = "mis-preview";
+
+/// The draft a preview asks for: [`PREVIEW_PARAM`] in the request's `query` (its entry page), else
+/// in its `referer` when that is a page of `slug` (the files that page loads). Its API calls name
+/// the draft in [`DRAFT_HEADER`], as `mis.js` reads the parameter too.
+pub fn preview_of(query: Option<&str>, referer: Option<&str>, slug: &str) -> Option<u32> {
+    let param = |q: &str| {
+        (q.split('&').filter_map(|kv| kv.split_once('=')))
+            .find(|(k, _)| *k == PREVIEW_PARAM)
+            .and_then(|(_, v)| v.parse().ok())
+    };
+    let page = || {
+        let uri: axum::http::Uri = referer?.parse().ok()?;
+        uri.path().starts_with(&format!("/a/{slug}/")).then(|| param(uri.query()?)).flatten()
+    };
+    query.and_then(param).or_else(page)
+}
+
 /// The draft release `Cookie` header `cookies` names for `slug`, if any.
 pub fn cookie_draft(cookies: Option<&str>, slug: &str) -> Option<u32> {
     let name = draft_cookie_name(slug);

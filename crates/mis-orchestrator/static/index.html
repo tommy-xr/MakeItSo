@@ -3817,7 +3817,7 @@ function draftCard(a, inTask, alone) {
 // sign-in page can't show: the link signs in in a tab, and coming back loads it again.
 function showPreview(box, a) {
   const ok = a && a.draft && a.url && ['owner', 'editor'].includes(a.role);
-  const url = ok ? `${a.url}?draft=${a.draft.release}` : '';
+  const url = ok ? `${a.url}?mis-preview=${a.draft.release}` : ''; // URL-scoped: the app opened normally stays live
   box.hidden = !ok;
   if (box.dataset.url === url) return;
   box.dataset.url = url;
