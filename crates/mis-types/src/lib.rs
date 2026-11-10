@@ -13,8 +13,9 @@ mod access;
 pub use access::access_headers;
 mod apps;
 pub use apps::{
-    valid_slug, AppBackup, AppMe, AppMember, AppRelease, AppRole, AppTask, AppView, BackupKind,
-    RestoreBackup, Restored, SetMember, MAX_APP_TITLE_CHARS, SLUG_RULE,
+    valid_slug, AppBackup, AppDraft, AppMe, AppMember, AppRelease, AppRole, AppTask, AppView,
+    BackupKind, ProposeDraft, RestoreBackup, Restored, SetMember, MAX_APP_TITLE_CHARS,
+    MAX_DRAFT_IMAGE_BYTES, MAX_DRAFT_NOTE_CHARS, SLUG_RULE,
 };
 pub mod diff;
 pub use diff::{DiffBase, DiffStat, TaskDiff};

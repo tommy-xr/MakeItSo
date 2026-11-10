@@ -31,7 +31,14 @@ live. Nothing you do goes live.
    never use any other credential on the machine. If it is refused, say why and leave
    publishing to the owner.
 6. Commit (`feat: …`/`fix: …`), push the branch, open a PR in mis-notes (see PR).
-7. Report the PR URL, the release number and what the owner should try before making it live.
+7. Propose the release as the app's draft, from the worktree (its HEAD is what the PR merges
+   at, so commit and push first):
+   `mis apps propose <slug> --release <n> --pr <url> --before before.png --after after.png --note "<what changed, what to try>"`.
+   Shots: 390 px, the same screen and data before (`origin/main`) and after; a new app has no
+   before. The owner tries the draft, then publishes it (merges the PR, makes it live),
+   discards it, or replies in this thread asking for changes: then push to the same branch,
+   publish a new release and propose it again; it replaces the draft.
+8. Report the PR URL, the release number and what the owner should try.
 
 ## Layout: functional core, thin shell
 

@@ -646,6 +646,31 @@ fn handle_incoming(
                     tokio::spawn(async move { tx.send(msg).await });
                 }
             }
+            Ok(OrchMsg::Query {
+                req,
+                query:
+                    Query::MergeDraft {
+                        cwd,
+                        repo,
+                        number,
+                        head,
+                    },
+            }) => {
+                let (tx, roots) = (ctx.pr_tx.clone(), ctx.roots.clone());
+                tokio::spawn(async move {
+                    let w = merge::Want { repo, number };
+                    let result = match roots::resolve_cwd(&roots, Some(&cwd)) {
+                        Ok(dir) => {
+                            let dir = dir.display().to_string();
+                            merge::merge_draft("gh".as_ref(), &dir, &w, &head).await
+                        }
+                        Err(why) => Err(format!("the apps repo: {why}")),
+                    };
+                    tracing::info!("merge draft {}#{}: {result:?}", w.repo, w.number);
+                    let answer = Answer::Merged { result };
+                    let _ = tx.send(WorkerMsg::Answer { req, answer }).await;
+                });
+            }
             Ok(OrchMsg::Query { req, query }) => {
                 let tx = ctx.pr_tx.clone();
                 tokio::spawn(async move {
@@ -676,6 +701,8 @@ fn answer(query: Query) -> Answer {
             let (claude, codex) = sessions::roots();
             transcript::read(&claude, &codex, &harness, id, limit, unix_ms())
         }
+        // Answered where it arrives: it runs `gh`.
+        Query::MergeDraft { .. } => Answer::NotFound,
     }
 }
 

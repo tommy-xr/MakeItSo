@@ -1017,6 +1017,15 @@ impl Ledger {
         self.workers.get(&wid).map(|w| w.conn)
     }
 
+    /// Where to merge an app draft's PR: the online worker that ran `task` (it opened the
+    /// PR), else any online one.
+    pub fn merge_worker(&self, task: Option<TaskId>) -> Option<WorkerId> {
+        let online = |wid: &WorkerId| self.workers.get(wid).is_some_and(|w| w.conn.is_some());
+        let ran = task.and_then(|id| self.tasks.iter().find(|t| t.task.id == id)?.worker);
+        ran.filter(online)
+            .or_else(|| self.workers.keys().copied().find(online))
+    }
+
     /// Have online worker `wid` save `purpose` (blank clears); it confirms with
     /// `worker_purpose`, which updates what clients see.
     pub fn set_purpose(&self, wid: WorkerId, purpose: &str) -> Result<Vec<Effect>, String> {

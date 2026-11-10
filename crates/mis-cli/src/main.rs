@@ -140,6 +140,28 @@ enum AppsCmd {
     },
     /// Make release `n` live; an earlier n reverts.
     Activate { slug: String, n: u32 },
+    /// Propose staged release `release` as the app's draft, replacing any, with the PR it was
+    /// built from: the owner tries it, then publishes (merges the PR, makes it live) or discards it.
+    Propose {
+        slug: String,
+        #[arg(long)]
+        release: u32,
+        /// `https://github.com/<owner>/<repo>/pull/<n>`.
+        #[arg(long)]
+        pr: String,
+        /// Screenshots, PNG, JPEG or GIF up to 2 MiB: before the change (none for a new app), after.
+        #[arg(long)]
+        before: Option<std::path::PathBuf>,
+        #[arg(long)]
+        after: Option<std::path::PathBuf>,
+        /// What changed and what to try.
+        #[arg(long)]
+        note: Option<String>,
+        /// The commit the release was built from; the PR merges only at it. Default: this
+        /// folder's `git rev-parse HEAD`.
+        #[arg(long)]
+        head: Option<String>,
+    },
     /// Let `email` open the app (signed in through the home Access app), as `role`.
     Share {
         slug: String,
@@ -254,6 +276,40 @@ async fn apps(args: &Args, cmd: &AppsCmd) -> Result<()> {
             call(args, req).await?;
             println!("{slug}: release {n} live");
         }
+        AppsCmd::Propose {
+            slug,
+            release,
+            pr,
+            before,
+            after,
+            note,
+            head,
+        } => {
+            use base64ct::{Base64, Encoding};
+            let shot = |p: &Option<std::path::PathBuf>| -> Result<Option<String>> {
+                let Some(p) = p else { return Ok(None) };
+                let bytes = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
+                Ok(Some(Base64::encode_string(&bytes)))
+            };
+            let head = (head.clone().or_else(git_head)).context(
+                "no commit to merge at: run it in the app's git worktree, or pass --head",
+            )?;
+            let body = ProposeDraft {
+                release: *release,
+                pr: pr.clone(),
+                head,
+                note: note.clone(),
+                before: shot(before)?,
+                after: shot(after)?,
+                task: std::env::var(TASK_ENV).ok().and_then(|t| t.parse().ok()),
+            };
+            let req = client
+                .post(format!("{base}/api/apps/{slug}/draft"))
+                .header("content-type", "application/json")
+                .body(serde_json::to_string(&body)?);
+            call(args, req).await?;
+            println!("{slug}: v{release} is its draft; the owner tries it, then publishes or discards it");
+        }
         AppsCmd::Share { slug, email, role } => {
             set_member(args, &client, &base, slug, email, Some((*role).into())).await?;
             println!(
@@ -302,6 +358,17 @@ async fn apps(args: &Args, cmd: &AppsCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// This folder's checked-out commit, if it is in a git repo.
+fn git_head() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let sha = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (out.status.success() && !sha.is_empty()).then_some(sha)
 }
 
 async fn set_member(
@@ -385,6 +452,9 @@ fn app_lines(a: &AppView, now: u64) -> String {
         true => "\n    shared with no one".into(),
         false => format!("\n    shared with {}", members.join(", ")),
     });
+    if let Some(d) = &a.draft {
+        out.push_str(&format!("\n    draft v{} · {}", d.release, d.pr));
+    }
     for r in a.releases.iter().rev() {
         let live = if Some(r.n) == a.active {
             " · live"
@@ -1561,6 +1631,8 @@ mod tests {
                     role: AppRole::Viewer,
                 },
             ],
+            draft: None,
+            role: None,
         };
         assert_eq!(
             app_lines(&a, 120_000),
@@ -1577,6 +1649,23 @@ mod tests {
         };
         assert!(app_lines(&staged, 0)
             .starts_with("demo · Demo · not live · v2 ready\n    shared with no one\n"));
+        let drafted = AppView {
+            draft: Some(AppDraft {
+                id: Default::default(),
+                release: 2,
+                pr: "https://github.com/o/r/pull/7".into(),
+                head: "ab".repeat(20),
+                note: None,
+                before: false,
+                after: true,
+                task: None,
+                at: 0,
+                error: None,
+            }),
+            ..staged
+        };
+        assert!(app_lines(&drafted, 0)
+            .contains("shared with no one\n    draft v2 · https://github.com/o/r/pull/7\n"));
     }
 
     #[test]

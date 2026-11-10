@@ -51,7 +51,65 @@ pub struct AppView {
     /// Who it is shared with, by email. Direct loopback requests are its owner too.
     #[serde(default)]
     pub members: Vec<AppMember>,
+    /// The staged release an agent proposes, to try and then publish or discard.
+    #[serde(default)]
+    pub draft: Option<AppDraft>,
+    /// The asker's role in it: only an owner publishes or discards its draft. None: not a member.
+    #[serde(default)]
+    pub role: Option<AppRole>,
 }
+
+/// An app's draft: a staged release and the PR it was built from (`mis apps propose`). One
+/// per app; a newer proposal replaces it. Publishing merges the PR, then makes it live.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AppDraft {
+    /// This proposal: a decision names it, so it never lands on one proposed since.
+    pub id: uuid::Uuid,
+    pub release: u32,
+    /// `https://github.com/<owner>/<repo>/pull/<n>`.
+    pub pr: String,
+    /// The commit the release was built from: the PR merges only while that is its head.
+    pub head: String,
+    #[serde(default)]
+    pub note: Option<String>,
+    /// Screenshots kept with it (`GET /api/apps/{slug}/draft/before|after`).
+    #[serde(default)]
+    pub before: bool,
+    #[serde(default)]
+    pub after: bool,
+    /// The task that proposed it, whose thread a change request replies in.
+    #[serde(default)]
+    pub task: Option<uuid::Uuid>,
+    /// Unix millis it was proposed.
+    pub at: u64,
+    /// Why the last publish didn't happen, e.g. the PR couldn't merge.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// `POST /api/apps/{slug}/draft`: propose release `release` as the app's draft.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProposeDraft {
+    pub release: u32,
+    pub pr: String,
+    /// The full sha of the commit the release was built from.
+    pub head: String,
+    #[serde(default)]
+    pub note: Option<String>,
+    /// Base64 PNG, JPEG or GIF, up to [`MAX_DRAFT_IMAGE_BYTES`].
+    #[serde(default)]
+    pub before: Option<String>,
+    #[serde(default)]
+    pub after: Option<String>,
+    /// With the full token, the task it belongs to; an app task's token names its own.
+    #[serde(default)]
+    pub task: Option<uuid::Uuid>,
+}
+
+/// Largest before or after screenshot on a draft.
+pub const MAX_DRAFT_IMAGE_BYTES: usize = 2 << 20;
+/// Most characters in a draft's note.
+pub const MAX_DRAFT_NOTE_CHARS: usize = 2000;
 
 /// What a member may do with an app: viewers read, editors also write, owners also admin.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

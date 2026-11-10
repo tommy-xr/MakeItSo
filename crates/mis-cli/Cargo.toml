@@ -12,6 +12,7 @@ path = "src/main.rs"
 mis-types.workspace = true
 mis-agent.workspace = true
 anyhow.workspace = true
+base64ct.workspace = true
 clap.workspace = true
 flate2 = "1.1"
 futures-util.workspace = true

@@ -251,47 +251,18 @@ pub fn check(policy: &MergePolicy, w: &Want, pr: &Pr) -> Result<MergeFacts, Stri
     if let Some(missing) = policy.require_labels.iter().find(|l| !has(l)) {
         return Err(format!("it lacks the label {missing}"));
     }
-    // A re-run check counts only its newest run, as the PR card has it; an
-    // unfinished run always counts, as a queued re-run may not have started.
-    let mut newest: BTreeMap<(&str, &str, &str), &Check> = BTreeMap::new();
-    for c in &pr.status_check_rollup {
-        let key = (c.kind.as_str(), c.workflow_name.as_str(), c.label());
-        let replaces = |old: &&Check| {
-            old.verdict().is_some() && (c.verdict().is_none() || old.started_at <= c.started_at)
-        };
-        if newest.get(&key).is_none_or(replaces) {
-            newest.insert(key, c);
-        }
-    }
-    let checks: Vec<&Check> = newest.into_values().collect();
+    let checks = newest_checks(pr);
     if checks.is_empty() {
         return Err("no checks ran on it".into());
     }
-    let named = |v: Option<bool>| -> Vec<&str> {
-        let them = checks.iter().filter(|c| c.verdict() == v);
-        them.map(|c| c.label()).take(3).collect()
-    };
-    let failed = named(Some(false));
-    if !failed.is_empty() {
-        return Err(format!("checks failed: {}", failed.join(", ")));
-    }
-    let pending = named(None);
-    if !pending.is_empty() {
-        return Err(format!("checks still running: {}", pending.join(", ")));
-    }
+    checks_settled(&checks)?;
     if !checks
         .iter()
         .any(|c| c.conclusion == "SUCCESS" || c.state == "SUCCESS")
     {
         return Err("no check passed: all were skipped".into());
     }
-    if pr.mergeable != "MERGEABLE" || pr.merge_state_status != "CLEAN" {
-        return Err(format!(
-            "GitHub says it isn't ready to merge ({}, {})",
-            pr.mergeable.to_lowercase(),
-            pr.merge_state_status.to_lowercase()
-        ));
-    }
+    ready(pr)?;
     let head = &pr.head_ref_oid;
     if head.len() != 40 || !head.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(format!("unexpected head commit {head:?}"));
@@ -317,6 +288,156 @@ pub fn check(policy: &MergePolicy, w: &Want, pr: &Pr) -> Result<MergeFacts, Stri
         },
         method: policy.method,
     })
+}
+
+/// Each check's newest run: a re-run counts only its newest, as the PR card has it; an
+/// unfinished run always counts, as a queued re-run may not have started.
+fn newest_checks(pr: &Pr) -> Vec<&Check> {
+    let mut newest: BTreeMap<(&str, &str, &str), &Check> = BTreeMap::new();
+    for c in &pr.status_check_rollup {
+        let key = (c.kind.as_str(), c.workflow_name.as_str(), c.label());
+        let replaces = |old: &&Check| {
+            old.verdict().is_some() && (c.verdict().is_none() || old.started_at <= c.started_at)
+        };
+        if newest.get(&key).is_none_or(replaces) {
+            newest.insert(key, c);
+        }
+    }
+    newest.into_values().collect()
+}
+
+/// Err if any of `checks` failed or is still running, naming up to three.
+fn checks_settled(checks: &[&Check]) -> Result<(), String> {
+    let named = |v: Option<bool>| -> Vec<&str> {
+        let them = checks.iter().filter(|c| c.verdict() == v);
+        them.map(|c| c.label()).take(3).collect()
+    };
+    let failed = named(Some(false));
+    if !failed.is_empty() {
+        return Err(format!("checks failed: {}", failed.join(", ")));
+    }
+    let pending = named(None);
+    if !pending.is_empty() {
+        return Err(format!("checks still running: {}", pending.join(", ")));
+    }
+    Ok(())
+}
+
+/// Err unless GitHub says `pr` can merge cleanly now.
+fn ready(pr: &Pr) -> Result<(), String> {
+    if pr.mergeable != "MERGEABLE" || pr.merge_state_status != "CLEAN" {
+        return Err(format!(
+            "GitHub says it isn't ready to merge ({}, {})",
+            pr.mergeable.to_lowercase(),
+            pr.merge_state_status.to_lowercase()
+        ));
+    }
+    Ok(())
+}
+
+/// What publishing an app draft does with its PR.
+#[derive(Debug, PartialEq)]
+pub enum DraftMerge {
+    Merge,
+    /// Already merged at the draft's head (an earlier publish whose activation failed).
+    Merged,
+}
+
+/// Whether app draft PR `pr` (fetched as `w`) may merge now. The owner's tap is the review:
+/// no policy, and a repo without CI is fine, but its head must still be `head` (what the
+/// draft was built from), and it must be open and ready, no check failed or still running.
+pub fn check_draft(w: &Want, pr: &Pr, head: &str) -> Result<DraftMerge, String> {
+    if pr.number != w.number {
+        return Err(format!("gh returned #{} for #{}", pr.number, w.number));
+    }
+    if !pr.head_ref_oid.eq_ignore_ascii_case(head) {
+        return Err(format!(
+            "it was pushed to after the draft was made (head {}, draft {})",
+            short(&pr.head_ref_oid),
+            short(head)
+        ));
+    }
+    match pr.state.as_str() {
+        "MERGED" => return Ok(DraftMerge::Merged),
+        "OPEN" => {}
+        s => return Err(format!("it is {}", s.to_lowercase())),
+    }
+    if pr.is_draft {
+        return Err("it is a draft PR".into());
+    }
+    checks_settled(&newest_checks(pr))?;
+    ready(pr)?;
+    Ok(DraftMerge::Merge)
+}
+
+/// `owner/name` of a GitHub remote URL (`git@github.com:o/n.git`, `https://github.com/o/n`).
+pub fn github_repo(remote: &str) -> Option<String> {
+    let path = (remote.strip_prefix("git@github.com:"))
+        .or_else(|| remote.strip_prefix("https://github.com/"))
+        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))?;
+    let path = path.trim_end_matches('/').trim_end_matches(".git");
+    let (o, n) = path.split_once('/')?;
+    (!o.is_empty() && !n.is_empty() && !n.contains('/')).then(|| format!("{o}/{n}"))
+}
+
+/// Merge app draft PR `w` at `head` if [`check_draft`] lets it, its repo being `apps_repo`'s
+/// origin. Ok: what happened. Err: why nothing was merged.
+pub async fn merge_draft(
+    gh: &std::ffi::OsStr,
+    apps_repo: &str,
+    w: &Want,
+    head: &str,
+) -> Result<String, String> {
+    let origin = crate::git::origin(apps_repo).await;
+    let ours = origin.as_deref().and_then(github_repo);
+    if !ours.is_some_and(|o| o.eq_ignore_ascii_case(&w.repo)) {
+        return Err(format!(
+            "{} isn't the apps repo ({apps_repo}'s origin is {})",
+            w.repo,
+            origin.as_deref().unwrap_or("unknown")
+        ));
+    }
+    let json =
+        (run_gh(gh, &view_args(w)).await).map_err(|e| format!("couldn't read the PR: {e}"))?;
+    match check_draft(w, &parse(&json)?, head)? {
+        DraftMerge::Merged => Ok(format!("{}#{} was merged already", w.repo, w.number)),
+        DraftMerge::Merge => {
+            merge_confirmed(gh, w, MergeMethod::Squash, head).await?;
+            Ok(format!(
+                "merged {}#{} (squash at {})",
+                w.repo,
+                w.number,
+                short(head)
+            ))
+        }
+    }
+}
+
+/// `gh` with `args`, its stdout; Err: why it failed.
+async fn run_gh(gh: &std::ffi::OsStr, args: &[String]) -> Result<String, String> {
+    (crate::pr::gh(gh, args, GH_TIMEOUT).await).map_err(crate::pr::GhError::why)
+}
+
+/// Merge `w` while its head is `head`, then read it back: Err unless it is merged now (gh
+/// exits 0 having only queued it on a repo with a merge queue).
+async fn merge_confirmed(
+    gh: &std::ffi::OsStr,
+    w: &Want,
+    method: MergeMethod,
+    head: &str,
+) -> Result<(), String> {
+    run_gh(gh, &merge_args(w, method, head)).await?;
+    let state = (run_gh(gh, &view_args(w)).await.ok())
+        .and_then(|json| parse(&json).ok())
+        .map(|pr| pr.state);
+    match state.as_deref() {
+        Some("MERGED") => Ok(()),
+        Some(s) => Err(format!(
+            "gh merged it, but it is {} (a merge queue?)",
+            s.to_lowercase()
+        )),
+        None => Err("gh merged it, but it couldn't be read back".into()),
+    }
 }
 
 /// How one `merge_pr` call ended.
@@ -467,21 +588,9 @@ impl Merger {
                 Err(o) => return o,
             }
         }
-        let args = merge_args(w, self.policy.method, &facts.head);
-        if let Err(why) = self.gh(&args).await {
-            return Outcome::Failed(why);
-        }
-        // gh exits 0 having only queued it on a repo with a merge queue: say so.
-        let state = (self.gh(&view_args(w)).await.ok())
-            .and_then(|json| parse(&json).ok())
-            .map(|pr| pr.state);
-        match state.as_deref() {
-            Some("MERGED") => Outcome::Merged(Box::new(facts)),
-            Some(s) => Outcome::Failed(format!(
-                "gh merged it, but it is {} (a merge queue?)",
-                s.to_lowercase()
-            )),
-            None => Outcome::Failed("gh merged it, but it couldn't be read back".into()),
+        match merge_confirmed(&self.gh, w, self.policy.method, &facts.head).await {
+            Ok(()) => Outcome::Merged(Box::new(facts)),
+            Err(why) => Outcome::Failed(why),
         }
     }
 
@@ -494,7 +603,7 @@ impl Merger {
     }
 
     async fn gh(&self, args: &[String]) -> Result<String, String> {
-        (crate::pr::gh(&self.gh, args, GH_TIMEOUT).await).map_err(crate::pr::GhError::why)
+        run_gh(&self.gh, args).await
     }
 }
 
@@ -552,6 +661,59 @@ mod tests {
 
     /// A change to the eligible PR's JSON.
     type Edit = fn(&mut Value);
+
+    #[test]
+    fn a_draft_pr_merges_open_ready_and_at_its_head_even_without_checks() {
+        let w = want7();
+        let ok = pr(|v| v["statusCheckRollup"] = json!([]));
+        assert_eq!(check_draft(&w, &ok, HEAD), Ok(DraftMerge::Merge));
+        let merged = pr(|v| v["state"] = json!("MERGED"));
+        assert_eq!(check_draft(&w, &merged, HEAD), Ok(DraftMerge::Merged));
+        let other = "a".repeat(40);
+        assert!(check_draft(&w, &ok, &other)
+            .unwrap_err()
+            .contains("pushed to"));
+        assert!(
+            check_draft(&w, &merged, &other).is_err(),
+            "merged at another head"
+        );
+        let refuse: [(Edit, &str); 6] = [
+            (|v| v["state"] = json!("CLOSED"), "closed"),
+            (|v| v["isDraft"] = json!(true), "draft PR"),
+            (|v| v["number"] = json!(8), "#8"),
+            (|v| v["mergeStateStatus"] = json!("BLOCKED"), "blocked"),
+            (
+                |v| v["statusCheckRollup"][0]["conclusion"] = json!("FAILURE"),
+                "failed",
+            ),
+            (
+                |v| v["statusCheckRollup"][0]["status"] = json!("IN_PROGRESS"),
+                "running",
+            ),
+        ];
+        for (edit, why) in refuse {
+            let got = check_draft(&w, &pr(edit), HEAD).unwrap_err();
+            assert!(got.contains(why), "{got}");
+        }
+    }
+
+    #[test]
+    fn github_remotes_name_their_repo() {
+        for url in [
+            "git@github.com:tommy-xr/mis-notes.git",
+            "https://github.com/tommy-xr/mis-notes",
+            "https://github.com/tommy-xr/mis-notes.git",
+            "ssh://git@github.com/tommy-xr/mis-notes.git",
+        ] {
+            assert_eq!(
+                github_repo(url).as_deref(),
+                Some("tommy-xr/mis-notes"),
+                "{url}"
+            );
+        }
+        assert_eq!(github_repo("https://gitlab.com/o/r"), None);
+        assert_eq!(github_repo("https://github.com/o/r/x"), None);
+    }
 
     fn refused(edit: impl FnOnce(&mut Value)) -> String {
         check(&policy(), &want7(), &pr(edit)).unwrap_err()

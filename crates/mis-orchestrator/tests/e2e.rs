@@ -5936,3 +5936,174 @@ async fn with_no_full_token_set_an_app_task_token_is_still_held_to_its_app() {
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// A PNG's magic and a byte: enough to be sniffed as one.
+const PNG: [u8; 9] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1];
+
+/// Answer the next query `worker` gets, a draft merge, with `result`; the query.
+async fn answer_merge(worker: &mut Ws, result: Result<String, String>) -> Query {
+    let OrchMsg::Query { req, query } = recv(worker).await else {
+        panic!("query")
+    };
+    let answer = Answer::Merged { result };
+    send(worker, &WorkerMsg::Answer { req, answer }).await;
+    query
+}
+
+/// Publish or discard pool's draft `id` as Access login `jwt`.
+async fn decide(mis: &str, action: &str, id: uuid::Uuid, jwt: &str) -> (u16, String) {
+    let body = Some((
+        "application/json".into(),
+        format!(r#"{{"id":"{id}"}}"#).into_bytes(),
+    ));
+    let path = format!("/api/apps/pool/draft/{action}");
+    call(
+        mis,
+        "POST",
+        &path,
+        &[("cf-access-jwt-assertion", jwt)],
+        body,
+    )
+    .await
+}
+
+async fn pool_view(mis: &str, headers: &[(&str, &str)]) -> AppView {
+    let (status, list) = call(mis, "GET", "/api/apps", headers, None).await;
+    assert_eq!(status, 200, "{list}");
+    let list: Vec<AppView> = serde_json::from_str(&list).unwrap();
+    list.into_iter().find(|a| a.slug == "pool").unwrap()
+}
+
+#[tokio::test]
+async fn an_app_task_proposes_a_draft_that_only_the_owner_publishes_or_discards() {
+    use base64ct::{Base64, Encoding};
+    let (mis, _, dir) = start_with_apps(behind_access()).await;
+    let live = "/api/apps/pool/releases?activate=true";
+    assert_eq!(publish(&mis, live, "s", &demo("v1")).await.0, 201);
+    for (email, role) in [("me@example.com", "owner"), ("jen@example.com", "editor")] {
+        let body = format!(r#"{{"email":"{email}","role":"{role}"}}"#);
+        assert_eq!(
+            post_json(&mis, "/api/apps/pool/members", "s", &body)
+                .await
+                .0,
+            200
+        );
+    }
+    let (_, mut worker) = join_as(&mis).await;
+    let change = serde_json::json!({"request": "Add a chart.", "slug": "pool", "change": true,
+        "harness": "claude"});
+    let auth = [("authorization", "Bearer s")];
+    let (task, token) = app_task(&mis, &mut worker, &auth, change).await;
+    assert_eq!(
+        publish(&mis, "/api/apps/pool/releases", &token, &demo("v2"))
+            .await
+            .0,
+        201
+    );
+
+    // Proposed with the task's token: a staged release, the PR, screenshots.
+    const PR: &str = "https://github.com/tommy-xr/mis-notes/pull/7";
+    let head = "d68ea1f8a9b4b0890914ce16e5539e480e68c07b";
+    let propose = |release: u32, before: &[u8]| {
+        serde_json::json!({"release": release, "pr": PR, "head": head, "note": " Try the chart. ",
+            "before": Base64::encode_string(before), "after": Base64::encode_string(&PNG)})
+        .to_string()
+    };
+    let path = "/api/apps/pool/draft";
+    let (status, why) = post_json(&mis, path, &token, &propose(1, &PNG)).await;
+    assert!(status == 400 && why.contains("live"), "{status} {why}");
+    let (status, why) = post_json(&mis, path, &token, &propose(2, b"<svg/>")).await;
+    assert!(status == 400 && why.contains("PNG"), "{status} {why}");
+    let (status, why) = post_json(&mis, "/api/apps/budget/draft", &token, &propose(2, &PNG)).await;
+    assert!(status == 403 && why.contains("pool"), "{status} {why}");
+    let (status, body) = post_json(&mis, path, &token, &propose(2, &PNG)).await;
+    assert_eq!(status, 201, "{body}");
+    let draft = pool_view(&mis, &auth).await.draft.unwrap();
+    assert_eq!(
+        (draft.release, draft.pr.as_str(), draft.task),
+        (2, PR, Some(task.id))
+    );
+    assert_eq!(
+        (draft.note.as_deref(), draft.before, draft.after),
+        (Some("Try the chart."), true, true)
+    );
+    let (status, png) = call(&mis, "GET", "/api/apps/pool/draft/after", &auth, None).await;
+    assert!(status == 200 && png.contains("PNG"), "{status}");
+
+    // An editor sees it, read-only; the owner's publish merges the PR first.
+    let jen = access_jwt_for(ACCESS_AUD, "jen@example.com");
+    let me = access_jwt_for(ACCESS_AUD, "me@example.com");
+    let as_jen = [("cf-access-jwt-assertion", jen.as_str())];
+    let as_me = [("cf-access-jwt-assertion", me.as_str())];
+    assert_eq!(pool_view(&mis, &as_jen).await.role, Some(AppRole::Editor));
+    assert_eq!(pool_view(&mis, &as_me).await.role, Some(AppRole::Owner));
+    let id = draft.id;
+    let (status, why) = decide(&mis, "publish", id, &jen).await;
+    assert!(status == 403 && why.contains("owner"), "{status} {why}");
+    assert_eq!(
+        decide(&mis, "publish", uuid::Uuid::new_v4(), &me).await.0,
+        409
+    );
+    // A screenshot is served for its own draft only.
+    let stale = format!("/api/apps/pool/draft/after?id={}", uuid::Uuid::new_v4());
+    assert_eq!(call(&mis, "GET", &stale, &auth, None).await.0, 404);
+
+    // A PR that won't merge leaves nothing live, and says why on the draft.
+    let (got, query) = tokio::join!(
+        decide(&mis, "publish", id, &me),
+        answer_merge(&mut worker, Err("checks failed: build".into()))
+    );
+    assert!(got.0 == 409 && got.1.contains("checks failed"), "{got:?}");
+    let Query::MergeDraft {
+        cwd,
+        repo,
+        number,
+        head: h,
+    } = query
+    else {
+        panic!("{query:?}")
+    };
+    assert_eq!(
+        (cwd.as_str(), repo.as_str(), number),
+        ("~/code/mis-notes", "tommy-xr/mis-notes", 7)
+    );
+    assert_eq!(h, head);
+    let pool = pool_view(&mis, &as_me).await;
+    assert_eq!(pool.active, Some(1));
+    assert_eq!(
+        pool.draft.unwrap().error.as_deref(),
+        Some("checks failed: build")
+    );
+    // Merged: live, and the draft is done.
+    let (got, _) = tokio::join!(
+        decide(&mis, "publish", id, &me),
+        answer_merge(&mut worker, Ok("merged".into()))
+    );
+    assert_eq!(got.0, 204, "{got:?}");
+    let pool = pool_view(&mis, &as_me).await;
+    assert_eq!((pool.active, pool.draft), (Some(2), None));
+
+    // Discarded: gone, nothing live changes, no merge.
+    assert_eq!(
+        publish(&mis, "/api/apps/pool/releases", &token, &demo("v3"))
+            .await
+            .0,
+        201
+    );
+    assert_eq!(
+        post_json(&mis, path, &token, &propose(3, &PNG)).await.0,
+        201
+    );
+    let id = pool_view(&mis, &auth).await.draft.unwrap().id;
+    assert_eq!(decide(&mis, "discard", id, &jen).await.0, 403);
+    assert_eq!(decide(&mis, "discard", id, &me).await.0, 204);
+    let pool = pool_view(&mis, &as_me).await;
+    assert_eq!((pool.active, pool.draft), (Some(2), None));
+    assert_eq!(
+        call(&mis, "GET", "/api/apps/pool/draft/after", &auth, None)
+            .await
+            .0,
+        404
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}

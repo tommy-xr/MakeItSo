@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::TimeZone;
-use mis_types::{AppBackup, AppMember, AppRelease, AppRole, AppView, Restored};
+use mis_types::{
+    AppBackup, AppDraft, AppMember, AppRelease, AppRole, AppView, ProposeDraft, Restored,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -30,6 +32,9 @@ const MANIFEST: &str = "app.json";
 const META: &str = ".release.json";
 /// Beside `releases/`, so no bundle can ship or replace it.
 pub(crate) const POLICY: &str = "policy.json";
+/// `<slug>/draft/`: the current draft (`draft.json`, `before`, `after`), replaced whole.
+const DRAFT: &str = "draft";
+const DRAFT_FILE: &str = "draft.json";
 use mis_types::MAX_APP_TITLE_CHARS as MAX_TITLE_CHARS;
 
 pub use mis_types::valid_slug;
@@ -303,6 +308,14 @@ pub enum PublishError {
     NoSuchApp,
     Exists,
     Io(anyhow::Error),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum DraftError {
+    NoSuchApp,
+    /// Not a draft this app can have.
+    Invalid(String),
+    Io(String),
 }
 
 #[derive(Debug, PartialEq)]
@@ -595,6 +608,102 @@ impl Apps {
         Ok(policy.list())
     }
 
+    /// Make `p` `slug`'s draft (proposed by `task` at Unix millis `at`), replacing any: built
+    /// beside it, then renamed into place whole.
+    pub fn propose(
+        &self,
+        slug: &str,
+        p: &ProposeDraft,
+        task: Option<uuid::Uuid>,
+        at: u64,
+    ) -> Result<AppDraft, DraftError> {
+        let shot = |what, b64: &Option<String>| {
+            (b64.as_deref().map(|b| crate::drafts::image(what, b)))
+                .transpose()
+                .map_err(DraftError::Invalid)
+        };
+        let (before, after) = (shot("before", &p.before)?, shot("after", &p.after)?);
+        let _held = self.lock.lock().unwrap();
+        let ns = self.release_ns(slug);
+        if ns.is_empty() {
+            return Err(DraftError::NoSuchApp);
+        }
+        let pr = crate::drafts::check(p, &ns, self.active_n(slug)).map_err(DraftError::Invalid)?;
+        let note = p.note.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let draft = AppDraft {
+            id: uuid::Uuid::new_v4(),
+            release: p.release,
+            pr,
+            head: p.head.trim().to_ascii_lowercase(),
+            note: note.map(String::from),
+            before: before.is_some(),
+            after: after.is_some(),
+            task,
+            at,
+            error: None,
+        };
+        let app = self.dir.join(slug);
+        let tmp = app.join(format!(".draft-{}", uuid::Uuid::new_v4()));
+        let json = serde_json::to_vec(&draft).expect("draft serializes");
+        let files = [
+            (DRAFT_FILE, Some(json)),
+            ("before", before),
+            ("after", after),
+        ];
+        let written = crate::images::private_dir(&tmp).and_then(|()| {
+            for (name, bytes) in files {
+                if let Some(b) = bytes {
+                    crate::push::write_private(&tmp.join(name), &b)?;
+                }
+            }
+            match std::fs::remove_dir_all(app.join(DRAFT)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+            Ok(std::fs::rename(&tmp, app.join(DRAFT))?)
+        });
+        if let Err(e) = written {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(DraftError::Io(format!("{e:#}")));
+        }
+        Ok(draft)
+    }
+
+    /// `slug`'s draft, if it has one.
+    pub fn draft(&self, slug: &str) -> Option<AppDraft> {
+        let raw = std::fs::read(self.dir.join(slug).join(DRAFT).join(DRAFT_FILE)).ok()?;
+        serde_json::from_slice(&raw).ok()
+    }
+
+    /// The draft's `before` or `after` screenshot.
+    pub fn draft_shot(&self, slug: &str, after: bool) -> Option<Vec<u8>> {
+        let name = if after { "after" } else { "before" };
+        std::fs::read(self.dir.join(slug).join(DRAFT).join(name)).ok()
+    }
+
+    /// Drop `slug`'s draft if it is still proposal `id`: whether it was.
+    pub fn end_draft(&self, slug: &str, id: uuid::Uuid) -> bool {
+        let _held = self.lock.lock().unwrap();
+        if self.draft(slug).is_none_or(|d| d.id != id) {
+            return false;
+        }
+        std::fs::remove_dir_all(self.dir.join(slug).join(DRAFT)).is_ok()
+    }
+
+    /// Note on `slug`'s draft, if still proposal `id`, why publishing it didn't happen.
+    pub fn draft_failed(&self, slug: &str, id: uuid::Uuid, why: &str) {
+        let _held = self.lock.lock().unwrap();
+        let Some(mut d) = self.draft(slug).filter(|d| d.id == id) else {
+            return;
+        };
+        d.error = Some(why.into());
+        let path = self.dir.join(slug).join(DRAFT).join(DRAFT_FILE);
+        let json = serde_json::to_vec(&d).expect("draft serializes");
+        if let Err(e) = crate::push::write_private(&path, &json) {
+            tracing::warn!("apps/{slug}: noting a failed publish: {e}");
+        }
+    }
+
     /// `/a/<slug>/` on this server, if it is served.
     pub fn url(&self, slug: &str) -> Option<String> {
         Some(format!("{}/a/{slug}/", self.base_url.as_ref()?))
@@ -637,6 +746,8 @@ impl Apps {
             active,
             releases,
             members: self.policy(slug).list(),
+            draft: self.draft(slug),
+            role: None,
         })
     }
 }
