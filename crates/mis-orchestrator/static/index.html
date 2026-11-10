@@ -4310,6 +4310,7 @@ function renderNotes(path) {
   const text = noteText(front.body, dir);
   const assets = (Array.isArray(front.meta.assets) ? front.meta.assets : []).map((a) => notePath(dir, String(a))).filter(Boolean);
   const mover = /^inbox\/[^/]+$/.test(path) && !readOnly ? noteMover(path, got.hash) : '';
+  notesDrawn[2] = noteMove; // a new card, if noteMover started one, is what's drawn
   body.replaceChildren(...stale, mover, noteChips(path, front.meta), text, ...assets.map((a) => noteFig(a, noteHref(a))));
 }
 
