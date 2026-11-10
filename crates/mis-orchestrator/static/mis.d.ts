@@ -51,8 +51,10 @@ declare namespace Mis {
     user: string;
     role: Role;
     app: string;
-    /** The draft release its owner is trying, on a copy of the records; absent: the live app. */
+    /** The draft release they are trying, on a copy of the records; absent: the live app. */
     draft?: number;
+    /** The app's current draft, which owners and editors may try (`/a/<slug>/?draft=<n>`). */
+    drafted?: number;
   }
 
   /** Every record the caller can see, by collection. */

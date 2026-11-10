@@ -77,7 +77,7 @@
     globalThis.mis = { ...front(ready), mock: { seed: via('seed'), setRole: via('setRole') } };
   } else {
     const slug = location.pathname.split('/')[2];
-    // Set by the apps listener when its owner tries the app's draft.
+    // Set by the apps listener when an owner or editor tries the app's draft.
     const draft = (new RegExp(`(?:^|; )mis-draft-${slug}=(\\d+)`).exec(document.cookie || '') || [])[1];
     globalThis.mis = front(Promise.resolve(client(`/a/${slug}/api/v1/`, draft)));
     if (draft) draftBadge(slug, draft);

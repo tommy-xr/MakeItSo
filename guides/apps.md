@@ -35,7 +35,7 @@ live. Nothing you do goes live.
    at, so commit and push first):
    `mis apps propose <slug> --release <n> --pr <url> --before before.png --after after.png --note "<what changed, what to try>"`.
    Shots: 390 px, the same screen and data before (`origin/main`) and after; a new app has no
-   before. The owner tries the draft (`/a/<slug>/?draft=<n>`: that release on a throwaway
+   before. The owner and editors try the draft (`/a/<slug>/?draft=<n>`: that release on a throwaway
    copy of the app's records, so it must work on real data), then publishes it (merges the PR, makes it live),
    discards it, or replies in this thread asking for changes: then push to the same branch,
    publish a new release and propose it again; it replaces the draft.

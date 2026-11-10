@@ -166,7 +166,7 @@ async fn guard(
 }
 
 /// A `Set-Cookie` dropping the draft cookie a page or file request carries if it no longer
-/// applies (the draft was replaced or decided, or the asker isn't its owner).
+/// applies (the draft was replaced or decided, or the asker is a viewer).
 fn stale_draft_cookie(req: &Request) -> Option<String> {
     req.extensions()
         .get::<Member>()
@@ -399,6 +399,9 @@ async fn me(
     Json(AppMe {
         user: m.subject.name().into(),
         role: m.role,
+        drafted: (app_access::may_try(m.role))
+            .then(|| apps.draft(&slug).map(|d| d.release))
+            .flatten(),
         app: slug,
         draft: m.draft,
     })
@@ -611,7 +614,7 @@ struct EntryParams {
     draft: Option<String>,
 }
 
-/// The app's entry page. `?draft=<n>`: its owner tries draft n (its release, on a copy of the
+/// The app's entry page. `?draft=<n>`: an owner or editor tries draft n (its release, on a copy of the
 /// records); `?draft=off` leaves it. Either sets a cookie, then goes back to the bare URL.
 async fn entry(
     State(apps): State<Arc<Apps>>,

@@ -76,7 +76,7 @@ pub fn role_of(policy: &Policy, subject: &Subject) -> Option<AppRole> {
     }
 }
 
-/// The cookie that puts `/a/<slug>/` in draft mode for its owner. Only a selector (each
+/// The cookie that puts `/a/<slug>/` in draft mode for an owner or editor. Only a selector (each
 /// request is checked again), so not HttpOnly: `mis.js` reads it to say it's a draft.
 pub fn draft_cookie_name(slug: &str) -> String {
     format!("mis-draft-{slug}")
@@ -109,11 +109,16 @@ pub enum Serve {
     Gone,
 }
 
+/// Whether `role` may try an app's draft: owners and editors (viewers see only the live app).
+pub fn may_try(role: AppRole) -> bool {
+    allows(role, Action::Write)
+}
+
 /// What a request asking for draft `asked` (cookie or header) gets, `current` being the app's
 /// draft now.
 pub fn draft_of(asked: Option<u32>, api: bool, role: AppRole, current: Option<u32>) -> Serve {
     match asked {
-        Some(n) if role == AppRole::Owner && current == Some(n) => Serve::Draft(n),
+        Some(n) if may_try(role) && current == Some(n) => Serve::Draft(n),
         Some(_) if api => Serve::Gone,
         _ => Serve::Live,
     }
@@ -263,7 +268,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_the_owner_tries_the_current_draft_named_by_its_cookie() {
+    fn owners_and_editors_try_the_current_draft_named_by_its_cookie() {
         use AppRole::*;
         let c = Some("a=1; mis-draft-pool=3; mis-draft-budget=7");
         assert_eq!(cookie_draft(c, "pool"), Some(3));
@@ -275,7 +280,8 @@ mod tests {
             assert_eq!(draft_of(Some(3), api, Owner, Some(3)), Serve::Draft(3));
             assert_eq!(draft_of(None, api, Owner, Some(3)), Serve::Live);
         }
-        for (role, current) in [(Editor, Some(3)), (Owner, Some(4)), (Owner, None)] {
+        assert_eq!(draft_of(Some(3), true, Editor, Some(3)), Serve::Draft(3));
+        for (role, current) in [(Viewer, Some(3)), (Owner, Some(4)), (Owner, None)] {
             assert_eq!(draft_of(Some(3), false, role, current), Serve::Live);
             assert_eq!(draft_of(Some(3), true, role, current), Serve::Gone);
         }

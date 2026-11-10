@@ -6109,7 +6109,7 @@ async fn an_app_task_proposes_a_draft_that_only_the_owner_publishes_or_discards(
 }
 
 #[tokio::test]
-async fn the_owner_tries_a_draft_on_a_copy_of_the_records_that_goes_with_it() {
+async fn owners_and_editors_try_a_draft_on_a_copy_of_the_records_that_goes_with_it() {
     let dev = mis_orchestrator::apps_http::Auth {
         dev: true,
         ..Default::default()
@@ -6131,9 +6131,16 @@ async fn the_owner_tries_a_draft_on_a_copy_of_the_records_that_goes_with_it() {
         201
     );
 
-    // Only the owner gets in, for the current draft; an old cookie doesn't undo entering.
-    let editor = "\r\nX-Mis-Dev-Role: editor";
-    assert_eq!(app_get(&apps, "/a/demo/?draft=2", editor).await.0, 404);
+    // Owners and editors are told of it and get in, for the current draft only; viewers never.
+    let (editor, viewer) = ("\r\nX-Mis-Dev-Role: editor", "\r\nX-Mis-Dev-Role: viewer");
+    let me = "/a/demo/api/v1/me";
+    assert!(app_get(&apps, me, editor)
+        .await
+        .2
+        .contains(r#""drafted":2"#));
+    assert!(!app_get(&apps, me, viewer).await.2.contains("drafted"));
+    assert_eq!(app_get(&apps, "/a/demo/?draft=2", viewer).await.0, 404);
+    assert_eq!(app_get(&apps, "/a/demo/?draft=2", editor).await.0, 303);
     assert_eq!(app_get(&apps, "/a/demo/?draft=3", "").await.0, 404);
     let (status, head, _) =
         app_get(&apps, "/a/demo/?draft=2", "\r\nCookie: mis-draft-demo=1").await;
@@ -6149,8 +6156,20 @@ async fn the_owner_tries_a_draft_on_a_copy_of_the_records_that_goes_with_it() {
     // In it: the draft's page and a copy of the records; writes stay in the copy.
     assert_eq!(app_get(&apps, "/a/demo/", page).await.2, "v2");
     assert_eq!(app_get(&apps, "/a/demo/", "").await.2, "v1");
-    let me = "/a/demo/api/v1/me";
     assert!(app_get(&apps, me, api).await.2.contains(r#""draft":2"#));
+    let editor_write = format!("{api}{editor}");
+    assert_eq!(
+        app_post(&apps, MUTATIONS, &editor_write, &op("by-editor"))
+            .await
+            .0,
+        200
+    );
+    let by_editor = "/a/demo/api/v1/records/shared/notes/by-editor";
+    assert_eq!(
+        app_get(&apps, by_editor, "").await.0,
+        404,
+        "an editor's draft write stays in the copy"
+    );
     let one = "/a/demo/api/v1/records/shared/notes/real";
     assert_eq!(
         app_get(&apps, one, api).await.0,
@@ -6165,14 +6184,14 @@ async fn the_owner_tries_a_draft_on_a_copy_of_the_records_that_goes_with_it() {
         404,
         "never in the real records"
     );
-    // Not the owner: the live page; the API refuses rather than serve live data.
+    // A viewer: the live page; the API refuses rather than serve live data.
     assert_eq!(
-        app_get(&apps, "/a/demo/", &format!("{page}{editor}"))
+        app_get(&apps, "/a/demo/", &format!("{page}{viewer}"))
             .await
             .2,
         "v1"
     );
-    assert_eq!(app_get(&apps, me, &format!("{api}{editor}")).await.0, 409);
+    assert_eq!(app_get(&apps, me, &format!("{api}{viewer}")).await.0, 409);
 
     // Discarded: a page left open can't write anywhere; its cookie is dropped on reload.
     let (_, list) = get_json(&mis, "/api/apps", "s").await;
