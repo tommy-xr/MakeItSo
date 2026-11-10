@@ -2,6 +2,8 @@
 //! reply held to the folders [`crate::filing::dests`] allows. Pure; the App runs the model
 //! after each publisher run and keeps the answers in `<state>/captures/suggestions.json`.
 
+use std::collections::BTreeSet;
+
 use mis_types::{NoteSuggestion, NoteSuggestions, Project};
 use serde::Deserialize;
 
@@ -21,8 +23,31 @@ pub struct Note {
     pub path: String,
     /// sha256 (hex) of its bytes, as a filing checks them.
     pub hash: String,
-    /// Its first [`MAX_NOTE_BYTES`] bytes, as text.
+    /// Its first [`MAX_NOTE_BYTES`] at most, cut between characters.
     pub text: String,
+}
+
+/// The note at `path` from its `bytes` (as a filing reads them): hashed whole, the text cut.
+pub fn note(path: String, bytes: &[u8]) -> Note {
+    let mut end = bytes.len().min(MAX_NOTE_BYTES);
+    // Back off a character the cut would split (UTF-8 continuation bytes are 0b10xxxxxx).
+    while end < bytes.len() && end > 0 && bytes[end] & 0xC0 == 0x80 {
+        end -= 1;
+    }
+    Note {
+        path,
+        hash: crate::capture::sha256(bytes),
+        text: String::from_utf8_lossy(&bytes[..end]).into_owned(),
+    }
+}
+
+/// The inbox at a run's HEAD.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Inbox {
+    /// Every `inbox/*.md`.
+    pub paths: BTreeSet<String>,
+    /// The newest [`MAX_NOTES`] of them, read.
+    pub notes: Vec<Note>,
 }
 
 /// A folder a note may be filed in, and what the prompt says of it.
@@ -75,15 +100,10 @@ pub fn dests(paths: &[String], projects: &[Project]) -> Vec<Dest> {
         .collect()
 }
 
-/// Prompt asking which of `dests` `note` (its Markdown, frontmatter included, capped at
-/// [`MAX_NOTE_BYTES`]) belongs in, and for a one-line summary, as JSON. Its `project:` or
-/// first `#tag` is a hint.
+/// Prompt asking which of `dests` `note` (its Markdown, frontmatter included, as [`note`]
+/// cuts it) belongs in, and for a one-line summary, as JSON. Its `project:` or first `#tag`
+/// is a hint.
 pub fn prompt(note: &str, dests: &[Dest]) -> String {
-    let mut end = note.len().min(MAX_NOTE_BYTES);
-    while !note.is_char_boundary(end) {
-        end -= 1;
-    }
-    let note = &note[..end];
     let list: String = (dests.iter())
         .map(|d| match d.about.as_str() {
             "" => format!("- {}\n", d.path),
@@ -168,22 +188,35 @@ fn cut(s: &str) -> String {
     crate::summary::cut(&line, 120)
 }
 
-/// The notes in `inbox` with no suggestion for their current hash, after dropping from
-/// `store` the paths no longer in `inbox`.
-pub fn pending<'a>(store: &mut NoteSuggestions, inbox: &'a [Note]) -> Vec<&'a Note> {
-    store.retain(|path, _| inbox.iter().any(|n| &n.path == path));
-    let fresh = |n: &&Note| store.get(&n.path).is_some_and(|s| s.hash == n.hash);
-    inbox.iter().filter(|n| !fresh(n)).collect()
+/// sha256 (hex) of the folder paths, to tell when they change.
+fn folders(dests: &[Dest]) -> String {
+    let paths: Vec<&str> = dests.iter().map(|d| d.path.as_str()).collect();
+    crate::capture::sha256(paths.join("\n").as_bytes())
 }
 
-/// `reply` for `note`, made at `at` (unix ms).
-pub fn suggestion(note: &Note, reply: Reply, at: u64) -> NoteSuggestion {
+/// The inbox's newest notes that need a suggestion, after dropping from `store` the paths
+/// no longer in the inbox. A suggestion holds while its note's hash does, and its folder is
+/// still one of `dests` (for [`NONE`]: while the folders are the ones it chose from).
+pub fn pending<'a>(store: &mut NoteSuggestions, inbox: &'a Inbox, dests: &[Dest]) -> Vec<&'a Note> {
+    store.retain(|path, _| inbox.paths.contains(path));
+    let now = folders(dests);
+    let holds = |s: &NoteSuggestion| match s.dest.as_str() {
+        NONE => s.folders == now,
+        dest => dests.iter().any(|d| d.path == dest),
+    };
+    let fresh = |n: &&Note| (store.get(&n.path)).is_some_and(|s| s.hash == n.hash && holds(s));
+    inbox.notes.iter().filter(|n| !fresh(n)).collect()
+}
+
+/// `reply` for `note`, chosen from `dests`, made at `at` (unix ms).
+pub fn suggestion(note: &Note, reply: Reply, dests: &[Dest], at: u64) -> NoteSuggestion {
     NoteSuggestion {
         hash: note.hash.clone(),
         dest: reply.dest,
         summary: reply.summary,
         at,
         error: reply.error,
+        folders: folders(dests),
     }
 }
 
@@ -212,7 +245,7 @@ mod tests {
         )
     }
 
-    fn note(path: &str, hash: &str) -> Note {
+    fn at(path: &str, hash: &str) -> Note {
         let (path, hash) = (path.into(), hash.into());
         Note {
             path,
@@ -260,12 +293,15 @@ mod tests {
     }
 
     #[test]
-    fn the_note_is_cut_at_4_kb_between_characters() {
+    fn a_note_is_hashed_whole_and_cut_at_4_kb_between_characters() {
         let md = format!("---\nvia: share\n---\n{}", "é".repeat(MAX_NOTE_BYTES));
-        let p = prompt(&md, &some_dests());
-        let shown = p.split_once("Note:\n").unwrap().1;
-        assert!(md.starts_with(shown));
-        assert_eq!(shown.len(), MAX_NOTE_BYTES - 1, "é is 2 bytes; 17 + 2n");
+        let n = note("inbox/a.md".into(), md.as_bytes());
+        assert_eq!(n.hash, crate::capture::sha256(md.as_bytes()));
+        assert!(md.starts_with(&n.text));
+        assert_eq!(n.text.len(), MAX_NOTE_BYTES - 1, "é is 2 bytes; 17 + 2n");
+        assert_eq!(note("x".into(), b"short").text, "short");
+        let p = prompt(&n.text, &some_dests());
+        assert!(p.ends_with(&format!("Note:\n{}", n.text)));
     }
 
     #[test]
@@ -318,32 +354,65 @@ mod tests {
     }
 
     #[test]
-    fn pending_is_new_or_changed_notes_and_gone_ones_are_dropped() {
+    fn pending_is_new_or_changed_notes_and_only_gone_ones_are_dropped() {
+        let d = some_dests();
         let made = |hash: &str| NoteSuggestion {
             hash: hash.into(),
-            dest: NONE.into(),
+            dest: "archive".into(),
             summary: String::new(),
             at: 1,
             error: None,
+            folders: folders(&d),
         };
         let mut store: NoteSuggestions = [
             ("inbox/a.md".to_string(), made("1")),
             ("inbox/b.md".into(), made("1")),
+            ("inbox/old.md".into(), made("1")),
             ("inbox/gone.md".into(), made("1")),
         ]
         .into();
-        let inbox = [
-            note("inbox/a.md", "1"),
-            note("inbox/b.md", "2"),
-            note("inbox/c.md", "1"),
-        ];
-        let todo: Vec<&str> = (pending(&mut store, &inbox).iter())
+        // `old.md` is in the inbox but past the newest: kept, not asked about.
+        let inbox = Inbox {
+            paths: ["a", "b", "c", "old"]
+                .map(|n| format!("inbox/{n}.md"))
+                .into(),
+            notes: vec![
+                at("inbox/a.md", "1"),
+                at("inbox/b.md", "2"),
+                at("inbox/c.md", "1"),
+            ],
+        };
+        let todo: Vec<&str> = (pending(&mut store, &inbox, &d).iter())
             .map(|n| n.path.as_str())
             .collect();
         assert_eq!(todo, ["inbox/b.md", "inbox/c.md"]);
-        assert_eq!(
-            store.keys().collect::<Vec<_>>(),
-            ["inbox/a.md", "inbox/b.md"]
-        );
+        let kept: Vec<&String> = store.keys().collect();
+        assert_eq!(kept, ["inbox/a.md", "inbox/b.md", "inbox/old.md"]);
+    }
+
+    #[test]
+    fn a_suggestion_is_remade_when_its_folder_goes_or_for_none_when_folders_change() {
+        let d = some_dests();
+        let a = at("inbox/a.md", "1");
+        let inbox = Inbox {
+            paths: ["inbox/a.md".to_string()].into(),
+            notes: vec![a.clone()],
+        };
+        let reply = |dest: &str| Reply {
+            dest: dest.into(),
+            summary: String::new(),
+            error: None,
+        };
+        let asks = |dest: &str, made_from: &[Dest], now: &[Dest]| {
+            let s = suggestion(&a, reply(dest), made_from, 1);
+            let mut store: NoteSuggestions = [(a.path.clone(), s)].into();
+            !pending(&mut store, &inbox, now).is_empty()
+        };
+        let fewer = &d[1..];
+        assert!(!asks("projects/mis", &d, &d));
+        assert!(asks("projects/mis", &d, fewer), "its folder is gone");
+        assert!(!asks("areas/home", &d, fewer), "its folder is still there");
+        assert!(!asks(NONE, &d, &d));
+        assert!(asks(NONE, &d, fewer), "the folders changed");
     }
 }

@@ -59,6 +59,8 @@ pub mod tools;
 /// leaving it in Planning forever.
 const PLANNER_TIMEOUT: Duration = Duration::from_secs(90);
 const SUMMARY_TIMEOUT: Duration = Duration::from_secs(60);
+/// Failed suggestion calls in a row that end a pass: likely offline or logged out.
+const SUGGEST_FAILURES: usize = 2;
 /// How often the ledger is saved (only files that changed are written).
 const SAVE_EVERY: Duration = Duration::from_secs(1);
 /// How often tasks past `ledger::persist::KEEP_MS` are forgotten.
@@ -573,35 +575,40 @@ impl App {
     }
 
     /// After each publisher run (the first is at start), suggest where each inbox note goes
-    /// that has no suggestion for its current text.
+    /// that needs it. The suggestions are kept here and saved after each change, so a
+    /// failed save never brings on another call.
     async fn suggest_loop(self, notes: Arc<notes::Notes>, agent: Arc<dyn Agent>) {
+        let file = notes.suggestions_file();
+        let mut store = load_suggestions(&file);
         loop {
             notes.ran().await;
-            self.suggest(&notes, agent.as_ref()).await;
+            self.suggest(&notes, agent.as_ref(), &file, &mut store)
+                .await;
         }
     }
 
-    /// One pass over [`file_suggest::pending`], saving each answer as it comes. A failed
-    /// call (offline, logged out, timed out) ends the pass: the rest wait for the next run.
-    async fn suggest(&self, notes: &notes::Notes, agent: &dyn Agent) {
+    /// One pass over [`file_suggest::pending`]. A failed call (offline, logged out, timed
+    /// out) stores nothing; [`SUGGEST_FAILURES`] in a row end the pass, the rest wait for
+    /// the next run.
+    async fn suggest(
+        &self,
+        notes: &notes::Notes,
+        agent: &dyn Agent,
+        file: &std::path::Path,
+        store: &mut mis_types::NoteSuggestions,
+    ) {
         let Some(inbox) = notes.inbox() else {
             return;
         };
-        let file = notes.suggestions_file();
-        let mut store = load_suggestions(&file);
-        let before = store.len();
-        let todo: Vec<_> = (file_suggest::pending(&mut store, &inbox).into_iter())
-            .cloned()
-            .collect();
-        if store.len() != before {
-            save_suggestions(&file, &store);
-        }
-        if todo.is_empty() {
-            return;
-        }
         let clone = notes.clone_dir().to_path_buf();
         let read = tokio::task::spawn_blocking(move || projects::list(&clone));
         let dests = file_suggest::dests(&notes.dests(), &read.await.expect("reads").0);
+        let before = store.len();
+        let todo = file_suggest::pending(store, &inbox, &dests);
+        if store.len() != before {
+            save_suggestions(file, store);
+        }
+        let mut failed = 0;
         for note in todo {
             let mut reply = Err("no reply".to_string());
             run_oneshot(
@@ -621,14 +628,18 @@ impl App {
             .await;
             match reply {
                 Ok(reply) => {
+                    failed = 0;
                     let r = file_suggest::parse(&reply, &dests);
-                    let s = file_suggest::suggestion(&note, r, unix_ms());
-                    store.insert(note.path, s);
-                    save_suggestions(&file, &store);
+                    let s = file_suggest::suggestion(note, r, &dests, unix_ms());
+                    store.insert(note.path.clone(), s);
+                    save_suggestions(file, store);
                 }
                 Err(why) => {
                     tracing::warn!(path = %note.path, "suggesting where a note goes: {why}");
-                    return;
+                    failed += 1;
+                    if failed == SUGGEST_FAILURES {
+                        return;
+                    }
                 }
             }
         }
@@ -1933,14 +1944,17 @@ fn save_suggestions(file: &std::path::Path, store: &mis_types::NoteSuggestions) 
 }
 
 /// Where each inbox note might be filed, as last suggested: `{}` with notes or suggestions
-/// off. Read-only, like the sync status.
+/// off. Auth as for the tree: summaries quote notes.
 async fn notes_suggestions(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
-    if !app.admit(&headers, peer, "/api/notes/suggestions").await {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if let Err(refused) = app
+        .admit_full(&headers, peer, "/api/notes/suggestions")
+        .await
+    {
+        return refused.into_response();
     }
     let Some(file) = app.notes.as_ref().map(|n| n.suggestions_file()) else {
         return Json(mis_types::NoteSuggestions::new()).into_response();

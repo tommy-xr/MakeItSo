@@ -293,8 +293,8 @@ pub struct Notes {
     moves: Mutex<Vec<(NoteMove, oneshot::Sender<Filed>)>>,
     /// Where notes may be filed, as of the last run's HEAD.
     dests: Mutex<Vec<String>>,
-    /// The inbox's newest notes as of the last run that could list them; None before one.
-    inbox: Mutex<Option<Vec<crate::file_suggest::Note>>>,
+    /// The inbox as of the last run that could list it; None before one.
+    inbox: Mutex<Option<crate::file_suggest::Inbox>>,
     /// Woken at the end of each run.
     ran: tokio::sync::Notify,
     /// Woken by each filing queued.
@@ -348,9 +348,8 @@ impl Notes {
         self.dests.lock().unwrap().clone()
     }
 
-    /// The inbox's newest notes ([`crate::file_suggest::MAX_NOTES`]) at the last run's HEAD;
-    /// None until a run lists them.
-    pub fn inbox(&self) -> Option<Vec<crate::file_suggest::Note>> {
+    /// The inbox at the last run's HEAD; None until a run lists it.
+    pub fn inbox(&self) -> Option<crate::file_suggest::Inbox> {
         self.inbox.lock().unwrap().clone()
     }
 
@@ -779,23 +778,21 @@ impl Notes {
         }
     }
 
-    /// HEAD's newest `inbox/*.md`, by name, read (and hashed) as a filing reads them.
-    fn inbox_notes(&self) -> Result<Vec<crate::file_suggest::Note>, Failure> {
+    /// HEAD's `inbox/*.md`, the newest ([`crate::file_suggest::MAX_NOTES`], by name) read
+    /// as a filing reads them.
+    fn inbox_notes(&self) -> Result<crate::file_suggest::Inbox, Failure> {
         let note = |p: &String| crate::notes_view::kind(p, false) == mis_types::NoteKind::Md;
-        let mut paths: Vec<String> = (self.modes(&[&format!("{INBOX}/")])?.into_keys())
-            .filter(note)
-            .collect();
-        paths.sort_by(|a, b| b.cmp(a));
-        paths.truncate(crate::file_suggest::MAX_NOTES);
-        Ok((paths.into_iter())
-            .filter_map(|path| {
-                let bytes = crate::apps::read_file(&self.clone, &path)?;
-                let hash = crate::capture::sha256(&bytes);
-                let head = &bytes[..bytes.len().min(crate::file_suggest::MAX_NOTE_BYTES)];
-                let text = String::from_utf8_lossy(head).into_owned();
-                Some(crate::file_suggest::Note { path, hash, text })
+        let paths: std::collections::BTreeSet<String> =
+            (self.modes(&[&format!("{INBOX}/")])?.into_keys())
+                .filter(note)
+                .collect();
+        let notes = (paths.iter().rev().take(crate::file_suggest::MAX_NOTES))
+            .filter_map(|p| {
+                let bytes = crate::apps::read_file(&self.clone, p)?;
+                Some(crate::file_suggest::note(p.clone(), &bytes))
             })
-            .collect())
+            .collect();
+        Ok(crate::file_suggest::Inbox { paths, notes })
     }
 
     /// HEAD's modes [`crate::filing::dests`] reads: the folders and what's directly in

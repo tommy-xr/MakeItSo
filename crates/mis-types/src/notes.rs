@@ -151,4 +151,7 @@ pub struct NoteSuggestion {
     /// Why the reply couldn't be used as given (then `dest` is `none`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// sha256 (hex) of the folders it was chosen from: `none` is asked again when they change.
+    #[serde(default)]
+    pub folders: String,
 }
