@@ -870,11 +870,6 @@ impl App {
         let prompt = app_tasks::prompt(&t)?;
         self.check_images(&t.images)?;
         let set = self.settings()?.apps;
-        let worker = {
-            let online = self.ledger().online_hosts(&t.harness);
-            let online = online.iter().map(|(id, h)| (*id, h.as_str()));
-            app_tasks::machine(t.worker, set.worker, &self.host, online)
-        };
         let bound = app_tasks::binding(&t, requester);
         if let (Some(apps), Some(slug)) = (self.apps.clone(), bound.slug.clone()) {
             let exists = tokio::task::spawn_blocking(move || apps.exists(&slug));
@@ -883,6 +878,9 @@ impl App {
         }
         let model = t.model.filter(|m| !m.trim().is_empty());
         self.transition(|l| {
+            let online = l.online_hosts(&t.harness);
+            let online = online.iter().map(|(id, h)| (*id, h.as_str()));
+            let worker = app_tasks::machine(t.worker, set.worker, &self.host, online);
             match l.submit_app_task(prompt, set.repo, t.harness, model, worker, t.images, bound) {
                 Ok((task, effects)) => (Ok(task), effects),
                 Err(why) => (Err(why), vec![]),

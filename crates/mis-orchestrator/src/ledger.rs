@@ -875,18 +875,22 @@ impl Ledger {
             ..bound
         });
         if let Some(wid) = worker {
-            // As it last connected: one that has left keeps what it ran.
-            let info = (self.seen.get(&wid))
-                .ok_or_else(|| format!("unknown worker {}", &wid.to_string()[..8]))?;
-            if !info.harnesses.contains(&entry.task.harness) {
-                let h = &entry.task.harness;
-                return Err(format!("{} doesn't run {h}", self.host(wid)));
-            }
+            self.runs(wid, &entry.task.harness)?;
             entry.pin = Some(wid);
         }
         let (_, mut effects) = self.enqueue(entry);
         effects.push(Effect::Broadcast(self.status()));
         Ok((id, effects))
+    }
+
+    /// Err unless `wid` ran `harness` when it last connected: a task may wait for it.
+    fn runs(&self, wid: WorkerId, harness: &str) -> Result<(), String> {
+        let info = (self.seen.get(&wid))
+            .ok_or_else(|| format!("unknown worker {}", &wid.to_string()[..8]))?;
+        match info.harnesses.iter().any(|h| h == harness) {
+            true => Ok(()),
+            false => Err(format!("{} doesn't run {harness}", self.host(wid))),
+        }
     }
 
     /// Online workers running `harness`: id and hostname.
@@ -1055,10 +1059,13 @@ impl Ledger {
                     merge,
                     ..p.task.clone()
                 };
-                match p.pin {
-                    Some(wid) => self.enqueue_entry_pinned(wid, entry(task, images))?,
-                    None => self.enqueue(entry(task, images)),
+                // Pinned: it waits for that machine while offline.
+                let mut e = entry(task, images);
+                if let Some(wid) = p.pin {
+                    self.runs(wid, &e.task.harness)?;
+                    e.pin = Some(wid);
                 }
+                self.enqueue(e)
             }
             _ => {
                 let prompt = reply_context(&p.task.prompt, p.summary.as_deref(), &text, false);
@@ -2306,6 +2313,12 @@ mod tests {
         let (r, _) = l.reply(plain, "merge".into(), vec![], false).unwrap();
         let r = l.tasks.iter().find(|t| t.task.id == r).unwrap();
         assert!(!r.app && r.task.merge == MergeRule::Any);
+        // Its machine offline: the next waits for it.
+        finish(&mut l, again, None);
+        l.disconnect(wid, 1);
+        let (later, _) = l.reply(again, "and a title".into(), vec![], false).unwrap();
+        let t = l.tasks.iter().find(|t| t.task.id == later).unwrap();
+        assert_eq!((t.status, t.pin), (TaskStatus::Queued, Some(wid)));
     }
 
     #[test]

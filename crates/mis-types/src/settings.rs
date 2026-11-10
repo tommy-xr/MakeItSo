@@ -21,7 +21,7 @@ pub struct AppSettings {
     /// The apps repo's checkout on the worker: the tasks' folder. `~/` is the worker's home.
     pub repo: String,
     /// The worker that runs them, unless a task picks one; it waits while that is offline.
-    /// None: the worker on the orchestrator's host if online, else any.
+    /// None: the worker on the orchestrator's host if online when a task starts, else any.
     pub worker: Option<uuid::Uuid>,
 }
 

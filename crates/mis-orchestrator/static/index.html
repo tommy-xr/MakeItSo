@@ -934,7 +934,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
     <label for="st-model">Model</label><input id="st-model" placeholder="e.g. opus" autocomplete="off" autocapitalize="off" spellcheck="false" required>
     <label for="st-repo">Apps repo on the worker</label><input id="st-repo" placeholder="e.g. ~/code/mis-notes" autocomplete="off" autocapitalize="off" spellcheck="false" required>
     <label for="st-worker">Machine</label><select id="st-worker"><option value="">Auto</option></select>
-    <p class="dim">Auto: the worker on this orchestrator’s machine while online, else any. A chosen one is waited for while offline.</p>
+    <p class="dim">Auto: the worker on this orchestrator’s machine if online when a task starts, else any. Tasks wait for their machine while it’s offline.</p>
     <p id="st-msg" hidden></p>
     <div class="row"><button>Save</button></div>
   </fieldset></form>
@@ -3909,7 +3909,7 @@ function settingsMsg(text, bad) { $('st-msg').textContent = text; $('st-msg').hi
 function fillMachines(saved) {
   const sel = $('st-worker'), v = saved === undefined ? sel.value : saved;
   const opts = workers.map((w) => [w.id, workerName(w) + (w.online ? '' : ' · offline')]);
-  if (v && !workers.some((w) => w.id === v)) opts.push([v, `${v.slice(0, 8)} · offline`]);
+  if (v && !workers.some((w) => w.id === v)) opts.push([v, `${short(v)} · offline`]);
   const key = JSON.stringify(opts); // unchanged, an open list stays open
   if (sel.dataset.key !== key) sel.replaceChildren(el('option', { value: '' }, 'Auto'), ...opts.map(([value, text]) => el('option', { value }, text)));
   sel.dataset.key = key;

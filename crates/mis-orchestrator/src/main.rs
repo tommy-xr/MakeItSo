@@ -532,7 +532,6 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Ctrl-C, or SIGTERM (`kill`, service managers) on Unix.
 /// This machine's name, as its worker reports it: `MIS_HOSTNAME`, else `hostname`'s.
 fn hostname() -> String {
     if let Some(h) = std::env::var("MIS_HOSTNAME")
@@ -548,6 +547,7 @@ fn hostname() -> String {
         .unwrap_or_default()
 }
 
+/// Ctrl-C, or SIGTERM (`kill`, service managers) on Unix.
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
