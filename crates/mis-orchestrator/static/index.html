@@ -1766,8 +1766,8 @@ function ticker() {
     return { parts: dots([planning && `${planning} planning`, wait]), cls: 'warn', open: held.id };
   }
   if (queued || planning) return { parts: dots([planning && `${planning} planning`, queued && `${queued} queued`]), cls: 'run' };
-  const need = needYou();
-  if (need.length) return { parts: [needLabel(need.length)], cls: 'need', open: need[0].id };
+  const n = homeNeed().n;
+  if (n) return { parts: [needLabel(n)], cls: 'need', open: needYou()[0]?.id };
   return { parts: [], cls: '' };
 }
 
@@ -1775,15 +1775,22 @@ function ticker() {
 // opening it settles it, so the next tap opens the next.
 const needYou = () => tasks.filter((t) => ATTENTION[t.attention]).reverse().sort((a, b) => rank(a) - rank(b));
 const needLabel = (n) => `${n} need${n === 1 ? 's' : ''} you`;
-// The header badge: how many need you, lit in the most urgent one's colour.
+// Home's Needs you rows (tasks, then sessions waiting on you), not counting rows only held there:
+// { n, att: the most urgent kind, href: its first }.
+function homeNeed() {
+  const need = everOpen ? listOf('home', false).threads.filter((th) => th.sec === 'need') : [], waits = everOpen ? feed.filter(asks) : [];
+  const first = need[0] && [need[0].root, ...need[0].replies].find((t) => rank(t) === need[0].rank);
+  return { n: need.length + waits.length, att: first ? first.attention : 'approval', href: first ? `#task/${first.id}` : waits[0] ? `#session/${liveKey(waits[0])}` : '' };
+}
+// The header badge: Home's count, lit in the most urgent one's colour; a tap opens that one.
 function renderNeed() {
-  const need = everOpen ? needYou() : [], b = $('need');
-  b.hidden = !need.length;
-  if (!need.length) return;
-  b.textContent = need.length;
-  b.className = `att ${need[0].attention}`;
-  b.href = `#task/${need[0].id}`;
-  b.setAttribute('aria-label', needLabel(need.length));
+  const need = homeNeed(), b = $('need');
+  b.hidden = !need.n;
+  if (!need.n) return;
+  b.textContent = need.n;
+  b.className = `att ${need.att}`;
+  b.href = need.href;
+  b.setAttribute('aria-label', needLabel(need.n));
 }
 
 // Dot, then the ticker: a flash wins, then the connection until a socket has opened, then offline, then work.
@@ -1836,7 +1843,7 @@ $('upd').onclick = (e) => {
 
 // `#` Home, `#tasks`, `#sessions`, `#task/<id>`, `#routines`, `#apps`, `#settings`, `#workers`, `#worker/<id>`, `#session/<worker>/<harness>/<id>`,
 // `#notes/<repo path>` (each segment URI-encoded), `#projects`, `#projects/<id or alias>`.
-// `#new` (see takeNew) is Tasks with the composer focused.
+// `#new` (see takeNew) is Home or Tasks with the composer focused.
 function route() {
   const m = location.hash.match(/^#(task|worker)\/([0-9a-f-]{36})$/);
   if (m) return { view: m[1] === 'task' ? 'detail' : 'machine', id: m[2] };
@@ -1869,8 +1876,11 @@ const inSplit = () => document.documentElement.classList.contains('split'); // a
 // its place until another is opened or its list is left, rather than leaving Needs you (or In flight) the moment opening
 // it marks it seen (or it finishes). { id, sec, attention, underway } or null.
 let kept = null;
+// The list `listOf` is building, if it holds rows: kept's hold applies only there, and only in kept's own list.
+let building = null;
+const hold = (t) => (kept?.id === t.id && kept.sec === building ? kept : null);
 // A task's attention for placing its row: its own, else the kept one's.
-const att = (t) => (ATTENTION[t.attention] || kept?.id !== t.id ? t.attention : kept.attention);
+const att = (t) => (ATTENTION[t.attention] || !hold(t) ? t.attention : kept.attention);
 // What each list last had open beside it ({ home: '#task/<id>', … }), so its rail link reopens that.
 const lastOpen = {};
 
@@ -1926,7 +1936,7 @@ const placement = (t) => [t.harness, t.model, t.worker && hostOf(t.worker)].filt
 // Why a task needs the user, most urgent first: [rank, label].
 const ATTENTION = { approval: [-1, 'needs you: approval'], failed: [0, 'needs you'], limited: [1, 'needs you: usage limit'], unread: [2, 'needs you: unread'] };
 // Needs you, then working, then the rest.
-const rank = (t) => ATTENTION[att(t)]?.[0] ?? (underway(t) || (kept?.id === t.id && kept.underway) ? 3 : 4);
+const rank = (t) => ATTENTION[att(t)]?.[0] ?? (underway(t) || hold(t)?.underway ? 3 : 4);
 const underway = (t) => ['planning', 'queued', 'running'].includes(t.status) || awaited(t);
 // Delivered into a session and followed there for its answer (a day).
 const awaited = (t) => t.status === 'delivered' && Date.now() + skew - (t.finished_at || 0) < 864e5;
@@ -2135,8 +2145,9 @@ const sayState = (status, held) => ({ running: 'delivering', delivered: held ? '
   done: 'answered' }[status] || status);
 // A live session: name and age; state, what it waits on, machine, harness; its last line. Then the latest you sent it,
 // each opening its task: a reply sent to a copy is only there.
+const shownMessages = (s) => s.messages.slice(-2);
 function liveRow(s, now) {
-  const you = s.messages.slice(-2).map((m) => {
+  const you = shownMessages(s).map((m) => {
     const t = tasks.find((x) => x.id === m.task);
     return el('a', { className: 'you', href: `#task/${m.task}` }, t ? statusDot(t) : '',
       el('span', { className: 'one' }, `You: ${m.text} · ${m.answered ? `answered ${span(now - ((t && t.finished_at) || m.at))}` : sayState(m.status, m.held)}`));
@@ -2153,21 +2164,22 @@ const secHead = (label, ...end) => el('div', { className: 'sec' }, el('h3', {}, 
 const asks = (s) => s.online && (s.state === 'waiting' || s.state === 'stalled');
 // Under way: Sessions' Live; the rest (idle, in shell, offline) are Recent, as the orchestrator ranks them.
 const isLive = (s) => s.online && ['working', 'waiting', 'stalled'].includes(s.state);
-// A list's threads (Home shows those `onHome`) and live sessions. Home holds the row of a session open beside it.
-function listOf(sec) {
-  const fed = sec === 'home' ? feed.filter((s) => asks(s) || (here.sec === 'home' && location.hash === `#session/${liveKey(s)}`)) : sec === 'sessions' ? feed : [];
-  return { fed, threads: sec === 'sessions' ? [] : homeThreads(tasks, new Set(fed.flatMap((s) => s.messages.map((m) => m.task)))) };
+// A list's threads (Home shows those `onHome`) and live sessions. Home holds the row of a session open beside it;
+// `holds` false leaves held rows out (counts).
+function listOf(sec, holds = true) {
+  building = holds ? sec : null;
+  const fed = sec === 'home' ? feed.filter((s) => asks(s) || (holds && here.sec === 'home' && location.hash === `#session/${liveKey(s)}`)) : sec === 'sessions' ? feed : [];
+  const threads = sec === 'sessions' ? [] : homeThreads(tasks, new Set(fed.flatMap((s) => s.messages.map((m) => m.task))));
+  building = null;
+  return { fed, threads };
 }
 const onHome = (th) => secRank(th.sec) < 2;
 // Whether list `sec` shows `h` (a task or session), in a row of its own or under a session's.
 function shows(sec, h) {
   const { fed, threads } = listOf(sec);
   return threads.some((th) => (sec !== 'home' || onHome(th)) && [th.root, ...th.replies].some((t) => `#task/${t.id}` === h))
-    || fed.some((s) => `#session/${liveKey(s)}` === h || s.messages.some((m) => `#task/${m.task}` === h));
+    || fed.some((s) => `#session/${liveKey(s)}` === h || shownMessages(s).some((m) => `#task/${m.task}` === h));
 }
-// Sessions: those under way, then the rest of the last six hours.
-const sessionGroups = (ss, now) => [['Live', ss.filter(isLive)], ['Recent', ss.filter((s) => !isLive(s))]].filter(([, g]) => g.length)
-  .map(([h, g], i) => [secHead(h, ...(i ? [] : [el('a', { href: '#workers' }, 'All sessions')])), el('ul', { className: 'rows' }, ...g.map((s) => liveRow(s, now)))]);
 function renderList() {
   if (frozen()) return;
   const sec = listSec(), now = Date.now() + skew, { fed, threads: all } = listOf(sec);
@@ -2190,7 +2202,10 @@ function renderList() {
   if (sec === 'home' && (drafted.length || sessions.length) && !groups.has('need')) groups.set('need', []);
   // Sections in Home's order; on Home, drafts, then the tasks needing you, then sessions waiting on you.
   const keys = [...groups.keys()].sort((a, b) => secRank(a) - secRank(b) || b.localeCompare(a));
-  const body = sec === 'sessions' ? sessionGroups(sessions, now) : keys.map((k) => [secHead(label(k)), el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []),
+  // Sessions: those under way, then the rest of the last six hours.
+  const body = sec === 'sessions' ? [['Live', sessions.filter(isLive)], ['Recent', sessions.filter((s) => !isLive(s))]].filter(([, g]) => g.length)
+    .map(([h, g], i) => [secHead(h, ...(i ? [] : [el('a', { href: '#workers' }, 'All sessions')])), el('ul', { className: 'rows' }, ...g.map((s) => liveRow(s, now)))])
+    : keys.map((k) => [secHead(label(k)), el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []),
     ...(k === 'need' ? drafted : []), ...groups.get(k).flatMap((th) => threadRows(th, now)), ...(k === 'need' && sec === 'home' ? sessions.map((s) => liveRow(s, now)) : []))]);
   const focused = $('list').contains(document.activeElement) && document.activeElement.getAttribute('href');
   $('list').replaceChildren(...(inSplit() ? [el('a', { href: '#new', className: 'newtask', title: 'New task (c)' }, '+ New task')] : []), ...body.flat());
@@ -3555,12 +3570,11 @@ function renderNav() {
   // Notes: one link per folder the repo has, no dot; the inbox with how many notes wait in it.
   const ns = notesTree && notesTree.entries, inbox = ns && ns.filter((e) => e.kind === 'md' && /^inbox\/[^/]+$/.test(e.path)).length;
   const folders = ns ? NOTE_FOLDERS.filter(([f]) => ns.some((e) => e.path === f)) : [];
-  // Rail counts: Home's Needs you rows (tinted as the most urgent), Tasks in flight, Sessions waiting on you (tinted;
+  // Rail counts: Home's Needs you rows (tinted as the most urgent), Tasks' In flight rows, Sessions waiting on you (tinted;
   // else live), the notes inbox, busy workers.
-  const need = listOf('home').threads.filter((th) => th.sec === 'need'), waits = feed.filter(asks).length;
-  const urgent = need.length ? Object.keys(ATTENTION).find((a) => ATTENTION[a][0] === need[0].rank) : 'approval';
-  navCount('nav-need', everOpen ? need.length + waits : 0, 'need you', `att ${urgent}`);
-  navCount('n-tasks', tasks.filter((t) => rank(t) === 3).length, 'under way');
+  const need = homeNeed(), waits = feed.filter(asks).length;
+  navCount('nav-need', need.n, 'need you', `att ${need.att}`);
+  navCount('n-tasks', listOf('tasks', false).threads.filter((th) => th.sec === 'flight').length, 'under way');
   if (waits) navCount('n-sessions', waits, 'waiting', 'att approval'); else navCount('n-sessions', feed.filter(isLive).length, 'live');
   navCount('n-inbox', inbox, 'in inbox');
   navCount('n-busy', workers.filter((w) => workerState(w) === 'busy').length, 'busy');
@@ -4464,9 +4478,9 @@ $('prompt').value = drafts.get('draft:new');
 window.onhashchange = () => { if ($('viewer').open) $('viewer').close(); takeNew(); locate(); remember(); micOff(); hush(); presses.clear(); clearTimeout(clickTimer); clickTimer = 0; if (route().view === 'routines' && routines) loadRoutines(); if (route().view === 'apps' && hosted) loadApps(); if (route().view === 'settings') settingsAsked = null; if (route().view === 'notes') { noteShown = null; if (notesTree) loadNotes(); } if (route().view === 'projects') { if (projects) loadProjects(); if (notesTree && route().id) loadNotes(); } render(); };
 setInterval(tick, 1000);
 
-// `#new`, a link into the page for a new task, is a list with the composer focused: the one in view (or the open task's),
-// else Home. The hash becomes that list's so back links don't refocus.
-function takeNew() { if (location.hash === '#new') { history.replaceState(null, '', here.sec ? here.back : '#'); wantNew = true; } }
+// `#new`, a link into the page for a new task, is a list with the composer focused: Tasks from Tasks (or a task opened
+// there), else Home, where a new task shows. The hash becomes that list's so back links don't refocus.
+function takeNew() { if (location.hash === '#new') { history.replaceState(null, '', here.sec === 'tasks' ? '#tasks' : '#'); wantNew = true; } }
 takeNew();
 locate();
 
@@ -4514,8 +4528,8 @@ function step(d) {
   const split = inSplit();
   if (!split && route().view !== 'list') return;
   const seen = new Set(), links = [...$('list').querySelectorAll('a[href^="#task/"], a[href^="#session/"]')].filter((a) => !seen.has(a.getAttribute('href')) && seen.add(a.getAttribute('href')));
-  const here = split ? location.hash : document.activeElement?.getAttribute('href');
-  const at = links.findIndex((a) => a.getAttribute('href') === here);
+  const cur = split ? location.hash : document.activeElement?.getAttribute('href');
+  const at = links.findIndex((a) => a.getAttribute('href') === cur);
   const a = links[at < 0 ? 0 : Math.max(0, Math.min(links.length - 1, at + d))];
   if (!a || (at >= 0 && a === links[at])) return; // an end of the list
   settle(); // like a tap, a step holds the rows' order a moment, so stepping back finds the row just left
@@ -4574,7 +4588,8 @@ function deskMode() {
   if (railShown()) loadNav();
 }
 desk.addEventListener('change', deskMode);
-wide.addEventListener('change', () => render());
+wide.addEventListener('change', () => { remember(); render(); });
+remember(); // a task or session open at load
 $('list').addEventListener('scroll', settle);
 // + opens the new-routine form atop Routines; the orchestrator writes `<name>.md`, paused.
 function showNewRoutine(on) {
@@ -4737,7 +4752,7 @@ function pushStart(key) {
   // A tapped notification for an open window: show its task or session here.
   navigator.serviceWorker.addEventListener('message', (e) => {
     const url = e.data && e.data.open && new URL(e.data.open);
-    if (url && url.origin === location.origin) location.hash = url.hash;
+    if (url && url.origin === location.origin) { here = { sec: null, back: '#' }; location.hash = url.hash; } // as a deep link
   });
   navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready).then((reg) => {
     push.reg = reg;
