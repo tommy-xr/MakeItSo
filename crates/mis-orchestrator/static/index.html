@@ -3249,12 +3249,9 @@ async function loadSessions(id) {
   sessAsked.set(id, ask);
   sessLists.delete(id);
   redrawWorkers();
-  let got;
-  try {
-    const r = await fetch(`/api/workers/${id}/sessions${showHeadless ? '?headless=true' : ''}`, { headers: authHeaders() });
-    got = r.ok ? { list: await r.json() } : { error: (await r.text()) || `error ${r.status}` };
-  } catch { got = { error: 'couldn’t reach the orchestrator' }; }
-  if (sessAsked.get(id) !== ask) return;
+  const res = await getJson(`/api/workers/${id}/sessions${showHeadless ? '?headless=true' : ''}`, () => loadSessions(id));
+  if (sessAsked.get(id) !== ask || !res) return;
+  const got = res.error ? res : { list: res.ok };
   sessLists.set(id, got);
   redrawWorkers();
 }
@@ -3491,12 +3488,9 @@ let routineLiveAsk = null; // name of the routine whose go-live confirm is open
 async function loadRoutines() {
   const ask = {};
   routinesAsked = ask;
-  let got;
-  try {
-    const r = await fetch('/api/routines', { headers: authHeaders() });
-    got = r.ok ? { list: await r.json() } : { error: (await r.text()) || `error ${r.status}` };
-  } catch { got = { error: 'couldn’t reach the orchestrator' }; }
-  if (routinesAsked !== ask) return;
+  const res = await getJson('/api/routines', loadRoutines);
+  if (routinesAsked !== ask || !res) return;
+  const got = res.error ? res : { list: res.ok };
   routines = got;
   if (route().view === 'routines') renderRoutines();
   renderNav();
@@ -3634,13 +3628,9 @@ const shareDraft = new Map(); // slug -> { email, role } typed into its share fo
 async function loadApps() {
   const ask = {};
   hostedAsked = ask;
-  let got;
-  try {
-    const r = await fetch('/api/apps', { headers: authHeaders() });
-    got = r.ok ? { list: await r.json() } : { error: (await r.text()) || `error ${r.status}` };
-  } catch { got = { error: 'couldn’t reach the orchestrator' }; }
-  if (hostedAsked !== ask) return;
-  hosted = got;
+  const res = await getJson('/api/apps', loadApps);
+  if (hostedAsked !== ask || !res) return;
+  hosted = res.error ? res : { list: res.ok };
   // Drafts also show on Home (beside a task or session too) and their task's page.
   if (['apps', 'list', 'detail', 'session'].includes(route().view)) render();
   renderNav();
@@ -3841,11 +3831,9 @@ let settingsAsked = null, settingsBusy = false;
 async function loadSettings() {
   const ask = {};
   settingsAsked = ask;
-  let got;
-  try {
-    const r = await fetch('/api/settings', { headers: authHeaders() });
-    got = r.ok ? { s: await r.json() } : { error: (await r.text()) || `error ${r.status}` };
-  } catch { got = { error: 'couldn’t reach the orchestrator' }; }
+  const res = await getJson('/api/settings', loadSettings);
+  if (!res) return {}; // retried; the fields stay as they were
+  const got = res.error ? res : { s: res.ok };
   if (settingsAsked !== ask) return got;
   settings = got;
   if (got.s) { $('st-default').value = got.s.default_harness || ''; $('st-harness').value = got.s.apps.harness; $('st-model').value = got.s.apps.model; $('st-repo').value = got.s.apps.repo; }
@@ -3935,12 +3923,9 @@ function forgetNotes() {
 async function loadNotes() {
   const ask = {};
   notesAsked = ask;
-  let got;
-  try {
-    const r = await fetch('/api/notes/tree', { headers: authHeaders() });
-    got = r.ok ? await r.json() : { error: (await r.text()) || `error ${r.status}` };
-  } catch { got = { error: 'couldn’t reach the orchestrator' }; }
-  if (notesAsked !== ask) return;
+  const res = await getJson('/api/notes/tree', loadNotes);
+  if (notesAsked !== ask || !res) return;
+  const got = res.error ? res : res.ok;
   // The same tree as shown: keep it, so the view isn't redrawn.
   if (JSON.stringify(got) !== JSON.stringify(notesTree)) notesTree = got;
   if (route().view === 'notes') renderNotes(route().id);
@@ -4039,12 +4024,9 @@ const projectHref = (id) => `#projects/${encodeURIComponent(id)}`;
 async function loadProjects() {
   const ask = {};
   projectsAsked = ask;
-  let got;
-  try {
-    const r = await fetch('/api/projects', { headers: authHeaders() });
-    got = r.ok ? await r.json() : { error: (await r.text()) || `error ${r.status}` };
-  } catch { got = { error: 'couldn’t reach the orchestrator' }; }
-  if (projectsAsked !== ask) return;
+  const res = await getJson('/api/projects', loadProjects);
+  if (projectsAsked !== ask || !res) return;
+  const got = res.error ? res : res.ok;
   if (JSON.stringify(got) !== JSON.stringify(projects)) projects = got;
   if (route().view === 'projects') renderProjects(route().id);
   renderNav();
@@ -4327,6 +4309,7 @@ function connect() {
     clearTimeout(offlineTimer);
     offlineTimer = 0;
     unsend(); // a submit sent on the old socket gets no reply here; its text goes back
+    retryUnreached();
     live.clear(); // pieces were missed meanwhile; the open task's Show brings its reply so far
     send({ type: 'subscribe' });
     if (!readOnly) send({ type: 'watch_sessions' }); // full access only
@@ -4386,6 +4369,31 @@ window.addEventListener('online', reconnectNow);
 function authHeaders() {
   const token = store.get();
   try { return token ? { authorization: `Bearer ${token}` } : {}; } catch { return {}; }
+}
+// net:begin. Pure. An HTML 5xx is a proxy's page saying the orchestrator is away (e.g. Cloudflare's 502 while it
+// restarts): the orchestrator's own errors are plain text. tests/md.test.mjs runs this block.
+const awayStatus = (status, type) => status >= 500 && /^text\/html/i.test(type || '');
+// net:end
+// GET `path`'s JSON: { ok } or { error: the server's reason }. Unreachable (the orchestrator restarting, a dropped
+// network): null, and `retry` runs once it is back, so a view keeps what it shows rather than an error that sticks.
+// The connection dot already says it's away.
+const RETRY_MS = 3000;
+const unreached = new Map(); // path -> its retry
+let unreachedTimer = 0;
+async function getJson(path, retry) {
+  try {
+    const r = await fetch(path, { headers: authHeaders() });
+    if (!awayStatus(r.status, r.headers.get('content-type'))) return r.ok ? { ok: await r.json() } : { error: (await r.text()) || `error ${r.status}` };
+  } catch {}
+  unreached.set(path, retry);
+  // The socket still up (a blip, or it hasn't noticed yet): again shortly. Else its reopening does.
+  if (!unreachedTimer) unreachedTimer = setTimeout(() => { unreachedTimer = 0; if (ws && ws.readyState === WebSocket.OPEN) retryUnreached(); }, RETRY_MS);
+  return null;
+}
+function retryUnreached() {
+  const due = [...unreached.values()];
+  unreached.clear();
+  for (const f of due) f();
 }
 // Longest side to MAX_SIDE, JPEG, upright: bitmaps honour EXIF orientation; else the <img> path does.
 async function shrink(file) {
