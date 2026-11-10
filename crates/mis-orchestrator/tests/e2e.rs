@@ -6222,5 +6222,6 @@ async fn owners_and_editors_try_a_draft_on_a_copy_of_the_records_that_goes_with_
     assert_eq!(app_get(&apps, trial, api).await.0, 404);
     let (status, head, _) = app_get(&apps, "/a/demo/?draft=off", page).await;
     assert!(status == 303 && head.contains("Max-Age=0"), "{head}");
-    std::fs::remove_dir_all(dir).unwrap();
+    // Windows: the app's records are still open.
+    let _ = std::fs::remove_dir_all(dir);
 }
