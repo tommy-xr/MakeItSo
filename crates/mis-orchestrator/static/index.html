@@ -181,7 +181,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .ngrp .chev { width: 1rem; height: 1rem; transition: transform .15s; }
   .ngrp [aria-expanded=true] .chev { transform: rotate(180deg); }
   #menu .nsub a { gap: .625rem; min-height: 2.5rem; padding-left: 1.5rem; font-size: .875rem; }
-  .nsub .sd { background: var(--s, var(--faint)); } /* never run: faint, as on Routines */
+  .nsub .sd, .rows .sd.never { background: var(--s, var(--faint)); } /* never run (or not live): faint, as on Routines */
   .nsub .n { margin-left: auto; color: var(--dim); font-size: .75rem; font-variant-numeric: tabular-nums; }
   /* Notes: folder rows (icon, name, size or count); a note's chips, body and pictures. */
   .nlist .r1 svg { flex: none; width: 1.125rem; height: 1.125rem; color: var(--dim); }
@@ -781,8 +781,17 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
     /* The list scrolls in its own column; the window still scrolls the task, so following a reply works as before. */
     :root.split:not(.vr) body > #list { position: fixed; z-index: 1; inset: var(--head) auto 0 var(--rail); box-sizing: border-box; width: var(--list); max-width: none; margin: 0;
       padding: 0 var(--pad) 1.5rem; overflow-y: auto; overscroll-behavior: contain; border-right: 1px solid var(--sep); }
+    :root.split:not(.vr) #list > .rows:first-child { margin-top: .75rem; } /* a section's list with no heading over it */
     :root.split:not(.vr) #list .rows a[aria-current] { background: var(--bubble); box-shadow: inset 3px 0 var(--accent); }
     :root.split:not(.vr) :is(#detail, #session) .chead .back { display: none; }
+    /* Every rail section opens its list beside the view: no chevrons, nothing unfolds under them. */
+    :root:not(.vr) #menu :is(.nsub, .ngrp button[aria-controls]) { display: none; }
+    :root:not(.vr) #menu nav > a > .nc { margin-right: .375em; }
+    :root.split:not(.vr) :is(#projects .chead .back, #machine .mtop) { display: none; }
+    :root.split:not(.vr) #workers :is(#fleet, #machines) { display: none; } /* listed beside it; Notify me stays */
+    :root.split:not(.vr) #notify-row { justify-content: center; }
+    /* A diff takes the task column's whole width, past the 48rem measure (wider than 1440px). */
+    :root.split:not(.vr) #diff { margin-inline: calc((100% - (100vw - var(--side) - 2 * var(--pad))) / 2); }
     #choose { padding-top: 30svh; text-align: center; }
     #choose .keys { display: none; margin-top: .5rem; font-size: .8125rem; }
     @media (hover: hover) and (pointer: fine) { #choose .keys { display: block; } }
@@ -1845,36 +1854,44 @@ $('upd').onclick = (e) => {
   renderUpdate();
 };
 
-// `#` Home, `#tasks`, `#sessions`, `#task/<id>`, `#routines`, `#apps`, `#settings`, `#workers`, `#worker/<id>`, `#session/<worker>/<harness>/<id>`,
-// `#notes/<repo path>` (each segment URI-encoded), `#projects`, `#projects/<id or alias>`.
+// `#` Home, `#tasks`, `#sessions`, `#task/<id>`, `#routines`, `#routines/<name>`, `#apps`, `#apps/<slug>`, `#settings`, `#workers`,
+// `#worker/<id>`, `#session/<worker>/<harness>/<id>`, `#notes/<repo path>` (each segment URI-encoded), `#projects`, `#projects/<id or alias>`.
 // `#new` (see takeNew) is Home or Tasks with the composer focused.
-function route() {
-  const m = location.hash.match(/^#(task|worker)\/([0-9a-f-]{36})$/);
+function route(h = location.hash) {
+  const m = h.match(/^#(task|worker)\/([0-9a-f-]{36})$/);
   if (m) return { view: m[1] === 'task' ? 'detail' : 'machine', id: m[2] };
-  const s = location.hash.match(/^#session\/([0-9a-f-]{36}\/(?:claude|codex)\/[0-9a-f-]{36})$/);
+  const s = h.match(/^#session\/([0-9a-f-]{36}\/(?:claude|codex)\/[0-9a-f-]{36})$/);
   if (s) return { view: 'session', id: s[1] };
-  const n = location.hash.match(/^#notes(?:\/(.*?))?\/*$/);
+  const n = h.match(/^#notes(?:\/(.*?))?\/*$/);
   if (n) { try { return { view: 'notes', id: (n[1] || '').split('/').map(decodeURIComponent).join('/') }; } catch { return { view: 'notes', id: '' }; } }
-  const p = location.hash.match(/^#projects(?:\/([^/]*))?\/*$/);
-  if (p) { try { return { view: 'projects', id: decodeURIComponent(p[1] || '') }; } catch { return { view: 'projects', id: '' }; } }
-  if (secOf(location.hash)) return { view: 'list', id: secOf(location.hash) };
-  return { view: { '#workers': 'workers', '#routines': 'routines', '#apps': 'apps', '#settings': 'settings' }[location.hash] || 'list' };
+  const p = h.match(/^#(projects|routines|apps)(?:\/([^/]*))?\/*$/);
+  if (p) { try { return { view: p[1], id: decodeURIComponent(p[2] || '') }; } catch { return { view: p[1], id: '' }; } }
+  if (secOf(h)) return { view: 'list', id: secOf(h) };
+  return { view: { '#workers': 'workers', '#settings': 'settings' }[h] || 'list' };
 }
 
 // The list a hash shows (Home, Tasks or Sessions), else null.
 const secOf = (h) => ({ '': 'home', '#': 'home', '#tasks': 'tasks', '#sessions': 'sessions' })[h] || null;
 // The list in view, or the one the open task or session came from (Home if neither).
 const listSec = () => here.sec || 'home';
-// On entering a view: a task or session takes its place from its history entry, else stamps it with the view it left.
+// The rail's other sections, each its own list beside what it opens when wide: Notes' folders, Projects, Routines, Apps, Workers.
+const COLS = ['notes', 'projects', 'routines', 'apps', 'workers'];
+// The section a view is in when not opened from one: a worker's page is in Workers.
+const homeOf = (view) => (view === 'machine' ? 'workers' : COLS.includes(view) ? view : null);
+// What a list opens (a task, session, worker, note or folder, project, routine, app), as against a list itself.
+const isItem = (r) => ['detail', 'session', 'machine'].includes(r.view) || (COLS.includes(r.view) && !!r.id);
+// On entering a view: an item takes its place from its history entry, else stamps it with the view it left
+// (its own section if that was none, e.g. Settings or a fresh load).
 function locate() {
   const r = route();
-  if (r.view !== 'detail' && r.view !== 'session') here = { sec: r.view === 'list' ? r.id || 'home' : null, back: location.hash || '#' };
+  if (!isItem(r)) here = { sec: r.view === 'list' ? r.id || 'home' : homeOf(r.view), back: location.hash || '#' };
   else if (history.state?.here) here = history.state.here;
-  else history.replaceState({ here }, '');
+  else { if (!here.sec) here = { sec: homeOf(r.view), back: here.back }; history.replaceState({ here }, ''); }
 }
-// Wide desktop (75rem+, not Quest): the list stays up beside the open task, or a session opened from it (or `#choose`).
+// Wide desktop (75rem+, not Quest): the list stays up beside what it opened, or `#choose`; a session or task opened from
+// no list (a fresh load) shows Home's, or for a session, none.
 const wide = matchMedia('(min-width: 75rem)');
-const isSplit = (r) => wide.matches && isDesk() && (r.view === 'list' || r.view === 'detail' || (r.view === 'session' && !!here.sec));
+const isSplit = (r) => wide.matches && isDesk() && r.view !== 'settings' && (r.view === 'list' || r.view === 'detail' || !!here.sec);
 const inSplit = () => document.documentElement.classList.contains('split'); // as render() last laid out
 // The task last opened beside the list, its list, and the attention it had or whether it was under way: its row keeps
 // its place until another is opened or its list is left, rather than leaving Needs you (or In flight) the moment opening
@@ -1887,6 +1904,8 @@ const hold = (t) => (kept?.id === t.id && kept.sec === building ? kept : null);
 const att = (t) => (ATTENTION[t.attention] || !hold(t) ? t.attention : kept.attention);
 // What each list last had open beside it ({ home: '#task/<id>', … }), so its rail link reopens that.
 const lastOpen = {};
+const CHOOSE = { sessions: 'Select a session, or start a task below.', notes: 'Select a folder.', projects: 'Select a project.',
+  routines: 'Select a routine.', apps: 'Select an app.', workers: 'Select a worker.' };
 
 function render() {
   const r = route(), split = everOpen && isSplit(r);
@@ -1913,16 +1932,19 @@ function render() {
   $('send').disabled = $('send-reply').disabled = !live || !!pending;
   if (shots.some((x) => !x.id)) $('send').disabled = true; // photos still uploading
   $('clip').disabled = shots.length >= MAX_SHOTS || !!pending;
-  for (const v in views) $(v).hidden = !everOpen || (v !== r.view && !(split && v === 'list'));
-  $('choose').hidden = !everOpen || !split || r.view !== 'list';
-  $('choose').firstChild.textContent = r.id === 'sessions' ? 'Select a session, or start a task below.' : 'Select a task, or start one below.';
+  // Beside a list with nothing open: Select a … (a + form open atop Routines or Apps shows instead). Workers keeps its
+  // Notify me toggle under it.
+  const choosing = split && !isItem(r) && !(r.view === 'routines' && !$('routine-new').hidden) && !(r.view === 'apps' && !$('app-new').hidden);
+  for (const v in views) $(v).hidden = !everOpen || (v === 'list' ? !split && r.view !== 'list' : v !== r.view || (choosing && v !== 'workers'));
+  $('choose').hidden = !everOpen || !choosing;
+  $('choose').firstChild.textContent = CHOOSE[r.view === 'list' ? r.id : r.view] || 'Select a task, or start one below.';
   // A conversation's back link returns to the view it was opened from.
   if (r.view === 'detail' || r.view === 'session') $(r.view).querySelector('.back').href = here.back;
   if (r.view !== 'detail' && r.view !== 'session') { follow.key = null; $('latest').hidden = true; if (detail) detail.sig = null; }
   if (r.view !== 'detail' && detail) detail.since = 0; // its 2s start again on return, from a session too
   if (r.view !== 'session') closeSession();
-  const onWorkers = r.view === 'workers' || r.view === 'machine' || (r.view === 'session' && !here.sec);
-  const area = onWorkers ? 'workers' : ['routines', 'apps', 'settings', 'notes', 'projects'].includes(r.view) ? r.view : listSec();
+  // The rail marks the section the view is in, or was opened from; a session from none is under Workers.
+  const area = here.sec || homeOf(r.view) || { settings: 'settings', session: 'workers' }[r.view] || 'home';
   for (const a of $('menu').querySelectorAll('nav a')) {
     if (a.dataset.view === area) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
@@ -2178,14 +2200,22 @@ function listOf(sec, holds = true) {
   return { fed, threads };
 }
 const onHome = (th) => secRank(th.sec) < 2;
-// Whether list `sec` shows `h` (a task or session), in a row of its own, under a session's, or as Home's draft row.
+// Whether list `sec` shows `h` (a task or session), in a row of its own, under a session's, or as Home's draft row; for
+// another section, whether what `h` opens is still there, as far as this page has read.
 function shows(sec, h) {
+  if (COLS.includes(sec)) {
+    const r = route(h), has = (got, list, f) => !got?.[list] || got[list].some(f);
+    return { detail: () => tasks.some((t) => t.id === r.id), machine: () => workers.some((w) => w.id === r.id), session: () => true,
+      notes: () => has(notesTree, 'entries', (e) => e.path === r.id), projects: () => !projects?.projects || !!projectFind(projects.projects, r.id),
+      routines: () => has(routines, 'list', (x) => x.name === r.id), apps: () => has(hosted, 'list', (a) => a.slug === r.id) }[r.view]?.() ?? false;
+  }
   const { fed, threads } = listOf(sec);
   return (sec === 'home' && appDrafts().some((a) => draftHref(a) === h)) || threads.some((th) => (sec !== 'home' || onHome(th)) && [th.root, ...th.replies].some((t) => `#task/${t.id}` === h))
     || fed.some((s) => `#session/${liveKey(s)}` === h || shownMessages(s).some((m) => `#task/${m.task}` === h));
 }
 function renderList() {
   if (frozen()) return;
+  if (COLS.includes(listSec())) return renderCol(listSec());
   const sec = listSec(), now = Date.now() + skew, { fed, threads: all } = listOf(sec);
   hintBudget = HINT_FILES;
   const threads = held(sec, all, (th) => th.root.id).filter((th) => sec !== 'home' || onHome(th));
@@ -2218,6 +2248,38 @@ function renderList() {
   if (focused) $('list').querySelector(`a[href="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true }); // a redraw keeps j/k's (or Tab's) place
   if (!body.length) $('list').append(el('p', { className: 'dim', style: 'padding: 1rem .375rem' }, sec === 'sessions' ? 'No live sessions.'
     : sec === 'home' && tasks.length ? 'Nothing needs you or is running.' : inSplit() ? 'No tasks yet.' : 'No tasks yet. Start one below.'));
+}
+
+// A section's list came in: redraw it if it is beside the view.
+const relistCol = (sec) => { if (inSplit() && listSec() === sec) renderList(); };
+// Another section's list beside what it opens: Notes' folders, projects, routines, apps or workers, fetched if not yet.
+// The open one's row is marked: its own, the folder it is in, or the project a note opened from Projects is in.
+function renderCol(sec) {
+  const now = Date.now() + skew, say = (cls, text) => el('p', { className: cls, style: 'padding: 1rem .375rem' }, text);
+  const [got, asked, load] = { notes: [notesTree, notesAsked, loadNotes], projects: [projects, projectsAsked, loadProjects],
+    routines: [routines, routinesAsked, loadRoutines], apps: [hosted, hostedAsked, loadApps], workers: [{}] }[sec];
+  const rows = (list, row, none, cls = 'rows') => (list.length ? el('ul', { className: cls }, ...list.map(row)) : say('dim', none));
+  let body;
+  if (!got) { if (!asked) load(); body = [el('div', { className: 'rows' }, skel())]; }
+  else if (got.error) body = [say('bad', got.error)];
+  else if (got.state === 'off') body = [say('dim', 'Notes repo not configured (MIS_NOTES_REMOTE)')];
+  else body = {
+    notes: () => [rows(noteTops(notesTree.entries), (e) => noteRow(e, notesTree.entries), 'No notes yet', 'rows nlist')],
+    projects: projectList,
+    routines: () => [rows(routines.list, (r) => el('li', {}, el('a', { href: `#routines/${encodeURIComponent(r.name)}` },
+      el('div', { className: 'r1' }, el('span', { className: `sd ${routineState(r) || 'never'}` }), el('span', { className: 'one' }, r.name), modeChip(r.mode)),
+      el('div', { className: 'r2 one' }, ...dots([r.trigger || r.file, nextText(r.next_at, now)])))), 'No routines yet')],
+    apps: () => [rows(hosted.list, (a) => el('li', {}, el('a', { href: `#apps/${encodeURIComponent(a.slug)}` },
+      el('div', { className: 'r1' }, el('span', { className: `sd ${a.active ? 'done' : 'never'}` }), el('span', { className: 'one' }, a.title)),
+      el('div', { className: 'r2 one' }, ...dots([a.slug, a.active ? `v${a.active} live` : 'not live', plural(a.releases.length, 'release')])))), 'No apps yet')],
+    workers: () => [rows(workers, (w) => { const run = runningOn(w.id); return el('li', {}, el('a', { href: `#worker/${w.id}` },
+      el('div', { className: 'r1' }, el('span', { className: `sd ${workerState(w)}` }), el('span', { className: 'one' }, w.info.hostname), chip(workerState(w))),
+      el('div', { className: 'r2 one' }, ...(run ? dots([clock(run), run.activity]) : [w.info.purpose || machineText(w)])))); }, 'No workers connected')],
+  }[sec]();
+  $('list').replaceChildren(...body);
+  const r = route(), proj = sec === 'projects' && r.view === 'notes' && noteProject(r.id), h = proj ? projectHref(proj) : location.hash;
+  const links = [...$('list').querySelectorAll('a[href^="#"]')];
+  (links.find((a) => a.getAttribute('href') === h) || links.find((a) => h.startsWith(`${a.getAttribute('href')}/`)))?.setAttribute('aria-current', 'page');
 }
 
 const KIND = { pr: 'PR', commit: 'commit', ci_run: 'CI', issue: 'issue', url: 'link', test: 'test', note: 'note' };
@@ -3484,6 +3546,7 @@ async function loadRoutines() {
   if (routinesAsked !== ask) return;
   routines = got;
   if (route().view === 'routines') renderRoutines();
+  relistCol('routines');
   renderNav();
 }
 async function routineAct(name, action, body) {
@@ -3550,7 +3613,10 @@ function renderRoutines() {
   if (!routines) { if (!$('routine-list').querySelector('.skel')) $('routine-list').replaceChildren(el('li', {}, skel())); if (!routinesAsked) loadRoutines(); return; }
   const now = Date.now() + skew;
   if (routines.error) { $('routine-list').replaceChildren(el('li', { className: 'bad' }, routines.error)); return; }
-  $('routine-list').replaceChildren(...routines.list.map((r) => routineRow(r, now)));
+  // Beside the list, only the one picked there (none under the + form).
+  const one = inSplit() ? route().id : null, list = routines.list.filter((r) => one === null || r.name === one);
+  $('routine-list').replaceChildren(...list.map((r) => routineRow(r, now)));
+  if (one && !list.length) $('routine-list').append(el('li', { className: 'dim' }, 'No such routine'));
   if (!routines.list.length) $('routine-list').append(el('li', { className: 'dim' }, `No routines yet: ${readOnly ? '' : 'tap + by Routines in the menu, or '}add a .md file to the orchestrator’s routines folder`));
   // A routine picked in the menu: scroll to it once.
   const pick = routineFocus && [...$('routine-list').children].find((li) => li.dataset.name === routineFocus);
@@ -3584,6 +3650,13 @@ function renderNav() {
   navCount('n-busy', workers.filter((w) => workerState(w) === 'busy').length, 'busy');
   fillNav($('nav-notes'), !notesTree ? [['Loading…']] : notesTree.error ? [[notesTree.error]] : notesTree.state === 'off' ? [['Not configured']]
     : !folders.length ? [['No notes yet']] : folders.map(([f, label]) => [noteHref(f), null, label, f === 'inbox' && inbox ? String(inbox) : '']));
+  // No notes remote has nothing to unfold: Notes and Projects (read from the same repo) drop their chevron and list.
+  const off = notesTree?.state === 'off' || projects?.state === 'off';
+  for (const id of ['nav-notes', 'nav-projects']) {
+    const b = $('menu').querySelector(`[aria-controls=${id}]`);
+    b.hidden = off;
+    $(id).hidden = off || b.getAttribute('aria-expanded') !== 'true';
+  }
   // Projects: one link per active one.
   const active = projects && projects.projects && projects.projects.filter(projectActive);
   fillNav($('nav-projects'), !projects ? [['Loading…']] : projects.error ? [[projects.error]] : projects.state === 'off' ? [['Not configured']]
@@ -3800,14 +3873,17 @@ function renderApps() {
   if (!everOpen) return; // fetch once connected, with the token in place
   if (!hosted) { delete $('app-list').dataset.key; if (!$('app-list').querySelector('.skel')) $('app-list').replaceChildren(el('li', {}, skel())); if (!hostedAsked) loadApps(); return; }
   if (hosted.error) { delete $('app-list').dataset.key; $('app-list').replaceChildren(el('li', { className: 'bad' }, hosted.error)); return; }
+  // Beside the list, only the one picked there (none under the + form).
+  const pick = inSplit() ? route().id : null, list = hosted.list.filter((a) => pick === null || a.slug === pick);
   // Rebuilt only when something shown changes, so a share form being typed into survives other updates.
-  const key = JSON.stringify([hosted.list, appAsk, appBusy, memberAsk, [...appErr], readOnly, draftAsk, draftBusy, [...draftErr]]);
+  const key = JSON.stringify([hosted.list, pick, appAsk, appBusy, memberAsk, [...appErr], readOnly, draftAsk, draftBusy, [...draftErr]]);
   const now = Date.now() + skew;
   if ($('app-list').dataset.key === key) {
     for (const s of $('app-list').querySelectorAll('[data-at]')) s.textContent = ago(now - Number(s.dataset.at));
     return;
   }
-  $('app-list').replaceChildren(...hosted.list.map((a) => appRow(a, now)));
+  $('app-list').replaceChildren(...list.map((a) => appRow(a, now)));
+  if (pick && !list.length) $('app-list').append(el('li', { className: 'dim' }, 'No such app'));
   $('app-list').dataset.key = key;
   if (!hosted.list.length) $('app-list').append(el('li', { className: 'dim' }, `No apps yet: ${readOnly ? '' : 'tap + by Apps in the menu, or '}publish one with mis apps publish <name> <folder>`));
 }
@@ -3855,7 +3931,10 @@ $('settings-form').onsubmit = async (e) => {
 };
 
 // notes:begin. The Notes view, pure: a note's frontmatter, who wrote it, a folder's rows. tests/md.test.mjs runs this block.
-const NOTE_FOLDERS = [['inbox', 'Inbox'], ['projects', 'Projects'], ['areas', 'Areas'], ['resources', 'Resources'], ['archive', 'Archive'], ['ai', 'AI']];
+// Projects live under Projects, not here.
+const NOTE_FOLDERS = [['inbox', 'Inbox'], ['areas', 'Areas'], ['resources', 'Resources'], ['archive', 'Archive'], ['ai', 'AI']];
+// The top folders `entries` has, in NOTE_FOLDERS' order.
+const noteTops = (entries) => NOTE_FOLDERS.map(([f]) => entries.find((e) => e.path === f)).filter(Boolean);
 // A YAML scalar or flow list as the notes repo writes them: `"json"`, `'single'`, `[a, b]`, plain (`# comment` dropped).
 function yamlValue(v) {
   v = v.trim();
@@ -3887,6 +3966,8 @@ function noteRows(entries, dir) {
 }
 // A project record's folder, its files and the AI's (`ai/` mirrors the repo), and the one named `slug` (id or alias, any case).
 const projectDir = (p) => `${p.archived ? 'archive' : 'projects'}/${p.id}`;
+// The project folder a path is in, its own or the AI's (`ai/projects/x/a.md`: `x`), else null.
+const noteProject = (path) => /^(?:ai\/)?(?:projects|archive)\/([^/]+)\//.exec(path)?.[1] ?? null;
 const projectActive = (p) => !p.archived && p.status.toLowerCase() === 'active';
 function projectFiles(entries, p) {
   const dir = projectDir(p);
@@ -3923,6 +4004,7 @@ async function loadNotes() {
   if (JSON.stringify(got) !== JSON.stringify(notesTree)) notesTree = got;
   if (route().view === 'notes') renderNotes(route().id);
   if (route().view === 'projects') renderProjects(route().id);
+  relistCol('notes');
   renderNav();
 }
 function loadNote(path) {
@@ -3977,7 +4059,9 @@ function noteText(src, dir) {
 function renderNotes(path) {
   if (!everOpen) return; // fetch once connected, with the token in place
   const cut = path.lastIndexOf('/'), dir = cut < 0 ? '' : path.slice(0, cut);
-  $('notes').querySelector('.back').href = !path ? '#' : dir ? noteHref(dir) : '#notes';
+  // A project's file opened from Projects goes back to the project.
+  const proj = here.sec === 'projects' && noteProject(path);
+  $('notes').querySelector('.back').href = proj ? projectHref(proj) : !path ? '#' : dir ? noteHref(dir) : '#notes';
   const entry = notesTree && notesTree.entries && (path ? notesTree.entries.find((e) => e.path === path) : { kind: 'dir', path: '' });
   if (entry && entry.kind === 'md' && (!noteShown || noteShown.path !== path)) loadNote(path);
   const got = entry && entry.kind === 'md' ? noteShown.got : null;
@@ -3994,8 +4078,7 @@ function renderNotes(path) {
   if (!entry) return say('dim', 'Not in the notes repo');
   const stale = ['offline', 'conflict'].includes(notesTree.state) ? el('p', { className: 'dim' }, `Notes repo ${notesTree.state}: showing the last copy`) : '';
   if (entry.kind === 'dir') {
-    const rows = path ? noteRows(notesTree.entries, path)
-      : NOTE_FOLDERS.map(([f]) => notesTree.entries.find((e) => e.path === f)).filter(Boolean);
+    const rows = path ? noteRows(notesTree.entries, path) : noteTops(notesTree.entries);
     const ul = el('ul', { className: 'rows nlist' }, ...rows.map((e) => noteRow(e, notesTree.entries)));
     if (!rows.length) ul.append(el('li', { className: 'dim' }, path ? 'Empty' : 'No notes yet'));
     return body.replaceChildren(stale, ul);
@@ -4025,6 +4108,7 @@ async function loadProjects() {
   if (projectsAsked !== ask) return;
   if (JSON.stringify(got) !== JSON.stringify(projects)) projects = got;
   if (route().view === 'projects') renderProjects(route().id);
+  relistCol('projects');
   renderNav();
 }
 // Rows of files, linking into the Notes view; skeleton until the tree is in.
@@ -4033,6 +4117,16 @@ function projectRows(rows) {
   const ul = el('ul', { className: 'rows nlist' }, ...rows.map((e) => noteRow(e, notesTree.entries)));
   if (!rows.length) ul.append(el('li', { className: 'dim' }, 'None'));
   return ul;
+}
+// Every project, then records that couldn't be read: `#projects`, or its list beside one.
+function projectList() {
+  const list = projects.projects, row = (q) => el('li', {}, el('a', { href: projectHref(q.id) },
+    el('div', { className: 'r1' }, el('span', { className: 'one' }, q.title), el('span', { className: 'n' }, q.archived ? 'archived' : q.status))));
+  const ul = el('ul', { className: 'rows nlist' }, ...list.map(row));
+  if (!list.length) ul.append(el('li', { className: 'dim' }, 'No projects yet'));
+  const bad = projects.errors.map((e) => el('li', {}, el('a', { href: noteHref(e.path) },
+    el('div', { className: 'r1' }, el('span', { className: 'one' }, e.path)), el('div', { className: 'r2 bad' }, e.error))));
+  return [ul, ...(bad.length ? [el('h3', {}, 'Can’t read'), el('ul', { className: 'rows nlist' }, ...bad)] : [])];
 }
 // `#projects`: every project, then records that couldn't be read. `#projects/<slug>`: one project.
 function renderProjects(slug) {
@@ -4051,15 +4145,7 @@ function renderProjects(slug) {
   if (projects.error) return say('bad', projects.error);
   if (projects.state === 'off') return say('dim', 'Notes repo not configured (MIS_NOTES_REMOTE)');
   const stale = ['offline', 'conflict'].includes(projects.state) ? el('p', { className: 'dim' }, `Notes repo ${projects.state}: showing the last copy`) : '';
-  if (!slug) {
-    const row = (q) => el('li', {}, el('a', { href: projectHref(q.id) },
-      el('div', { className: 'r1' }, el('span', { className: 'one' }, q.title), el('span', { className: 'n' }, q.archived ? 'archived' : q.status))));
-    const ul = el('ul', { className: 'rows nlist' }, ...list.map(row));
-    if (!list.length) ul.append(el('li', { className: 'dim' }, 'No projects yet'));
-    const bad = projects.errors.map((e) => el('li', {}, el('a', { href: noteHref(e.path) },
-      el('div', { className: 'r1' }, el('span', { className: 'one' }, e.path)), el('div', { className: 'r2 bad' }, e.error))));
-    return body.replaceChildren(stale, ul, ...(bad.length ? [el('h3', {}, 'Can’t read'), el('ul', { className: 'rows nlist' }, ...bad)] : []));
-  }
+  if (!slug) return body.replaceChildren(stale, ...projectList());
   if (!p) return say('dim', 'No such project');
   const dir = projectDir(p), files = notesTree && notesTree.entries ? projectFiles(notesTree.entries, p) : { own: [], ai: [] };
   const facts = [
@@ -4526,13 +4612,13 @@ $('new').addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('opts
 
 // Keyboard shortcuts: c a new task, j/k the next/previous task, Esc back (or out of a field), Cmd/Ctrl+B the menu.
 const mac = /Mac|iPhone|iPad/.test(navigator.platform); // Cmd+B there; Ctrl+B moves the cursor in a field
-// The next (d = 1) or previous task or session in the list: beside the list it opens it, else it focuses its row.
+// The next (d = 1) or previous row in the list: beside the list it opens it, else it focuses its row.
 // A task under a live session as well as in Needs you counts once, at its row.
 function step(d) {
   const split = inSplit();
   if (!split && route().view !== 'list') return;
-  const seen = new Set(), links = [...$('list').querySelectorAll('a[href^="#task/"], a[href^="#session/"]')].filter((a) => !seen.has(a.getAttribute('href')) && seen.add(a.getAttribute('href')));
-  const cur = split ? location.hash : document.activeElement?.getAttribute('href');
+  const seen = new Set(), links = [...$('list').querySelectorAll('.rows a[href^="#"]')].filter((a) => !seen.has(a.getAttribute('href')) && seen.add(a.getAttribute('href')));
+  const cur = split ? $('list').querySelector('a[aria-current]')?.getAttribute('href') ?? location.hash : document.activeElement?.getAttribute('href');
   const at = links.findIndex((a) => a.getAttribute('href') === cur);
   const a = links[at < 0 ? 0 : Math.max(0, Math.min(links.length - 1, at + d))];
   if (!a || (at >= 0 && a === links[at])) return; // an end of the list
@@ -4552,8 +4638,9 @@ document.addEventListener('keydown', (e) => {
   const field = e.target instanceof Element && e.target.closest('input, textarea, select, [contenteditable]');
   if (e.key === 'Escape') {
     if (field) { field.blur(); return; }
-    const back = $(route().view).querySelector('.back');
-    if (back) { e.preventDefault(); location.hash = back.getAttribute('href'); }
+    // Beside the list, a routine or app (no back link) goes back to it.
+    const back = $(route().view).querySelector('.back')?.getAttribute('href') ?? (inSplit() && isItem(route()) ? here.back : null);
+    if (back) { e.preventDefault(); location.hash = back; }
     return;
   }
   if (field || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -4599,12 +4686,12 @@ $('list').addEventListener('scroll', settle);
 function showNewRoutine(on) {
   $('routine-new').hidden = !on;
   $('rn-error').hidden = true;
+  render(); // shown now, so the name field can take focus; beside the list, in place of Select a routine
   if (on) $('rn-name').focus();
 }
 $('routine-add').onclick = () => {
   $('menu').close();
   location.hash = '#routines';
-  render(); // shown now, so the name field can take focus
   showNewRoutine(true);
 };
 $('rn-cancel').onclick = () => { $('routine-new').reset(); showNewRoutine(false); };
@@ -4622,7 +4709,7 @@ $('routine-new').onsubmit = async (e) => {
   if (why) { $('rn-error').textContent = why; $('rn-error').hidden = false; return; }
   $('routine-new').reset();
   showNewRoutine(false);
-  routineFocus = body.name;
+  if (inSplit()) location.hash = `#routines/${encodeURIComponent(body.name)}`; else routineFocus = body.name;
   await loadRoutines();
 };
 // + by Apps, or an app's Change…: a form atop Apps that starts a task building (`change` null) or
@@ -4644,6 +4731,7 @@ async function showNewApp(change) {
   pickHarness();
   if (got.error) { $('an-error').textContent = `Settings: ${got.error}`; $('an-error').hidden = false; }
   $('app-new').hidden = false;
+  render(); // beside the list, in place of Select an app
   window.scrollTo(0, 0);
   $('an-request').focus();
 }
@@ -4661,7 +4749,7 @@ $('app-add').onclick = () => {
   render();
   showNewApp(null);
 };
-$('an-cancel').onclick = () => { appOpening = null; $('app-new').reset(); $('app-new').hidden = true; };
+$('an-cancel').onclick = () => { appOpening = null; $('app-new').reset(); $('app-new').hidden = true; render(); };
 $('app-new').onsubmit = async (e) => {
   e.preventDefault();
   const body = { request: $('an-request').value, slug: appChange || $('an-slug').value.trim() || null, change: !!appChange,
@@ -4689,10 +4777,12 @@ for (const b of $('menu').querySelectorAll('.ngrp button[aria-controls]')) b.onc
   if (open && b.getAttribute('aria-controls') === 'nav-apps') loadApps();
   if (open && b.getAttribute('aria-controls') === 'nav-notes') loadNotes();
   if (open && b.getAttribute('aria-controls') === 'nav-projects') loadProjects();
+  try { localStorage.setItem('mis-nav-open', JSON.stringify([...$('menu').querySelectorAll('.ngrp [aria-expanded=true]')].map((x) => x.getAttribute('aria-controls')))); } catch {}
 };
 $('menu').addEventListener('close', () => $('menu-btn').setAttribute('aria-expanded', String(railShown())));
-// Beside the list, Home, Tasks and Sessions reopen what each last had open beside it, while that list still shows it.
-function remember() { const r = route(); if (here.sec && isSplit(r)) lastOpen[here.sec] = r.view === 'list' ? null : location.hash; }
+// Beside the list, each section reopens what it last had open beside it, while that list still shows it (or, for
+// Notes, Projects, Routines, Apps and Workers, while it is still there).
+function remember() { const r = route(); if (here.sec && isSplit(r)) lastOpen[here.sec] = isItem(r) ? location.hash : null; }
 for (const a of $('menu').querySelectorAll('nav a[data-view]')) a.addEventListener('click', (e) => {
   const sec = a.dataset.view, h = lastOpen[sec];
   if (!h || !wide.matches || !isDesk()) return;
@@ -4702,13 +4792,20 @@ for (const a of $('menu').querySelectorAll('nav a[data-view]')) a.addEventListen
   if (location.hash !== h) location.hash = h;
   else { history.replaceState({ here }, ''); remember(); render(); }
 });
-// The rail opens with Notes and Workers unfolded: short lists, and Workers carries what's running.
-if (isDesk()) for (const id of ['nav-notes', 'nav-workers']) $('menu').querySelector(`[aria-controls=${id}]`).click();
+// The lists unfold as last left; the first time, the rail has Notes and Workers unfolded: short lists, and Workers carries what's running.
+let navOpen = null;
+try { navOpen = JSON.parse(localStorage.getItem('mis-nav-open')); } catch {}
+for (const id of Array.isArray(navOpen) ? navOpen : isDesk() ? ['nav-notes', 'nav-workers'] : []) $('menu').querySelector(`.ngrp [aria-controls="${CSS.escape(id)}"]`)?.click();
 $('menu-btn').setAttribute('aria-expanded', String(railShown()));
 $('menu-close').onclick = () => $('menu').close();
 let downOnBackdrop = false;
 $('menu').addEventListener('pointerdown', (e) => { downOnBackdrop = e.target === $('menu'); });
 $('menu').addEventListener('click', (e) => { if ((e.target === $('menu') && downOnBackdrop) || e.target.closest('nav a')) $('menu').close(); });
+// An unfolded list's link opens its item in that list's section (a worker in Workers), wherever the view was.
+$('menu').addEventListener('click', (e) => {
+  const top = e.target.closest('.nsub a[href^="#"]')?.closest('.nsub').previousElementSibling.querySelector('a[data-view]');
+  if (top) here = { sec: top.dataset.view, back: top.getAttribute('href') };
+});
 // Theme, per viewer: System follows the device; Dark or Light set `data-theme`, which the token blocks key on.
 const theme = {
   get() { try { return localStorage.getItem('mis-theme') || ''; } catch { return ''; } },
