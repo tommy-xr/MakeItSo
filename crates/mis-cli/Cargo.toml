@@ -18,6 +18,8 @@ flate2 = "1.1"
 futures-util.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
+# `mis apps sdk`'s version: a hash of what it writes.
+sha2 = "0.10"
 tar = "0.4"
 tokio.workspace = true
 tokio-tungstenite.workspace = true

@@ -114,6 +114,13 @@ declare namespace Mis {
     /** Up to 100 ops, each id once, in one transaction: all land, or none (rejects with `index`).
      * Each op's record in order (null for a remove). */
     batch(ops: Op[]): Promise<(Envelope | null)[]>;
+    /** Every record `list` finds, following cursors to the end. */
+    all<T = unknown>(space: Space, collection: string, q?: Omit<Query, 'cursor'>): Promise<Envelope<T>[]>;
+    /** Creates each row (rev 0), 100 to a batch, so a retry or a re-import writes nothing twice:
+     * `present` counts ids already there (skipped), `added` the rest (with a retry whose reply was
+     * lost: the same data, by you). Each id already there costs a request: leave out ids you
+     * know are stored, so it only meets ids added meanwhile. */
+    createAll(space: Space, collection: string, rows: { id: string; data: unknown }[]): Promise<{ added: number; present: number }>;
   }
 
   /** `mis.mock`, only with `?mock=1`. */
@@ -134,12 +141,59 @@ declare namespace Mis {
     mount(el: Element | null): void;
   }
 
+  /** A screen of the app, at `#/<id>`. `tab`: in the bottom tab bar (when two or more are);
+   * else in the ⋯ menu. */
+  interface Section {
+    id: string;
+    label: string;
+    tab?: boolean;
+  }
+  /** `#/log/for/ann` -> `{id: 'log', path: ['log', 'for', 'ann']}`. An empty or unknown hash is
+   * the first section, its path kept (`#/p/ann` -> `{id: <first>, path: ['p', 'ann']}`). Parts
+   * are as in the hash, percent-encoded. */
+  interface Route {
+    id: string;
+    path: string[];
+  }
+  interface ShellOptions {
+    /** The heading of an app with one section. Default: the page's title. */
+    title?: string;
+    /** In order; the first is the default. */
+    sections: Section[];
+    /** In the header instead of the section's label (null: the label). */
+    heading?: string | null;
+    /** A ‹ link before the heading to this href (null: none). */
+    back?: string | null;
+    /** Each time the route changes, after the shell has drawn it. */
+    onNavigate?(route: Route): void;
+  }
+  interface Shell {
+    /** Render the app's content into this. */
+    main: HTMLElement;
+    readonly route: Route;
+    /** Change options; new sections may move the route (and call onNavigate). */
+    update(patch: Partial<ShellOptions>): void;
+  }
+
   interface Sdk {
     MisError: MisErrorClass;
     me(): Promise<Me>;
     records: Records;
     export(): Promise<Export>;
+    /** A 409: the record changed (or appeared) since it was read; `current` is what's stored. */
+    isConflict(e: unknown): e is MisError & { current: Envelope | null };
+    /** What to tell the user when a write fails: a 403 is "You can only view this app.". */
+    errorText(e: unknown): string;
     menu: Menu;
+    /**
+     * The app's frame, appended to the body, once per page: a header (the section's label,
+     * View only for viewers, the ⋯ menu), `main` for the content, and a bottom tab bar for `tab`
+     * sections (two or more); the other sections go in the menu above its platform items. One
+     * section: just the header. Hash routes (`#/<id>`), light and dark, safe areas; the header takes the page's
+     * colours and font, the tab bar and menu the --mis-menu-* variables (see Menu) plus
+     * --mis-menu-line and --mis-menu-accent (the current tab).
+     */
+    shell(options: ShellOptions): Shell;
     mock?: MockControls;
   }
 }

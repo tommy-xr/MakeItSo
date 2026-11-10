@@ -175,11 +175,18 @@ enum AppsCmd {
     Backups { slug: String },
     /// Snapshot the app's records now.
     Backup { slug: String },
-    /// Write the SDK this CLI was built with (mis.js, mis-mock.js, mis.d.ts) into `dir` (the
-    /// repo's `apps/_sdk`), for the apps' dev servers to serve at `/a/_/` and their type-checks.
-    Sdk { dir: std::path::PathBuf },
+    /// Write the SDK this CLI was built with (mis.js, mis-mock.js, mis.d.ts) and the apps' dev
+    /// tooling (vite.ts, shots.mjs, check.mjs) into `dir` (the repo's `apps/_sdk`), each marked
+    /// generated, with `VERSION`.
+    Sdk {
+        dir: std::path::PathBuf,
+        /// Write nothing; fail unless `dir` is exactly what this CLI writes.
+        #[arg(long)]
+        check: bool,
+    },
     /// Start app `slug` in `./apps/<slug>` from a template folder, filling `{{slug}}` and
-    /// `{{title}}` in its text files; it uses the repo's `apps/_sdk/`. Never over an existing folder.
+    /// `{{title}}` in its text files; it uses the repo's `apps/_sdk/` (and says if that is stale).
+    /// Never over an existing folder.
     New {
         slug: String,
         #[arg(long, default_value = "apps/_template")]
@@ -220,10 +227,28 @@ async fn apps(args: &Args, cmd: &AppsCmd) -> Result<()> {
     let base = http_url(&args.url);
     let client = reqwest::Client::new();
     match cmd {
-        AppsCmd::Sdk { dir } => {
+        AppsCmd::Sdk { dir, check: true } => {
+            let v = scaffold::sdk_version();
+            let problems = scaffold::check_sdk(dir)?;
+            if !problems.is_empty() {
+                bail!(
+                    "{} is not the SDK of this mis (v{v}):\n  {}\nrun `mis apps sdk {}`, and remove what isn't generated",
+                    dir.display(),
+                    problems.join("\n  "),
+                    dir.display()
+                );
+            }
+            println!("{}: current (v{v})", dir.display());
+        }
+        AppsCmd::Sdk { dir, check: false } => {
             scaffold::write_sdk(dir)?;
-            let names: Vec<_> = scaffold::SDK.iter().map(|(n, _)| *n).collect();
-            println!("{}: {}", dir.display(), names.join(", "));
+            let names: Vec<_> = scaffold::sdk_files().iter().map(|(n, _)| *n).collect();
+            println!(
+                "{} (v{}): {}",
+                dir.display(),
+                scaffold::sdk_version(),
+                names.join(", ")
+            );
         }
         AppsCmd::New {
             slug,
@@ -238,6 +263,10 @@ async fn apps(args: &Args, cmd: &AppsCmd) -> Result<()> {
                 dest.display(),
                 template.display()
             );
+            let sdk = std::path::Path::new("apps/_sdk");
+            if !scaffold::check_sdk(sdk).is_ok_and(|p| p.is_empty()) {
+                println!("apps/_sdk is not this mis's SDK: run `mis apps sdk apps/_sdk` first");
+            }
             println!("next: cd {} && npm install && npm run dev", dest.display());
         }
         AppsCmd::List => {

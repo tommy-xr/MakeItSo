@@ -55,18 +55,53 @@
   // `mis`, each method waiting for `ready` (the client, or the mock once loaded).
   function front(ready) {
     const via = (pick) => async (...args) => pick(await ready)(...args);
+    const list = via((m) => m.records.list), batch = via((m) => m.records.batch);
+    const isConflict = (e) => e instanceof MisError && e.status === 409;
     return {
       MisError,
-      me: via((m) => m.me),
+      me: async () => menu.saw(await (await ready).me()),
       records: {
-        list: via((m) => m.records.list),
+        list,
         get: via((m) => m.records.get),
         put: via((m) => m.records.put),
         remove: via((m) => m.records.remove),
-        batch: via((m) => m.records.batch),
+        batch,
+        // Every page of a query.
+        all: async (space, collection, q) => {
+          const out = [];
+          let cursor = null;
+          do {
+            const page = await list(space, collection, cursor ? { ...q, cursor } : q);
+            out.push(...page.records);
+            cursor = page.cursor;
+          } while (cursor);
+          return out;
+        },
+        // Create-only puts, 100 to a batch. An id already there (a 409 naming its op) is
+        // dropped and the rest sent again, so a re-import or a second phone writes nothing twice.
+        createAll: async (space, collection, rows) => {
+          let added = 0, present = 0;
+          for (let i = 0; i < rows.length; i += 100) {
+            let ops = rows.slice(i, i + 100).map(({ id, data }) => ({ op: 'put', space, collection, id, rev: 0, data }));
+            while (ops.length) {
+              try {
+                added += (await batch(ops)).length;
+                break;
+              } catch (e) {
+                if (!isConflict(e) || e.index === undefined) throw e;
+                ops = ops.filter((_, j) => j !== e.index);
+                present++;
+              }
+            }
+          }
+          return { added, present };
+        },
       },
       export: via((m) => m.export),
+      isConflict,
+      errorText: (e) => e instanceof MisError && e.status === 403 ? 'You can only view this app.' : `Not saved: ${e?.message ?? e}`,
       menu: { mount: (el) => menu.mount(el) },
+      shell: (opts) => shell(opts),
     };
   }
 
@@ -96,10 +131,11 @@
     return e;
   };
 
-  // Neutral, following light and dark; an app themes it with --mis-menu-fg/-bg (the button)
-  // and --mis-menu-surface/-text (the menu, the feedback panel).
+  // Neutral, following light and dark; an app themes it with --mis-menu-fg/-bg (the button),
+  // --mis-menu-surface/-text (the menu, the feedback panel, the tab bar), --mis-menu-line
+  // (borders) and --mis-menu-accent (the current tab). The shell's header takes the page's colours.
   const STYLE = `
-.mis-ui{--s:var(--mis-menu-surface,#fff);--t:var(--mis-menu-text,#1c1c1e);--d:color-mix(in srgb,var(--t) 60%,transparent);--l:color-mix(in srgb,var(--t) 12%,transparent)}
+.mis-ui{--s:var(--mis-menu-surface,#fff);--t:var(--mis-menu-text,#1c1c1e);--d:color-mix(in srgb,var(--t) 60%,transparent);--l:var(--mis-menu-line,color-mix(in srgb,var(--t) 12%,transparent));--a:var(--mis-menu-accent,var(--t))}
 @media (prefers-color-scheme:dark){.mis-ui{--s:var(--mis-menu-surface,#1c1c1e);--t:var(--mis-menu-text,#f2f2f7)}}
 .mis-mb{all:unset;box-sizing:border-box;position:relative;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:8px;cursor:pointer;color:var(--mis-menu-fg,currentColor);background:var(--mis-menu-bg,transparent);opacity:.7;font:600 18px/1 system-ui,sans-serif;letter-spacing:1px}
 .mis-mb:hover,.mis-mb[aria-expanded=true]{opacity:1}
@@ -123,77 +159,114 @@
 .mis-panel button{padding:7px 14px;border:1px solid var(--l);border-radius:999px;background:transparent;color:inherit;font:600 13px/1.4 system-ui,sans-serif}
 .mis-panel button[type=submit]{background:var(--t);color:var(--s);border-color:var(--t)}
 .mis-panel .mis-err{color:#d33;font-size:13px}
-.mis-tag{position:fixed;left:calc(8px + env(safe-area-inset-left));bottom:calc(8px + env(safe-area-inset-bottom));z-index:2147483646;padding:4px 10px;border-radius:999px;background:color-mix(in srgb,var(--s) 80%,transparent);color:var(--t);box-shadow:0 0 0 1px var(--mis-menu-dot,#e8a33d);font:12px/1.5 system-ui,sans-serif;text-decoration:none;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}`;
+.mis-tag{position:fixed;left:calc(8px + env(safe-area-inset-left));bottom:calc(8px + env(safe-area-inset-bottom));z-index:2147483646;padding:4px 10px;border-radius:999px;background:color-mix(in srgb,var(--s) 80%,transparent);color:var(--t);box-shadow:0 0 0 1px var(--mis-menu-dot,#e8a33d);font:12px/1.5 system-ui,sans-serif;text-decoration:none;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
+.mis-pop a[aria-current=page]{font-weight:600}
+.mis-head{box-sizing:border-box;display:flex;align-items:center;gap:10px;max-width:560px;margin:0 auto;padding:calc(14px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right)) 6px calc(16px + env(safe-area-inset-left))}
+.mis-head h1{flex:1;min-width:0;margin:0;font-size:28px;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mis-head .mis-back{padding-right:2px;color:var(--a);font-size:30px;line-height:1;text-decoration:none}
+.mis-head [hidden]{display:none}
+.mis-badge{padding:2px 10px;border-radius:99px;background:var(--l);color:var(--d);font-size:13px;white-space:nowrap}
+.mis-main{display:block;max-width:560px;margin:0 auto}
+.mis-tabbed .mis-main{padding-bottom:calc(64px + env(safe-area-inset-bottom))}
+.mis-tabbed .mis-tag{bottom:calc(64px + env(safe-area-inset-bottom))}
+.mis-tabs{position:fixed;left:0;right:0;bottom:0;z-index:5;display:flex;justify-content:center;padding:0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);background:var(--s);border-top:1px solid var(--l)}
+.mis-tabs[hidden]{display:none}
+.mis-tabs a{flex:1;max-width:160px;min-height:56px;display:flex;align-items:center;justify-content:center;color:var(--d);font-size:15px;text-decoration:none}
+.mis-tabs a[aria-current=page]{color:var(--a);font-weight:600;box-shadow:inset 0 3px 0 var(--a)}`;
+  let styled = false;
+  const style = () => {
+    if (styled) return;
+    styled = true;
+    const el = make('style');
+    el.textContent = STYLE;
+    document.head.append(el);
+  };
 
   // The platform menu: who's signed in, All apps, and for owners and editors the app's draft,
-  // what became of their feedback, and Give feedback. Apps place its button in their header
-  // (`mis.menu.mount(el)`); else it floats top-right.
+  // what became of their feedback, and Give feedback; above them the shell's menu sections.
+  // Apps place its button in their header (`mis.menu.mount(el)`); else it floats top-right.
   function platformMenu() {
-    let btn = null, host = null, me = null, pop = null;
+    let btn = null, dot = null, host = null, me = null, pop = null, items = [], loaded = false;
+    const watchers = [];
+    const showDot = () => { if (me?.drafted && !draft) btn.append(dot); else dot.remove(); };
+    // Every /me the page reads, the app's too: the latest says who is signed in (and their role).
+    const saw = (m) => {
+      if (!m) return m;
+      me = m;
+      for (const f of watchers) f(m);
+      if (btn) showDot(); else if (loaded) button();
+      return m;
+    };
     const mount = (el) => {
       if (!el) return; // a React ref also calls with null
       host = el;
       if (btn) { btn.classList.remove('mis-float', 'mis-ui'); el.append(btn); }
     };
     const start = async () => {
-      const style = make('style');
-      style.textContent = STYLE;
-      document.head.append(style);
+      style();
       // Said whatever /me says: writes here go to test data.
       if (draft) {
         const tag = make('a', 'mis-tag mis-ui', `Draft v${draft} · test data · exit`);
         tag.href = `/a/${slug}/?draft=off`;
         document.body.append(tag);
       }
-      me = await globalThis.mis.me().catch(() => null);
-      if (!me) return;
+      await globalThis.mis.me().catch(() => null);
+      loaded = true;
+      // No /me yet: a button only for the shell's sections; a later /me adds the rest.
+      if (me || items.length) button();
+    };
+    function button() {
       btn = make('button', 'mis-mb', '⋯');
       btn.type = 'button';
       btn.setAttribute('aria-label', 'App menu');
       btn.setAttribute('aria-expanded', 'false');
-      const dot = make('span', 'mis-dot');
-      const showDot = () => { if (me.drafted && !draft) btn.append(dot); else dot.remove(); };
+      dot = make('span', 'mis-dot');
       showDot();
       // Fresh each time it opens: a draft or a feedback status may have changed. A tap while
       // open closes it.
       btn.onclick = async () => {
         if (pop) return pop.close();
-        me = (await globalThis.mis.me().catch(() => null)) || me;
-        showDot();
+        await globalThis.mis.me().catch(() => null);
         if (!pop) open();
       };
       if (host) return mount(host);
       // Not placed by the app: float, unless it places it soon after loading.
       setTimeout(() => { if (!host) { btn.classList.add('mis-float', 'mis-ui'); document.body.append(btn); } }, 800);
-    };
+    }
     function open() {
       const el = make('div', 'mis-pop mis-ui');
       el.setAttribute('role', 'menu');
       const close = () => { el.remove(); pop = null; btn.setAttribute('aria-expanded', 'false'); removeEventListener('pointerdown', outside, true); };
       const outside = (e) => { if (!el.contains(e.target) && !btn.contains(e.target)) close(); };
       pop = { close };
-      const item = (text, act) => {
+      const item = (text, act, current) => {
         const a = make(typeof act === 'string' ? 'a' : 'button', '', text);
-        if (typeof act === 'string') a.href = act; else a.onclick = () => { close(); act(); };
+        if (typeof act === 'string') a.href = act;
+        a.onclick = () => { close(); if (typeof act !== 'string') act(); };
         a.setAttribute('role', 'menuitem');
+        if (current) a.setAttribute('aria-current', 'page');
         el.append(a);
       };
-      const writes = me.role === 'owner' || me.role === 'editor';
-      el.append(make('div', 'mis-dim', `Signed in as ${me.user} · ${me.role}`));
-      if (draft) item(`Trying draft v${draft} · back to live`, `/a/${slug}/?draft=off`);
-      else if (me.drafted) item(`Draft v${me.drafted} ready · Try it`, `/a/${slug}/?draft=${me.drafted}`);
-      if (writes && !mocked) {
-        for (const f of me.feedback || []) {
-          const row = make('div', 'mis-fb', f.note);
-          const state = f.state === 'draft_ready' ? `draft v${f.release} ready` : f.state === 'working' ? 'an agent is on it'
-            : f.state === 'done' ? f.what : `waiting: ${f.why}`;
-          row.append(make('span', '', state));
-          el.append(row);
+      for (const s of items) item(s.label, s.href, s.current);
+      if (me) {
+        if (items.length) el.append(make('hr'));
+        const writes = me.role === 'owner' || me.role === 'editor';
+        el.append(make('div', 'mis-dim', `Signed in as ${me.user} · ${me.role}`));
+        if (draft) item(`Trying draft v${draft} · back to live`, `/a/${slug}/?draft=off`);
+        else if (me.drafted) item(`Draft v${me.drafted} ready · Try it`, `/a/${slug}/?draft=${me.drafted}`);
+        if (writes && !mocked) {
+          for (const f of me.feedback || []) {
+            const row = make('div', 'mis-fb', f.note);
+            const state = f.state === 'draft_ready' ? `draft v${f.release} ready` : f.state === 'working' ? 'an agent is on it'
+              : f.state === 'done' ? f.what : `waiting: ${f.why}`;
+            row.append(make('span', '', state));
+            el.append(row);
+          }
+          item('Give feedback…', () => mark());
         }
-        item('Give feedback…', () => mark());
+        el.append(make('hr'));
+        item('All apps', '/a/');
       }
-      el.append(make('hr'));
-      item('All apps', '/a/');
       const r = btn.getBoundingClientRect();
       // Under the button, inside the screen: it scrolls rather than run past the bottom.
       const top = Math.min(r.bottom + 6, innerHeight - 120);
@@ -262,7 +335,93 @@
         send.disabled = false;
       };
     }
-    return { mount, start };
+    // `saw`: each /me read. `watch(f)`: f(me) now if known, and on each later one. `items`: the
+    // shell's menu sections, shown on open.
+    return {
+      mount, start, saw,
+      watch(f) { watchers.push(f); if (me) f(me); },
+      set items(list) { items = list; if (loaded && !btn && list.length) button(); },
+    };
+  }
+
+  // Shell core, pure. The section a hash names: `#/log/for/ann` -> {id: 'log', path: ['log',
+  // 'for', 'ann']}. Empty or unknown: the first section, the path kept for the app (`#/p/ann`).
+  function route(hash, sections) {
+    const path = hash.replace(/^#\/?/, '').split('/').filter(Boolean);
+    return { id: (sections.find((x) => x.id === path[0]) || sections[0]).id, path };
+  }
+  // What the shell shows for options `s` on route `r`: the heading (the section's label; one
+  // section: the title; `heading` overrides), a back link, the tabs (two or more `tab`
+  // sections) and the menu's sections (the rest; none for one section).
+  function layout(s, r) {
+    const many = s.sections.length > 1;
+    const link = (x) => ({ label: x.label, href: `#/${x.id}`, current: x.id === r.id });
+    const tabbed = s.sections.filter((x) => x.tab).length > 1;
+    return {
+      heading: s.heading ?? (many ? s.sections.find((x) => x.id === r.id).label : s.title),
+      back: s.back ?? null,
+      tabs: tabbed ? s.sections.filter((x) => x.tab).map(link) : [],
+      items: many ? s.sections.filter((x) => !(tabbed && x.tab)).map(link) : [],
+    };
+  }
+  const sectioned = (list) => {
+    const ok = Array.isArray(list) && list.length && list.every((x) => typeof x?.id === 'string' && /^[A-Za-z0-9_-]+$/.test(x.id) && typeof x.label === 'string');
+    if (!ok) throw new TypeError('mis.shell: sections are [{id: [A-Za-z0-9_-]+, label, tab?}], at least one');
+  };
+
+  // The app's frame, appended to the body: a header (heading, View only for viewers, the ⋯
+  // menu), `main` for the app to render into, and bottom tabs. Once per page.
+  let framed = false;
+  function shell(opts) {
+    sectioned(opts?.sections);
+    if (framed) throw new Error('mis.shell: once per page');
+    framed = true;
+    style();
+    let s = { ...opts, title: opts.title ?? document.title };
+    const head = make('header', 'mis-head mis-ui'), back = make('a', 'mis-back', '‹'), h1 = make('h1');
+    const badge = make('span', 'mis-badge', 'View only'), slot = make('span');
+    const main = make('main', 'mis-main'), tabs = make('nav', 'mis-tabs mis-ui');
+    back.setAttribute('aria-label', 'Back');
+    badge.hidden = true;
+    head.append(back, h1, badge, slot);
+    document.body.append(head, main, tabs);
+    const link = ({ label, href, current }) => {
+      const a = make('a', '', label);
+      a.href = href;
+      if (current) a.setAttribute('aria-current', 'page');
+      return a;
+    };
+    let r = route(location.hash, s.sections);
+    const render = () => {
+      const v = layout(s, r);
+      h1.textContent = v.heading;
+      back.hidden = !v.back;
+      if (v.back) back.href = v.back;
+      tabs.replaceChildren(...v.tabs.map(link));
+      tabs.hidden = !v.tabs.length;
+      document.body.classList.toggle('mis-tabbed', v.tabs.length > 0);
+      menu.items = v.items;
+    };
+    // On a new hash, or new sections moving it (a viewer's without `log`): render, then tell the app.
+    const follow = () => {
+      const was = r;
+      r = route(location.hash, s.sections);
+      render();
+      if (r.id !== was.id || r.path.join('/') !== was.path.join('/')) s.onNavigate?.(r);
+    };
+    addEventListener('hashchange', follow);
+    menu.mount(slot);
+    menu.watch((me) => (badge.hidden = me.role !== 'viewer'));
+    render();
+    return {
+      main,
+      get route() { return r; },
+      update(patch) {
+        if (patch && 'sections' in patch) sectioned(patch.sections);
+        s = { ...s, ...patch };
+        follow();
+      },
+    };
   }
 
   function toast(text) {
@@ -288,6 +447,8 @@
     return parts.join(' > ');
   }
 
+  // Tests reach the pure shell core here.
+  if (typeof globalThis.__misTest === 'function') globalThis.__misTest({ route, layout });
   // Last: everything it uses is defined by now.
   if (typeof document === 'object' && document.addEventListener) onBody(() => menu.start());
 })();
