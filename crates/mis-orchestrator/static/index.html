@@ -2977,16 +2977,22 @@ function ancestors(t) {
 const rootOf = (t) => ancestors(t)[0] || t; // whose prompt titles the thread
 // Grey bars standing in for content that is loading.
 const skel = (n = 6) => el('div', { className: 'skel', ariaBusy: 'true' }, ...Array.from({ length: n }, () => el('i')));
+let seenLater;
 function renderDetail(id) {
   if (!detail || detail.id !== id) {
     // A draft belongs to the thread it was typed in.
     if (replyFor !== id) { replyFor = id; $('reply-text').value = drafts.get(replyDraft(id)); $('reply-error').hidden = true; }
-    detail = { id, task: null, events: [], truncated: false, note: '', ready: false, sig: null, open: { earlier: false, runs: new Set() } };
+    detail = { id, since: Date.now(), task: null, events: [], truncated: false, note: '', ready: false, sig: null, open: { earlier: false, runs: new Set() } };
     send({ type: 'show', task: id });
   }
   const t = tasks.find((x) => x.id === id) || detail.task;
   // Looking at a finished task that needs the user settles it; repeats until the Status says so are harmless.
-  if (!readOnly && t && ATTENTION[t.attention] && ['done', 'failed'].includes(t.status) && !document.hidden) send({ type: 'seen', task: id });
+  // Beside the list it must stay open 2s first, so stepping through Needs you with j/k doesn't settle every task passed.
+  clearTimeout(seenLater);
+  if (!readOnly && t && ATTENTION[t.attention] && ['done', 'failed'].includes(t.status) && !document.hidden) {
+    const wait = inSplit() ? detail.since + 2000 - Date.now() : 0;
+    if (wait > 0) seenLater = setTimeout(render, wait); else send({ type: 'seen', task: id });
+  }
   const cards = approvalCards(t);
   $('approvals').replaceChildren(...cards);
   $('approvals').hidden = !cards.length;
