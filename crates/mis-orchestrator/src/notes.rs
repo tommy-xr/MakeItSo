@@ -344,8 +344,9 @@ impl Notes {
         };
         let pending = unpublished(&map);
         if pending == 0 {
-            // Nothing to publish; still catch the clone up, which the Notes view reads.
-            return (Some(0), self.sync().map(|()| false));
+            // Nothing to publish; still catch the clone up, which the Notes view reads, and
+            // push what an offline run committed (a filing).
+            return (Some(0), self.sync().and_then(|()| self.push(|| Ok(()))));
         }
         match self.publish_new(&receipts, &mut map) {
             Ok(pushed) => (Some(unpublished(&map)), Ok(pushed)),
@@ -389,36 +390,14 @@ impl Notes {
     /// then record it in `map` and save that. Ok(true): it pushed.
     fn publish_new(&self, receipts: &[Receipt], map: &mut Map) -> Result<bool, Failure> {
         self.sync()?;
-        let mut retries = 0;
-        let (actions, pushed) = loop {
+        let mut actions = Vec::new();
+        let pushed = self.push(|| {
             // Published per history counts as published, map or not.
             let mut known = self.history()?;
             known.extend(map.iter().map(|(id, p)| (*id, p.clone())));
-            let actions = plan(receipts, &known, &self.scan()?);
-            self.commit(receipts, &actions)?;
-            let ahead = self.git(&["rev-list", "--count", &format!("origin/{BRANCH}..HEAD")])?;
-            if ahead.check("rev-list", Failure::Other)?.text() == "0" {
-                break (actions, false);
-            }
-            let to = format!("HEAD:refs/heads/{BRANCH}");
-            let push = self.git(&["push", "--porcelain", "origin", &to])?;
-            if push.ok {
-                break (actions, true);
-            }
-            if !raced(&String::from_utf8_lossy(&push.stdout)) {
-                return Err(Failure::Offline(format!("push: {}", push.stderr.trim())));
-            }
-            if retries == PUSH_RETRIES {
-                let why = format!(
-                    "push refused after {PUSH_RETRIES} retries: {}",
-                    push.stderr.trim()
-                );
-                return Err(Failure::Other(why));
-            }
-            retries += 1;
-            // Someone pushed first: replay onto theirs and try again.
-            self.fetch_rebase()?;
-        };
+            actions = plan(receipts, &known, &self.scan()?);
+            self.commit(receipts, &actions)
+        })?;
         // HEAD is the remote's now: what its history published, plus what was adopted.
         for (id, p) in self.history()? {
             map.entry(id).or_insert(p);
@@ -437,6 +416,37 @@ impl Notes {
             tracing::info!(%commit, "published captures to the notes repo");
         }
         Ok(pushed)
+    }
+
+    /// `commit`, then push HEAD if that leaves it ahead of the remote. If someone pushed
+    /// first, rebase onto theirs and do both again, up to [`PUSH_RETRIES`] times. Ok(true):
+    /// it pushed.
+    fn push(&self, mut commit: impl FnMut() -> Result<(), Failure>) -> Result<bool, Failure> {
+        let mut retries = 0;
+        loop {
+            commit()?;
+            let ahead = self.git(&["rev-list", "--count", &format!("origin/{BRANCH}..HEAD")])?;
+            if ahead.check("rev-list", Failure::Other)?.text() == "0" {
+                return Ok(false);
+            }
+            let to = format!("HEAD:refs/heads/{BRANCH}");
+            let push = self.git(&["push", "--porcelain", "origin", &to])?;
+            if push.ok {
+                return Ok(true);
+            }
+            if !raced(&String::from_utf8_lossy(&push.stdout)) {
+                return Err(Failure::Offline(format!("push: {}", push.stderr.trim())));
+            }
+            if retries == PUSH_RETRIES {
+                let why = format!(
+                    "push refused after {PUSH_RETRIES} retries: {}",
+                    push.stderr.trim()
+                );
+                return Err(Failure::Other(why));
+            }
+            retries += 1;
+            self.fetch_rebase()?;
+        }
     }
 
     /// Clone if needed, point at the configured remote, remove what an interrupted run

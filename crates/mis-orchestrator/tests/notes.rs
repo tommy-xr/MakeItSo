@@ -612,3 +612,28 @@ fn a_crash_after_committing_keeps_and_pushes_the_commit() {
     assert_eq!(w.map()[&a.id].commit, w.head());
     assert!(!clone.join(".git/mis-writing").exists());
 }
+
+#[test]
+fn a_run_with_nothing_to_publish_pushes_a_commit_left_unpushed() {
+    let w = World::new();
+    w.capture("first", &[]);
+    w.notes().run();
+    // A commit made while the remote was away (a filing), with no capture pending.
+    let clone = w.state.join("notes");
+    std::fs::write(clone.join("inbox/later.md"), "later\n").unwrap();
+    git(&clone, &["add", "--", "inbox/later.md"]);
+    let who = [
+        "-c",
+        "user.name=Make It So",
+        "-c",
+        "user.email=mis@localhost",
+    ];
+    git(
+        &clone,
+        &[&who[..], &["commit", "--quiet", "-m", "offline"]].concat(),
+    );
+    let s = w.notes().run();
+    assert_eq!((s.state, s.pending, &s.last_error), (Idle, 0, &None));
+    assert!(s.last_push.is_some());
+    assert_eq!(w.log()[0], "offline");
+}
