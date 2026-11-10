@@ -6232,6 +6232,31 @@ async fn owners_and_editors_try_a_draft_on_a_copy_of_the_records_that_goes_with_
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// End `task` on `worker` (in session `sess`) and wait until the orchestrator has it done:
+/// feedback sent before that would find its thread still working, and wait for the owner.
+async fn finish_seen(mis: &str, worker: &mut Ws, task: TaskId) {
+    for event in [
+        AgentEvent::Started {
+            session: Some("sess".into()),
+            model: None,
+        },
+        AgentEvent::Finished {
+            ok: true,
+            summary: None,
+        },
+    ] {
+        send(worker, &WorkerMsg::Event { task, event }).await;
+    }
+    let (mut client, _) = connect_async(client_req(mis, &[("authorization", "Bearer s")]))
+        .await
+        .unwrap();
+    let done = |ts: &[TaskSummary]| {
+        ts.iter()
+            .any(|t| t.id == task && t.status == TaskStatus::Done)
+    };
+    status_until(&mut client, done).await;
+}
+
 /// Feedback marking `div.chart` on route `#/readings` at 390x844.
 fn feedback_body(note: &str) -> String {
     serde_json::json!({"route": "#/readings", "selector": "main > div.chart",
@@ -6330,25 +6355,7 @@ async fn feedback_on_a_draft_continues_its_thread_and_the_owner_can_hold_it() {
             .0,
         201
     );
-    for event in [
-        AgentEvent::Started {
-            session: Some("sess".into()),
-            model: None,
-        },
-        AgentEvent::Finished {
-            ok: true,
-            summary: None,
-        },
-    ] {
-        send(
-            &mut worker,
-            &WorkerMsg::Event {
-                task: task.id,
-                event,
-            },
-        )
-        .await;
-    }
+    finish_seen(&mis, &mut worker, task.id).await;
 
     // Trying the draft: feedback goes back to the task that made it, in its session.
     assert_eq!(app_get(&apps, "/a/demo/?draft=2", "").await.0, 303);
@@ -6371,25 +6378,7 @@ async fn feedback_on_a_draft_continues_its_thread_and_the_owner_can_hold_it() {
         "{}",
         reply.prompt
     );
-    for event in [
-        AgentEvent::Started {
-            session: Some("sess".into()),
-            model: None,
-        },
-        AgentEvent::Finished {
-            ok: true,
-            summary: None,
-        },
-    ] {
-        send(
-            &mut worker,
-            &WorkerMsg::Event {
-                task: reply.id,
-                event,
-            },
-        )
-        .await;
-    }
+    finish_seen(&mis, &mut worker, reply.id).await;
 
     // Held: it waits on the app for the owner, who sends one and dismisses another.
     assert_eq!(
