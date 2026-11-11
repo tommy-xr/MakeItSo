@@ -20,7 +20,8 @@ pub struct Spec {
     pub log: String,
 }
 
-/// The LaunchAgent plist: runs at load, restarted on any exit, files private (umask 077).
+/// The LaunchAgent plist: runs at load, restarted on any exit, files private (umask 077), and
+/// a log without color codes.
 pub fn launchd_plist(s: &Spec) -> String {
     let string = |v: &str| format!("\t\t<string>{}</string>\n", xml_escape(v));
     let mut argv = vec![s.exe.as_str(), "--state-dir", &s.state_dir];
@@ -43,6 +44,8 @@ pub fn launchd_plist(s: &Spec) -> String {
 	<dict>
 		<key>PATH</key>
 		<string>{path}</string>
+		<key>NO_COLOR</key>
+		<string>1</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>
@@ -92,7 +95,13 @@ pub fn unit_path(
 /// The top-level lines of `launchctl print` that `status` shows: `state = running` etc.
 /// Nested blocks (indented further) repeat keys like `state`, so they're skipped.
 pub fn print_summary(out: &str) -> Vec<(&str, &str)> {
-    const KEYS: [&str; 4] = ["state", "pid", "runs", "last exit code"];
+    const KEYS: [&str; 5] = [
+        "state",
+        "pid",
+        "runs",
+        "last exit code",
+        "last terminating signal",
+    ];
     (out.lines())
         .filter_map(|l| l.strip_prefix('\t'))
         .filter(|l| !l.starts_with('\t'))
@@ -343,6 +352,8 @@ mod tests {
 	<dict>
 		<key>PATH</key>
 		<string>/Users/u/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>NO_COLOR</key>
+		<string>1</string>
 	</dict>
 	<key>RunAtLoad</key>
 	<true/>
@@ -391,14 +402,15 @@ mod tests {
     #[test]
     fn summary_skips_nested_blocks() {
         let out = "gui/501/x = {\n\tactive count = 1\n\tstate = running\n\n\tenvironment = {\n\t\tstate => x\n\t}\n\
-            \tendpoints = {\n\t\tstate = active\n\t}\n\truns = 2\n\tpid = 496\n\tlast exit code = 9: Killed: 9\n}\n";
+            \tendpoints = {\n\t\tstate = active\n\t}\n\truns = 2\n\tpid = 496\n\tlast exit code = (never exited)\n\tlast terminating signal = Killed: 9\n}\n";
         assert_eq!(
             print_summary(out),
             [
                 ("state", "running"),
                 ("runs", "2"),
                 ("pid", "496"),
-                ("last exit code", "9: Killed: 9")
+                ("last exit code", "(never exited)"),
+                ("last terminating signal", "Killed: 9")
             ]
         );
     }
