@@ -507,9 +507,18 @@ fn refuse_nonempty(dir: &Path, what: &str, except: Option<&str>) -> anyhow::Resu
 }
 
 /// `dir` made `0700`: an empty one already there may have been more open.
+#[cfg(unix)]
 fn restrict(dir: &Path) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    use std::os::unix::fs::PermissionsExt;
+    Ok(std::fs::set_permissions(
+        dir,
+        PermissionsExt::from_mode(0o700),
+    )?)
+}
+
+/// No modes off Unix.
+#[cfg(not(unix))]
+fn restrict(_: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
