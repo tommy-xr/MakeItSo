@@ -2781,6 +2781,62 @@ async fn supervisor_reports_update_live_and_read_token_cannot() {
 }
 
 #[tokio::test]
+async fn a_ready_core_build_starts_only_once_the_owner_chooses_it() {
+    let base = start_app(with_read_token()).await;
+    let (mut page, _) = connect_async(client_req(&base, &[("authorization", "Bearer r")]))
+        .await
+        .unwrap();
+    send(&mut page, &ClientMsg::Subscribe).await;
+    send(&mut page, &ClientMsg::Status).await;
+    let ServerMsg::Status { core_update, .. } = recv(&mut page).await else {
+        panic!()
+    };
+    assert_eq!(core_update, None, "no watcher has reported");
+
+    let (a, b) = ("a".repeat(40), "b".repeat(40));
+    let report = format!(
+        r#"{{"running":"{a}","ready":"{b}","origin":"https://github.com/demo/mis.git",
+        "incoming":[{{"sha":"{b}","subject":"feat: x (#12)"}}]}}"#
+    );
+    let builds = |auth: &str| format!("POST /api/update/builds HTTP/1.1\r\n{auth}");
+    let choose = |auth: &str| format!("POST /api/update/choose HTTP/1.1\r\n{auth}");
+    let (full, read) = ("Authorization: Bearer s", "Authorization: Bearer r");
+    assert_eq!(http(&base, &builds(read), report.as_bytes()).await.0, 403);
+    let (status, _, body) = http(&base, &builds(full), report.as_bytes()).await;
+    assert_eq!(status, 200);
+    assert_eq!(String::from_utf8_lossy(&body), r#"{"start":null}"#);
+
+    let ServerMsg::Status { core_update, .. } = recv(&mut page).await else {
+        panic!()
+    };
+    let v = core_update.unwrap();
+    assert_eq!(v.repo.as_deref(), Some("demo/mis"));
+    let ready = v.ready.unwrap();
+    assert_eq!(
+        (ready.sha.as_str(), ready.commits[0].pr),
+        (b.as_str(), Some(12))
+    );
+
+    let pick = |sha: &str| format!(r#"{{"sha":"{sha}"}}"#);
+    assert_eq!(http(&base, &choose(read), pick(&b).as_bytes()).await.0, 403);
+    let other = "c".repeat(40);
+    assert_eq!(
+        http(&base, &choose(full), pick(&other).as_bytes()).await.0,
+        409
+    );
+    assert_eq!(http(&base, &choose(full), pick(&b).as_bytes()).await.0, 204);
+    let ServerMsg::Status { core_update, .. } = recv(&mut page).await else {
+        panic!()
+    };
+    assert_eq!(core_update.unwrap().asked, Some(b.clone()));
+    let (_, _, body) = http(&base, &builds(full), report.as_bytes()).await;
+    assert_eq!(
+        String::from_utf8_lossy(&body),
+        format!(r#"{{"start":"{b}"}}"#)
+    );
+}
+
+#[tokio::test]
 async fn worker_purpose_and_inventory_reach_status() {
     let base = start().await;
     let (mut client, _) = connect_async(format!("{base}/ws/client")).await.unwrap();
@@ -4265,6 +4321,8 @@ async fn refused_everywhere_else(base: &str, headers: &[(&'static str, &str)]) {
         ("GET", format!("/api/evidence/{id}")),
         ("GET", "/api/update".into()),
         ("POST", "/api/update".into()),
+        ("POST", "/api/update/builds".into()),
+        ("POST", "/api/update/choose".into()),
         ("POST", format!("/api/tasks/{id}/cancel")),
         ("GET", format!("/api/tasks/{id}/diff")),
         ("GET", "/api/routines".into()),

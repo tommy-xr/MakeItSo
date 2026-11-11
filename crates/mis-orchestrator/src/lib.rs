@@ -1538,6 +1538,8 @@ pub fn router(app: App) -> Router {
         .route("/api/images/{id}", get(image))
         .route("/api/evidence/{id}", get(evidence_file))
         .route("/api/update", get(update_status).post(set_update))
+        .route("/api/update/builds", post(report_builds))
+        .route("/api/update/choose", post(choose_build))
         .route("/api/tasks/{id}/cancel", post(cancel))
         .route("/api/tasks/{id}/diff", get(task_diff))
         .route("/api/routines", get(routines).post(new_routine))
@@ -2296,7 +2298,7 @@ fn refused_capture(r: capture::Refused) -> (StatusCode, String) {
     }
 }
 
-/// For `scripts/mis-up --watch`: the update shown to clients, and how many
+/// For `scripts/mis-up --watch`: the update shown to clients, the core's builds, and how many
 /// tasks a restart would interrupt (it restarts at 0).
 async fn update_status(
     State(app): State<App>,
@@ -2307,7 +2309,9 @@ async fn update_status(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let l = app.ledger();
-    Json(serde_json::json!({ "update": l.update(), "running": l.running() })).into_response()
+    let (update, running, core) = (l.update(), l.running(), l.core_update());
+    Json(serde_json::json!({ "update": update, "running": running, "core_update": core }))
+        .into_response()
 }
 
 /// The supervisor reports an [`Update`]; clients see it live in Status.
@@ -2331,6 +2335,60 @@ async fn set_update(
     match set {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(why) => (StatusCode::BAD_REQUEST, why).into_response(),
+    }
+}
+
+/// `mis-up --watch` reports the core's [`Builds`] every few seconds; the reply names the build to
+/// start now, if any: `{"start": sha | null}`.
+async fn report_builds(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/update/builds").await {
+        return refused.into_response();
+    }
+    let builds = match serde_json::from_slice::<Builds>(&body) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let reported = app.transition(|l| match l.report_builds(builds) {
+        Ok((start, effects)) => (Ok(start), effects),
+        Err(why) => (Err(why), vec![]),
+    });
+    match reported {
+        Ok(start) => Json(serde_json::json!({ "start": start })).into_response(),
+        Err(why) => (StatusCode::BAD_REQUEST, why).into_response(),
+    }
+}
+
+/// The owner chooses a build: `{"sha"}` of the ready one (Update), the previous one (Roll
+/// back) or the running one (keep it). The watcher starts it once no task runs.
+async fn choose_build(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/update/choose").await {
+        return refused.into_response();
+    }
+    #[derive(serde::Deserialize)]
+    struct Choice {
+        sha: String,
+    }
+    let choice = match serde_json::from_slice::<Choice>(&body) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let chosen = app.transition(|l| match l.choose_build(&choice.sha) {
+        Ok(effects) => (Ok(()), effects),
+        Err(why) => (Err(why), vec![]),
+    });
+    match chosen {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(why) => (StatusCode::CONFLICT, why).into_response(),
     }
 }
 

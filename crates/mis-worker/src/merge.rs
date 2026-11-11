@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mis_types::{
-    first_line, Approval, Assessment, Link, LinkKind, MergeApprove, MergeFacts, MergeMethod,
-    MergePolicy, TaskId, MAX_APPROVAL_DETAIL,
+    first_line, github_repo, Approval, Assessment, Link, LinkKind, MergeApprove, MergeFacts,
+    MergeMethod, MergePolicy, TaskId, MAX_APPROVAL_DETAIL,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -428,16 +428,6 @@ pub fn log_tail(log: &str) -> String {
     tail[cut..].to_string()
 }
 
-/// `owner/name` of a GitHub remote URL (`git@github.com:o/n.git`, `https://github.com/o/n`).
-pub fn github_repo(remote: &str) -> Option<String> {
-    let path = (remote.strip_prefix("git@github.com:"))
-        .or_else(|| remote.strip_prefix("https://github.com/"))
-        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))?;
-    let path = path.trim_end_matches('/').trim_end_matches(".git");
-    let (o, n) = path.split_once('/')?;
-    (!o.is_empty() && !n.is_empty() && !n.contains('/')).then(|| format!("{o}/{n}"))
-}
-
 /// Look at approved review PR `w` and merge it at `head` if [`assess`] lets it; its repo
 /// must be `checkout`'s origin. A failure comes with the tail of its CI log.
 pub async fn assess_review(
@@ -837,24 +827,6 @@ mod tests {
         let tail = log_tail(&log);
         assert!(tail.starts_with("line 40\n") && tail.ends_with("line 99"));
         assert!(log_tail(&"é".repeat(5000)).len() <= 4000);
-    }
-
-    #[test]
-    fn github_remotes_name_their_repo() {
-        for url in [
-            "git@github.com:tommy-xr/mis-notes.git",
-            "https://github.com/tommy-xr/mis-notes",
-            "https://github.com/tommy-xr/mis-notes.git",
-            "ssh://git@github.com/tommy-xr/mis-notes.git",
-        ] {
-            assert_eq!(
-                github_repo(url).as_deref(),
-                Some("tommy-xr/mis-notes"),
-                "{url}"
-            );
-        }
-        assert_eq!(github_repo("https://gitlab.com/o/r"), None);
-        assert_eq!(github_repo("https://github.com/o/r/x"), None);
     }
 
     fn refused(edit: impl FnOnce(&mut Value)) -> String {

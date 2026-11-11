@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::{app_grant, note, plan, routine, summary};
 
 mod alerts;
+mod builds;
 pub mod persist;
 mod reviews;
 mod routines;
@@ -568,6 +569,10 @@ pub struct Ledger {
     queue: VecDeque<TaskId>,
     /// The supervisor's last report; not saved, so a restart clears it.
     update: Update,
+    /// The watcher's last report of the core's builds, and the build the owner chose among
+    /// them; not saved: the watcher reports again after a restart.
+    builds: Option<Builds>,
+    chosen: Option<String>,
     /// Each routine's schedule state, by name (see `routines`).
     routines: BTreeMap<String, routine::State>,
     /// Each worker's live sessions as it last reported them; outlives the worker.
@@ -603,6 +608,7 @@ impl Ledger {
             tasks: self.tasks.iter().map(|t| self.summary(t)).collect(),
             now_ms: Some(self.now_ms),
             update: self.update.clone(),
+            core_update: self.core_update(),
             default_harness: self.default_harness.clone(),
         }
     }
@@ -626,12 +632,7 @@ impl Ledger {
     /// The supervisor reports an update; clients see it in Status.
     /// Err: a sha that isn't 7-40 hex digits.
     pub fn set_update(&mut self, update: Update) -> Result<Vec<Effect>, String> {
-        let sha = |sha: String| match (7..=40).contains(&sha.len())
-            && sha.bytes().all(|b| b.is_ascii_hexdigit())
-        {
-            true => Ok(sha),
-            false => Err(format!("sha {sha:?}: want 7-40 hex digits")),
-        };
+        let sha = |sha: String| builds::sha(&sha).map(|()| sha);
         let line = |s: String| first_line(&s, MAX_SUBJECT);
         let update = match update {
             Update::None => Update::None,
