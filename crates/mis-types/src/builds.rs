@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::Checks;
+
 /// How the running build started.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -24,6 +26,9 @@ pub struct Commit {
     pub subject: String,
     #[serde(default)]
     pub pr: Option<u64>,
+    /// Main's CI run on it, if the watcher could ask.
+    #[serde(default)]
+    pub ci: Option<Checks>,
 }
 
 /// `mis-up --watch`'s report, sent every few seconds to `POST /api/update/builds`.

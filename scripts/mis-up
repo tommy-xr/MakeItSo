@@ -176,11 +176,29 @@ prune() {
 # The running and previous builds, for a restart of mis-up and for Roll back.
 save() { printf '%s %s\n' "$cur" "$prev" >"$BUILDS/.state.new" && mv "$BUILDS/.state.new" "$BUILDS/.state"; }
 
-# Commits $1..$2, newest first (at most 50), as JSON [{"sha","subject"}].
+# Commits $1..$2, newest first (at most 50), as JSON [{"sha","subject","ci"}]; ci from $ci.
 commits() {
   [ -n "$1" ] && [ -n "$2" ] || { printf '[]'; return; }
-  printf '[%s]' "$(git -C "$REPO" log -50 --format='%H %s' "$1..$2" | tr -d '\000-\011\013-\037' | esc |
-    sed 's/^\([0-9a-f]*\) \(.*\)$/{"sha":"\1","subject":"\2"}/' | paste -sd, -)"
+  git -C "$REPO" log -50 --format='%H %s' "$1..$2" | tr -d '\000-\011\013-\037' | esc |
+    CI=$ci awk 'BEGIN { n = split(ENVIRON["CI"], l, "\n"); for (i = n; i > 0; i--) { split(l[i], f, " "); c[f[1]] = f[2] } }
+      { printf "%s{\"sha\":\"%s\",\"subject\":\"%s\"%s}", (NR > 1 ? "," : "["), $1, substr($0, length($1) + 2),
+          (c[$1] ? ",\"ci\":\"" c[$1] "\"" : "") }
+      END { printf "%s", NR ? "]" : "[]" }'
+}
+
+# Main's CI runs, newest first, as "<sha> passing|failing|pending" lines in $ci; kept if gh
+# can't say within 20 s.
+checks() {
+  command -v gh >/dev/null || return 0
+  # shellcheck disable=SC2016 # jq's own $c
+  (cd "$REPO" && exec gh run list --branch main --limit 50 --json headSha,status,conclusion --jq '.[] |
+    (if .status != "completed" then "pending" elif .conclusion == "success" then "passing"
+     elif .conclusion == "failure" or .conclusion == "timed_out" then "failing" else empty end) as $c |
+    "\(.headSha) \($c)"') >"$BUILDS/.ci" 2>/dev/null &
+  p=$! i=0
+  while kill -0 $p 2>/dev/null && [ $i -lt 20 ]; do sleep 1; i=$((i + 1)); done
+  kill $p 2>/dev/null
+  wait $p && ci=$(cat "$BUILDS/.ci")
 }
 str() { if [ -n "$1" ]; then printf '"%s"' "$1"; else printf null; fi; }
 
@@ -264,7 +282,7 @@ if ! on_clean_main; then
 fi
 [ $update = 1 ] && git -C "$REPO" pull -q --ff-only
 mkdir -p "$BUILDS"
-cur='' prev='' ready='' tried='' how=launch told=''
+cur='' prev='' ready='' tried='' how=launch ci='' told=''
 [ -f "$BUILDS/.state" ] && read -r cur prev <"$BUILDS/.state" || true
 if [ $watch = 1 ] && [ -n "$cur" ] && [ -d "$BUILDS/$cur" ]; then
   # What main gained since waits for the owner, as it would have had this kept running.
@@ -308,6 +326,7 @@ while :; do
       log "$REPO is not clean main; not updating"
     elif git -C "$REPO" fetch -q origin main && git -C "$REPO" merge -q --ff-only origin/main; then
       consider
+      [ -n "$ready$prev" ] && checks && describe
     else
       log "can't fetch or fast-forward to origin/main"
     fi

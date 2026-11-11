@@ -69,7 +69,8 @@ pub fn view(r: &Builds, chosen: Option<&str>) -> CoreUpdate {
         kept: chosen == Some(r.running.as_str()),
         ready,
         back,
-        auto: r.auto,
+        // Not for a build the owner rolled back from.
+        auto: r.auto && r.ready != r.previous,
     }
 }
 
@@ -77,7 +78,7 @@ pub fn view(r: &Builds, chosen: Option<&str>) -> CoreUpdate {
 /// else, with `auto`, the ready one, unless the owner rolled back from it.
 pub fn next(r: &Builds, chosen: Option<&str>, busy: usize) -> Option<String> {
     let v = view(r, chosen);
-    let auto = (r.auto && r.ready != r.previous).then(|| v.ready.map(|c| c.sha));
+    let auto = v.auto.then(|| v.ready.map(|c| c.sha));
     (busy == 0).then(|| v.asked.or(auto.flatten())).flatten()
 }
 
@@ -128,6 +129,7 @@ mod tests {
             sha: sha.into(),
             subject: subject.into(),
             pr: None,
+            ci: None,
         }
     }
 
@@ -275,6 +277,7 @@ mod tests {
             ..ready()
         };
         assert_eq!(next(&r, None, 0), None);
+        assert!(!view(&r, None).auto, "the page offers Update");
         assert_eq!(next(&r, Some(B), 0).as_deref(), Some(B), "the owner may");
     }
 }

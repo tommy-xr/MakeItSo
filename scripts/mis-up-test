@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end check of `mis-up --watch` against a throwaway origin built from this checkout's HEAD:
 #   1. a commit lands while a task runs: it shows as ready and nothing restarts; the owner's
-#      Update waits for the task to end, then the orchestrator restarts on the new commit;
+#      Update waits for the task to end, then the orchestrator restarts on the new commit; its CI
+#      shows from a fake gh;
 #   2. Roll back returns to the build before; Update again brings the new one back;
 #   3. a commit that doesn't build: "failed", the old version still serves;
 #   4. an update whose orchestrator exits at start: dropped, the running build serves again;
@@ -41,6 +42,12 @@ case "\$*" in *hold*) while [ ! -f "$W/gate" ]; do sleep 0.2; done ;; esac
 echo '{"type":"result","subtype":"success","is_error":false,"result":"done"}'
 FAKE
 chmod +x "$W/fake/claude"
+# Fake gh, as `gh run list` for main: the newest commit's CI still runs, the rest passed.
+cat >"$W/fake/gh" <<FAKE
+#!/bin/sh
+git -C "$W/repo" log -5 --format=%H origin/main | awk 'NR == 1 { print \$1 " pending"; next } { print \$1 " passing" }'
+FAKE
+chmod +x "$W/fake/gh"
 touch "$W/.mis-up-test"
 
 # The origin's URL is a GitHub one (for PR links); git fetches it from the bare repo.
@@ -96,6 +103,8 @@ v1=$(push "docs: harmless change (#41)")
 within 600 "$v1 shows as ready" ready_is "$v1"
 check "its PR is #41" [ "$(core '.ready.commits[0].pr')" = 41 ]
 check "repo for links" [ "$(core .repo)" = demo/mis ]
+ci_is() { [ "$(core ".ready.commits[0].ci")" = "$1" ]; }
+within 10 "its CI runs" ci_is pending
 snap ready
 sleep 8
 check "still serving $v0: nobody chose $v1" serving "$v0"
@@ -134,7 +143,7 @@ snap failed
 
 # 4. Builds, but the orchestrator exits at start.
 git -C "$W/dev" checkout -q HEAD~1 -- crates/mis-orchestrator/src/main.rs
-sed -i.bak 's/^async fn main() -> anyhow::Result<()> {$/&\n    if std::env::var_os("HOME").is_some() { std::process::exit(3); }/' \
+sed -i.bak -E 's/^(async )?fn main\(\) -> anyhow::Result<\(\)> \{$/&\n    if std::env::var_os("HOME").is_some() { std::process::exit(3); }/' \
   "$W/dev/crates/mis-orchestrator/src/main.rs"
 rm "$W/dev/crates/mis-orchestrator/src/main.rs.bak"
 grep -q 'process::exit(3)' "$W/dev/crates/mis-orchestrator/src/main.rs" || fail "exit patch didn't apply"
