@@ -1,145 +1,39 @@
+use anyhow::Context;
 use clap::Parser;
 use mis_orchestrator::access_gate::AccessGate;
 use mis_orchestrator::capture::Inbox;
+use mis_orchestrator::config::{self, nonempty, Args, Level, UpdateChannel};
 use mis_orchestrator::evidence;
 use mis_orchestrator::images::Images;
 use mis_orchestrator::push::Push;
 use mis_orchestrator::{access, normalize_origins, App};
 
 #[derive(Parser)]
-#[command(about = "Make It So orchestrator", version = mis_orchestrator::VERSION)]
-struct Args {
-    #[arg(long, default_value = "127.0.0.1:7474")]
-    bind: String,
-    /// Shared secret clients and workers must send as a bearer token.
-    #[arg(long, env = "MIS_TOKEN")]
-    token: Option<String>,
-    /// Read-only token: sees tasks, workers and transcripts but cannot submit (repeatable, or
-    /// comma-separated `MIS_READ_TOKENS`, preferred: argv is visible to other users). Needs --token.
-    #[arg(
-        long = "read-token",
-        env = "MIS_READ_TOKENS",
-        value_delimiter = ',',
-        hide_env_values = true
-    )]
-    read_tokens: Vec<String>,
-    /// Capture-only token (a phone's share sheet): may `POST /api/capture` and nothing else
-    /// (repeatable, or comma-separated `MIS_CAPTURE_TOKENS`, preferred). Needs --token.
-    #[arg(
-        long = "capture-token",
-        env = "MIS_CAPTURE_TOKENS",
-        value_delimiter = ',',
-        hide_env_values = true
-    )]
-    capture_tokens: Vec<String>,
-    /// Externally reachable URL (e.g. a tunnel hostname), shown in connection hints.
-    #[arg(long, env = "MIS_PUBLIC_URL")]
-    public_url: Option<String>,
-    /// Serve published apps at `/a/<slug>/` on this address, e.g. `127.0.0.1:7475`. Unset: not
-    /// served. Each app to its members only (`mis apps share`), signed in through the Access
-    /// app of --apps-cf-access-aud; direct loopback requests are every app's owner.
-    #[arg(long, env = "MIS_APPS_BIND")]
-    apps_bind: Option<String>,
-    /// Where the apps listener is reached from outside, e.g. `https://home.example.com`; app
-    /// links point there, and its host is the only non-loopback Host the listener answers.
-    /// Default: the --apps-bind address.
-    #[arg(long, env = "MIS_APPS_PUBLIC_URL")]
-    apps_public_url: Option<String>,
-    /// App development: a direct loopback request may act as a viewer or editor by sending
-    /// `X-Mis-Dev-Role`, to try an app's other roles locally. Never for a served household.
-    #[arg(long, env = "MIS_APPS_DEV", value_parser = clap::builder::BoolishValueParser::new())]
-    apps_dev: bool,
-    /// Browser origin allowed to connect, e.g. `https://mis.example.com` (repeatable).
-    #[arg(
-        long = "allowed-origin",
-        env = "MIS_ALLOWED_ORIGINS",
-        value_delimiter = ','
-    )]
-    allowed_origins: Vec<String>,
-    /// Don't plan with the local `claude` CLI; tasks without --harness run as-is on the default
-    /// harness (Settings; claude unset).
-    #[arg(long)]
-    no_planner: bool,
-    /// Model the planner itself runs on.
-    #[arg(long, default_value = "sonnet", value_parser = clap::builder::NonEmptyStringValueParser::new())]
-    planner_model: String,
-    /// Don't summarize finished tasks (they keep the agent's own last message) or suggest
-    /// where inbox notes go.
-    #[arg(long)]
-    no_summary: bool,
-    /// Model that summarizes finished tasks and suggests where inbox notes go.
-    #[arg(long, default_value = "haiku", value_parser = clap::builder::NonEmptyStringValueParser::new())]
-    summary_model: String,
-    /// Cloudflare Access team: the `<team>` in `<team>.cloudflareaccess.com`. With
-    /// --cf-access-aud, non-local requests need a valid Access JWT.
-    #[arg(long, env = "MIS_CF_ACCESS_TEAM")]
-    cf_access_team: Option<String>,
-    /// Application Audience (AUD) tag of the Access application.
-    #[arg(long, env = "MIS_CF_ACCESS_AUD")]
-    cf_access_aud: Option<String>,
-    /// Only these Access identities get in: emails, or service token client ids (repeatable,
-    /// or comma-separated `MIS_ACCESS_SUBJECTS`). Unset: anyone the Access application admits.
-    #[arg(
-        long = "access-subject",
-        env = "MIS_ACCESS_SUBJECTS",
-        value_delimiter = ','
-    )]
-    access_subjects: Vec<String>,
-    /// AUD tag of a second Access app on path `/api/capture` (Service Auth for the phone's
-    /// capture-only service token). Its JWT is accepted there only, and only to capture.
-    #[arg(long, env = "MIS_CF_ACCESS_CAPTURE_AUD")]
-    cf_access_capture_aud: Option<String>,
-    /// AUD tag of the Access app in front of the apps listener (its own hostname and
-    /// policy, same team). Its JWTs are accepted there only; the MIS app's are refused there.
-    #[arg(long, env = "MIS_APPS_CF_ACCESS_AUD")]
-    apps_cf_access_aud: Option<String>,
-    /// Fetch Access keys from here instead of the team's certs URL (testing).
-    #[arg(long, hide = true)]
-    cf_access_certs_url: Option<String>,
-    /// Holds task history (`ledger.json`, `transcripts/`; tasks are kept 30 days
-    /// after they end), the push notification key and subscriptions, and uploaded
-    /// images (`images/`, deleted after a week), evidence files agents attach
-    /// (`evidence/`, deleted after 30 days), captures (`captures/inbox/`, kept), the notes
-    /// repo clone (`notes/`) and published apps (`apps/`, every release kept). Default: ~/.local/state/mis
-    /// (%LOCALAPPDATA%\mis on Windows).
-    #[arg(long, env = "MIS_STATE_DIR")]
-    state_dir: Option<std::path::PathBuf>,
-    /// Routine files: one Markdown file per periodic task, re-read every 30s.
-    /// Default: ~/.config/mis/routines.
-    #[arg(long, env = "MIS_ROUTINES_DIR")]
-    routines_dir: Option<std::path::PathBuf>,
-    /// Git remote of the notes repo, e.g. `https://github.com/you/mis-notes.git`. Captures are
-    /// published to its `inbox/` on `main`, through a clone at `<state-dir>/notes`, with the
-    /// user's git credentials (e.g. `gh auth setup-git`). Unset: not published.
-    #[arg(long, env = "MIS_NOTES_REMOTE")]
-    notes_remote: Option<String>,
-    /// VAPID contact push services may use about this sender (`mailto:` or `https:`).
-    #[arg(
-        long,
-        env = "MIS_VAPID_SUBJECT",
-        default_value = "https://github.com/tommy-xr/MakeItSo"
-    )]
-    vapid_subject: String,
-    /// Release channel this build follows: `stable` (tagged releases), `edge` (every merge to
-    /// main) or `off`. It checks every 5 min and, once no task runs, restarts on a newer release
-    /// that passes `--self-test`; workers switch to this build from it. Default: stable for CI
-    /// release builds, else off (`mis-up` sets off).
-    #[arg(long, env = "MIS_UPDATE_CHANNEL", value_enum)]
-    update_channel: Option<UpdateChannel>,
-    /// Seconds between release checks (testing).
-    #[arg(long, hide = true, default_value_t = 300)]
-    update_every: u64,
-    /// Check this build can run here (reads the state dir without locking it, binds a port),
-    /// then exit. The updater runs it on a new build before switching.
-    #[arg(long)]
-    self_test: bool,
+#[command(
+    about = "Make It So orchestrator",
+    version = mis_orchestrator::VERSION,
+    args_conflicts_with_subcommands = true
+)]
+struct Cli {
+    #[command(flatten)]
+    args: Args,
+    /// None serves.
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
 }
 
-#[derive(Clone, Copy, clap::ValueEnum)]
-enum UpdateChannel {
-    Stable,
-    Edge,
-    Off,
+#[derive(clap::Subcommand)]
+enum Cmd {
+    /// Check this machine can host the orchestrator as its env vars (and --env-file) set it
+    /// up: sign-ins, notes remote, state dir, power and login. Exit 1 on a failure.
+    Doctor {
+        /// As the orchestrator's.
+        #[arg(long = "env-file", env = "MIS_ENV_FILE")]
+        _env_file: Option<std::path::PathBuf>,
+        /// Print the checks as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// The channel to publish to workers; see `--update-channel`.
@@ -193,61 +87,39 @@ fn one_shot_claude(model: &str, extra: &[&str]) -> std::sync::Arc<mis_agent::cla
     })
 }
 
-/// `v`, unless unset or empty: `MIS_..=` means unset.
-fn nonempty(v: &Option<String>) -> Option<String> {
-    v.clone().filter(|v| !v.is_empty())
-}
-
 fn certs_url(args: &Args, team: &str) -> String {
     nonempty(&args.cf_access_certs_url).unwrap_or_else(|| access::certs_url(team))
 }
 
 /// `--apps-cf-access-aud`: a gate of its own, so a JWT for one Access app never opens the
-/// other. Needs the MIS app's team (checked by [`access_gate`]) and a public URL.
-async fn apps_access_gate(args: &Args) -> anyhow::Result<Option<AccessGate>> {
-    let Some(aud) = nonempty(&args.apps_cf_access_aud) else {
-        return Ok(None);
+/// other. Needs the MIS app's team and a public URL (`config::validate`).
+async fn apps_access_gate(args: &Args) -> Option<AccessGate> {
+    let (Some(aud), Some(team)) = (
+        nonempty(&args.apps_cf_access_aud),
+        nonempty(&args.cf_access_team),
+    ) else {
+        return None;
     };
-    let Some(team) = nonempty(&args.cf_access_team) else {
-        anyhow::bail!("--apps-cf-access-aud needs --cf-access-team/-aud");
-    };
-    if nonempty(&args.apps_bind).is_none() || nonempty(&args.apps_public_url).is_none() {
-        anyhow::bail!("--apps-cf-access-aud needs --apps-bind and --apps-public-url");
-    }
-    let others = [&args.cf_access_aud, &args.cf_access_capture_aud];
-    if others.iter().any(|a| nonempty(a).as_ref() == Some(&aud)) {
-        anyhow::bail!("--apps-cf-access-aud must be the home Access app's own AUD");
-    }
     let gate = AccessGate::remote(team.clone(), aud, certs_url(args, &team));
     if let Err(e) = gate.refresh().await {
         tracing::warn!("fetching Cloudflare Access keys (apps): {e:#}; retrying on first request");
     }
     tracing::info!("Cloudflare Access: apps need the home Access app's JWT");
-    Ok(Some(gate))
+    Some(gate)
 }
 
-/// `--cf-access-team` / `--cf-access-aud`: both or neither; `MIS_..=` means unset.
-async fn access_gate(args: &Args) -> anyhow::Result<Option<AccessGate>> {
-    let capture_aud = nonempty(&args.cf_access_capture_aud);
-    let (team, aud) = match (
+/// `--cf-access-team` / `--cf-access-aud` (both or neither: `config::validate`).
+async fn access_gate(args: &Args) -> Option<AccessGate> {
+    let (Some(team), Some(aud)) = (
         nonempty(&args.cf_access_team),
         nonempty(&args.cf_access_aud),
-    ) {
-        (Some(team), Some(aud)) => (team, aud),
-        (None, None) if capture_aud.is_none() => return Ok(None),
-        (None, None) => anyhow::bail!("--cf-access-capture-aud needs --cf-access-team/-aud"),
-        _ => anyhow::bail!("--cf-access-team and --cf-access-aud go together"),
+    ) else {
+        return None;
     };
-    if capture_aud.as_ref() == Some(&aud) {
-        anyhow::bail!("--cf-access-capture-aud must be another Access app's AUD");
-    }
-    if !team.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-        anyhow::bail!("--cf-access-team is the <team> in <team>.cloudflareaccess.com");
-    }
     let url = certs_url(args, &team);
     tracing::info!(%team, "Cloudflare Access: non-local requests need its JWT");
     let mut gate = AccessGate::remote(team, aud, url);
-    if let Some(aud) = capture_aud {
+    if let Some(aud) = nonempty(&args.cf_access_capture_aud) {
         tracing::info!("Cloudflare Access: capture app's JWT accepted on /api/capture");
         gate = gate.with_capture_aud(aud);
     }
@@ -255,7 +127,7 @@ async fn access_gate(args: &Args) -> anyhow::Result<Option<AccessGate>> {
     if let Err(e) = gate.refresh().await {
         tracing::warn!("fetching Cloudflare Access keys: {e:#}; retrying on first request");
     }
-    Ok(Some(gate))
+    Some(gate)
 }
 
 /// Print ready-to-paste worker/CLI commands for every way to reach this orchestrator.
@@ -301,64 +173,93 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// `--env-file`'s value in `argv` as clap will read it (`--env-file F` or `--env-file=F`).
+fn env_file_arg(argv: &[std::ffi::OsString]) -> Option<std::path::PathBuf> {
+    let mut args = argv.iter().skip(1);
+    while let Some(a) = args.next() {
+        if a == "--" {
+            break;
+        }
+        if a == "--env-file" {
+            return args.next().map(Into::into);
+        }
+        if let Some(v) = a.to_str().and_then(|a| a.strip_prefix("--env-file=")) {
+            return Some(v.into());
+        }
+    }
+    None
+}
+
+/// Set the `--env-file` / `MIS_ENV_FILE` variables not already set, for clap to read.
+fn load_env_file() -> anyhow::Result<()> {
+    let argv: Vec<_> = std::env::args_os().collect();
+    let Some(path) = env_file_arg(&argv).or_else(|| var("MIS_ENV_FILE")) else {
+        return Ok(());
+    };
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let vars = mis_types::env_file::parse(&text)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    // The process env wins; a key repeated in the file, its last value.
+    let unset: Vec<_> = (vars.into_iter())
+        .filter(|(k, _)| std::env::var_os(k).is_none())
+        .collect();
+    for (k, v) in unset {
+        std::env::set_var(k, v);
+    }
+    Ok(())
+}
+
+fn main() -> anyhow::Result<()> {
+    // First: no other thread may read the env while it is set.
+    load_env_file()?;
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
-    let mut args = Args::parse();
-    args.token = args.token.filter(|t| !t.is_empty()); // `MIS_TOKEN=` means no token
-    args.read_tokens = (args.read_tokens.iter().map(|t| t.trim().to_string()))
-        .filter(|t| !t.is_empty())
-        .collect();
-    if !args.read_tokens.is_empty() && args.token.is_none() {
-        anyhow::bail!("--read-token / MIS_READ_TOKENS needs --token / MIS_TOKEN");
-    }
-    args.capture_tokens = (args.capture_tokens.iter().map(|t| t.trim().to_string()))
-        .filter(|t| !t.is_empty())
-        .collect();
-    if !args.capture_tokens.is_empty() && args.token.is_none() {
-        anyhow::bail!("--capture-token / MIS_CAPTURE_TOKENS needs --token / MIS_TOKEN");
-    }
-    let shared = |t: &String| args.token.as_ref() == Some(t) || args.read_tokens.contains(t);
-    if args.capture_tokens.iter().any(shared) {
-        anyhow::bail!("capture tokens must differ from the full and read tokens");
-    }
+    let Cli { args, cmd } = Cli::parse();
     let state_dir = args.state_dir.clone().or_else(default_state_dir);
+    match cmd {
+        Some(Cmd::Doctor { json, .. }) => doctor(&args, state_dir.as_deref(), json),
+        None => tokio::runtime::Runtime::new()?.block_on(serve(args, state_dir)),
+    }
+}
+
+fn doctor(args: &Args, state_dir: Option<&std::path::Path>, json: bool) -> anyhow::Result<()> {
+    use mis_orchestrator::doctor;
+    let checks = doctor::checks(args, state_dir, &doctor::probe(args, state_dir));
+    match json {
+        true => println!("{}", serde_json::to_string_pretty(&checks)?),
+        false => print!("{}", doctor::render(&checks)),
+    }
+    if checks.iter().any(|c| c.level == Level::Fail) {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+async fn serve(mut args: Args, state_dir: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    // Before `validate`: the updater passes no serve flags, so the config seen here isn't the one served.
     if args.self_test {
         mis_orchestrator::self_test(state_dir.as_deref())?;
         println!("self-test ok");
         return Ok(());
     }
-    let addr: std::net::SocketAddr = args.bind.parse()?;
-    if !addr.ip().is_loopback() && args.token.is_none() {
-        anyhow::bail!("refusing to bind {addr} without --token / MIS_TOKEN");
+    let findings = config::validate(&args, state_dir.as_deref());
+    for f in findings.iter().filter(|f| f.level == Level::Warn) {
+        tracing::warn!("{}", f.msg);
     }
-    let gate = access_gate(&args).await?;
-    let apps_gate = apps_access_gate(&args).await?;
-    // `MIS_ACCESS_SUBJECTS=` means unset; a list of only blanks (`,`) is a mistake, not "anyone".
-    let given =
-        args.access_subjects.iter().any(|s| !s.is_empty()) || args.access_subjects.len() > 1;
-    args.access_subjects = (args.access_subjects.iter().map(|s| s.trim().to_string()))
-        .filter(|s| !s.is_empty())
-        .collect();
-    if given && args.access_subjects.is_empty() {
-        anyhow::bail!("--access-subject / MIS_ACCESS_SUBJECTS lists no one");
+    if let Some(f) = findings.iter().find(|f| f.level == Level::Fail) {
+        anyhow::bail!("{}", f.msg);
     }
-    match (&gate, args.access_subjects.is_empty()) {
-        (None, false) => anyhow::bail!("--access-subject / MIS_ACCESS_SUBJECTS needs Cloudflare Access"),
-        (Some(_), true) => tracing::warn!(
-            "Cloudflare Access: anyone its application admits gets full access; list who with --access-subject"
-        ),
-        _ => {}
-    }
-    if gate.is_some() && args.token.is_none() {
-        tracing::warn!("no --token: local requests without Cloudflare headers need nothing");
-    }
+    args.token = nonempty(&args.token); // `MIS_TOKEN=` means no token
+    args.read_tokens = config::trimmed(&args.read_tokens);
+    args.capture_tokens = config::trimmed(&args.capture_tokens);
+    args.access_subjects = config::trimmed(&args.access_subjects);
+    let gate = access_gate(&args).await;
+    let apps_gate = apps_access_gate(&args).await;
     let apps_listener = match nonempty(&args.apps_bind) {
-        Some(_) if state_dir.is_none() => anyhow::bail!("--apps-bind needs a state dir"),
         Some(bind) => Some(tokio::net::TcpListener::bind(&bind).await?),
         None => None,
     };
@@ -488,9 +389,6 @@ async fn main() -> anyhow::Result<()> {
                 app = app.with_notes(mis_orchestrator::notes::Notes::new(remote, &dir));
             }
         }
-        None if nonempty(&args.notes_remote).is_some() => {
-            anyhow::bail!("--notes-remote / MIS_NOTES_REMOTE needs a state dir")
-        }
         None => tracing::warn!(
             "no --state-dir and no home dir: task history is lost on restart; \
              push notifications, image attachments, evidence files and captures off"
@@ -585,6 +483,16 @@ mod tests {
             Some(Channel::Edge)
         );
         assert_eq!(channel(Some(UpdateChannel::Off), true), None);
+    }
+
+    #[test]
+    fn env_file_arg_as_clap_reads_it() {
+        let arg = |a: &[&str]| super::env_file_arg(&a.iter().map(Into::into).collect::<Vec<_>>());
+        assert_eq!(arg(&["m", "doctor", "--env-file", "f"]), Some("f".into()));
+        assert_eq!(arg(&["m", "--env-file=f", "--json"]), Some("f".into()));
+        assert_eq!(arg(&["m", "--env-file"]), None);
+        assert_eq!(arg(&["m", "--", "--env-file", "f"]), None);
+        assert_eq!(arg(&["--env-file"]), None, "argv[0] is the program");
     }
 
     #[test]

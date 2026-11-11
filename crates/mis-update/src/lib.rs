@@ -133,7 +133,7 @@ const RUN_LIMIT: Duration = Duration::from_secs(30);
 
 /// `cmd`'s output, or Err if it runs past `limit` (then it is killed). Output past the pipe's
 /// buffer stalls the child into the limit: fine for a version line or a short error.
-fn output_within(
+pub fn output_within(
     cmd: &mut std::process::Command,
     limit: Duration,
 ) -> anyhow::Result<std::process::Output> {
