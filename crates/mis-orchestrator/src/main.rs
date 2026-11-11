@@ -274,11 +274,15 @@ fn load_env_file(default: Option<PathBuf>) -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     // First: no other thread may read the env while it is set. `import` writes the env file;
-    // `export` archives the default one and `service` pins it, so both find the install that
-    // file sets up.
-    match std::env::args_os().nth(1) {
+    // `export` archives the default one and `service install` pins it, so both find the install
+    // that file sets up. Not `service uninstall`/`status`: a broken file must not block them.
+    let argv: Vec<_> = std::env::args_os().collect();
+    let service_install = || argv.iter().skip(2).any(|a| a == "install");
+    match argv.get(1) {
         Some(a) if a == "import" => {}
-        Some(a) if a == "export" || a == "service" => load_env_file(default_env_file())?,
+        Some(a) if a == "export" || (a == "service" && service_install()) => {
+            load_env_file(default_env_file())?
+        }
         _ => load_env_file(None)?,
     }
     tracing_subscriber::fmt()
