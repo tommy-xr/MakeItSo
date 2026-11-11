@@ -36,7 +36,11 @@ fn valid_key(k: &str) -> bool {
 /// The value a shell would assign, if it is literal text: `'…'` holds anything but `'`; `"…"`
 /// and bare values hold nothing the shell expands; bare values also no spaces or `~`.
 fn value_of(v: &str) -> Option<String> {
-    let quoted = |q: char| v.strip_prefix(q)?.strip_suffix(q).filter(|s| !s.contains(q));
+    let quoted = |q: char| {
+        v.strip_prefix(q)?
+            .strip_suffix(q)
+            .filter(|s| !s.contains(q))
+    };
     if let Some(s) = quoted('\'') {
         return Some(s.to_string());
     }
@@ -45,7 +49,9 @@ fn value_of(v: &str) -> Option<String> {
         return (!s.chars().any(expands)).then(|| s.to_string());
     }
     let special = |c: char| {
-        expands(c) || c.is_whitespace() || matches!(c, '#' | '~' | ';' | '&' | '|' | '<' | '>' | '(' | ')')
+        expands(c)
+            || c.is_whitespace()
+            || matches!(c, '#' | '~' | ';' | '&' | '|' | '<' | '>' | '(' | ')')
     };
     (!v.chars().any(special)).then(|| v.to_string())
 }

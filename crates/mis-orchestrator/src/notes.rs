@@ -961,6 +961,22 @@ impl Notes {
     }
 }
 
+/// Can `remote` be read with the user's git credentials, without a prompt? Err: what git
+/// said, the URL (it may carry a token) left out.
+pub fn reachable(remote: &str) -> Result<(), String> {
+    let deadline = Duration::from_secs(30);
+    match run_git(
+        &std::env::temp_dir(),
+        &["ls-remote", remote, "HEAD"],
+        deadline,
+        None,
+    ) {
+        Ok(out) if out.ok => Ok(()),
+        Ok(out) => Err(out.stderr.trim().replace(remote, "<remote>")),
+        Err(e) => Err(format!("running git: {e}")),
+    }
+}
+
 /// `git args` in `dir`, never waiting on a person: no prompts, askpass, editors, hooks or
 /// signing, and killed (with whatever it started) after `deadline`. Commits are Make It
 /// So's; the user's own git config (the credential helper) still applies.

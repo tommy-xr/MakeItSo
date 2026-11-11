@@ -32,6 +32,8 @@ pub mod apps_http;
 pub mod backups;
 pub mod boards;
 pub mod capture;
+pub mod config;
+pub mod doctor;
 pub mod drafts;
 pub mod email;
 pub mod evidence;
