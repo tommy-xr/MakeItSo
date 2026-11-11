@@ -4527,8 +4527,9 @@ const noteWhy = (path, why) => { const t = why.startsWith(`${path} `) ? why.slic
 const noteSuggested = (s, dests, pending) => (s && !s.error && s.dest !== 'none' && dests.includes(s.dest) ? 'file' : pending ? 'wait' : 'none');
 // A GitHub `owner/repo`'s page; null for anything else.
 const repoHref = (r) => (/^[\w.-]+\/[\w.-]+$/.test(r) && !/(^|\/)\.\.?($|\/)/.test(r) ? `https://github.com/${r}` : null);
-// A project slug from its title: an app's (slugify), accents dropped: `Café crème` -> `cafe-creme`.
-const projectSlug = (title) => slugify(title.normalize('NFKD').replace(/[\u0300-\u036f]/g, ''));
+// A project slug from its title: an app's (slugify), accents and apostrophes dropped:
+// `Café crème` -> `cafe-creme`, `Bryan’s Tool` -> `bryans-tool`.
+const projectSlug = (title) => slugify(title.normalize('NFKD').replace(/[\u0300-\u036f'‘’]/g, ''));
 // notes:end
 
 // Opening Notes or Projects asks the orchestrator to fetch the notes repo now (at most every 30 s), then rereads what
