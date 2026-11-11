@@ -145,7 +145,8 @@ pub struct Args {
     #[arg(long)]
     pub self_test: bool,
     /// File of `KEY=value` lines for the env vars above, e.g. `~/.config/mis/orchestrator.env`,
-    /// read before anything else; variables already set win. Only read when given.
+    /// read before anything else; variables already set win (so a self-update restart keeps the
+    /// values read at start). Only read when given.
     #[arg(long, env = "MIS_ENV_FILE")]
     pub env_file: Option<std::path::PathBuf>,
 }

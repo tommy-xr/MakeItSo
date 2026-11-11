@@ -167,7 +167,10 @@ fn conn(args: &Args) -> Result<Conn> {
     let file = home
         .ok()
         .and_then(|h| std::fs::read_to_string(format!("{h}/.config/mis/orchestrator.env")).ok())
-        .and_then(|t| mis_types::env_file::parse(&t).ok())
+        .map(|t| {
+            mis_types::env_file::parse(&t).map_err(|e| anyhow::anyhow!("orchestrator.env: {e}"))
+        })
+        .transpose()?
         .map(|kv| kv.into_iter().collect::<std::collections::HashMap<_, _>>())
         .unwrap_or_default();
     let (url, token) = match args.url.clone().filter(|u| !u.is_empty()) {

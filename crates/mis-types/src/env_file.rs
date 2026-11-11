@@ -36,6 +36,9 @@ fn valid_key(k: &str) -> bool {
 /// The value a shell would assign, if it is literal text: `'…'` holds anything but `'`; `"…"`
 /// and bare values hold nothing the shell expands; bare values also no spaces or `~`.
 fn value_of(v: &str) -> Option<String> {
+    if v.contains('\0') {
+        return None;
+    }
     let quoted = |q: char| {
         v.strip_prefix(q)?
             .strip_suffix(q)
@@ -52,6 +55,8 @@ fn value_of(v: &str) -> Option<String> {
         expands(c)
             || c.is_whitespace()
             || matches!(c, '#' | '~' | ';' | '&' | '|' | '<' | '>' | '(' | ')')
+            // After `export`, shells brace-expand and may glob.
+            || matches!(c, '{' | '}' | '*' | '?' | '[')
     };
     (!v.chars().any(special)).then(|| v.to_string())
 }
@@ -88,6 +93,9 @@ mod tests {
             "A=a #c",
             "A=a b",
             "A=~/x",
+            "export A={a,b}",
+            "A=*",
+            "A='a\0b'",
             "A='a'b'",
             "A='a' # c",
             "A=\"a",

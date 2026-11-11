@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use crate::config::{self, nonempty, Args, Level};
 
@@ -22,8 +23,8 @@ pub struct Probe {
 #[derive(Debug)]
 pub struct StateDir {
     pub path: PathBuf,
-    /// Permission bits; None: not created yet.
-    pub mode: Option<u32>,
+    /// Permission bits; Ok(None): not created yet; Err: can't tell.
+    pub mode: Result<Option<u32>, String>,
     /// Ok(true): free; Ok(false): an orchestrator holds it; Err: can't tell.
     pub lock: Result<bool, String>,
 }
@@ -70,7 +71,6 @@ pub fn checks(args: &Args, state_dir: Option<&Path>, p: &Probe) -> Vec<Check> {
             .is_ok_and(|v| v["loggedIn"] == serde_json::Value::Bool(true))
     };
     out.push(match &p.claude {
-        _ if args.no_planner && args.no_summary => check("claude", Ok, "not used"),
         None => check("claude", Warn, "no `claude` on PATH: planner, summaries and drafts off"),
         Some(json) if signed_in(json) => check("claude", Ok, "signed in"),
         Some(_) => check(
@@ -99,12 +99,13 @@ pub fn checks(args: &Args, state_dir: Option<&Path>, p: &Probe) -> Vec<Check> {
 
 fn state_check(s: &StateDir) -> Check {
     let dir = s.path.display();
-    match (s.mode, &s.lock) {
-        (None, _) => check("state dir", Level::Ok, format!("{dir}: created on start")),
-        (Some(m), _) if m & 0o077 != 0 => check(
+    match (&s.mode, &s.lock) {
+        (Err(e), _) => check("state dir", Level::Fail, format!("{dir}: {e}")),
+        (Result::Ok(None), _) => check("state dir", Level::Ok, format!("{dir}: created on start")),
+        (Result::Ok(Some(m)), _) if m & 0o077 != 0 => check(
             "state dir",
             Level::Fail,
-            format!("{dir} is readable by others (mode {m:o}): chmod 700 {dir}"),
+            format!("{dir} is accessible by others (mode {m:o}): chmod 700 {dir}"),
         ),
         (_, Err(e)) => check("state dir", Level::Fail, format!("{dir}: locking: {e}")),
         (_, Ok(false)) => check(
@@ -189,9 +190,7 @@ fn tunnel_check(rule: &str, public_url: &str, bind: &str) -> Check {
         };
         Some(uri.port_u16().unwrap_or(default))
     };
-    let bind_port = bind
-        .rsplit_once(':')
-        .and_then(|(_, p)| p.parse::<u16>().ok());
+    let bind_port = bind.parse::<std::net::SocketAddr>().ok().map(|a| a.port());
     match service {
         Some(s) if port(s).is_some() && port(s) == bind_port => {
             check("tunnel", Level::Ok, format!("{public_url} -> {s}"))
@@ -225,12 +224,11 @@ pub fn render(checks: &[Check]) -> String {
 
 /// Run every probe that applies to `args` on this machine.
 pub fn probe(args: &Args, state_dir: Option<&Path>) -> Probe {
+    // Bounded: a stuck `claude` (a Keychain prompt) must not hang doctor.
     let stdout = |cmd: &str, a: &[&str]| -> Option<(bool, String)> {
-        let out = Command::new(cmd)
-            .args(a)
-            .stdin(Stdio::null())
-            .output()
-            .ok()?;
+        let mut cmd = Command::new(cmd);
+        cmd.args(a).stdin(Stdio::null());
+        let out = mis_update::output_within(&mut cmd, Duration::from_secs(10)).ok()?;
         Some((
             out.status.success(),
             String::from_utf8_lossy(&out.stdout).into(),
@@ -241,14 +239,18 @@ pub fn probe(args: &Args, state_dir: Option<&Path>) -> Probe {
         .map(Option::unwrap_or_default);
     let notes = nonempty(&args.notes_remote).map(|r| crate::notes::reachable(&r));
     let state = state_dir.map(|dir| {
-        let mode = std::fs::metadata(dir).ok().map(|m| mode_bits(&m));
+        let mode = match std::fs::metadata(dir) {
+            Ok(m) => Ok(Some(mode_bits(&m))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.to_string()),
+        };
         let lock = match mode {
-            None => Ok(true),
-            Some(_) => match crate::store::lock(dir) {
+            Ok(Some(_)) => match crate::store::lock(dir) {
                 Ok(_released) => Ok(true),
                 Err(e) if e.is::<crate::store::Locked>() => Ok(false),
                 Err(e) => Err(format!("{e:#}")),
             },
+            _ => Ok(true),
         };
         StateDir {
             path: dir.to_path_buf(),
@@ -384,14 +386,13 @@ mod tests {
         assert_eq!(level(Some(r#"{"loggedIn":false}"#), &[]), Warn);
         assert_eq!(level(Some(""), &[]), Warn);
         assert_eq!(level(None, &[]), Warn);
-        assert_eq!(level(None, &["--no-planner", "--no-summary"]), Ok);
     }
 
     #[test]
     fn state_dir_and_notes() {
-        let dir = |mode, lock| StateDir {
+        let dir = |mode: Option<u32>, lock| StateDir {
             path: "/s".into(),
-            mode,
+            mode: Result::Ok(mode),
             lock,
         };
         let level = |s: StateDir| state_check(&s).level;
@@ -400,6 +401,11 @@ mod tests {
         assert_eq!(level(dir(Some(0o700), Result::Ok(false))), Warn);
         assert_eq!(level(dir(Some(0o750), Result::Ok(true))), Fail);
         assert_eq!(level(dir(Some(0o700), Err("denied".into()))), Fail);
+        let unreadable = StateDir {
+            mode: Err("not a directory".into()),
+            ..dir(None, Result::Ok(true))
+        };
+        assert_eq!(level(unreadable), Fail);
         let p = Probe {
             notes: Some(Err("<remote>: not found".into())),
             ..Default::default()

@@ -240,6 +240,7 @@ fn doctor(args: &Args, state_dir: Option<&std::path::Path>, json: bool) -> anyho
 }
 
 async fn serve(mut args: Args, state_dir: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    // Before `validate`: the updater passes no serve flags, so the config seen here isn't the one served.
     if args.self_test {
         mis_orchestrator::self_test(state_dir.as_deref())?;
         println!("self-test ok");
