@@ -451,7 +451,7 @@ pub(crate) fn url_path(path: &str) -> String {
         .collect()
 }
 
-fn escape(s: &str) -> String {
+pub(crate) fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

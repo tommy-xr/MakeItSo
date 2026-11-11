@@ -294,9 +294,15 @@ fn parse_file<T>(path: &Path, parse: impl FnOnce(&str) -> Result<T, String>) -> 
 }
 
 pub fn which(bin: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
-        .unwrap_or(false)
+    find(bin).is_some()
+}
+
+/// `bin`'s path on `PATH`, as found (symlinks not followed).
+pub fn find(bin: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join(bin))
+        .find(|p| p.is_file())
 }
 
 #[cfg(test)]

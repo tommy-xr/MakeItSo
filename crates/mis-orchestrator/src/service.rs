@@ -4,6 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::apps_http::escape as xml_escape;
+
 pub const LABEL: &str = "io.github.tommy-xr.mis-orchestrator";
 
 /// What the LaunchAgent runs, every path resolved at install.
@@ -66,14 +68,9 @@ pub fn launchd_plist(s: &Spec) -> String {
     )
 }
 
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
-/// The unit's `PATH`: the dirs of `claude` and `git` as found at install, the exe's dir, then
-/// the system dirs, each once and only if it `exists`. launchd's default is the system dirs only.
+/// The unit's `PATH`: the dirs of `claude` and `git` as found at install (links not followed: a
+/// versioned install's link survives its updates), the exe's dir, then the system dirs; each
+/// once, absolute (launchd's cwd is `/`) and only if it `exists`. launchd's default: system dirs.
 pub fn unit_path(
     claude: Option<&Path>,
     git: Option<&Path>,
@@ -84,7 +81,7 @@ pub fn unit_path(
     let system = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(Path::new);
     let mut dirs: Vec<&Path> = Vec::new();
     for d in found.filter_map(Path::parent).chain(system) {
-        if !dirs.contains(&d) && exists(d) {
+        if d.is_absolute() && !dirs.contains(&d) && exists(d) {
             dirs.push(d);
         }
     }
@@ -110,13 +107,14 @@ pub fn print_summary(out: &str) -> Vec<(&str, &str)> {
         .collect()
 }
 
-/// `bin`'s path on `PATH`, as a shell would find it (not following symlinks: a versioned
-/// install's link stays valid across its updates).
-pub fn which(bin: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|d| d.join(bin))
-        .find(|p| p.is_file())
+/// The `MIS_*` vars in `set` the unit won't see: not in its env file and not pinned as a flag.
+/// `MIS_TOKEN=… service install` would otherwise install a service without the token.
+pub fn not_carried<'a>(set: &'a [String], env_file: &[(String, String)]) -> Vec<&'a str> {
+    const PINNED: [&str; 3] = ["MIS_STATE_DIR", "MIS_ROUTINES_DIR", "MIS_ENV_FILE"];
+    (set.iter().map(String::as_str))
+        .filter(|k| k.starts_with("MIS_") && !PINNED.contains(k))
+        .filter(|k| !env_file.iter().any(|(f, _)| f == k))
+        .collect()
 }
 
 /// The paths in use now, which `install` pins.
@@ -153,10 +151,19 @@ mod mac {
 
     use anyhow::{bail, Context};
 
-    use super::{launchd_plist, print_summary, unit_path, which, Dirs, Spec};
+    use super::{launchd_plist, not_carried, print_summary, unit_path, Dirs, Spec};
+    use mis_agent::find;
 
-    /// launchd sets these for an agent; pre-flight passes the same, plus the unit's PATH.
-    const LAUNCHD_ENV: [&str; 5] = ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR"];
+    /// Pre-flight's env besides the unit's PATH: what launchd sets for an agent, and
+    /// `SSH_CONNECTION` for doctor's warning that the GUI session's sign-ins may differ.
+    const PREFLIGHT_ENV: [&str; 6] = [
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TMPDIR",
+        "SSH_CONNECTION",
+    ];
 
     fn home() -> anyhow::Result<PathBuf> {
         (std::env::var_os("HOME").filter(|h| !h.is_empty()))
@@ -186,6 +193,14 @@ mod mac {
         (p.to_str().map(String::from)).with_context(|| format!("{} is not UTF-8", p.display()))
     }
 
+    /// `launchctl bootout`'s exit for a label not loaded (ESRCH); `print`'s for one not found.
+    const NOT_LOADED: i32 = 3;
+    const NOT_FOUND: i32 = 113;
+
+    fn stderr(out: &std::process::Output) -> String {
+        String::from_utf8_lossy(&out.stderr).trim().to_string()
+    }
+
     fn launchctl(args: &[&str]) -> anyhow::Result<std::process::Output> {
         Command::new("launchctl")
             .args(args)
@@ -201,7 +216,7 @@ mod mac {
         let env_file = (dirs.env_file.as_deref())
             .map(|e| e.canonicalize().with_context(|| e.display().to_string()))
             .transpose()?;
-        let (claude, git) = (which("claude"), which("git"));
+        let (claude, git) = (find("claude"), find("git"));
         let path = unit_path(claude.as_deref(), git.as_deref(), exe, Path::is_dir);
         // Held: KeepAlive would restart a service that can't take the state dir, forever.
         if state_dir.is_dir() {
@@ -212,7 +227,7 @@ mod mac {
         // Doctor reads its config from env only; flags would win over the env file the same way.
         let mut doctor = Command::new(exe);
         doctor.arg("doctor").env_clear().env("PATH", &path);
-        for k in LAUNCHD_ENV {
+        for k in PREFLIGHT_ENV {
             if let Some(v) = std::env::var_os(k) {
                 doctor.env(k, v);
             }
@@ -221,6 +236,21 @@ mod mac {
         doctor.env("MIS_ROUTINES_DIR", &routines_dir);
         if let Some(e) = &env_file {
             doctor.env("MIS_ENV_FILE", e);
+        }
+        let file_vars = match &env_file {
+            Some(e) => mis_types::env_file::parse(&std::fs::read_to_string(e)?)
+                .map_err(|why| anyhow::anyhow!("{}: {why}", e.display()))?,
+            None => vec![],
+        };
+        let set: Vec<String> = std::env::vars_os()
+            .filter_map(|(k, _)| k.into_string().ok())
+            .collect();
+        let dropped = not_carried(&set, &file_vars);
+        if !dropped.is_empty() {
+            println!(
+                "warning: not carried into the service (put them in the env file): {}",
+                dropped.join(", ")
+            );
         }
         println!("doctor, as the service will run:");
         if !doctor.status().context("running doctor")?.success() {
@@ -241,14 +271,12 @@ mod mac {
         std::fs::create_dir_all(plist.parent().unwrap())?;
         std::fs::write(&plist, launchd_plist(&spec))
             .with_context(|| format!("writing {}", plist.display()))?;
-        // Reinstall: unload the old one first (not running: the lock was free).
+        // Reinstall: replace any loaded unit.
         let _ = launchctl(&["bootout", &target(label)]);
         let out = launchctl(&["bootstrap", &domain(), &utf8(&plist)?])?;
         if !out.status.success() {
-            bail!(
-                "launchctl bootstrap: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
+            let _ = std::fs::remove_file(&plist);
+            bail!("launchctl bootstrap: {}", stderr(&out));
         }
         println!("\ninstalled {label}: starts now and at every login, restarted if it exits");
         println!("  plist: {}", plist.display());
@@ -260,9 +288,10 @@ mod mac {
     /// Stop and unload the service and delete its plist; the log stays.
     pub fn uninstall(label: &str) -> anyhow::Result<()> {
         let out = launchctl(&["bootout", &target(label)])?;
-        match out.status.success() {
-            true => println!("stopped {label}"),
-            false => println!("{label} wasn't loaded"),
+        match out.status.code() {
+            Some(0) => println!("stopped {label}"),
+            Some(NOT_LOADED) => println!("{label} wasn't loaded"),
+            _ => bail!("launchctl bootout: {}", stderr(&out)),
         }
         let plist = plist_path(label)?;
         match std::fs::remove_file(&plist) {
@@ -281,14 +310,15 @@ mod mac {
             println!("not installed ({} missing)", plist.display());
         }
         let out = launchctl(&["print", &target(label)])?;
-        match out.status.success() {
-            false => println!("{label}: not loaded"),
-            true => {
+        match out.status.code() {
+            Some(0) => {
                 println!("{label}: loaded");
                 for (k, v) in print_summary(&String::from_utf8_lossy(&out.stdout)) {
                     println!("  {k}: {v}");
                 }
             }
+            Some(NOT_FOUND) => println!("{label}: not loaded"),
+            _ => bail!("launchctl print: {}", stderr(&out)),
         }
         let log = log_path()?;
         match tail(&log, 20) {
@@ -397,6 +427,23 @@ mod tests {
         assert_eq!(p, "/Users/u/.local/bin:/usr/bin:/bin:/usr/sbin");
         let p = unit_path(None, None, Path::new("/opt/mis/mis-orchestrator"), |_| true);
         assert_eq!(p, "/opt/mis:/usr/bin:/bin:/usr/sbin:/sbin");
+        let rel = unit_path(
+            Some(Path::new("tools/claude")),
+            None,
+            Path::new("/x/m"),
+            |_| true,
+        );
+        assert_eq!(
+            rel, "/x:/usr/bin:/bin:/usr/sbin:/sbin",
+            "relative to install's cwd only"
+        );
+    }
+
+    #[test]
+    fn exported_vars_the_unit_lacks() {
+        let set = ["MIS_TOKEN", "MIS_BIND", "MIS_STATE_DIR", "HOME"].map(String::from);
+        let file = [("MIS_BIND".to_string(), "127.0.0.1:1".to_string())];
+        assert_eq!(not_carried(&set, &file), ["MIS_TOKEN"]);
     }
 
     #[test]
