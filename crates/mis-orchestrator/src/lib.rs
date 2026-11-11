@@ -53,6 +53,7 @@ pub mod records_db;
 pub mod routine;
 pub mod scope;
 pub mod self_update;
+pub mod service;
 pub mod settings;
 pub mod store;
 pub mod summary;
