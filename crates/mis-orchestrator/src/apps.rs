@@ -81,26 +81,53 @@ pub fn clean_path(raw: &str) -> Option<&str> {
     raw.split('/').all(seg_ok).then_some(raw)
 }
 
-/// A tar entry's path as a bundle path; `./` prefixes dropped. Ok(None): the top folder.
-/// Parsed from the archive's bytes, not as an OS path, so `a\b` is refused on Windows too.
-fn entry_path(raw: &[u8]) -> Result<Option<String>, String> {
+/// A tar entry's path as relative `/`-separated names, `./` and empty ones dropped (none: the
+/// top folder). Parsed from the archive's bytes, not as an OS path, so `a\b` is refused on
+/// Windows too: no absolute path, `..`, or `\`, `:` (a Windows drive or stream) or NUL in a name.
+pub(crate) fn entry_names(raw: &[u8]) -> Result<Vec<&str>, String> {
     let shown = String::from_utf8_lossy(raw);
     let p = std::str::from_utf8(raw).map_err(|_| format!("{shown}: not UTF-8"))?;
     if p.starts_with('/') {
         return Err(format!("{shown}: absolute path"));
     }
-    let mut segs = vec![];
-    for seg in p.split('/') {
-        match seg {
+    let mut names = vec![];
+    for name in p.split('/') {
+        match name {
             "" | "." => {}
             ".." => return Err(format!("{shown}: `..` in path")),
-            s => segs.push(s),
+            n if n.contains(['\\', ':', '\0']) => return Err(format!("{shown}: odd name")),
+            n => names.push(n),
         }
     }
-    if segs.is_empty() {
+    Ok(names)
+}
+
+/// What an archive may hold: regular files and folders. Links, devices and the rest are
+/// refused, so nothing unpacked points or writes outside where it is put.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    File,
+    Dir,
+}
+
+/// A tar entry type as a [`Kind`]. Ok(None): metadata to skip (a pax global header).
+pub(crate) fn entry_kind(kind: tar::EntryType) -> Result<Option<Kind>, String> {
+    match kind {
+        tar::EntryType::Regular | tar::EntryType::Continuous => Ok(Some(Kind::File)),
+        tar::EntryType::Directory => Ok(Some(Kind::Dir)),
+        tar::EntryType::XGlobalHeader => Ok(None),
+        other => Err(format!("{other:?} entries aren't allowed")),
+    }
+}
+
+/// A tar entry's path as a bundle path ([`entry_names`], joined). Ok(None): the top folder.
+fn entry_path(raw: &[u8]) -> Result<Option<String>, String> {
+    let names = entry_names(raw)?;
+    if names.is_empty() {
         return Ok(None);
     }
-    let joined = segs.join("/");
+    let shown = String::from_utf8_lossy(raw);
+    let joined = names.join("/");
     if reserved(&joined) {
         return Err(format!("{shown}: `api/` belongs to the server"));
     }
@@ -123,11 +150,10 @@ pub fn unpack(tar_gz: &[u8]) -> Result<Bundle, String> {
     for entry in ar.entries().map_err(bad)? {
         let mut entry = entry.map_err(bad)?;
         let path = entry_path(&entry.path_bytes())?;
-        let kind = entry.header().entry_type();
-        match kind {
-            tar::EntryType::Directory | tar::EntryType::XGlobalHeader => continue,
-            tar::EntryType::Regular | tar::EntryType::Continuous => {}
-            other => return Err(format!("{}: {other:?} entries aren't allowed", show(&path))),
+        let kind = entry_kind(entry.header().entry_type());
+        match kind.map_err(|e| format!("{}: {e}", show(&path)))? {
+            None | Some(Kind::Dir) => continue,
+            Some(Kind::File) => {}
         }
         let path = path.ok_or("a file named like the top folder")?;
         let len = entry.size();

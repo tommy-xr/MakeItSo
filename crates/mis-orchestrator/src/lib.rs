@@ -57,6 +57,7 @@ pub mod settings;
 pub mod store;
 pub mod summary;
 pub mod tools;
+pub mod transfer;
 
 /// A stuck planner (auth prompt, network stall) fails the task instead of
 /// leaving it in Planning forever.
@@ -1645,8 +1646,7 @@ pub fn self_test(dir: Option<&std::path::Path>) -> anyhow::Result<()> {
         let path = dir.join(store::LEDGER_FILE);
         match std::fs::read_to_string(&path) {
             Ok(json) => {
-                Ledger::restore(&json, |_| None, Duration::ZERO, 0)
-                    .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+                readable(&json).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(anyhow::Error::from(e).context(path.display().to_string())),
@@ -1654,6 +1654,12 @@ pub fn self_test(dir: Option<&std::path::Path>) -> anyhow::Result<()> {
     }
     std::net::TcpListener::bind("127.0.0.1:0")?;
     Ok(())
+}
+
+/// `ledger.json` text as this build restores it (transcripts aside): Err on another format
+/// version, or a file it can't read.
+pub fn readable(json: &str) -> Result<Ledger, String> {
+    Ledger::restore(json, |_| None, Duration::ZERO, 0).map(|r| r.ledger)
 }
 
 /// The phone page. Not framable: it acts with the token stored for this origin. It frames
