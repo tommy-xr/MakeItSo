@@ -143,7 +143,7 @@ snap failed
 
 # 4. Builds, but the orchestrator exits at start.
 git -C "$W/dev" checkout -q HEAD~1 -- crates/mis-orchestrator/src/main.rs
-sed -i.bak 's/^async fn main() -> anyhow::Result<()> {$/&\n    if std::env::var_os("HOME").is_some() { std::process::exit(3); }/' \
+sed -i.bak -E 's/^(async )?fn main\(\) -> anyhow::Result<\(\)> \{$/&\n    if std::env::var_os("HOME").is_some() { std::process::exit(3); }/' \
   "$W/dev/crates/mis-orchestrator/src/main.rs"
 rm "$W/dev/crates/mis-orchestrator/src/main.rs.bak"
 grep -q 'process::exit(3)' "$W/dev/crates/mis-orchestrator/src/main.rs" || fail "exit patch didn't apply"
