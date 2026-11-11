@@ -34,6 +34,30 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Run this orchestrator as a service (a macOS LaunchAgent): started at login, restarted
+    /// whenever it exits.
+    Service {
+        /// LaunchAgent label (testing).
+        #[arg(long, hide = true, default_value = mis_orchestrator::service::LABEL)]
+        label: String,
+        #[command(subcommand)]
+        cmd: ServiceCmd,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum ServiceCmd {
+    /// Check it would start (doctor, run as the service will be), then install and start it.
+    /// Pins this executable and the state dir, routines dir and env file in use now.
+    Install {
+        /// As the orchestrator's.
+        #[arg(long = "env-file", env = "MIS_ENV_FILE")]
+        env_file: Option<std::path::PathBuf>,
+    },
+    /// Stop and remove it; its log stays.
+    Uninstall,
+    /// Loaded or not, running or not, its last exit and its log's tail.
+    Status,
 }
 
 /// The channel to publish to workers; see `--update-channel`.
@@ -151,9 +175,7 @@ fn print_connect_hints(
             .filter(|i| addr.ip().is_unspecified() || i.ip() == addr.ip());
         urls.extend(lan.map(|i| format!("ws://{}:{}", i.ip(), addr.port())));
     }
-    let token = token
-        .map(|t| format!(" MIS_TOKEN={}", sh_quote(t)))
-        .unwrap_or_default();
+    let token = token_env(token, std::io::IsTerminal::is_terminal(&std::io::stderr()));
     eprintln!("\nmis-orchestrator {}", mis_orchestrator::VERSION);
     eprintln!("Connect workers with one of (same MIS_URL/MIS_TOKEN work for `mis`):");
     for u in &urls {
@@ -166,6 +188,15 @@ fn print_connect_hints(
         eprintln!("Browser origins allowed: {}", origins.join(", "));
     }
     eprintln!();
+}
+
+/// ` MIS_TOKEN=…` for a connect hint: the token only on a terminal, not into a log file.
+fn token_env(token: Option<&str>, tty: bool) -> String {
+    match token {
+        Some(t) if tty => format!(" MIS_TOKEN={}", sh_quote(t)),
+        Some(_) => " MIS_TOKEN=<redacted>".into(),
+        None => String::new(),
+    }
 }
 
 /// Single-quote for POSIX shells so tokens like `a$b` or `x y` paste intact.
@@ -222,6 +253,7 @@ fn main() -> anyhow::Result<()> {
     let state_dir = args.state_dir.clone().or_else(default_state_dir);
     match cmd {
         Some(Cmd::Doctor { json, .. }) => doctor(&args, state_dir.as_deref(), json),
+        Some(Cmd::Service { label, cmd }) => service(&label, cmd, &args, state_dir),
         None => tokio::runtime::Runtime::new()?.block_on(serve(args, state_dir)),
     }
 }
@@ -237,6 +269,30 @@ fn doctor(args: &Args, state_dir: Option<&std::path::Path>, json: bool) -> anyho
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn service(
+    label: &str,
+    cmd: ServiceCmd,
+    args: &Args,
+    state_dir: Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    use mis_orchestrator::service;
+    match cmd {
+        ServiceCmd::Install { env_file } => {
+            let no_home = || anyhow::anyhow!("no home dir: set MIS_STATE_DIR and MIS_ROUTINES_DIR");
+            let dirs = service::Dirs {
+                state_dir: state_dir.ok_or_else(no_home)?,
+                routines_dir: (args.routines_dir.clone())
+                    .or_else(default_routines_dir)
+                    .ok_or_else(no_home)?,
+                env_file,
+            };
+            service::install(label, &std::env::current_exe()?.canonicalize()?, dirs)
+        }
+        ServiceCmd::Uninstall => service::uninstall(label),
+        ServiceCmd::Status => service::status(label),
+    }
 }
 
 async fn serve(mut args: Args, state_dir: Option<std::path::PathBuf>) -> anyhow::Result<()> {
@@ -493,6 +549,14 @@ mod tests {
         assert_eq!(arg(&["m", "--env-file"]), None);
         assert_eq!(arg(&["m", "--", "--env-file", "f"]), None);
         assert_eq!(arg(&["--env-file"]), None, "argv[0] is the program");
+    }
+
+    #[test]
+    fn token_only_on_a_terminal() {
+        use super::token_env;
+        assert_eq!(token_env(Some("t0k"), true), " MIS_TOKEN='t0k'");
+        assert_eq!(token_env(Some("t0k"), false), " MIS_TOKEN=<redacted>");
+        assert_eq!(token_env(None, false), "");
     }
 
     #[test]
