@@ -643,20 +643,35 @@ mod tests {
 
     #[test]
     fn env_settings_that_wont_work_here_are_named() {
+        // Absolute here: `/x` on Unix, `C:/x` on Windows (the env file allows no `\`).
+        let abs = |p: &str| format!("{}{p}", if cfg!(windows) { "C:" } else { "" });
         let to = Paths {
-            state: "/here/state".into(),
-            routines: "/here/routines".into(),
-            env: "/here/orchestrator.env".into(),
+            state: abs("/here/state").into(),
+            routines: abs("/here/routines").into(),
+            env: abs("/here/orchestrator.env").into(),
         };
-        let env = "MIS_STATE_DIR=/old/home/.local/state/mis\nMIS_ROUTINES_DIR=/here/routines\n\
-                   MIS_BIND=127.0.0.1:7474\nMIS_NOTES_REMOTE=/here/notes.git\n\
-                   MIS_RELEASE_KEY=/old/key.pub\nMIS_X=relative/dir\n";
-        let got = env_warnings(env, &to, |p| p.starts_with("/here")).unwrap();
+        let env = [
+            format!("MIS_STATE_DIR={}", abs("/old/home/.local/state/mis")),
+            format!("MIS_ROUTINES_DIR={}", abs("/here/routines")),
+            "MIS_BIND=127.0.0.1:7474".into(),
+            format!("MIS_NOTES_REMOTE={}", abs("/here/notes.git")),
+            format!("MIS_RELEASE_KEY={}", abs("/old/key.pub")),
+            "MIS_X=relative/dir".into(),
+        ];
+        let here = abs("/here");
+        let got = env_warnings(&env.join("\n"), &to, |p| p.starts_with(&here)).unwrap();
         assert_eq!(
             got,
             [
-                "MIS_STATE_DIR=/old/home/.local/state/mis: the import is in /here/state",
-                "MIS_RELEASE_KEY=/old/key.pub: not on this machine"
+                format!(
+                    "MIS_STATE_DIR={}: the import is in {}",
+                    abs("/old/home/.local/state/mis"),
+                    abs("/here/state")
+                ),
+                format!(
+                    "MIS_RELEASE_KEY={}: not on this machine",
+                    abs("/old/key.pub")
+                )
             ]
         );
         assert!(env_warnings("X=$HOME", &to, |_| true).is_err());
