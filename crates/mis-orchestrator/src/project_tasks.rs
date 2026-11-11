@@ -7,11 +7,11 @@ const MAX_TITLE_CHARS: usize = 80;
 
 /// What `t` asks for, the record to write, then the projects guide. Err: why it can't be a task.
 pub fn prompt(t: &ProjectTask) -> Result<String, String> {
-    let (title, slug, description) = (t.title.trim(), t.slug.trim(), t.description.trim());
+    let (title, slug, description) = (normalize(&t.title), t.slug.trim(), t.description.trim());
     if !valid_slug(slug) {
         return Err(format!("{slug:?}: {SLUG_RULE}"));
     }
-    let title = quoted(title)?;
+    let value = quoted(&title)?;
     if description.is_empty() {
         return Err("say what the project is".into());
     }
@@ -30,29 +30,31 @@ pub fn prompt(t: &ProjectTask) -> Result<String, String> {
     Ok(format!(
         "Start a new project, slug `{slug}`. This folder is a checkout of the mis-notes repo. \
          Follow the projects guide below to the end: a mis-notes PR with its record, never \
-         merged.\n\n{repo}\n\nDescription:\n{description}\n\n\
+         merged.\n\nTitle: {title}\n\n{repo}\n\nDescription:\n{description}\n\n\
          Record frontmatter (`projects/{slug}/README.md`, then the description):\n```\n\
-         ---\nschema: 1\nid: {slug}\ntitle: {title}\naliases: []\nstatus: active\n\
+         ---\nschema: 1\nid: {slug}\ntitle: {value}\naliases: []\nstatus: active\n\
          repos: {repos}\nnotes: []\n---\n```\n\n{guide}"
     ))
 }
 
-/// `title` as a frontmatter value the projects parser reads back as is: `"…"`, or `'…'` if it
-/// has a `"`. Err if it is blank, too long, more than one line, or has both quotes.
+/// `title` trimmed, whitespace runs as one space, curly quotes straight. iPhone keyboards type
+/// `’`; this keeps `Bryan’s` and `Bryan's` the same title.
+fn normalize(title: &str) -> String {
+    (title.split_whitespace().collect::<Vec<_>>().join(" "))
+        .replace(['‘', '’'], "'")
+        .replace(['“', '”'], "\"")
+}
+
+/// `title` as a frontmatter value the projects parser (and YAML) reads back as is: `'…'`, each
+/// `'` doubled. Err if it is blank or too long.
 fn quoted(title: &str) -> Result<String, String> {
     if title.is_empty() {
         return Err("give the project a title".into());
     }
-    if title.chars().count() > MAX_TITLE_CHARS || title.contains(['\n', '\r']) {
-        return Err(format!(
-            "a title is one line, up to {MAX_TITLE_CHARS} characters"
-        ));
+    if title.chars().count() > MAX_TITLE_CHARS {
+        return Err(format!("a title is up to {MAX_TITLE_CHARS} characters"));
     }
-    match (title.contains('"'), title.contains('\'')) {
-        (false, _) => Ok(format!("\"{title}\"")),
-        (true, false) => Ok(format!("'{title}'")),
-        (true, true) => Err("a title can't have both kinds of quote".into()),
-    }
+    Ok(format!("'{}'", title.replace('\'', "''")))
 }
 
 #[cfg(test)]
@@ -115,11 +117,34 @@ mod tests {
 
     #[test]
     fn titles_read_back_as_typed() {
-        for title in ["A: b #1", "Tom's #1 idea", "say \"hi\" # now"] {
+        for title in [
+            "A: b #1",
+            "Tom's #1 idea",
+            "say \"hi\" # now",
+            "it's \"x\" # 'y'",
+            "'quoted' \"too\"",
+        ] {
             let p = prompt(&task(title, "x", "d", false)).unwrap();
+            assert!(p.contains(&format!("\n\nTitle: {title}\n\n")), "{p}");
             let got = crate::projects::parse("projects/x", &record(&p, "me")).unwrap();
-            assert_eq!(got.title, title.trim(), "{p}");
+            assert_eq!(got.title, title, "{p}");
         }
+    }
+
+    #[test]
+    fn titles_are_normalized() {
+        for (typed, want) in [
+            (" Pool  robot\t", "Pool robot"),
+            ("a\nb", "a b"),
+            ("Bryan’s “Big” ‘Tool’", "Bryan's \"Big\" 'Tool'"),
+            ("plain", "plain"),
+        ] {
+            assert_eq!(normalize(typed), want, "{typed:?}");
+        }
+        let p = prompt(&task("Bryan’s “Big” Tool", "x", "d", false)).unwrap();
+        assert!(p.contains("\ntitle: 'Bryan''s \"Big\" Tool'\n"), "{p}");
+        let got = crate::projects::parse("projects/x", &record(&p, "me")).unwrap();
+        assert_eq!(got.title, "Bryan's \"Big\" Tool");
     }
 
     #[test]
@@ -129,9 +154,7 @@ mod tests {
         assert!(bad(task("T", "../x", "d", true)).contains("a-z"));
         assert!(bad(task("T", "", "d", true)).contains("a-z"));
         assert!(bad(task(" ", "x", "d", true)).contains("title"));
-        assert!(bad(task("a\nb", "x", "d", true)).contains("one line"));
         assert!(bad(task(&"t".repeat(81), "x", "d", true)).contains("80"));
-        assert!(bad(task("it's \"x\"", "x", "d", true)).contains("quote"));
         assert!(bad(task("T", "x", " \n ", true)).contains("what the project is"));
     }
 }

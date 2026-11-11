@@ -74,7 +74,7 @@ pub fn parse(dir: &str, text: &str) -> Result<Project, String> {
         last = Some((k, v.is_empty()));
     }
     let body = body.ok_or("the frontmatter needs a closing `---` line")?;
-    let one = |k: &str| keys.get(k).map(|v| unquote(v)).filter(|v| !v.is_empty());
+    let one = |k: &str| keys.get(k).map(|v| scalar(v)).filter(|v| !v.is_empty());
     let list = |k: &str| match keys.get(k).copied().filter(|v| !v.is_empty()) {
         Some(v) => parse_list(k, v),
         None => Ok((items.get(k).into_iter().flatten())
@@ -82,24 +82,32 @@ pub fn parse(dir: &str, text: &str) -> Result<Project, String> {
             .map(|i| i.to_string())
             .collect()),
     };
-    if let Some(s) = one("schema").filter(|s| *s != "1") {
+    if let Some(s) = one("schema").filter(|s| s != "1") {
         return Err(format!("schema `{s}`: only 1 is known"));
     }
     let (top, folder) = dir.split_once('/').unwrap_or_default();
-    let id = one("id").unwrap_or(folder);
+    let id = one("id").unwrap_or_else(|| folder.into());
     if id != folder {
         return Err(format!("id `{id}` isn't its folder's name, `{folder}`"));
     }
     Ok(Project {
-        id: id.into(),
-        title: one("title").unwrap_or(id).into(),
+        title: one("title").unwrap_or_else(|| id.clone()),
+        id,
         aliases: list("aliases")?,
-        status: one("status").unwrap_or("active").into(),
+        status: one("status").unwrap_or_else(|| "active".into()),
         repos: list("repos")?,
         notes: list("notes")?,
         archived: top == "archive",
         description: body.trim().into(),
     })
+}
+
+/// A value unquoted; inside `'…'`, `''` is one `'` (YAML): `'it''s "x"'` -> `it's "x"`.
+fn scalar(v: &str) -> String {
+    match v.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')) {
+        Some(inner) => inner.replace("''", "'"),
+        None => unquote(v).into(),
+    }
 }
 
 /// The projects `records` define, and what's wrong with the rest. `records` are (folder,

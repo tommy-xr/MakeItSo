@@ -5320,7 +5320,7 @@ async fn new_project_task_runs_the_projects_guide_in_the_settings_repo_and_never
     assert!(task
         .prompt
         .starts_with("Start a new project, slug `pool-robot`."));
-    assert!(task.prompt.contains("\ntitle: \"Pool robot\"\n"));
+    assert!(task.prompt.contains("\ntitle: 'Pool robot'\n"));
     assert!(task.prompt.contains("\nrepos: [OWNER/pool-robot]\n"));
     assert!(task
         .prompt

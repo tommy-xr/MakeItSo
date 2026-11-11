@@ -21,6 +21,9 @@ record's frontmatter. Use them as given.
 - A new repo is always private (`--private`), owned by your own gh user, and named `<slug>`.
 - Work in your own mis-notes worktree (step 2), never in the checkout you start in (others use it)
   or the orchestrator's `<state-dir>/notes` clone.
+- No title, description or other text from your request ever goes in a shell command: a quote
+  in it breaks the command. Write such text into files with your file-writing tool; commands use
+  only the slug, the owner and paths.
 - Shell variables don't carry from one command to the next: write the owner and paths out in
   full in every command.
 - The repo's README is neutral: what the project is, goals, first steps. No private paths, notes,
@@ -41,10 +44,9 @@ record's frontmatter. Use them as given.
      folder plus `/<slug>` (`dirname "$(git rev-parse --show-toplevel)"`), and it doesn't exist.
 2. Make your worktree off `origin/main`:
    `git worktree add -b project-<slug> ../mis-notes-project-<slug> origin/main`, and work there.
-3. Repo (only if asked), as one command, so it stops at the first failure:
-   `mkdir <folder> && cd <folder> && printf '%s\n' '# <title>' > README.md`, then fill in
-   `README.md`: what it is, `## Goals` and `## First steps`, from the description; plain and short.
-   Then one command:
+3. Repo (only if asked). `mkdir <folder>`; if it fails, stop. With your file-writing tool, write
+   `<folder>/README.md`: `# <title>`, what it is, `## Goals` and `## First steps`, from the
+   description; plain and short. Then one command, so it stops at the first failure:
    `cd <folder> && git init -b main && git add README.md && git commit -m "docs: add readme" &&
    gh repo create <owner>/<slug> --private --source . --remote origin --push`.
    `gh repo view <owner>/<slug> --json visibility -q .visibility` must say `PRIVATE`; if not, stop
@@ -53,8 +55,9 @@ record's frontmatter. Use them as given.
    exactly (with a repo, `OWNER` in `repos:` replaced by the owner; without one, `repos: []`), a
    blank line, then the description as given. Nothing else in the folder.
 5. Commit (`feat: add project <slug>`), `git push -u origin project-<slug>`, then
-   `gh pr create --base main --title "feat: add project <slug>" --body "<one line: what it is;
-   the repo link if any>"`. Leave it for the owner to merge. Then remove your worktree:
+   `gh pr create --base main --title "feat: add project <slug>" --body "Adds project <slug>."`
+   (with a repo: `--body "Adds project <slug>, repo https://github.com/<owner>/<slug>."`).
+   Leave it for the owner to merge. Then remove your worktree:
    `git worktree remove ../mis-notes-project-<slug>` (the branch is pushed).
 6. Reply with the PR link and, if made, the repo link
    (`https://github.com/<owner>/<slug>`). If a step after the repo failed, say what exists now
@@ -66,7 +69,7 @@ record's frontmatter. Use them as given.
 ---
 schema: 1
 id: <slug>
-title: "<title>"
+title: '<title>'
 aliases: []
 status: active
 repos: [<owner>/<slug>]
@@ -76,6 +79,7 @@ notes: []
 <description>
 ```
 
-`id` must equal the folder's name. `aliases` are other names it goes by; `repos` are GitHub
-`owner/repo`s; `notes` are paths to the owner's own notes (leave empty). Once the PR is merged,
-the project shows in Make It So's Projects view.
+`id` must equal the folder's name; in `title`, each `'` is doubled (`'Bryan''s tool'`).
+`aliases` are other names it goes by; `repos` are GitHub `owner/repo`s; `notes` are paths to the
+owner's own notes (leave empty). Once the PR is merged, the project shows in Make It So's Projects
+view.

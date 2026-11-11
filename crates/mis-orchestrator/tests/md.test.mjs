@@ -549,7 +549,7 @@ test('cleared keys stay unique and capped, newest kept', () => {
 test('a title suggests a slug the orchestrator takes', () => {
   const ok = (s) => /^[a-z0-9][a-z0-9-]{0,31}$/.test(s);
   for (const [title, slug] of [['Pool robot', 'pool-robot'], ['  Pool Robot #2!', 'pool-robot-2'], ['Café crème', 'cafe-creme'],
-    ['--x--', 'x'], ['日本', ''], ['a'.repeat(31) + ' bcd', 'a'.repeat(31)]]) {
+    ['--x--', 'x'], ['日本', ''], ["Bryan's Tool", 'bryans-tool'], ['Bryan’s “Big” Tool', 'bryans-big-tool'], ['a'.repeat(31) + ' bcd', 'a'.repeat(31)]]) {
     assert.equal(nt.projectSlug(title), slug, title);
     if (slug) assert.ok(ok(slug), slug);
   }
