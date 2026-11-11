@@ -227,7 +227,7 @@ mod mac {
             path,
             log: utf8(&log)?,
         };
-        private_dir(log.parent().unwrap())?;
+        crate::images::private_dir(log.parent().unwrap())?;
         let plist = plist_path(label)?;
         std::fs::create_dir_all(plist.parent().unwrap())?;
         std::fs::write(&plist, launchd_plist(&spec))
@@ -246,13 +246,6 @@ mod mac {
         println!("  log:   {}", log.display());
         println!("check it with `mis-orchestrator service status`");
         Ok(())
-    }
-
-    fn private_dir(dir: &Path) -> anyhow::Result<()> {
-        use std::os::unix::fs::DirBuilderExt;
-        (std::fs::DirBuilder::new().recursive(true).mode(0o700))
-            .create(dir)
-            .with_context(|| format!("creating {}", dir.display()))
     }
 
     /// Stop and unload the service and delete its plist; the log stays.
