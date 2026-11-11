@@ -96,7 +96,7 @@ pub(crate) fn dest(names: &[&str], kind: Kind) -> Result<Option<Dest>, String> {
 /// The first clash among entries `seen` (dest -> its kind), as an error: a path a file and
 /// also a folder with something in it. (A file listed twice is caught as it is seen.)
 pub(crate) fn clash(seen: &BTreeMap<(Root, String), Kind>) -> Option<String> {
-    for ((root, path), _) in seen {
+    for (root, path) in seen.keys() {
         let mut parents = path.match_indices('/').map(|(i, _)| &path[..i]);
         let file = |p: &&str| seen.get(&(*root, p.to_string())) == Some(&Kind::File);
         if let Some(p) = parents.find(file) {
@@ -139,6 +139,7 @@ pub(crate) fn missing_paths(
 /// What [`export`] wrote.
 #[derive(Debug)]
 pub struct Exported {
+    /// The env file's included.
     pub files: usize,
     pub env: bool,
     pub routines: bool,
@@ -198,7 +199,7 @@ fn write_archive(file: File, from: &Paths) -> anyhow::Result<Exported> {
             Some(&meta),
         )?;
     }
-    let mut files = append_tree(&mut ar, &from.state, Root::State, &mut vec![])?;
+    let mut files = env as usize + append_tree(&mut ar, &from.state, Root::State, &mut vec![])?;
     let routines = from.routines.is_dir();
     if routines {
         files += append_tree(&mut ar, &from.routines, Root::Routines, &mut vec![])?;
@@ -383,6 +384,9 @@ pub fn import(from: &Path, to: &Paths) -> anyhow::Result<Imported> {
             .open(&path)
             .with_context(|| format!("creating {}", path.display()))?;
         std::io::copy(entry, &mut f)?;
+        // Images expire, and captures dedupe, by age.
+        let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(entry.header().mtime()?);
+        f.set_modified(mtime)?;
         f.sync_all()?;
         files += 1;
         Ok(())
@@ -421,11 +425,13 @@ fn ensure_once(
     }
 }
 
+type Entry<'a> = tar::Entry<'a, flate2::read::GzDecoder<BufReader<File>>>;
+
 /// Each entry of archive `path` that goes somewhere, checked by [`entry_kind`],
 /// [`entry_names`] and [`dest`], in order.
 fn each_entry(
     path: &Path,
-    mut f: impl FnMut(Dest, Kind, &mut dyn Read) -> anyhow::Result<()>,
+    mut f: impl FnMut(Dest, Kind, &mut Entry) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let file = File::open(path).with_context(|| format!("reading {}", path.display()))?;
     let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(BufReader::new(file)));
@@ -566,9 +572,11 @@ mod tests {
         let json = |v: u32| format!(r#"{{"version":"0.1.0+old","ledger_version":{v}}}"#);
         let ok = check_manifest(Some(json(persist::VERSION).as_bytes())).unwrap();
         assert_eq!(ok.version, "0.1.0+old");
-        let newer = check_manifest(Some(json(persist::VERSION + 1).as_bytes())).unwrap_err();
+        let v = persist::VERSION;
+        let newer = check_manifest(Some(json(v + 1).as_bytes())).unwrap_err();
+        let want = format!("0.1.0+old with task history format {}; ", v + 1);
         assert!(
-            newer.contains("0.1.0+old with task history format 2") && newer.contains("reads 1"),
+            newer.contains(&want) && newer.contains(&format!("reads {v}")),
             "{newer}"
         );
         assert!(check_manifest(None)

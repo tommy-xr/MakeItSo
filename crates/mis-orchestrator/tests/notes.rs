@@ -493,6 +493,32 @@ fn a_lost_map_never_brings_back_what_the_human_deleted_or_filed() {
 }
 
 #[test]
+fn a_fresh_clone_republishes_nothing_even_without_the_map() {
+    // As on a machine an export moved to: no `notes/` clone. The map is lost too, and the
+    // human filed the record out of inbox/, so only the history's trailers say it went.
+    let w = World::new();
+    let a = w.capture("published before the move", &[JPEG]);
+    w.notes().run();
+    let map = w.map();
+    std::fs::remove_dir_all(w.state.join("notes")).unwrap();
+    std::fs::remove_file(w.state.join("captures/published.json")).unwrap();
+    w.human_pull();
+    std::fs::create_dir_all(w.human.join("projects")).unwrap();
+    let to = w.human.join("projects").join(&a.file);
+    std::fs::rename(w.human.join("inbox").join(&a.file), to).unwrap();
+    w.human_commit("file it");
+    let head = w.head();
+    let s = w.notes().run();
+    assert_eq!((s.state, s.pending, s.last_push), (Idle, 0, None));
+    assert_eq!(w.head(), head, "nothing republished");
+    assert!(
+        w.state.join("notes/projects").join(&a.file).exists(),
+        "cloned"
+    );
+    assert_eq!(w.map(), map);
+}
+
+#[test]
 fn files_from_an_interrupted_run_are_cleared_and_a_humans_are_kept() {
     let w = World::new();
     w.capture("first", &[]);
