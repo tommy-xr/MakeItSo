@@ -985,7 +985,7 @@ pub fn unpushed(clone: &Path) -> Result<bool, String> {
         Ok(out) => Err(out.stderr.trim().to_string()),
         Err(e) => Err(format!("running git: {e}")),
     };
-    if !git(&["status", "--porcelain"])?.is_empty() {
+    if !git(&["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
         return Ok(true);
     }
     Ok(git(&["rev-list", "--count", &format!("origin/{BRANCH}..HEAD")])? != "0")

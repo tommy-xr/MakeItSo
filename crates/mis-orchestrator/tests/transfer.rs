@@ -149,6 +149,9 @@ async fn an_install_moves_whole_and_serves_the_same() {
     std::fs::copy(&archive, &moved).unwrap();
     drop(old);
 
+    // An empty state dir made by hand, too open: allowed, and made private.
+    std::fs::create_dir_all(new.state()).unwrap();
+    std::fs::set_permissions(new.state(), std::fs::Permissions::from_mode(0o755)).unwrap();
     let out = new.orch(&["import", moved.to_str().unwrap()]);
     let shown = text(&out);
     assert!(out.status.success(), "{shown}");

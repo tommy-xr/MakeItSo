@@ -316,7 +316,7 @@ fn append_file<W: Write>(
     // Whole, so a file changed meanwhile (routines and the env file aren't locked) can't leave
     // an entry shorter than its header says.
     let mut bytes = Vec::new();
-    data.take(len).read_to_end(&mut bytes)?;
+    data.take(len + 1).read_to_end(&mut bytes)?;
     ensure!(bytes.len() as u64 == len, "{name}: changed while exported");
     ar.append_data(&mut h, name, &bytes[..])?;
     Ok(())
@@ -389,12 +389,16 @@ pub fn import(from: &Path, to: &Paths) -> anyhow::Result<Imported> {
     }
     if routines {
         refuse_nonempty(&to.routines, "routines dir", None)?;
-        private_root(&to.routines)?;
     }
     // Locked before it's judged empty, so no orchestrator starts on it meanwhile.
-    private_root(&to.state)?;
+    private_dir(&to.state)?;
     let _lock = store::lock(&to.state)?;
     refuse_nonempty(&to.state, "state dir", Some(store::LOCK_FILE))?;
+    restrict(&to.state)?;
+    if routines {
+        private_dir(&to.routines)?;
+        restrict(&to.routines)?;
+    }
     let mut files = 0;
     let wrote = each_entry(from, |dest, kind, entry| {
         let path = match dest {
@@ -502,9 +506,8 @@ fn refuse_nonempty(dir: &Path, what: &str, except: Option<&str>) -> anyhow::Resu
     Ok(())
 }
 
-/// `dir`, made or made `0700`: an empty one already there may have been more open.
-fn private_root(dir: &Path) -> anyhow::Result<()> {
-    private_dir(dir)?;
+/// `dir` made `0700`: an empty one already there may have been more open.
+fn restrict(dir: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
     Ok(())
