@@ -495,24 +495,6 @@ fn workers_menu(f: &Fleet, page: &str) -> Option<Item> {
     Some(Item::Submenu { label, items })
 }
 
-/// `KEY=value` lines of a shell env file; skips comments, strips quotes and `export`.
-pub fn parse_env(text: &str) -> HashMap<String, String> {
-    text.lines()
-        .map(str::trim)
-        .filter(|l| !l.starts_with('#'))
-        .filter_map(|l| l.strip_prefix("export ").unwrap_or(l).split_once('='))
-        .map(|(k, v)| {
-            let v = v.trim();
-            let v = v
-                .strip_prefix('"')
-                .and_then(|v| v.strip_suffix('"'))
-                .or_else(|| v.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
-                .unwrap_or(v);
-            (k.trim().to_string(), v.to_string())
-        })
-        .collect()
-}
-
 /// URL of the orchestrator at `MIS_BIND`; a wildcard host means loopback.
 pub fn local_url(env: &HashMap<String, String>) -> String {
     let bind = env.get("MIS_BIND").map_or("127.0.0.1:7474", String::as_str);
@@ -1026,13 +1008,10 @@ mod tests {
     }
 
     #[test]
-    fn env_file_and_url() {
-        let env = parse_env("# c\nMIS_TOKEN='a b'\nexport MIS_BIND=\"0.0.0.0:7575\"\n\nX=1=2");
-        assert_eq!(env["MIS_TOKEN"], "a b");
-        assert_eq!(env["X"], "1=2");
-        assert_eq!(local_url(&env), "ws://127.0.0.1:7575");
+    fn url_of_bind() {
+        let bind = |b: &str| local_url(&HashMap::from([("MIS_BIND".into(), b.into())]));
+        assert_eq!(bind("0.0.0.0:7575"), "ws://127.0.0.1:7575");
         assert_eq!(local_url(&HashMap::new()), "ws://127.0.0.1:7474");
-        let bind = |b: &str| local_url(&parse_env(&format!("MIS_BIND={b}")));
         assert_eq!(bind("[::]:7474"), "ws://[::1]:7474");
         assert_eq!(bind("100.64.1.2:7474"), "ws://100.64.1.2:7474");
     }

@@ -34,6 +34,21 @@ impl std::fmt::Display for Locked {
 
 impl std::error::Error for Locked {}
 
+/// Lock existing `dir` as an orchestrator does, without waiting; dropping the file releases it.
+/// Err `Locked`: an orchestrator holds it.
+pub fn lock(dir: &Path) -> anyhow::Result<File> {
+    let path = dir.join(LOCK_FILE);
+    let lock = (std::fs::OpenOptions::new().create(true).truncate(false))
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(std::fs::TryLockError::WouldBlock) => Err(Locked(dir.to_path_buf()).into()),
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
 pub struct Store {
     dir: PathBuf,
     /// Locked while open: one orchestrator per state dir.
@@ -63,26 +78,18 @@ impl Store {
         builder
             .create(dir.join(TRANSCRIPTS))
             .with_context(|| format!("creating {}", dir.display()))?;
-        let lock_path = dir.join(LOCK_FILE);
-        let lock = (std::fs::OpenOptions::new().create(true).truncate(false))
-            .write(true)
-            .open(&lock_path)
-            .with_context(|| format!("opening {}", lock_path.display()))?;
         // A restart may find the old process still saving: give it a moment.
         let mut tries = 0;
-        loop {
-            match lock.try_lock() {
-                Ok(()) => break,
-                Err(std::fs::TryLockError::WouldBlock) if tries < LOCK_TRIES => {
+        let lock = loop {
+            match lock(dir) {
+                Ok(lock) => break lock,
+                Err(e) if e.is::<Locked>() && tries < LOCK_TRIES => {
                     tries += 1;
                     std::thread::sleep(LOCK_WAIT);
                 }
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    return Err(Locked(dir.to_path_buf()).into())
-                }
-                Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+                Err(e) => return Err(e),
             }
-        }
+        };
         let path = dir.join(LEDGER_FILE);
         let transcript = |id| std::fs::read_to_string(transcript_path(dir, id)).ok();
         let restored = match std::fs::read_to_string(&path) {
@@ -209,6 +216,16 @@ mod tests {
             assert_eq!(mode(dir.join(LEDGER_FILE)), 0o600);
             assert_eq!(mode(transcript_path(&dir, id)), 0o600);
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn lock_fails_at_once_while_an_orchestrator_holds_the_dir() {
+        let dir = temp_dir();
+        let (store, _, _) = Store::open(&dir, NOW, 0).unwrap();
+        assert!(lock(&dir).unwrap_err().is::<Locked>());
+        drop(store);
+        drop(lock(&dir).unwrap());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
