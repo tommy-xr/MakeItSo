@@ -977,6 +977,20 @@ pub fn reachable(remote: &str) -> Result<(), String> {
     }
 }
 
+/// Whether `clone` holds what the remote lacks: uncommitted changes, or commits not pushed
+/// (an offline filing). Err: git couldn't tell.
+pub fn unpushed(clone: &Path) -> Result<bool, String> {
+    let git = |args: &[&str]| match run_git(clone, args, Duration::from_secs(30), None) {
+        Ok(out) if out.ok => Ok(out.text()),
+        Ok(out) => Err(out.stderr.trim().to_string()),
+        Err(e) => Err(format!("running git: {e}")),
+    };
+    if !git(&["status", "--porcelain"])?.is_empty() {
+        return Ok(true);
+    }
+    Ok(git(&["rev-list", "--count", &format!("origin/{BRANCH}..HEAD")])? != "0")
+}
+
 /// `git args` in `dir`, never waiting on a person: no prompts, askpass, editors, hooks or
 /// signing, and killed (with whatever it started) after `deadline`. Commits are Make It
 /// So's; the user's own git config (the credential helper) still applies.

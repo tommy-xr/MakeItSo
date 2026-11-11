@@ -519,6 +519,41 @@ fn a_fresh_clone_republishes_nothing_even_without_the_map() {
 }
 
 #[test]
+fn unpushed_names_what_only_the_clone_has() {
+    let w = World::new();
+    w.capture("pushed", &[]);
+    w.notes().run();
+    let clone = w.state.join("notes");
+    assert_eq!(mis_orchestrator::notes::unpushed(&clone), Ok(false));
+    std::fs::write(clone.join("inbox/local.md"), "# here only\n").unwrap();
+    assert_eq!(
+        mis_orchestrator::notes::unpushed(&clone),
+        Ok(true),
+        "uncommitted"
+    );
+    git(&clone, &["add", "-A"]);
+    git(
+        &clone,
+        &[
+            "-c",
+            "user.name=H",
+            "-c",
+            "user.email=h@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "x",
+        ],
+    );
+    assert_eq!(
+        mis_orchestrator::notes::unpushed(&clone),
+        Ok(true),
+        "unpushed"
+    );
+}
+
+#[test]
 fn files_from_an_interrupted_run_are_cleared_and_a_humans_are_kept() {
     let w = World::new();
     w.capture("first", &[]);

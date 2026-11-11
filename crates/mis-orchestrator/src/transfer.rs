@@ -1,6 +1,6 @@
 //! `export` / `import`: an install (state dir, routines, env file) as one `.tar.gz`, to move it
 //! to another machine. What goes in and where each entry lands are pure ([`skipped`],
-//! [`dest`], [`clash`], [`check_manifest`], [`missing_paths`]); [`export`] and [`import`] are
+//! [`dest`], [`clash`], [`check_manifest`], [`env_warnings`]); [`export`] and [`import`] are
 //! the filesystem shell. Both hold the state dir's lock, so neither runs beside an orchestrator.
 
 use std::collections::BTreeMap;
@@ -12,6 +12,7 @@ use anyhow::{bail, ensure, Context};
 use serde::{Deserialize, Serialize};
 
 use crate::apps::{entry_kind, entry_names, Kind};
+use crate::images::private_dir;
 use crate::ledger::persist;
 use crate::store;
 
@@ -123,17 +124,32 @@ pub(crate) fn check_manifest(raw: Option<&[u8]>) -> Result<Manifest, String> {
     Ok(m)
 }
 
-/// The env file's absolute path values that `exists` says aren't here, as `KEY=value`: the
-/// old machine's home, state dir or repo, to change for this one.
-pub(crate) fn missing_paths(
+/// What in the env file `env` won't work for the install placed at `to`, as `KEY=value: why`:
+/// a state or routines dir other than `to`'s, or an absolute path `exists` says isn't here
+/// (the old machine's home or repo).
+pub(crate) fn env_warnings(
     env: &str,
+    to: &Paths,
     exists: impl Fn(&Path) -> bool,
 ) -> Result<Vec<String>, String> {
-    let vars = mis_types::env_file::parse(env)?;
-    Ok((vars.into_iter())
-        .filter(|(_, v)| Path::new(v).is_absolute() && !exists(Path::new(v)))
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect())
+    let mut out = Vec::new();
+    for (k, v) in mis_types::env_file::parse(env)? {
+        let placed = match k.as_str() {
+            "MIS_STATE_DIR" => Some(&to.state),
+            "MIS_ROUTINES_DIR" => Some(&to.routines),
+            _ => None,
+        };
+        match placed {
+            Some(p) if Path::new(&v) != p => {
+                out.push(format!("{k}={v}: the import is in {}", p.display()))
+            }
+            None if Path::new(&v).is_absolute() && !exists(Path::new(&v)) => {
+                out.push(format!("{k}={v}: not on this machine"))
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 /// What [`export`] wrote.
@@ -154,24 +170,39 @@ pub fn export(out: &Path, from: &Paths) -> anyhow::Result<Exported> {
         from.state.display()
     );
     let _lock = store::lock(&from.state)?;
+    // Followed: either may be a link to where it really is.
+    let from = Paths {
+        state: from.state.canonicalize()?,
+        routines: (from.routines.canonicalize()).unwrap_or_else(|_| from.routines.clone()),
+        env: from.env.clone(),
+    };
     let parent = match out.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
-    let (parent, state) = (parent.canonicalize()?, from.state.canonicalize()?);
-    ensure!(
-        !parent.starts_with(&state),
-        "{} is inside the state dir; write it elsewhere",
-        out.display()
-    );
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    let file = opts
-        .open(out)
-        .with_context(|| format!("creating {}", out.display()))?;
-    let written = write_archive(file, from);
+    let parent = parent.canonicalize()?;
+    for (dir, what) in [(&from.state, "state"), (&from.routines, "routines")] {
+        ensure!(
+            !parent.starts_with(dir),
+            "{} is inside the {what} dir; write it elsewhere",
+            out.display()
+        );
+    }
+    // Left out, the clone is re-cloned there: what it hasn't pushed would be lost.
+    let notes = from.state.join("notes");
+    if notes.join(".git").exists() {
+        match crate::notes::unpushed(&notes) {
+            Ok(false) => {}
+            Ok(true) => bail!(
+                "{} has changes the notes remote lacks: start the orchestrator online so it \
+                 pushes them, then export",
+                notes.display()
+            ),
+            Err(e) => bail!("{}: can't tell what it hasn't pushed: {e}", notes.display()),
+        }
+    }
+    let file = create_private(out)?;
+    let written = write_archive(file, &from);
     if written.is_err() {
         let _ = std::fs::remove_file(out);
     }
@@ -229,6 +260,8 @@ fn append_tree<W: Write>(
     let name = std::iter::once(top).chain(rel.iter().map(String::as_str));
     let name = name.collect::<Vec<_>>().join("/");
     let path = rel.iter().fold(dir.to_path_buf(), |p, n| p.join(n));
+    // Import takes only what it can place on any machine: no `\` or `:` in a name.
+    entry_names(name.as_bytes()).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
     let meta = std::fs::symlink_metadata(&path)?;
     if meta.is_file() {
         let f = File::open(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -280,8 +313,12 @@ fn append_file<W: Write>(
     let mtime = meta.and_then(|m| m.modified().ok());
     let secs = mtime.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
     h.set_mtime(secs.map_or(0, |d| d.as_secs()));
-    // Stopped orchestrator: nothing grows or shrinks under the lock.
-    ar.append_data(&mut h, name, data.take(len))?;
+    // Whole, so a file changed meanwhile (routines and the env file aren't locked) can't leave
+    // an entry shorter than its header says.
+    let mut bytes = Vec::new();
+    data.take(len).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() as u64 == len, "{name}: changed while exported");
+    ar.append_data(&mut h, name, &bytes[..])?;
     Ok(())
 }
 
@@ -293,8 +330,8 @@ pub struct Imported {
     pub tasks: usize,
     pub env: bool,
     pub routines: bool,
-    /// The env file's [`missing_paths`], or why it couldn't be read.
-    pub missing: Result<Vec<String>, String>,
+    /// The env file's [`env_warnings`], or why it couldn't be read.
+    pub warnings: Result<Vec<String>, String>,
 }
 
 /// Archive `from` (an [`export`]) into `to`: checked whole first (entries, manifest, task
@@ -343,10 +380,6 @@ pub fn import(from: &Path, to: &Paths) -> anyhow::Result<Imported> {
         None => 0,
     };
     let routines = seen.keys().any(|(r, _)| *r == Root::Routines);
-    refuse_nonempty(&to.state, "state dir")?;
-    if routines {
-        refuse_nonempty(&to.routines, "routines dir")?;
-    }
     if env.is_some() {
         ensure!(
             !to.env.exists(),
@@ -354,8 +387,14 @@ pub fn import(from: &Path, to: &Paths) -> anyhow::Result<Imported> {
             to.env.display()
         );
     }
-    private_dir(&to.state)?;
+    if routines {
+        refuse_nonempty(&to.routines, "routines dir", None)?;
+        private_root(&to.routines)?;
+    }
+    // Locked before it's judged empty, so no orchestrator starts on it meanwhile.
+    private_root(&to.state)?;
     let _lock = store::lock(&to.state)?;
+    refuse_nonempty(&to.state, "state dir", Some(store::LOCK_FILE))?;
     let mut files = 0;
     let wrote = each_entry(from, |dest, kind, entry| {
         let path = match dest {
@@ -376,13 +415,7 @@ pub fn import(from: &Path, to: &Paths) -> anyhow::Result<Imported> {
             return private_dir(&path);
         }
         private_dir(path.parent().expect("under a root"))?;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-        let mut f = opts
-            .open(&path)
-            .with_context(|| format!("creating {}", path.display()))?;
+        let mut f = create_private(&path)?;
         std::io::copy(entry, &mut f)?;
         // Images expire, and captures dedupe, by age.
         let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(entry.header().mtime()?);
@@ -392,15 +425,16 @@ pub fn import(from: &Path, to: &Paths) -> anyhow::Result<Imported> {
         Ok(())
     });
     wrote.with_context(|| {
+        let placed = [&to.state, &to.routines, &to.env].map(|p| p.display().to_string());
         format!(
-            "import cut short: remove what it wrote in {} before trying again",
-            to.state.display()
+            "import cut short: remove what it wrote ({}) before trying again",
+            placed.join(", ")
         )
     })?;
-    let missing = match &env {
+    let warnings = match &env {
         Some(text) => std::str::from_utf8(text)
             .map_err(|_| "not UTF-8".to_string())
-            .and_then(|t| missing_paths(t, Path::exists)),
+            .and_then(|t| env_warnings(t, to, Path::exists)),
         None => Ok(vec![]),
     };
     Ok(Imported {
@@ -409,7 +443,7 @@ pub fn import(from: &Path, to: &Paths) -> anyhow::Result<Imported> {
         tasks,
         env: env.is_some(),
         routines,
-        missing,
+        warnings,
     })
 }
 
@@ -453,9 +487,10 @@ fn each_entry(
     Ok(())
 }
 
-fn refuse_nonempty(dir: &Path, what: &str) -> anyhow::Result<()> {
+/// Err unless `dir` is missing or holds nothing but `except`.
+fn refuse_nonempty(dir: &Path, what: &str, except: Option<&str>) -> anyhow::Result<()> {
     let used = match std::fs::read_dir(dir) {
-        Ok(mut d) => d.next().is_some(),
+        Ok(d) => (d.flatten()).any(|e| Some(e.file_name()) != except.map(Into::into)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => return Err(anyhow::Error::from(e).context(dir.display().to_string())),
     };
@@ -467,14 +502,21 @@ fn refuse_nonempty(dir: &Path, what: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `dir` and its missing parents, made `0700`.
-fn private_dir(dir: &Path) -> anyhow::Result<()> {
-    let mut b = std::fs::DirBuilder::new();
-    b.recursive(true);
+/// `dir`, made or made `0700`: an empty one already there may have been more open.
+fn private_root(dir: &Path) -> anyhow::Result<()> {
+    private_dir(dir)?;
     #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
-    b.create(dir)
-        .with_context(|| format!("creating {}", dir.display()))
+    std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    Ok(())
+}
+
+/// New file `path`, `0600`.
+fn create_private(path: &Path) -> anyhow::Result<File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    (opts.open(path)).with_context(|| format!("creating {}", path.display()))
 }
 
 #[cfg(test)]
@@ -588,11 +630,23 @@ mod tests {
     }
 
     #[test]
-    fn env_paths_missing_here_are_named() {
-        let env = "MIS_STATE_DIR=/old/home/.local/state/mis\nMIS_BIND=127.0.0.1:7474\n\
-                   MIS_NOTES_REMOTE=/here/notes.git\nMIS_ROUTINES_DIR=relative/dir\n";
-        let got = missing_paths(env, |p| p.starts_with("/here")).unwrap();
-        assert_eq!(got, ["MIS_STATE_DIR=/old/home/.local/state/mis"]);
-        assert!(missing_paths("X=$HOME", |_| true).is_err());
+    fn env_settings_that_wont_work_here_are_named() {
+        let to = Paths {
+            state: "/here/state".into(),
+            routines: "/here/routines".into(),
+            env: "/here/orchestrator.env".into(),
+        };
+        let env = "MIS_STATE_DIR=/old/home/.local/state/mis\nMIS_ROUTINES_DIR=/here/routines\n\
+                   MIS_BIND=127.0.0.1:7474\nMIS_NOTES_REMOTE=/here/notes.git\n\
+                   MIS_RELEASE_KEY=/old/key.pub\nMIS_X=relative/dir\n";
+        let got = env_warnings(env, &to, |p| p.starts_with("/here")).unwrap();
+        assert_eq!(
+            got,
+            [
+                "MIS_STATE_DIR=/old/home/.local/state/mis: the import is in /here/state",
+                "MIS_RELEASE_KEY=/old/key.pub: not on this machine"
+            ]
+        );
+        assert!(env_warnings("X=$HOME", &to, |_| true).is_err());
     }
 }

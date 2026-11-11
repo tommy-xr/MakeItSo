@@ -16,7 +16,7 @@ use crate::ledger::{Effect, Ledger};
 use crate::push::write_private;
 
 pub const LEDGER_FILE: &str = "ledger.json";
-const LOCK_FILE: &str = "ledger.lock";
+pub const LOCK_FILE: &str = "ledger.lock";
 const TRANSCRIPTS: &str = "transcripts";
 /// How long `open` waits for another orchestrator to let go of the dir.
 const LOCK_TRIES: u32 = 50;

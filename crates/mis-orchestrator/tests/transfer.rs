@@ -85,9 +85,10 @@ fn put(id: &str, data: serde_json::Value) -> Mutation {
 }
 
 /// The old machine's install: two tasks, a VAPID key, app `pool` with its rows only in its
-/// WAL, a routine, an env file, and what an export leaves out. The VAPID public key.
-fn old_install(home: &Home) -> String {
-    let state = home.state();
+/// WAL, a routine, an env file putting the state dir somewhere else, and what an export leaves
+/// out. The VAPID public key, and the state dir.
+fn old_install(home: &Home) -> (String, PathBuf) {
+    let state = home.0.join("data/mis");
     let (mut store, mut ledger, _) = Store::open(&state, Duration::ZERO, 0).unwrap();
     for prompt in ["water the plants", "renew the passport"] {
         ledger.submit(prompt.into(), None, Some("claude".into()), None, vec![]);
@@ -122,10 +123,9 @@ fn old_install(home: &Home) -> String {
         .write(true)
         .open(home.routines().join("weekly.md"));
     f.unwrap().set_modified(long_ago()).unwrap();
-    // The old home's state dir: missing on the new machine.
     let env = format!("MIS_TOKEN={TOKEN}\nMIS_STATE_DIR={}\n", state.display());
     std::fs::write(home.env(), env).unwrap();
-    vapid.public_key()
+    (vapid.public_key(), state)
 }
 
 fn free_port() -> u16 {
@@ -136,15 +136,10 @@ fn free_port() -> u16 {
 #[tokio::test]
 async fn an_install_moves_whole_and_serves_the_same() {
     let (old, new) = (Home::new("old"), Home::new("new"));
-    let vapid = old_install(&old);
+    let (vapid, state_was) = old_install(&old);
     let archive = old.0.join("mis.tar.gz");
-    let env = old.env();
-    let out = old.orch(&[
-        "export",
-        archive.to_str().unwrap(),
-        "--env-file",
-        env.to_str().unwrap(),
-    ]);
+    // The default env file names the state dir, as for `mis-up`.
+    let out = old.orch(&["export", archive.to_str().unwrap()]);
     assert!(out.status.success());
     assert!(text(&out).contains("Exported 8 files"), "{}", text(&out));
     assert!(text(&out).contains("Never run the tunnel on both machines at once"));
@@ -152,7 +147,6 @@ async fn an_install_moves_whole_and_serves_the_same() {
     // Carried to the other machine; the old one is gone.
     let moved = new.0.join("mis.tar.gz");
     std::fs::copy(&archive, &moved).unwrap();
-    let state_was = old.state();
     drop(old);
 
     let out = new.orch(&["import", moved.to_str().unwrap()]);
@@ -160,12 +154,15 @@ async fn an_install_moves_whole_and_serves_the_same() {
     assert!(out.status.success(), "{shown}");
     assert!(shown.contains("Imported 2 tasks, 8 files"), "{shown}");
     let stale = format!(
-        "warning: MIS_STATE_DIR={}: not on this machine",
-        state_was.display()
+        "warning: MIS_STATE_DIR={}: the import is in {}",
+        state_was.display(),
+        new.state().display()
     );
     assert!(shown.contains(&stale), "{shown}");
     assert!(shown.contains("Run a worker on this machine") && shown.contains("worker.toml"));
-    assert!(shown.contains("mis-orchestrator doctor:\n") && shown.contains("state dir"));
+    // Doctor looks at what was placed, not where the stale env file points.
+    let free = format!("{}: private, free", new.state().display());
+    assert!(shown.contains("mis-orchestrator doctor:\n") && shown.contains(&free));
     let state = new.state();
     for (p, m) in [
         (state.clone(), 0o700),
@@ -248,11 +245,11 @@ async fn an_install_moves_whole_and_serves_the_same() {
 #[test]
 fn export_and_import_refuse_to_overwrite_or_race() {
     let (old, new) = (Home::new("old"), Home::new("new"));
-    old_install(&old);
+    let (_, state) = old_install(&old);
     let archive = old.0.join("mis.tar.gz");
     let path = archive.to_str().unwrap();
     // A running orchestrator holds the state dir.
-    let running = Store::open(&old.state(), Duration::ZERO, 0).unwrap();
+    let running = Store::open(&state, Duration::ZERO, 0).unwrap();
     let out = old.orch(&["export", path]);
     assert!(!out.status.success());
     assert!(
@@ -262,7 +259,23 @@ fn export_and_import_refuse_to_overwrite_or_race() {
     );
     assert!(!archive.exists());
     drop(running);
-    let inside = old.state().join("mis.tar.gz");
+    // A notes clone holding what its remote lacks.
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .current_dir(state.join("notes"))
+            .args(args)
+            .status();
+        assert!(ok.unwrap().success());
+    };
+    git(&["init", "--quiet"]);
+    let out = old.orch(&["export", path]);
+    assert!(
+        text(&out).contains("has changes the notes remote lacks"),
+        "{}",
+        text(&out)
+    );
+    std::fs::remove_dir_all(state.join("notes/.git")).unwrap();
+    let inside = state.join("mis.tar.gz");
     let out = old.orch(&["export", inside.to_str().unwrap()]);
     assert!(
         text(&out).contains("is inside the state dir"),
