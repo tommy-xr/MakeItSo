@@ -415,6 +415,8 @@ mod tests {
         assert!(p.contains("<string>/Users/u/.config/mis/routines</string>\n\t</array>"));
     }
 
+    /// `/Users/u` isn't absolute on Windows (no drive); launchd paths are POSIX.
+    #[cfg(unix)]
     #[test]
     fn path_keeps_found_dirs_that_exist_once() {
         let exists = |d: &Path| d != Path::new("/sbin");
