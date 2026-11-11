@@ -249,7 +249,8 @@ struct TaskEntry {
     /// Its message is in its session (`TaskStatus::Delivered`).
     #[serde(default)]
     delivery: Option<Delivery>,
-    /// Builds or changes an app (`submit_app_task`): it and replies in its thread never merge.
+    /// Builds or changes an app, or starts a project (`submit_app_task`): it and replies in its
+    /// thread never merge.
     #[serde(default)]
     app: bool,
     /// The app its thread works on, which its `token` may stage releases of.
@@ -839,9 +840,9 @@ impl Ledger {
 
     /// Queue an app task: `prompt` as is (no planner), in `cwd` on `harness`, on `worker`
     /// only if given, with `images`, bound to `bound`'s app (its `thread` becomes this task) with a token
-    /// of its own. It never merges: the user approves its PR. It waits while `worker` is busy or
-    /// offline. Err if no worker runs `harness` (it would wait for good), or `worker` never
-    /// connected or doesn't run it.
+    /// of its own. A project task has no `bound`, so no token. It never merges: the user approves
+    /// its PR. It waits while `worker` is busy or offline. Err if no worker runs `harness` (it
+    /// would wait for good), or `worker` never connected or doesn't run it.
     #[allow(clippy::too_many_arguments)] // a task's fields, plus the worker and its app
     pub fn submit_app_task(
         &mut self,
@@ -851,7 +852,7 @@ impl Ledger {
         model: Option<String>,
         worker: Option<WorkerId>,
         images: Vec<Uuid>,
-        bound: app_grant::Binding,
+        bound: Option<app_grant::Binding>,
     ) -> Result<(TaskId, Vec<Effect>), String> {
         if worker.is_none() && !self.known_fleet().contains_key(&harness) {
             return Err(format!("no worker runs {harness:?}"));
@@ -870,11 +871,9 @@ impl Ledger {
         };
         let id = task.id;
         let mut entry = TaskEntry::new(task, self.now_ms);
-        (entry.app, entry.token, entry.images) = (true, Some(app_grant::mint()), images);
-        entry.bound = Some(app_grant::Binding {
-            thread: id,
-            ..bound
-        });
+        (entry.app, entry.images) = (true, images);
+        entry.token = bound.as_ref().map(|_| app_grant::mint());
+        entry.bound = bound.map(|b| app_grant::Binding { thread: id, ..b });
         if let Some(wid) = worker {
             self.runs(wid, &entry.task.harness)?;
             entry.pin = Some(wid);
@@ -2177,7 +2176,7 @@ mod tests {
             None,
             None,
             vec![],
-            new_app(),
+            Some(new_app()),
         ))
         .unwrap();
         let token = |l: &Ledger, id| {
@@ -2248,7 +2247,7 @@ mod tests {
             None,
             None,
             vec![],
-            new_app(),
+            Some(new_app()),
         ))
         .unwrap();
         assert!(l.thread_tip(first).unwrap().is_err(), "still running");
@@ -2265,6 +2264,35 @@ mod tests {
     }
 
     #[test]
+    fn a_project_task_and_its_replies_never_merge_and_hold_no_token() {
+        let mut l = Ledger::default();
+        let wid = Uuid::new_v4();
+        l.connect(wid, info(), &[], 1, T0);
+        let (id, eff) = (l.submit_app_task(
+            "p".into(),
+            "~/n".into(),
+            "claude".into(),
+            None,
+            None,
+            vec![],
+            None,
+        ))
+        .unwrap();
+        assert!(eff.iter().any(
+            |e| matches!(e, Effect::Assign { task, token: None, .. } if task.merge == MergeRule::Never)
+        ));
+        let t = l.tasks.iter_mut().find(|t| t.task.id == id).unwrap();
+        (t.status, t.session, t.worker) = (TaskStatus::Done, None, Some(wid));
+        let (reply, _) = l.reply(id, "merge it".into(), vec![], false).unwrap();
+        let r = l.tasks.iter().find(|t| t.task.id == reply).unwrap();
+        assert!(r.app && r.token.is_none() && r.bound.is_none());
+        assert_eq!(
+            (r.task.merge.clone(), r.task.cwd.as_deref()),
+            (MergeRule::Never, Some("~/n"))
+        );
+    }
+
+    #[test]
     fn replies_to_an_app_task_never_merge_either() {
         let mut l = Ledger::default();
         let wid = Uuid::new_v4();
@@ -2277,7 +2305,7 @@ mod tests {
             None,
             None,
             vec![],
-            new_app(),
+            Some(new_app()),
         ))
         .unwrap();
         let finish = |l: &mut Ledger, id, session: Option<&str>| {
@@ -2316,7 +2344,7 @@ mod tests {
                 None,
                 Some(wid),
                 vec![],
-                new_app(),
+                Some(new_app()),
             )
             .unwrap();
         finish(&mut l, other, None);

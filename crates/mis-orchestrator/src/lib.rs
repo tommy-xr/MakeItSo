@@ -46,6 +46,7 @@ pub mod note;
 pub mod notes;
 pub mod notes_view;
 pub mod plan;
+pub mod project_tasks;
 pub mod projects;
 pub mod push;
 pub mod records;
@@ -999,19 +1000,32 @@ impl App {
     ) -> Result<TaskId, String> {
         let prompt = app_tasks::prompt(&t)?;
         self.check_images(&t.images)?;
-        let set = self.settings()?.apps;
         let bound = app_tasks::binding(&t, requester);
         if let (Some(apps), Some(slug)) = (self.apps.clone(), bound.slug.clone()) {
             let exists = tokio::task::spawn_blocking(move || apps.exists(&slug));
             let exists = exists.await.expect("listing releases doesn't panic");
             app_grant::startable(&bound, exists)?;
         }
-        let model = t.model.filter(|m| !m.trim().is_empty());
+        let pick = (t.harness, t.model, t.worker);
+        self.submit_on_apps_machine(prompt, pick, t.images, Some(bound))
+    }
+
+    /// Queue an app or project task in Settings' apps repo, on the apps machine: `worker` if
+    /// picked, else Settings', else this host's (`app_tasks::machine`). Err: why not.
+    fn submit_on_apps_machine(
+        &self,
+        prompt: String,
+        (harness, model, worker): (String, Option<String>, Option<WorkerId>),
+        images: Vec<uuid::Uuid>,
+        bound: Option<app_grant::Binding>,
+    ) -> Result<TaskId, String> {
+        let set = self.settings()?.apps;
+        let model = model.filter(|m| !m.trim().is_empty());
         self.transition(|l| {
-            let online = l.online_hosts(&t.harness);
+            let online = l.online_hosts(&harness);
             let online = online.iter().map(|(id, h)| (*id, h.as_str()));
-            let worker = app_tasks::machine(t.worker, set.worker, &self.host, online);
-            match l.submit_app_task(prompt, set.repo, t.harness, model, worker, t.images, bound) {
+            let worker = app_tasks::machine(worker, set.worker, &self.host, online);
+            match l.submit_app_task(prompt, set.repo, harness, model, worker, images, bound) {
                 Ok((task, effects)) => (Ok(task), effects),
                 Err(why) => (Err(why), vec![]),
             }
@@ -1529,12 +1543,13 @@ pub fn router(app: App) -> Router {
             "/api/capture",
             post(capture).layer(axum::extract::DefaultBodyLimit::max(CAPTURE_BODY)),
         )
-        .route("/api/notes/sync", get(notes_sync))
+        .route("/api/notes/sync", get(notes_sync).post(notes_fetch))
         .route("/api/notes/tree", get(notes_tree))
         .route("/api/notes/file", get(notes_file))
         .route("/api/notes/move", post(notes_move))
         .route("/api/notes/suggestions", get(notes_suggestions))
         .route("/api/projects", get(projects_list))
+        .route("/api/projects/tasks", post(new_project_task))
         .route("/api/images/{id}", get(image))
         .route("/api/evidence/{id}", get(evidence_file))
         .route("/api/update", get(update_status).post(set_update))
@@ -2109,6 +2124,24 @@ async fn notes_suggestions(
     let read = tokio::task::spawn_blocking(move || load_suggestions(&file));
     let notes = read.await.expect("reads");
     Json(mis_types::NoteSuggestions { pending, notes }).into_response()
+}
+
+/// Fetch and rebase the notes clone now, so a PR just merged shows: 200 with the status once a
+/// run that started after the ask finishes, or after [`notes::FETCH_WAIT`]. Asks coalesce; runs
+/// stay serialized with publishing. Full scope only.
+async fn notes_fetch(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/notes/sync").await {
+        return refused.into_response();
+    }
+    let sync = match app.notes.clone() {
+        Some(n) => n.fetch_now(notes::FETCH_WAIT).await,
+        None => NotesSync::OFF,
+    };
+    Json(sync).into_response()
 }
 
 /// The notes clone's shown folders, for the Notes view. Full scope only: notes are the
@@ -2966,6 +2999,50 @@ async fn send_board(
         Json(serde_json::json!({ "task": task })),
     )
         .into_response()
+}
+
+/// Start a task that starts a project ([`mis_types::ProjectTask`]) in the settings' apps repo
+/// (the mis-notes checkout): 201 `{"task": id}`, 400 with why not (a slug the notes clone
+/// already has, too). Full scope only.
+async fn new_project_task(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/projects/tasks").await {
+        return refused.into_response();
+    }
+    let t: mis_types::ProjectTask = match serde_json::from_slice(&body) {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let prompt = match project_tasks::prompt(&t) {
+        Ok(p) => p,
+        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
+    };
+    // The clone may lag the remote; the agent checks again after a fetch.
+    if let Some(notes) = app.notes.clone() {
+        let slug = t.slug.trim().to_string();
+        let read = tokio::task::spawn_blocking(move || {
+            let (list, _) = projects::list(notes.clone_dir());
+            let folders = projects::folders(notes.clone_dir());
+            projects::taken(&list, &folders, &slug).map(|at| format!("`{slug}` is taken: {at}"))
+        });
+        if let Some(why) = read.await.expect("reads") {
+            return (StatusCode::BAD_REQUEST, why).into_response();
+        }
+    }
+    // On the apps machine, as app tasks: it has the mis-notes checkout. No binding: no app token.
+    let pick = (t.harness, t.model, t.worker);
+    match app.submit_on_apps_machine(prompt, pick, vec![], None) {
+        Ok(task) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "task": task })),
+        )
+            .into_response(),
+        Err(why) => (StatusCode::BAD_REQUEST, why).into_response(),
+    }
 }
 
 #[derive(serde::Deserialize)]

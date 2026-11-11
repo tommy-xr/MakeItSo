@@ -33,6 +33,8 @@ const GIT_DEADLINE: Duration = Duration::from_secs(5 * 60);
 pub const AFTER_CAPTURE: Duration = Duration::from_secs(30);
 /// And runs this often regardless.
 pub const EVERY: Duration = Duration::from_secs(10 * 60);
+/// [`Notes::fetch_now`] waits at most this long for its run.
+pub const FETCH_WAIT: Duration = Duration::from_secs(60);
 
 /// A capture kept in the state dir.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,7 +280,15 @@ impl Out {
     }
 }
 
-/// The publisher: the clone at `<state>/notes` and the status `GET /api/notes/sync` shows.
+/// [`Notes::publish_loop`]'s runs: counts, and the latest `started` value an ask waits past.
+#[derive(Debug, Default)]
+struct Runs {
+    started: u64,
+    finished: u64,
+    wanted: u64,
+}
+
+/// The publisher: the clone at `<state>/notes` and the status `/api/notes/sync` shows.
 pub struct Notes {
     remote: String,
     clone: PathBuf,
@@ -299,6 +309,8 @@ pub struct Notes {
     ran: tokio::sync::Notify,
     /// Woken by each filing queued.
     queued: tokio::sync::Notify,
+    /// Runs started, finished and asked for ([`Self::fetch_now`]).
+    runs: tokio::sync::watch::Sender<Runs>,
     after_capture: Duration,
     every: Duration,
 }
@@ -322,6 +334,7 @@ impl Notes {
             inbox: Default::default(),
             ran: Default::default(),
             queued: Default::default(),
+            runs: Default::default(),
             after_capture: AFTER_CAPTURE,
             every: EVERY,
         }
@@ -383,22 +396,56 @@ impl Notes {
         rx
     }
 
-    /// Publish at start, `after_capture` after each capture, every `every`, and at once
-    /// when a filing is queued. The only caller of [`Self::run`], so runs never overlap.
+    /// Run soon (a run fetches and rebases the clone, unless reading the captures fails, and
+    /// publishes what's pending) and wait, up to `wait`, for it to finish; then the status.
+    /// Asks before a run starts share it.
+    pub async fn fetch_now(&self, wait: Duration) -> NotesSync {
+        let mut runs = self.runs.subscribe();
+        let mut want = 0;
+        self.runs.send_modify(|r| {
+            want = r.started + 1;
+            r.wanted = r.wanted.max(want);
+        });
+        let done = runs.wait_for(|r| r.finished >= want);
+        let _ = tokio::time::timeout(wait, done).await;
+        self.status()
+    }
+
+    /// Runs finished since start (tests).
+    pub fn runs(&self) -> u64 {
+        self.runs.borrow().finished
+    }
+
+    /// Once a run is asked for that hasn't started.
+    async fn asked(&self) {
+        let _ = (self.runs.subscribe())
+            .wait_for(|r| r.wanted > r.started)
+            .await;
+    }
+
+    /// Publish at start, `after_capture` after each capture (sooner if a fetch is asked for),
+    /// every `every`, and at once when a filing is queued or on each [`Self::fetch_now`]. The
+    /// only caller of [`Self::run`], so runs never overlap.
     pub async fn publish_loop(self: std::sync::Arc<Self>) {
-        let mut every = tokio::time::interval(self.every);
+        let first = tokio::time::Instant::now() + self.every;
+        let mut every = tokio::time::interval_at(first, self.every);
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
+            // Started: it serves every ask made so far.
+            self.runs.send_modify(|r| r.started += 1);
+            let notes = self.clone();
+            let _ = tokio::task::spawn_blocking(move || notes.run()).await;
+            self.runs.send_modify(|r| r.finished += 1);
             tokio::select! {
                 _ = every.tick() => {}
                 _ = self.queued.notified() => {}
+                _ = self.asked() => {}
                 _ = self.kick.notified() => tokio::select! {
                     _ = tokio::time::sleep(self.after_capture) => {}
                     _ = self.queued.notified() => {}
+                    _ = self.asked() => {}
                 },
             }
-            let notes = self.clone();
-            let _ = tokio::task::spawn_blocking(move || notes.run()).await;
         }
     }
 
