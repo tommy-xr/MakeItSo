@@ -528,6 +528,21 @@ mod tests {
         assert_eq!(r.unwrap()["error"]["message"], "unknown tool");
     }
 
+    /// Harnesses hide exactly these from the event stream; a new tool here must join them.
+    #[test]
+    fn every_offered_tool_is_hidden_as_the_workers_own() {
+        let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+        let all = Offer {
+            ask: true,
+            merge: true,
+        };
+        let (r, _) = handle(&list, all, None, &read, Used::default());
+        let names: Vec<String> = (r.unwrap()["result"]["tools"].as_array().unwrap().iter())
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, mis_agent::OWN_TOOLS);
+    }
+
     #[test]
     fn merge_pr_is_offered_only_with_a_policy_and_its_refusal_is_an_error() {
         let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});

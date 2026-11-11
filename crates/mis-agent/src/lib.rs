@@ -21,6 +21,15 @@ pub const MCP_TOKEN_ENV: &str = "MIS_MCP_TOKEN";
 pub const MCP_SERVER: &str = "mis";
 /// Tool on that server claude asks, in ask mode, about a call the rules don't allow.
 pub const APPROVE_TOOL: &str = "approve";
+/// The worker's own tools on `MCP_SERVER`, hidden from the event stream: it reports
+/// them itself. Any other tool there (an embedder's) shows like a built-in one.
+pub const OWN_TOOLS: [&str; 5] = [
+    "report_status",
+    "report_evidence",
+    "report_result",
+    APPROVE_TOOL,
+    mis_types::MERGE_TOOL,
+];
 /// How long the worker waits for the user to answer before denying.
 pub const APPROVAL_WAIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 /// How long a harness lets one call to the worker's MCP server take: `APPROVAL_WAIT`
