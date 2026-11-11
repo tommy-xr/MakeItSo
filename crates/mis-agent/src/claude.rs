@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use std::collections::HashSet;
 
-use crate::{Agent, BoxFut, RunOpts, MCP_SERVER, MCP_TOKEN_ENV};
+use crate::{Agent, BoxFut, RunOpts, MCP_SERVER, MCP_TOKEN_ENV, OWN_TOOLS};
 
 #[derive(Default)]
 pub struct ClaudeAgent {
@@ -232,12 +232,14 @@ fn usage(u: &Value) -> Option<(u64, u64)> {
 /// Claude's checklist tool: each call holds the whole list.
 const TODO_WRITE: &str = "TodoWrite";
 
-/// Calls to the worker's own tools (`report_status`, `report_evidence`),
-/// including claude's lookup of them (or of `TodoWrite`): the worker already
-/// reports them as events, so the echo is noise (and would make every task look
-/// like it used tools).
+/// Calls to the worker's `OWN_TOOLS`, including claude's lookup of them (or of
+/// `TodoWrite`): the worker already reports them as events, so the echo is noise
+/// (and would make every task look like it used tools).
 fn is_own_tool(block: &Value) -> bool {
-    let own = |name: &str| name.starts_with(&format!("mcp__{MCP_SERVER}__"));
+    let own = |name: &str| {
+        (name.strip_prefix(&format!("mcp__{MCP_SERVER}__")))
+            .is_some_and(|tool| OWN_TOOLS.contains(&tool))
+    };
     let name = block["name"].as_str().unwrap_or("");
     let lookup = block["input"]["query"]
         .as_str()
@@ -848,6 +850,44 @@ mod tests {
         let mixed = r#"{"query":"select:mcp__mis__report_status,Bash"}"#;
         assert_eq!(p.line(&call("t6", "ToolSearch", mixed)).len(), 1);
         assert_eq!(p.line(&result("t3")).len(), 1);
+        assert!(p.hidden.is_empty());
+    }
+
+    #[test]
+    fn embedder_tools_on_the_mis_server_show_and_own_ones_stay_hidden() {
+        let call = |id: &str, name: &str| {
+            format!(
+                r#"{{"type":"assistant","message":{{"id":"m","content":[{{"type":"tool_use","id":"{id}","name":"{name}","input":{{}}}}]}}}}"#
+            )
+        };
+        let result = |id: &str, text: &str| {
+            format!(
+                r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"{id}","content":"{text}"}}]}}}}"#
+            )
+        };
+        let mut p = Parser::default();
+        for tool in ["report_status", "report_result", "approve", "merge_pr"] {
+            let name = format!("mcp__mis__{tool}");
+            assert!(p.line(&call("own", &name)).is_empty(), "{tool}");
+            assert!(p.line(&result("own", "ok")).is_empty(), "{tool}");
+        }
+        // Interleaved: a hidden report call between a visible call and its result.
+        let shown = AgentEvent::ToolUse {
+            name: "mcp__mis__capture".into(),
+            input: serde_json::json!({}),
+        };
+        assert_eq!(p.line(&call("e1", "mcp__mis__capture")), [shown]);
+        assert!(p.line(&call("r1", "mcp__mis__report_evidence")).is_empty());
+        assert!(p.line(&result("r1", "ok")).is_empty());
+        assert_eq!(
+            p.line(&result("e1", "frame.png")),
+            [AgentEvent::ToolResult {
+                content: "frame.png".into()
+            }]
+        );
+        // Looking up an embedder tool is a lookup like any other.
+        let lookup = r#"{"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"s1","name":"ToolSearch","input":{"query":"select:mcp__mis__capture"}}]}}"#;
+        assert_eq!(p.line(lookup).len(), 1);
         assert!(p.hidden.is_empty());
     }
 

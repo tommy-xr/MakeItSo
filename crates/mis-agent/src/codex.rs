@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use crate::{Agent, BoxFut, RunOpts, MCP_SERVER, MCP_TOKEN_ENV};
+use crate::{Agent, BoxFut, RunOpts, MCP_SERVER, MCP_TOKEN_ENV, OWN_TOOLS};
 
 #[derive(Default)]
 pub struct CodexAgent {
@@ -284,6 +284,25 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
         }],
         (Some("item.completed"), Some("command_execution")) => vec![AgentEvent::ToolResult {
             content: item["aggregated_output"].as_str().unwrap_or("").to_string(),
+        }],
+        // The worker reports its own tools itself.
+        (_, Some("mcp_tool_call"))
+            if item["server"] == MCP_SERVER
+                && (item["tool"].as_str()).is_some_and(|t| OWN_TOOLS.contains(&t)) =>
+        {
+            vec![]
+        }
+        // Named like claude's, `mcp__<server>__<tool>`.
+        (Some("item.started"), Some("mcp_tool_call")) => vec![AgentEvent::ToolUse {
+            name: format!(
+                "mcp__{}__{}",
+                item["server"].as_str().unwrap_or(""),
+                item["tool"].as_str().unwrap_or("")
+            ),
+            input: item["arguments"].clone(),
+        }],
+        (Some("item.completed"), Some("mcp_tool_call")) => vec![AgentEvent::ToolResult {
+            content: crate::claude::tool_result_text(&item["result"]["content"]),
         }],
         // One turn per `exec`, so its usage is the run's total. `input_tokens`
         // already includes `cached_input_tokens`.
@@ -686,6 +705,33 @@ mod tests {
         assert_eq!(first.unwrap()[0].text, "Run `echo one`");
         let bad = r#"{"type":"item.updated","item":{"type":"todo_list","items":[{"text":"a"}]}}"#;
         assert!(parse_line(bad).is_empty());
+    }
+
+    /// `exec --json` 0.167 calling an MCP tool (`echo`, trimmed and anonymised), plus a
+    /// `report_status` call of the same shape: the worker's own tools stay hidden.
+    #[test]
+    fn mcp_tool_calls_become_tool_events_except_own_ones() {
+        let fixture = include_str!("../tests/fixtures/codex-mcp.jsonl");
+        let tools: Vec<AgentEvent> = (fixture.lines().flat_map(parse_line))
+            .filter(|e| {
+                matches!(
+                    e,
+                    AgentEvent::ToolUse { .. } | AgentEvent::ToolResult { .. }
+                )
+            })
+            .collect();
+        assert_eq!(
+            tools,
+            [
+                AgentEvent::ToolUse {
+                    name: "mcp__mis__echo".into(),
+                    input: serde_json::json!({"text": "hi"}),
+                },
+                AgentEvent::ToolResult {
+                    content: "echo: hi".into()
+                },
+            ]
+        );
     }
 
     #[test]
