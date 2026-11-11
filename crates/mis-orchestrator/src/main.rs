@@ -69,7 +69,7 @@ enum ServiceCmd {
     /// Check it would start (doctor, run as the service will be), then install and start it.
     /// Pins this executable and the state dir, routines dir and env file in use now.
     Install {
-        /// As the orchestrator's.
+        /// As the orchestrator's. Default: ~/.config/mis/orchestrator.env, if there.
         #[arg(long = "env-file", env = "MIS_ENV_FILE")]
         env_file: Option<std::path::PathBuf>,
     },
@@ -274,10 +274,11 @@ fn load_env_file(default: Option<PathBuf>) -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     // First: no other thread may read the env while it is set. `import` writes the env file;
-    // `export` archives the default one, so it finds the install that file sets up.
+    // `export` archives the default one and `service` pins it, so both find the install that
+    // file sets up.
     match std::env::args_os().nth(1) {
         Some(a) if a == "import" => {}
-        Some(a) if a == "export" => load_env_file(default_env_file())?,
+        Some(a) if a == "export" || a == "service" => load_env_file(default_env_file())?,
         _ => load_env_file(None)?,
     }
     tracing_subscriber::fmt()
@@ -328,7 +329,7 @@ fn service(
                 routines_dir: (args.routines_dir.clone())
                     .or_else(default_routines_dir)
                     .ok_or_else(no_home)?,
-                env_file,
+                env_file: env_file.or_else(|| default_env_file().filter(|p| p.is_file())),
             };
             service::install(label, &std::env::current_exe()?.canonicalize()?, dirs)
         }
