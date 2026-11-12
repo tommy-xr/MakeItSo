@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use anyhow::Context;
 use clap::Parser;
 use mis_orchestrator::access_gate::AccessGate;
@@ -6,6 +8,7 @@ use mis_orchestrator::config::{self, nonempty, Args, Level, UpdateChannel};
 use mis_orchestrator::evidence;
 use mis_orchestrator::images::Images;
 use mis_orchestrator::push::Push;
+use mis_orchestrator::transfer;
 use mis_orchestrator::{access, normalize_origins, App};
 
 #[derive(Parser)]
@@ -42,6 +45,22 @@ enum Cmd {
         label: String,
         #[command(subcommand)]
         cmd: ServiceCmd,
+    },
+    /// Write this install (state dir, routines, env file) to new archive <FILE>, for `import`
+    /// on another machine. Refused while the orchestrator runs.
+    Export {
+        file: PathBuf,
+        /// As the orchestrator's; it goes in the archive. Default: ~/.config/mis/orchestrator.env.
+        #[arg(long = "env-file", env = "MIS_ENV_FILE")]
+        env_file: Option<PathBuf>,
+    },
+    /// Unpack an `export` archive into this machine's new install, then run doctor (exit 1 if
+    /// it finds a failure).
+    Import {
+        file: PathBuf,
+        /// Where the archive's env file goes. Default: ~/.config/mis/orchestrator.env.
+        #[arg(long = "env-file", env = "MIS_ENV_FILE")]
+        env_file: Option<PathBuf>,
     },
 }
 
@@ -87,10 +106,20 @@ fn default_state_dir() -> Option<std::path::PathBuf> {
     Some(base.join("mis"))
 }
 
-/// `~/.config/mis/routines`, beside the worker's `worker.toml` (home is `%USERPROFILE%` on Windows).
-fn default_routines_dir() -> Option<std::path::PathBuf> {
+/// `~/.config/mis`, beside the worker's `worker.toml` (home is `%USERPROFILE%` on Windows).
+fn config_dir() -> Option<PathBuf> {
     let home = var("HOME").or_else(|| var("USERPROFILE"))?;
-    Some(home.join(".config").join("mis").join("routines"))
+    Some(home.join(".config").join("mis"))
+}
+
+/// `~/.config/mis/routines`.
+fn default_routines_dir() -> Option<std::path::PathBuf> {
+    Some(config_dir()?.join("routines"))
+}
+
+/// `~/.config/mis/orchestrator.env`, the env file `mis-up` reads.
+fn default_env_file() -> Option<PathBuf> {
+    Some(config_dir()?.join("orchestrator.env"))
 }
 
 /// Local `claude` for one tool-less turn on `model`: no user/project settings
@@ -221,10 +250,12 @@ fn env_file_arg(argv: &[std::ffi::OsString]) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Set the `--env-file` / `MIS_ENV_FILE` variables not already set, for clap to read.
-fn load_env_file() -> anyhow::Result<()> {
+/// Set the `--env-file` / `MIS_ENV_FILE` variables not already set, for clap to read. None
+/// given: `default`'s, if there.
+fn load_env_file(default: Option<PathBuf>) -> anyhow::Result<()> {
     let argv: Vec<_> = std::env::args_os().collect();
-    let Some(path) = env_file_arg(&argv).or_else(|| var("MIS_ENV_FILE")) else {
+    let given = env_file_arg(&argv).or_else(|| var("MIS_ENV_FILE"));
+    let Some(path) = given.or_else(|| default.filter(|p| p.is_file())) else {
         return Ok(());
     };
     let text =
@@ -242,8 +273,13 @@ fn load_env_file() -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    // First: no other thread may read the env while it is set.
-    load_env_file()?;
+    // First: no other thread may read the env while it is set. `import` writes the env file;
+    // `export` archives the default one, so it finds the install that file sets up.
+    match std::env::args_os().nth(1) {
+        Some(a) if a == "import" => {}
+        Some(a) if a == "export" => load_env_file(default_env_file())?,
+        _ => load_env_file(None)?,
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -254,6 +290,12 @@ fn main() -> anyhow::Result<()> {
     match cmd {
         Some(Cmd::Doctor { json, .. }) => doctor(&args, state_dir.as_deref(), json),
         Some(Cmd::Service { label, cmd }) => service(&label, cmd, &args, state_dir),
+        Some(Cmd::Export { file, env_file }) => {
+            export(&file, &install(&args, state_dir, env_file)?)
+        }
+        Some(Cmd::Import { file, env_file }) => {
+            import(&file, &install(&args, state_dir, env_file)?)
+        }
         None => tokio::runtime::Runtime::new()?.block_on(serve(args, state_dir)),
     }
 }
@@ -293,6 +335,92 @@ fn service(
         ServiceCmd::Uninstall => service::uninstall(label),
         ServiceCmd::Status => service::status(label),
     }
+}
+
+/// This install's paths, as serve would use them; `env_file` as given, else the default.
+fn install(
+    args: &Args,
+    state: Option<PathBuf>,
+    env_file: Option<PathBuf>,
+) -> anyhow::Result<transfer::Paths> {
+    let no_home =
+        || anyhow::anyhow!("no home dir: set MIS_STATE_DIR, MIS_ROUTINES_DIR and --env-file");
+    Ok(transfer::Paths {
+        state: state.ok_or_else(no_home)?,
+        routines: (args.routines_dir.clone().or_else(default_routines_dir)).ok_or_else(no_home)?,
+        env: env_file.or_else(default_env_file).ok_or_else(no_home)?,
+    })
+}
+
+fn export(file: &Path, from: &transfer::Paths) -> anyhow::Result<()> {
+    let e = transfer::export(file, from)?;
+    println!("Exported {} files to {}", e.files, file.display());
+    println!("  state dir: {}", from.state.display());
+    println!("  routines:  {}", or_none(e.routines, &from.routines));
+    println!("  env file:  {}", or_none(e.env, &from.env));
+    // The tunnel's config and credentials stay put: the new machine may not run it.
+    let dir = var("HOME").map(|h| h.join(".cloudflared"));
+    let mut files: Vec<_> = (dir.iter().flat_map(std::fs::read_dir).flatten().flatten())
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect();
+    files.sort();
+    println!(
+        "\nNot in the archive: the Cloudflare tunnel's files. To run it on the new machine, copy:"
+    );
+    match (files.is_empty(), &dir) {
+        (false, _) => files.iter().for_each(|f| println!("  {}", f.display())),
+        (true, Some(d)) => println!("  (none in {})", d.display()),
+        (true, None) => println!("  ~/.cloudflared"),
+    }
+    println!(
+        "Never run the tunnel on both machines at once: stop it here before starting it there."
+    );
+    Ok(())
+}
+
+/// `p`, or none if `had` is false.
+fn or_none(had: bool, p: &Path) -> String {
+    match had {
+        true => p.display().to_string(),
+        false => "none".into(),
+    }
+}
+
+fn import(file: &Path, to: &transfer::Paths) -> anyhow::Result<()> {
+    let i = transfer::import(file, to)?;
+    println!(
+        "Imported {} tasks, {} files from {} (mis-orchestrator {})",
+        i.tasks,
+        i.files,
+        file.display(),
+        i.manifest.version
+    );
+    println!("  state dir: {}", to.state.display());
+    println!("  routines:  {}", or_none(i.routines, &to.routines));
+    println!("  env file:  {}", or_none(i.env, &to.env));
+    match &i.warnings {
+        Ok(w) => {
+            (w.iter()).for_each(|w| println!("warning: {w}; change it in {}", to.env.display()))
+        }
+        Err(e) => println!("warning: can't check {}'s paths: {e}", to.env.display()),
+    }
+    println!("\nNext:");
+    println!("  - Run a worker on this machine: app tasks go to the orchestrator's host first.");
+    println!("  - On the old machine, point worker.toml's url here, or stop its worker.");
+    println!("\nmis-orchestrator doctor:");
+    // Of what was placed, whatever the env file says.
+    let mut doctor = std::process::Command::new(std::env::current_exe()?);
+    doctor.arg("doctor").env_remove("MIS_ENV_FILE");
+    doctor.env("MIS_STATE_DIR", &to.state);
+    doctor.env("MIS_ROUTINES_DIR", &to.routines);
+    if i.env {
+        doctor.arg("--env-file").arg(&to.env);
+    }
+    if !doctor.status().context("running doctor")?.success() {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 async fn serve(mut args: Args, state_dir: Option<std::path::PathBuf>) -> anyhow::Result<()> {
