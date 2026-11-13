@@ -3,7 +3,7 @@
 use anyhow::Context;
 use mis_types::{
     bound_plan, AgentEvent, LimitWindow, PermissionMode, Permissions, PlanItem, PlanStatus, TaskId,
-    TASK_ENV,
+    TokenUsage, TASK_ENV,
 };
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -180,14 +180,20 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
     serde_json::from_str::<Value>(line).map_or(vec![], |v| events(&v, &mut hidden))
 }
 
-/// `parse_line` plus a running `Usage`. Each assistant API message repeats its
-/// usage on every content block line, so it counts once per message id (latest
-/// line wins); the `result` line's session totals replace the tally.
+/// `parse_line` plus a running `Usage` and `UsageDetail`. Each assistant API message
+/// repeats its usage on every content block line, so it counts once per message id
+/// (latest line wins); the `result` line's session totals replace the tally. Those
+/// lines carry the output count so far; the main agent's `message_delta` has the final.
 #[derive(Default)]
 pub struct Parser {
     /// Latest usage per message id; lines of different messages may interleave.
-    messages: std::collections::HashMap<String, (u64, u64)>,
+    messages: std::collections::HashMap<String, TokenUsage>,
     sent: Option<(u64, u64)>,
+    /// The main agent's latest message: its id and usage.
+    last: Option<(String, TokenUsage)>,
+    /// The model `init` named, to find its context window in `result`.
+    model: Option<String>,
+    sent_detail: Option<AgentEvent>,
     /// Ids of tool calls `events` hid, so it can hide their results too.
     hidden: HashSet<String>,
 }
@@ -198,34 +204,113 @@ impl Parser {
             return vec![];
         };
         let mut out = events(&v, &mut self.hidden);
-        let total = match v["type"].as_str() {
-            Some("assistant") => usage(&v["message"]["usage"]).map(|u| {
-                let id = v["message"]["id"].as_str().unwrap_or_default();
-                self.messages.insert(id.to_string(), u);
-                self.messages
-                    .values()
-                    .fold((0, 0), |a, m| (a.0 + m.0, a.1 + m.1))
-            }),
-            Some("result") => usage(&v["usage"]),
-            _ => None,
+        let (total, detail) = match v["type"].as_str() {
+            Some("system") if v["subtype"] == "init" => {
+                self.model = v["model"].as_str().map(String::from);
+                (None, None)
+            }
+            Some("assistant") => match tokens(&v["message"]["usage"]) {
+                Some(t) => {
+                    let id = v["message"]["id"].as_str().unwrap_or_default();
+                    self.messages.insert(id.to_string(), t);
+                    if v["parent_tool_use_id"].is_null() {
+                        self.last = Some((id.to_string(), t));
+                    }
+                    let sum = sum(self.messages.values().copied());
+                    (Some(sum), Some(self.detail(sum, &Value::Null)))
+                }
+                None => (None, None),
+            },
+            // The final usage of the main agent's latest message (subagents stream none).
+            Some("stream_event") if v["event"]["type"] == "message_delta" => {
+                let id = v["api_message_id"].as_str();
+                match (&mut self.last, tokens(&v["event"]["usage"])) {
+                    (Some((last, t)), Some(u)) if Some(last.as_str()) == id => *t = u,
+                    _ => return out,
+                }
+                let tally = sum(self.messages.values().copied());
+                (None, Some(self.detail(tally, &Value::Null)))
+            }
+            Some("result") => {
+                // `modelUsage` counts subagents too; `usage` is the main agent's.
+                let models = v["modelUsage"].as_object();
+                let all = models.map(|m| sum(m.values().map(model_tokens)));
+                let tally = sum(self.messages.values().copied());
+                let detail = self.detail(all.unwrap_or(tally), &v);
+                (tokens(&v["usage"]), Some(detail))
+            }
+            _ => (None, None),
         };
+        // Before any Finished: the orchestrator drops events after it.
+        if let Some(d) = detail.filter(|d| self.sent_detail.as_ref() != Some(d)) {
+            self.sent_detail = Some(d.clone());
+            out.insert(0, d);
+        }
+        let total = total.map(|t| (t.prompt(), t.output));
         if let Some((input, output)) = total.filter(|t| self.sent != Some(*t)) {
             self.sent = total;
-            // Before any Finished: the orchestrator drops events after it.
             out.insert(0, AgentEvent::Usage { input, output });
         }
         out
     }
+
+    /// `UsageDetail` for `total`, with the end-of-run figures of a `result` line
+    /// (Null mid-run).
+    fn detail(&self, total: TokenUsage, result: &Value) -> AgentEvent {
+        let models = &result["modelUsage"];
+        // The main model's window; the only model's if `init` named another.
+        let window = (self.model.as_deref())
+            .and_then(|m| models[m]["contextWindow"].as_u64())
+            .or_else(|| match models.as_object() {
+                Some(m) if m.len() == 1 => m.values().next()?["contextWindow"].as_u64(),
+                _ => None,
+            });
+        AgentEvent::UsageDetail {
+            total,
+            last: self.last.as_ref().map(|(_, t)| *t),
+            turns: result["num_turns"].as_u64(),
+            cost_usd: result["total_cost_usd"].as_f64(),
+            api_ms: result["duration_api_ms"].as_u64(),
+            context_window: window,
+        }
+    }
 }
 
-/// (input incl. cache reads/writes, output) from a usage object.
-fn usage(u: &Value) -> Option<(u64, u64)> {
+/// A message or session `usage` object's counts.
+fn tokens(u: &Value) -> Option<TokenUsage> {
     let n = |k: &str| u[k].as_u64().unwrap_or(0);
-    u.is_object().then(|| {
-        (
-            n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens"),
-            n("output_tokens"),
-        )
+    u.is_object().then(|| TokenUsage {
+        input: n("input_tokens"),
+        cache_read: n("cache_read_input_tokens"),
+        cache_creation: n("cache_creation_input_tokens"),
+        output: n("output_tokens"),
+        reasoning_output: u["output_tokens_details"]["thinking_tokens"].as_u64(),
+    })
+}
+
+/// One `result.modelUsage` entry's counts.
+fn model_tokens(m: &Value) -> TokenUsage {
+    let n = |k: &str| m[k].as_u64().unwrap_or(0);
+    TokenUsage {
+        input: n("inputTokens"),
+        cache_read: n("cacheReadInputTokens"),
+        cache_creation: n("cacheCreationInputTokens"),
+        output: n("outputTokens"),
+        reasoning_output: m["thinkingTokens"].as_u64(),
+    }
+}
+
+/// Field-wise sum; reasoning stays None only if every item's is.
+fn sum(items: impl Iterator<Item = TokenUsage>) -> TokenUsage {
+    items.fold(TokenUsage::default(), |a, b| TokenUsage {
+        input: a.input + b.input,
+        cache_read: a.cache_read + b.cache_read,
+        cache_creation: a.cache_creation + b.cache_creation,
+        output: a.output + b.output,
+        reasoning_output: match (a.reasoning_output, b.reasoning_output) {
+            (None, None) => None,
+            (x, y) => Some(x.unwrap_or(0) + y.unwrap_or(0)),
+        },
     })
 }
 
@@ -278,9 +363,9 @@ fn events(v: &Value, hidden: &mut HashSet<String>) -> Vec<AgentEvent> {
         }
         Some("assistant") => blocks(v)
             .filter_map(|b| match b["type"].as_str()? {
-                "text" => Some(AgentEvent::Text {
+                "text" => Some(vec![AgentEvent::Text {
                     text: b["text"].as_str()?.to_string(),
-                }),
+                }]),
                 "tool_use" if is_own_tool(b) => {
                     hidden.insert(b["id"].as_str()?.to_string());
                     None
@@ -289,20 +374,15 @@ fn events(v: &Value, hidden: &mut HashSet<String>) -> Vec<AgentEvent> {
                 // "modified successfully" result hidden.
                 "tool_use" if b["name"] == TODO_WRITE && v["parent_tool_use_id"].is_null() => {
                     let Some(items) = todo_plan(&b["input"]) else {
-                        return Some(AgentEvent::ToolUse {
-                            name: TODO_WRITE.into(),
-                            input: b["input"].clone(),
-                        });
+                        return Some(tool_use(v, b, TODO_WRITE));
                     };
                     hidden.insert(b["id"].as_str()?.to_string());
-                    Some(AgentEvent::Plan { items })
+                    Some(vec![AgentEvent::Plan { items }])
                 }
-                "tool_use" => Some(AgentEvent::ToolUse {
-                    name: b["name"].as_str()?.to_string(),
-                    input: b["input"].clone(),
-                }),
+                "tool_use" => Some(tool_use(v, b, b["name"].as_str()?)),
                 _ => None,
             })
+            .flatten()
             .collect(),
         // `--include-partial-messages`: a text block's pieces as they arrive, the main
         // agent's only (a subagent's carry its Task call's id).
@@ -326,8 +406,17 @@ fn events(v: &Value, hidden: &mut HashSet<String>) -> Vec<AgentEvent> {
                     .as_str()
                     .is_some_and(|id| hidden.remove(id))
             })
-            .map(|b| AgentEvent::ToolResult {
-                content: tool_result_text(&b["content"]),
+            .flat_map(|b| {
+                let result = AgentEvent::ToolResult {
+                    content: tool_result_text(&b["content"]),
+                };
+                let meta = b["tool_use_id"]
+                    .as_str()
+                    .map(|id| AgentEvent::ToolResultMeta {
+                        id: id.into(),
+                        is_error: b["is_error"].as_bool(),
+                    });
+                std::iter::once(result).chain(meta)
             })
             .collect(),
         // `allowed` / `allowed_warning` still run; anything else (e.g. `rejected`) is a hit limit.
@@ -371,6 +460,20 @@ fn windows(info: &Value) -> Vec<LimitWindow> {
             })
         })
         .collect()
+}
+
+/// A `tool_use` block of assistant line `v` as `ToolUse` and, when it has an id,
+/// `ToolUseMeta` (the line's `parent_tool_use_id` is the subagent's Agent call).
+fn tool_use(v: &Value, b: &Value, name: &str) -> Vec<AgentEvent> {
+    let call = AgentEvent::ToolUse {
+        name: name.into(),
+        input: b["input"].clone(),
+    };
+    let meta = b["id"].as_str().map(|id| AgentEvent::ToolUseMeta {
+        id: id.into(),
+        parent_id: v["parent_tool_use_id"].as_str().map(String::from),
+    });
+    std::iter::once(call).chain(meta).collect()
 }
 
 fn blocks(v: &Value) -> impl Iterator<Item = &Value> {
@@ -539,6 +642,7 @@ impl Agent for ClaudeAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::old;
 
     /// A real `--include-partial-messages` run (haiku: a sentence, a Bash call, a
     /// sentence; ids zeroed): each text block streams as deltas, then its `assistant`
@@ -549,7 +653,7 @@ mod tests {
         let fixture = include_str!("../tests/fixtures/claude-partial.jsonl");
         let got: Vec<String> = fixture
             .lines()
-            .flat_map(|l| p.line(l))
+            .flat_map(|l| old(p.line(l)))
             .map(|e| match e {
                 AgentEvent::TextDelta { text } => format!("+{text}"),
                 AgentEvent::Text { text } => format!("={text}"),
@@ -599,7 +703,7 @@ mod tests {
         let fixture = include_str!("../tests/fixtures/claude-todowrite.jsonl");
         let got: Vec<String> = fixture
             .lines()
-            .flat_map(|l| p.line(l))
+            .flat_map(|l| old(p.line(l)))
             .filter_map(|e| match e {
                 AgentEvent::Plan { items } => Some(
                     (items.iter())
@@ -646,7 +750,7 @@ mod tests {
                 r#"{{"type":"assistant","parent_tool_use_id":{parent},"message":{{"content":[{{"type":"tool_use","id":"t","name":"TodoWrite","input":{{"todos":[{{"content":"a","status":"{status}"}}]}}}}]}}}}"#
             )
         };
-        let tool = |l: &str| matches!(&parse_line(l)[..], [AgentEvent::ToolUse { .. }]);
+        let tool = |l: &str| matches!(&old(parse_line(l))[..], [AgentEvent::ToolUse { .. }]);
         assert!(tool(&call(r#""toolu_1""#, "pending")));
         assert!(tool(&call("null", "blocked")));
         let plan = parse_line(&call("null", "pending"));
@@ -669,7 +773,7 @@ mod tests {
 
         let asst = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"pong"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#;
         assert_eq!(
-            parse_line(asst),
+            old(parse_line(asst)),
             vec![
                 AgentEvent::Text {
                     text: "pong".into()
@@ -683,7 +787,7 @@ mod tests {
 
         let user = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"a\nb"}]}}"#;
         assert_eq!(
-            parse_line(user),
+            old(parse_line(user)),
             vec![AgentEvent::ToolResult {
                 content: "a\nb".into()
             }]
@@ -786,16 +890,16 @@ mod tests {
         let usage = |input, output| AgentEvent::Usage { input, output };
         let text = AgentEvent::Text { text: "x".into() };
         let mut p = Parser::default();
-        assert_eq!(p.line(&asst("m1", 4)), [usage(110, 4), text.clone()]);
+        assert_eq!(old(p.line(&asst("m1", 4))), [usage(110, 4), text.clone()]);
         // Same message again (next content block): replaced, not added; unchanged is not resent.
-        assert_eq!(p.line(&asst("m1", 9)), [usage(110, 9), text.clone()]);
-        assert_eq!(p.line(&asst("m1", 9)), std::slice::from_ref(&text));
-        assert_eq!(p.line(&asst("m2", 1)), [usage(220, 10), text.clone()]);
+        assert_eq!(old(p.line(&asst("m1", 9))), [usage(110, 9), text.clone()]);
+        assert_eq!(old(p.line(&asst("m1", 9))), std::slice::from_ref(&text));
+        assert_eq!(old(p.line(&asst("m2", 1))), [usage(220, 10), text.clone()]);
         // Interleaved (e.g. a subagent's messages): m1 still counted once.
-        assert_eq!(p.line(&asst("m1", 12)), [usage(220, 13), text]);
+        assert_eq!(old(p.line(&asst("m1", 12))), [usage(220, 13), text]);
         let res = r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","usage":{"input_tokens":4,"cache_creation_input_tokens":200,"cache_read_input_tokens":16,"output_tokens":83}}"#;
         assert_eq!(
-            p.line(res),
+            old(p.line(res)),
             [
                 usage(220, 83),
                 AgentEvent::Finished {
@@ -805,6 +909,91 @@ mod tests {
             ]
         );
         assert!(p.line(r#"{"type":"system","subtype":"init"}"#).len() == 1);
+    }
+
+    /// A real run (haiku 2.1.323, `--tools Bash,Agent`; ids renumbered; text
+    /// deltas, system task lines and thinking dropped): a subagent runs `echo sub-ok`, then the main
+    /// agent runs `exit 3`. Each call and result carries its id; the subagent's its
+    /// Agent call as parent; results their `is_error`. Usage detail tallies every
+    /// message, `last` only the main agent's, and `result` adds the run's figures.
+    #[test]
+    fn subagent_run_reports_tool_ids_and_usage_detail() {
+        let mut p = Parser::default();
+        let fixture = include_str!("../tests/fixtures/claude-subagent.jsonl");
+        let events: Vec<AgentEvent> = fixture.lines().flat_map(|l| p.line(l)).collect();
+        let tools: Vec<String> = (events.iter())
+            .filter_map(|e| match e {
+                AgentEvent::ToolUse { name, .. } => Some(format!("use {name}")),
+                AgentEvent::ToolUseMeta { id, parent_id } => Some(format!("{id} in {parent_id:?}")),
+                AgentEvent::ToolResult { content } => Some(format!("result {}", &content[..6])),
+                AgentEvent::ToolResultMeta { id, is_error } => Some(format!("{id} {is_error:?}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tools,
+            [
+                "use Agent",
+                "toolu_01 in None",
+                "use Bash",
+                r#"toolu_02 in Some("toolu_01")"#,
+                "result sub-ok",
+                "toolu_02 Some(false)",
+                "result   <too",
+                "toolu_01 None",
+                "use Bash",
+                "toolu_03 in None",
+                "result Exit c",
+                "toolu_03 Some(true)",
+            ]
+        );
+        let tokens = |input, cache_read, cache_creation, output, reasoning_output| TokenUsage {
+            input,
+            cache_read,
+            cache_creation,
+            output,
+            reasoning_output,
+        };
+        let details: Vec<_> = (events.iter())
+            .filter_map(|e| match e {
+                AgentEvent::UsageDetail { last, .. } => Some(*last),
+                _ => None,
+            })
+            .collect();
+        // The first message's output so far, then its final count (`message_delta`);
+        // the subagent's message (third) leaves `last` on the main agent's.
+        let (so_far, done) = (
+            tokens(2, 0, 7957, 6, None),
+            tokens(2, 0, 7957, 275, Some(120)),
+        );
+        assert_eq!(details[..3], [Some(so_far), Some(done), Some(done)]);
+        let Some(AgentEvent::UsageDetail {
+            total,
+            last,
+            turns,
+            cost_usd,
+            api_ms,
+            context_window,
+        }) = events
+            .iter()
+            .rfind(|e| matches!(e, AgentEvent::UsageDetail { .. }))
+        else {
+            panic!("{events:?}")
+        };
+        // `modelUsage`: the subagent's tokens included, unlike `result.usage`.
+        assert_eq!(*total, tokens(10, 21431, 14233, 467, Some(120)));
+        // The main agent's last message: 8633 tokens of context.
+        assert_eq!(*last, Some(tokens(2, 8512, 119, 3, Some(0))));
+        assert_eq!(last.unwrap().prompt(), 8633);
+        assert_eq!(
+            (*turns, *api_ms, *context_window),
+            (Some(3), Some(4193), Some(1_000_000))
+        );
+        assert!((cost_usd.unwrap() - 0.00287526).abs() < 1e-9);
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Finished { ok: true, .. })
+        ));
     }
 
     #[test]
@@ -843,13 +1032,12 @@ mod tests {
         }
         // Other tools, and other tool searches, still show.
         assert_eq!(
-            p.line(&call("t3", "ToolSearch", r#"{"query":"git"}"#))
-                .len(),
+            old(p.line(&call("t3", "ToolSearch", r#"{"query":"git"}"#))).len(),
             1
         );
         let mixed = r#"{"query":"select:mcp__mis__report_status,Bash"}"#;
-        assert_eq!(p.line(&call("t6", "ToolSearch", mixed)).len(), 1);
-        assert_eq!(p.line(&result("t3")).len(), 1);
+        assert_eq!(old(p.line(&call("t6", "ToolSearch", mixed))).len(), 1);
+        assert_eq!(old(p.line(&result("t3"))).len(), 1);
         assert!(p.hidden.is_empty());
     }
 
@@ -876,18 +1064,18 @@ mod tests {
             name: "mcp__mis__capture".into(),
             input: serde_json::json!({}),
         };
-        assert_eq!(p.line(&call("e1", "mcp__mis__capture")), [shown]);
+        assert_eq!(old(p.line(&call("e1", "mcp__mis__capture"))), [shown]);
         assert!(p.line(&call("r1", "mcp__mis__report_evidence")).is_empty());
         assert!(p.line(&result("r1", "ok")).is_empty());
         assert_eq!(
-            p.line(&result("e1", "frame.png")),
+            old(p.line(&result("e1", "frame.png"))),
             [AgentEvent::ToolResult {
                 content: "frame.png".into()
             }]
         );
         // Looking up an embedder tool is a lookup like any other.
         let lookup = r#"{"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"s1","name":"ToolSearch","input":{"query":"select:mcp__mis__capture"}}]}}"#;
-        assert_eq!(p.line(lookup).len(), 1);
+        assert_eq!(old(p.line(lookup)).len(), 1);
         assert!(p.hidden.is_empty());
     }
 

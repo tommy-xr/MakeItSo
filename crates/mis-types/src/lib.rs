@@ -256,6 +256,21 @@ pub enum AgentEvent {
     ToolResult {
         content: String,
     },
+    /// Who made the `ToolUse` sent just before it: its id, and the call that started
+    /// the subagent making it (None: the main agent). For embedders of `mis-agent`;
+    /// the worker doesn't forward it.
+    ToolUseMeta {
+        id: String,
+        #[serde(default)]
+        parent_id: Option<String>,
+    },
+    /// Which call the `ToolResult` sent just before it answers, and whether it
+    /// failed (None: the harness didn't say). Like `ToolUseMeta`, never forwarded.
+    ToolResultMeta {
+        id: String,
+        #[serde(default)]
+        is_error: Option<bool>,
+    },
     /// One-line progress note the agent posted via the worker's `report_status` tool.
     Status {
         text: String,
@@ -294,6 +309,30 @@ pub enum AgentEvent {
         input: u64,
         output: u64,
     },
+    /// What the harness reports beyond `Usage`, sent when it changes (before any
+    /// `Finished`); each replaces the last. For embedders of `mis-agent`; the
+    /// worker doesn't forward it.
+    UsageDetail {
+        /// Cumulative for the run, subagents included.
+        total: TokenUsage,
+        /// The main agent's latest API message. Its `prompt()` is how full the
+        /// context is now. None: the harness reports totals only (codex).
+        #[serde(default)]
+        last: Option<TokenUsage>,
+        /// API round trips (claude's `num_turns`), at the end.
+        #[serde(default)]
+        turns: Option<u64>,
+        /// The run's cost (claude's `total_cost_usd`), at the end.
+        #[serde(default)]
+        cost_usd: Option<f64>,
+        /// Time spent in API calls (claude's `duration_api_ms`), at the end.
+        #[serde(default)]
+        api_ms: Option<u64>,
+        /// The main model's context window in tokens (claude's
+        /// `modelUsage.<model>.contextWindow`), at the end.
+        #[serde(default)]
+        context_window: Option<u64>,
+    },
     Finished {
         ok: bool,
         summary: Option<String>,
@@ -309,6 +348,26 @@ pub enum AgentEvent {
         read: bool,
         held: bool,
     },
+}
+
+/// Tokens split by how the prompt side was billed.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TokenUsage {
+    /// Prompt tokens neither read from nor written to the cache.
+    pub input: u64,
+    pub cache_read: u64,
+    pub cache_creation: u64,
+    pub output: u64,
+    /// The part of `output` spent reasoning, if the harness says.
+    pub reasoning_output: Option<u64>,
+}
+
+impl TokenUsage {
+    /// The whole prompt: for a single API message, how much context it filled.
+    pub fn prompt(&self) -> u64 {
+        self.input + self.cache_read + self.cache_creation
+    }
 }
 
 /// The text block a running task is writing: its `ServerMsg::TextDelta`s so far.

@@ -951,8 +951,11 @@ fn print_event(task: TaskId, event: &AgentEvent) {
         AgentEvent::Status { text } => println!("[{short}] status: {text}"),
         AgentEvent::Evidence(l) => println!("[{short}] evidence: {}", l.line()),
         AgentEvent::Limited { .. } => println!("[{short}] usage limit hit"),
-        // Kept by the worker, never forwarded.
-        AgentEvent::Limits { .. } => {}
+        // Kept or dropped by the worker, never forwarded.
+        AgentEvent::Limits { .. }
+        | AgentEvent::ToolUseMeta { .. }
+        | AgentEvent::ToolResultMeta { .. }
+        | AgentEvent::UsageDetail { .. } => {}
         // Stored on the task by the orchestrator, never forwarded.
         AgentEvent::Artifact(_)
         | AgentEvent::Result(_)
