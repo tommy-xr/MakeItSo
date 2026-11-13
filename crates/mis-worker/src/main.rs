@@ -1071,6 +1071,15 @@ async fn run(
                     ctx.add_limits(agent.name(), windows);
                     continue;
                 }
+                // Detail for embedders of `mis-agent`: transcripts don't keep it.
+                if matches!(
+                    ev,
+                    AgentEvent::ToolUseMeta { .. }
+                        | AgentEvent::ToolResultMeta { .. }
+                        | AgentEvent::UsageDetail { .. }
+                ) {
+                    continue;
+                }
                 if matches!(ev, AgentEvent::Finished { .. }) {
                     send_diff(id, base, tx).await;
                 }

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use mis_types::{
     bound_plan, AgentEvent, LimitWindow, PermissionMode, Permissions, PlanItem, PlanStatus, TaskId,
-    TASK_ENV,
+    TokenUsage, TASK_ENV,
 };
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -278,13 +278,19 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
         (Some("item.started" | "item.updated" | "item.completed"), Some("todo_list")) => {
             todo_plan(&item["items"]).map_or(vec![], |items| vec![AgentEvent::Plan { items }])
         }
-        (Some("item.started"), Some("command_execution")) => vec![AgentEvent::ToolUse {
-            name: "shell".into(),
-            input: serde_json::json!({ "command": item["command"] }),
-        }],
-        (Some("item.completed"), Some("command_execution")) => vec![AgentEvent::ToolResult {
-            content: item["aggregated_output"].as_str().unwrap_or("").to_string(),
-        }],
+        (Some("item.started"), Some("command_execution")) => with_use_meta(
+            AgentEvent::ToolUse {
+                name: "shell".into(),
+                input: serde_json::json!({ "command": item["command"] }),
+            },
+            item,
+        ),
+        (Some("item.completed"), Some("command_execution")) => with_result_meta(
+            AgentEvent::ToolResult {
+                content: item["aggregated_output"].as_str().unwrap_or("").to_string(),
+            },
+            item,
+        ),
         // The worker reports its own tools itself.
         (_, Some("mcp_tool_call"))
             if item["server"] == MCP_SERVER
@@ -293,25 +299,46 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
             vec![]
         }
         // Named like claude's, `mcp__<server>__<tool>`.
-        (Some("item.started"), Some("mcp_tool_call")) => vec![AgentEvent::ToolUse {
-            name: format!(
-                "mcp__{}__{}",
-                item["server"].as_str().unwrap_or(""),
-                item["tool"].as_str().unwrap_or("")
-            ),
-            input: item["arguments"].clone(),
-        }],
-        (Some("item.completed"), Some("mcp_tool_call")) => vec![AgentEvent::ToolResult {
-            content: crate::claude::tool_result_text(&item["result"]["content"]),
-        }],
-        // One turn per `exec`, so its usage is the run's total. `input_tokens`
-        // already includes `cached_input_tokens`.
+        (Some("item.started"), Some("mcp_tool_call")) => with_use_meta(
+            AgentEvent::ToolUse {
+                name: format!(
+                    "mcp__{}__{}",
+                    item["server"].as_str().unwrap_or(""),
+                    item["tool"].as_str().unwrap_or("")
+                ),
+                input: item["arguments"].clone(),
+            },
+            item,
+        ),
+        (Some("item.completed"), Some("mcp_tool_call")) => with_result_meta(
+            AgentEvent::ToolResult {
+                content: crate::claude::tool_result_text(&item["result"]["content"]),
+            },
+            item,
+        ),
+        // One turn per `exec`, so its usage is the run's total; codex reports no
+        // per-call usage. `input_tokens` already includes the cached ones.
         (Some("turn.completed"), _) => {
             let n = |k: &str| v["usage"][k].as_u64().unwrap_or(0);
+            let (cached, written) = (n("cached_input_tokens"), n("cache_write_input_tokens"));
             vec![
                 AgentEvent::Usage {
                     input: n("input_tokens"),
                     output: n("output_tokens"),
+                },
+                AgentEvent::UsageDetail {
+                    total: TokenUsage {
+                        input: n("input_tokens").saturating_sub(cached + written),
+                        cache_read: cached,
+                        cache_creation: written,
+                        output: n("output_tokens"),
+                        reasoning_output: v["usage"]["reasoning_output_tokens"].as_u64(),
+                    },
+                    last: None,
+                    turns: None,
+                    cost_usd: None,
+                    api_ms: None,
+                    context_window: None,
                 },
                 AgentEvent::Finished {
                     ok: true,
@@ -325,6 +352,25 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
         }],
         _ => vec![],
     }
+}
+
+/// `call` and its `ToolUseMeta`: an item's `id` names it in both of its events.
+/// Codex runs no subagents here, so there is no parent.
+fn with_use_meta(call: AgentEvent, item: &Value) -> Vec<AgentEvent> {
+    let meta = item["id"].as_str().map(|id| AgentEvent::ToolUseMeta {
+        id: id.into(),
+        parent_id: None,
+    });
+    std::iter::once(call).chain(meta).collect()
+}
+
+/// `result` and its `ToolResultMeta`, failed when the item's `status` is.
+fn with_result_meta(result: AgentEvent, item: &Value) -> Vec<AgentEvent> {
+    let meta = item["id"].as_str().map(|id| AgentEvent::ToolResultMeta {
+        id: id.into(),
+        is_error: item["status"].as_str().map(|s| s == "failed"),
+    });
+    std::iter::once(result).chain(meta).collect()
 }
 
 /// A `todo_list` item's `[{text, completed}]` as a plan. Codex marks no row in
@@ -506,6 +552,7 @@ impl Agent for CodexAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::old;
 
     /// Shaped like a live rollout tail: a cut first line, `token_count` with the
     /// `rate_limits` seen on this account (credits and usage numbers zeroed),
@@ -620,41 +667,41 @@ mod tests {
     #[test]
     fn parses_probe_output() {
         assert_eq!(
-            parse_line(r#"{"type":"thread.started","thread_id":"t1"}"#),
+            old(parse_line(r#"{"type":"thread.started","thread_id":"t1"}"#)),
             vec![AgentEvent::Started {
                 session: Some("t1".into()),
                 model: None,
             }]
         );
         assert_eq!(
-            parse_line(
+            old(parse_line(
                 r#"{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"I’ll run the command.\n"}}"#
-            ),
+            )),
             vec![AgentEvent::Text {
                 text: "I’ll run the command.".into()
             }]
         );
         assert_eq!(
-            parse_line(
+            old(parse_line(
                 r#"{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"/bin/zsh -lc 'echo hi'","aggregated_output":"","exit_code":null,"status":"in_progress"}}"#
-            ),
+            )),
             vec![AgentEvent::ToolUse {
                 name: "shell".into(),
                 input: serde_json::json!({"command": "/bin/zsh -lc 'echo hi'"})
             }]
         );
         assert_eq!(
-            parse_line(
+            old(parse_line(
                 r#"{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"x","aggregated_output":"hi\n","exit_code":0,"status":"completed"}}"#
-            ),
+            )),
             vec![AgentEvent::ToolResult {
                 content: "hi\n".into()
             }]
         );
         assert_eq!(
-            parse_line(
+            old(parse_line(
                 r#"{"type":"turn.completed","usage":{"input_tokens":21015,"cached_input_tokens":12160,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}"#
-            ),
+            )),
             vec![
                 AgentEvent::Usage {
                     input: 21015,
@@ -667,13 +714,15 @@ mod tests {
             ]
         );
         assert_eq!(
-            parse_line(r#"{"type":"turn.failed","error":{"message":"boom"}}"#),
+            old(parse_line(
+                r#"{"type":"turn.failed","error":{"message":"boom"}}"#
+            )),
             vec![AgentEvent::Finished {
                 ok: false,
                 summary: Some("boom".into())
             }]
         );
-        assert!(parse_line(r#"{"type":"turn.started"}"#).is_empty());
+        assert!(old(parse_line(r#"{"type":"turn.started"}"#)).is_empty());
     }
 
     /// `exec --json` 0.163 with `tools.update_plan` on (gpt-6-luna, told to plan
@@ -729,6 +778,59 @@ mod tests {
                 },
                 AgentEvent::ToolResult {
                     content: "echo: hi".into()
+                },
+            ]
+        );
+    }
+
+    /// A real `codex exec --json` run (0.167; thread id zeroed, config warnings
+    /// dropped): `echo one`, then `exit 3`. Each item's id names its call and result,
+    /// a failed one is an error; usage, split by cache, comes once at the end.
+    #[test]
+    fn tool_items_carry_ids_and_failures_and_turns_end_with_usage_detail() {
+        let fixture = include_str!("../tests/fixtures/codex-exit.jsonl");
+        let events: Vec<AgentEvent> = fixture.lines().flat_map(parse_line).collect();
+        let meta: Vec<String> = (events.iter())
+            .filter_map(|e| match e {
+                AgentEvent::ToolUseMeta { id, parent_id } => Some(format!("{id} in {parent_id:?}")),
+                AgentEvent::ToolResultMeta { id, is_error } => Some(format!("{id} {is_error:?}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            meta,
+            [
+                "item_3 in None",
+                "item_3 Some(false)",
+                "item_4 in None",
+                "item_4 Some(true)"
+            ]
+        );
+        let n = events.len();
+        assert_eq!(
+            events[n - 3..],
+            [
+                AgentEvent::Usage {
+                    input: 42810,
+                    output: 55
+                },
+                AgentEvent::UsageDetail {
+                    total: TokenUsage {
+                        input: 42810 - 33408,
+                        cache_read: 33408,
+                        cache_creation: 0,
+                        output: 55,
+                        reasoning_output: Some(0),
+                    },
+                    last: None,
+                    turns: None,
+                    cost_usd: None,
+                    api_ms: None,
+                    context_window: None,
+                },
+                AgentEvent::Finished {
+                    ok: true,
+                    summary: None
                 },
             ]
         );
