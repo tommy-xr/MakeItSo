@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use crate::{Agent, BoxFut, RunOpts, MCP_SERVER, MCP_TOKEN_ENV, OWN_TOOLS};
+use crate::{Agent, BoxFut, RunOpts, Setup, MCP_SERVER, MCP_TOKEN_ENV, OWN_TOOLS};
 
 #[derive(Default)]
 pub struct CodexAgent {
@@ -495,6 +495,13 @@ impl Agent for CodexAgent {
         tx: mpsc::Sender<AgentEvent>,
     ) -> BoxFut<'a> {
         Box::pin(async move {
+            // Nothing skips the user's AGENTS.md or skills (`--ignore-user-config`
+            // skips only config.toml), so codex can't read less than all of it.
+            anyhow::ensure!(
+                opts.setup == Setup::UserAndProject,
+                "codex can't run without the user's own instructions and skills ({:?} setup)",
+                opts.setup
+            );
             let mut cmd = Command::new("codex");
             cmd.args(self.argv(prompt, &opts));
             if let Some(m) = opts.mcp {
@@ -847,6 +854,25 @@ mod tests {
         assert!(!plan_tool_verdict(None), "didn't run or timed out");
         // The override after the subcommand, so codex parses it as config.
         assert_eq!(PLAN_PROBE, ["features", "list", "-c", PLAN_TOOL]);
+    }
+
+    #[test]
+    fn a_narrowed_setup_fails_before_codex_starts() {
+        // Rather than reading more than asked.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(4);
+        let opts = RunOpts {
+            setup: Setup::Project,
+            ..Default::default()
+        };
+        let agent = CodexAgent::default();
+        rt.block_on(crate::run_guarded(&agent, TaskId::nil(), "hi", opts, tx));
+        let Ok(AgentEvent::Finished { ok: false, summary }) = rx.try_recv() else {
+            panic!()
+        };
+        assert!(summary.unwrap().contains("Project setup"));
     }
 
     #[test]
