@@ -317,10 +317,11 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
             item,
         ),
         // One turn per `exec`, so its usage is the run's total; codex reports no
-        // per-call usage. `input_tokens` already includes the cached ones.
+        // per-call usage. `input_tokens` already includes the cached ones (whether it
+        // includes cache writes is unknown: every capture has none).
         (Some("turn.completed"), _) => {
             let n = |k: &str| v["usage"][k].as_u64().unwrap_or(0);
-            let (cached, written) = (n("cached_input_tokens"), n("cache_write_input_tokens"));
+            let cached = n("cached_input_tokens");
             vec![
                 AgentEvent::Usage {
                     input: n("input_tokens"),
@@ -328,9 +329,9 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
                 },
                 AgentEvent::UsageDetail {
                     total: TokenUsage {
-                        input: n("input_tokens").saturating_sub(cached + written),
+                        input: n("input_tokens").saturating_sub(cached),
                         cache_read: cached,
-                        cache_creation: written,
+                        cache_creation: n("cache_write_input_tokens"),
                         output: n("output_tokens"),
                         reasoning_output: v["usage"]["reasoning_output_tokens"].as_u64(),
                     },
@@ -364,11 +365,16 @@ fn with_use_meta(call: AgentEvent, item: &Value) -> Vec<AgentEvent> {
     std::iter::once(call).chain(meta).collect()
 }
 
-/// `result` and its `ToolResultMeta`, failed when the item's `status` is.
+/// `result` and its `ToolResultMeta`: an error if the item's `status` is `failed`,
+/// none if `completed`, unknown otherwise.
 fn with_result_meta(result: AgentEvent, item: &Value) -> Vec<AgentEvent> {
     let meta = item["id"].as_str().map(|id| AgentEvent::ToolResultMeta {
         id: id.into(),
-        is_error: item["status"].as_str().map(|s| s == "failed"),
+        is_error: match item["status"].as_str() {
+            Some("failed") => Some(true),
+            Some("completed") => Some(false),
+            _ => None,
+        },
     });
     std::iter::once(result).chain(meta).collect()
 }
@@ -667,16 +673,16 @@ mod tests {
     #[test]
     fn parses_probe_output() {
         assert_eq!(
-            old(parse_line(r#"{"type":"thread.started","thread_id":"t1"}"#)),
+            parse_line(r#"{"type":"thread.started","thread_id":"t1"}"#),
             vec![AgentEvent::Started {
                 session: Some("t1".into()),
                 model: None,
             }]
         );
         assert_eq!(
-            old(parse_line(
+            parse_line(
                 r#"{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"I’ll run the command.\n"}}"#
-            )),
+            ),
             vec![AgentEvent::Text {
                 text: "I’ll run the command.".into()
             }]
@@ -714,15 +720,13 @@ mod tests {
             ]
         );
         assert_eq!(
-            old(parse_line(
-                r#"{"type":"turn.failed","error":{"message":"boom"}}"#
-            )),
+            parse_line(r#"{"type":"turn.failed","error":{"message":"boom"}}"#),
             vec![AgentEvent::Finished {
                 ok: false,
                 summary: Some("boom".into())
             }]
         );
-        assert!(old(parse_line(r#"{"type":"turn.started"}"#)).is_empty());
+        assert!(parse_line(r#"{"type":"turn.started"}"#).is_empty());
     }
 
     /// `exec --json` 0.163 with `tools.update_plan` on (gpt-6-luna, told to plan

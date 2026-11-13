@@ -182,14 +182,15 @@ pub fn parse_line(line: &str) -> Vec<AgentEvent> {
 
 /// `parse_line` plus a running `Usage` and `UsageDetail`. Each assistant API message
 /// repeats its usage on every content block line, so it counts once per message id
-/// (latest line wins); the `result` line's session totals replace the tally.
+/// (latest line wins); the `result` line's session totals replace the tally. Those
+/// lines carry the output count so far; the main agent's `message_delta` has the final.
 #[derive(Default)]
 pub struct Parser {
     /// Latest usage per message id; lines of different messages may interleave.
     messages: std::collections::HashMap<String, TokenUsage>,
     sent: Option<(u64, u64)>,
-    /// The main agent's latest message's usage.
-    last: Option<TokenUsage>,
+    /// The main agent's latest message: its id and usage.
+    last: Option<(String, TokenUsage)>,
     /// The model `init` named, to find its context window in `result`.
     model: Option<String>,
     sent_detail: Option<AgentEvent>,
@@ -213,13 +214,23 @@ impl Parser {
                     let id = v["message"]["id"].as_str().unwrap_or_default();
                     self.messages.insert(id.to_string(), t);
                     if v["parent_tool_use_id"].is_null() {
-                        self.last = Some(t);
+                        self.last = Some((id.to_string(), t));
                     }
                     let sum = sum(self.messages.values().copied());
                     (Some(sum), Some(self.detail(sum, &Value::Null)))
                 }
                 None => (None, None),
             },
+            // The final usage of the main agent's latest message (subagents stream none).
+            Some("stream_event") if v["event"]["type"] == "message_delta" => {
+                let id = v["api_message_id"].as_str();
+                match (&mut self.last, tokens(&v["event"]["usage"])) {
+                    (Some((last, t)), Some(u)) if Some(last.as_str()) == id => *t = u,
+                    _ => return out,
+                }
+                let tally = sum(self.messages.values().copied());
+                (None, Some(self.detail(tally, &Value::Null)))
+            }
             Some("result") => {
                 // `modelUsage` counts subagents too; `usage` is the main agent's.
                 let models = v["modelUsage"].as_object();
@@ -256,7 +267,7 @@ impl Parser {
             });
         AgentEvent::UsageDetail {
             total,
-            last: self.last,
+            last: self.last.as_ref().map(|(_, t)| *t),
             turns: result["num_turns"].as_u64(),
             cost_usd: result["total_cost_usd"].as_f64(),
             api_ms: result["duration_api_ms"].as_u64(),
@@ -679,7 +690,7 @@ mod tests {
         );
         // A subagent's text streams under its Task call: not the reply.
         let sub = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}},"parent_tool_use_id":"toolu_1"}"#;
-        assert!(old(parse_line(sub)).is_empty());
+        assert!(parse_line(sub).is_empty());
     }
 
     /// A real run (haiku, `CLAUDE_CODE_ENABLE_TODO_TOOLS=1 CLAUDE_CODE_ENABLE_TASKS=0`,
@@ -742,7 +753,7 @@ mod tests {
         let tool = |l: &str| matches!(&old(parse_line(l))[..], [AgentEvent::ToolUse { .. }]);
         assert!(tool(&call(r#""toolu_1""#, "pending")));
         assert!(tool(&call("null", "blocked")));
-        let plan = old(parse_line(&call("null", "pending")));
+        let plan = parse_line(&call("null", "pending"));
         let [AgentEvent::Plan { items }] = &plan[..] else {
             panic!("{plan:?}")
         };
@@ -753,7 +764,7 @@ mod tests {
     fn parses_probe_output() {
         let init = r#"{"type":"system","subtype":"init","session_id":"abc","tools":[],"model":"claude-sonnet-4-5"}"#;
         assert_eq!(
-            old(parse_line(init)),
+            parse_line(init),
             vec![AgentEvent::Started {
                 session: Some("abc".into()),
                 model: Some("claude-sonnet-4-5".into()),
@@ -784,7 +795,7 @@ mod tests {
 
         let res = r#"{"type":"result","subtype":"success","is_error":false,"result":"pong","stop_reason":"end_turn"}"#;
         assert_eq!(
-            old(parse_line(res)),
+            parse_line(res),
             vec![AgentEvent::Finished {
                 ok: true,
                 summary: Some("pong".into())
@@ -793,19 +804,19 @@ mod tests {
 
         let err = r#"{"type":"result","subtype":"error_max_turns","is_error":true}"#;
         assert_eq!(
-            old(parse_line(err)),
+            parse_line(err),
             vec![AgentEvent::Finished {
                 ok: false,
                 summary: None
             }]
         );
 
-        assert!(old(parse_line(r#"{"type":"rate_limit_event"}"#)).is_empty());
+        assert!(parse_line(r#"{"type":"rate_limit_event"}"#).is_empty());
         // Only the session's own status counts; a rejected overage doesn't stop it.
         let limit = |status: &str| {
-            old(parse_line(&format!(
+            parse_line(&format!(
                 r#"{{"type":"rate_limit_event","rate_limit_info":{{"status":"{status}","resetsAt":1793223000,"rateLimitType":"five_hour","overageStatus":"rejected"}}}}"#
-            )))
+            ))
         };
         assert!(limit("allowed").is_empty());
         assert!(limit("allowed_warning").is_empty());
@@ -815,7 +826,7 @@ mod tests {
                 resets_at: Some(1793223000)
             }]
         );
-        assert!(old(parse_line("not json")).is_empty());
+        assert!(parse_line("not json").is_empty());
     }
 
     /// From a live `claude -p` run (ids zeroed).
@@ -897,11 +908,11 @@ mod tests {
                 }
             ]
         );
-        assert!(old(p.line(r#"{"type":"system","subtype":"init"}"#)).len() == 1);
+        assert!(p.line(r#"{"type":"system","subtype":"init"}"#).len() == 1);
     }
 
-    /// A real run (haiku 2.1.323, `--tools Bash,Agent`; ids renumbered, deltas, system
-    /// task lines and thinking dropped): a subagent runs `echo sub-ok`, then the main
+    /// A real run (haiku 2.1.323, `--tools Bash,Agent`; ids renumbered; text
+    /// deltas, system task lines and thinking dropped): a subagent runs `echo sub-ok`, then the main
     /// agent runs `exit 3`. Each call and result carries its id; the subagent's its
     /// Agent call as parent; results their `is_error`. Usage detail tallies every
     /// message, `last` only the main agent's, and `result` adds the run's figures.
@@ -949,9 +960,13 @@ mod tests {
                 _ => None,
             })
             .collect();
-        // The subagent's message (the second detail) leaves `last` on the main agent's.
-        let first = Some(tokens(2, 0, 7957, 6, None));
-        assert_eq!(details[..2], [first, first]);
+        // The first message's output so far, then its final count (`message_delta`);
+        // the subagent's message (third) leaves `last` on the main agent's.
+        let (so_far, done) = (
+            tokens(2, 0, 7957, 6, None),
+            tokens(2, 0, 7957, 275, Some(120)),
+        );
+        assert_eq!(details[..3], [Some(so_far), Some(done), Some(done)]);
         let Some(AgentEvent::UsageDetail {
             total,
             last,
@@ -968,7 +983,7 @@ mod tests {
         // `modelUsage`: the subagent's tokens included, unlike `result.usage`.
         assert_eq!(*total, tokens(10, 21431, 14233, 467, Some(120)));
         // The main agent's last message: 8633 tokens of context.
-        assert_eq!(*last, Some(tokens(2, 8512, 119, 1, None)));
+        assert_eq!(*last, Some(tokens(2, 8512, 119, 3, Some(0))));
         assert_eq!(last.unwrap().prompt(), 8633);
         assert_eq!(
             (*turns, *api_ms, *context_window),
@@ -1013,7 +1028,7 @@ mod tests {
             result("t5"),
         ];
         for line in own {
-            assert!(old(p.line(&line)).is_empty(), "{line}");
+            assert!(p.line(&line).is_empty(), "{line}");
         }
         // Other tools, and other tool searches, still show.
         assert_eq!(
@@ -1041,8 +1056,8 @@ mod tests {
         let mut p = Parser::default();
         for tool in ["report_status", "report_result", "approve", "merge_pr"] {
             let name = format!("mcp__mis__{tool}");
-            assert!(old(p.line(&call("own", &name))).is_empty(), "{tool}");
-            assert!(old(p.line(&result("own", "ok"))).is_empty(), "{tool}");
+            assert!(p.line(&call("own", &name)).is_empty(), "{tool}");
+            assert!(p.line(&result("own", "ok")).is_empty(), "{tool}");
         }
         // Interleaved: a hidden report call between a visible call and its result.
         let shown = AgentEvent::ToolUse {
@@ -1050,8 +1065,8 @@ mod tests {
             input: serde_json::json!({}),
         };
         assert_eq!(old(p.line(&call("e1", "mcp__mis__capture"))), [shown]);
-        assert!(old(p.line(&call("r1", "mcp__mis__report_evidence"))).is_empty());
-        assert!(old(p.line(&result("r1", "ok"))).is_empty());
+        assert!(p.line(&call("r1", "mcp__mis__report_evidence")).is_empty());
+        assert!(p.line(&result("r1", "ok")).is_empty());
         assert_eq!(
             old(p.line(&result("e1", "frame.png"))),
             [AgentEvent::ToolResult {

@@ -352,18 +352,14 @@ pub enum AgentEvent {
 
 /// Tokens split by how the prompt side was billed.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct TokenUsage {
     /// Prompt tokens neither read from nor written to the cache.
-    #[serde(default)]
     pub input: u64,
-    #[serde(default)]
     pub cache_read: u64,
-    #[serde(default)]
     pub cache_creation: u64,
-    #[serde(default)]
     pub output: u64,
     /// The part of `output` spent reasoning, if the harness says.
-    #[serde(default)]
     pub reasoning_output: Option<u64>,
 }
 

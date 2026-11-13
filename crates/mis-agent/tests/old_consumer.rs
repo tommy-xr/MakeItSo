@@ -17,7 +17,7 @@ fn mirror(event: AgentEvent) -> Option<String> {
 }
 
 #[test]
-fn a_consumer_predating_tool_ids_sees_the_same_events() {
+fn a_consumer_predating_tool_ids_compiles_and_still_sees_every_call() {
     let mut p = Parser::default();
     let fixture = include_str!("fixtures/claude-subagent.jsonl");
     let got: Vec<String> = fixture

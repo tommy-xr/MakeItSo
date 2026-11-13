@@ -1058,6 +1058,12 @@ async fn run(
             let due = deltas.due();
             let evs = tokio::select! {
                 ev = arx.recv() => match ev {
+                    // Detail for embedders of `mis-agent`: transcripts don't keep it.
+                    Some(
+                        AgentEvent::ToolUseMeta { .. }
+                        | AgentEvent::ToolResultMeta { .. }
+                        | AgentEvent::UsageDetail { .. },
+                    ) => continue,
                     Some(ev) => deltas.event(ev, Instant::now()),
                     None => break,
                 },
@@ -1069,15 +1075,6 @@ async fn run(
                     let now = unix_ms();
                     windows.iter_mut().for_each(|w| w.observed_at = now);
                     ctx.add_limits(agent.name(), windows);
-                    continue;
-                }
-                // Detail for embedders of `mis-agent`: transcripts don't keep it.
-                if matches!(
-                    ev,
-                    AgentEvent::ToolUseMeta { .. }
-                        | AgentEvent::ToolResultMeta { .. }
-                        | AgentEvent::UsageDetail { .. }
-                ) {
                     continue;
                 }
                 if matches!(ev, AgentEvent::Finished { .. }) {
