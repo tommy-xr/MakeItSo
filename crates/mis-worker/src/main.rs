@@ -1058,6 +1058,12 @@ async fn run(
             let due = deltas.due();
             let evs = tokio::select! {
                 ev = arx.recv() => match ev {
+                    // Detail for embedders of `mis-agent`: transcripts don't keep it.
+                    Some(
+                        AgentEvent::ToolUseMeta { .. }
+                        | AgentEvent::ToolResultMeta { .. }
+                        | AgentEvent::UsageDetail { .. },
+                    ) => continue,
                     Some(ev) => deltas.event(ev, Instant::now()),
                     None => break,
                 },

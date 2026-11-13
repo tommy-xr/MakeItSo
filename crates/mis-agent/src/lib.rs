@@ -333,6 +333,20 @@ pub fn find(bin: &str) -> Option<std::path::PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// `events` without tool ids and usage detail: what a consumer predating them acts on.
+#[cfg(test)]
+pub(crate) fn old(events: Vec<AgentEvent>) -> Vec<AgentEvent> {
+    let new = |e: &AgentEvent| {
+        matches!(
+            e,
+            AgentEvent::ToolUseMeta { .. }
+                | AgentEvent::ToolResultMeta { .. }
+                | AgentEvent::UsageDetail { .. }
+        )
+    };
+    events.into_iter().filter(|e| !new(e)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
