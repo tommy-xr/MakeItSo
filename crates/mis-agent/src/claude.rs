@@ -411,17 +411,18 @@ impl ClaudeAgent {
             ]);
             allowed.push(format!("mcp__{MCP_SERVER}"));
         }
-        if let Some(p) = o.permissions.filter(|_| o.read_only) {
-            a.extend(read_only_args(p, &mut allowed));
-        } else {
-            a.extend(setup_args(o.setup));
-        }
-        if let Some(p) = o.permissions.filter(|_| !o.read_only) {
-            a.extend(permission_args(p, &mut allowed));
-            // Ask: what the rules don't allow goes to the worker's `approve` tool.
-            if p.mode == PermissionMode::Ask && o.mcp.is_some() {
-                let tool = format!("mcp__{MCP_SERVER}__{}", crate::APPROVE_TOOL);
-                a.extend(["--permission-prompt-tool".into(), tool]);
+        match o.permissions {
+            Some(p) if o.read_only => a.extend(read_only_args(p, &mut allowed)),
+            p => {
+                a.extend(setup_args(o.setup));
+                if let Some(p) = p {
+                    a.extend(permission_args(p, &mut allowed));
+                    // Ask: what the rules don't allow goes to the worker's `approve` tool.
+                    if p.mode == PermissionMode::Ask && o.mcp.is_some() {
+                        let tool = format!("mcp__{MCP_SERVER}__{}", crate::APPROVE_TOOL);
+                        a.extend(["--permission-prompt-tool".into(), tool]);
+                    }
+                }
             }
         }
         // One list: each value is its own argv entry, as rules may hold spaces.
@@ -451,9 +452,9 @@ impl ClaudeAgent {
 }
 
 /// Flags narrowing what claude reads of the user's setup. Its setting sources also
-/// decide which CLAUDE.md files, skills and plugins load; MCP servers come from
-/// their own files, so only the run's `--mcp-config` stays. A read-only run
-/// already reads none of it.
+/// decide which CLAUDE.md files, skills, agents, commands and plugins load; MCP
+/// servers come from their own files, so only the run's `--mcp-config` stays. A
+/// read-only run already reads no setting sources or MCP servers.
 fn setup_args(s: Setup) -> Vec<String> {
     let sources = match s {
         Setup::UserAndProject => return vec![],
@@ -1152,16 +1153,17 @@ mod tests {
             (Setup::Project, "--setting-sources=project,local"),
             (Setup::Isolated, "--setting-sources="),
         ] {
-            let a = argv(setup, false);
-            assert_eq!(a[7..9], [sources, "--strict-mcp-config"], "{setup:?}");
+            let mut a = argv(setup, false);
+            let i = a.iter().position(|x| x == sources).unwrap();
+            assert_eq!(a[i + 1], "--strict-mcp-config", "{setup:?}");
             // The rest is as the caller set it: our server, the folders' rules.
-            assert_eq!(a[..7], user[..7]);
-            assert_eq!(a[9..], user[7..]);
+            a.drain(i..i + 2);
+            assert_eq!(a, user);
             assert_eq!(
                 setup_env(setup),
                 Some(("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"))
             );
-            // Read-only already reads no setup: no second set of flags.
+            // Read-only already reads no setting sources: no second set of flags.
             assert_eq!(argv(setup, true), argv(Setup::UserAndProject, true));
         }
     }

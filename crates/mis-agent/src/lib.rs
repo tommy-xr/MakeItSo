@@ -78,7 +78,9 @@ pub struct RunOpts<'a> {
 }
 
 /// How much of the user's own setup a run reads: instructions (CLAUDE.md,
-/// AGENTS.md), settings, skills, plugins, memory and MCP servers.
+/// AGENTS.md), settings, skills, plugins, memory and MCP servers. The user's
+/// settings include their own permission rules and hooks, so a narrowed setup
+/// drops those too: the run gets the caller's `permissions` only.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Setup {
     /// The user's global setup and the project's: the harness's own default.

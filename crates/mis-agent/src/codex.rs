@@ -250,18 +250,6 @@ pub fn permission_args(p: &Permissions) -> Vec<String> {
         .collect()
 }
 
-/// Whether codex can run reading only `s` of the user's setup. It can't narrow it:
-/// `--ignore-user-config` skips `config.toml`, but nothing skips the user's
-/// `AGENTS.md` or skills, so anything less than all of it is refused.
-pub fn check_setup(s: Setup) -> Result<(), String> {
-    match s {
-        Setup::UserAndProject => Ok(()),
-        _ => Err(format!(
-            "codex can't run without the user's own instructions and skills ({s:?} setup)"
-        )),
-    }
-}
-
 /// Map one `--json` line to zero or more events.
 pub fn parse_line(line: &str) -> Vec<AgentEvent> {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -455,7 +443,13 @@ impl Agent for CodexAgent {
         tx: mpsc::Sender<AgentEvent>,
     ) -> BoxFut<'a> {
         Box::pin(async move {
-            check_setup(opts.setup).map_err(anyhow::Error::msg)?;
+            // Nothing skips the user's AGENTS.md or skills (`--ignore-user-config`
+            // skips only config.toml), so codex can't read less than all of it.
+            anyhow::ensure!(
+                opts.setup == Setup::UserAndProject,
+                "codex can't run without the user's own instructions and skills ({:?} setup)",
+                opts.setup
+            );
             let mut cmd = Command::new("codex");
             cmd.args(self.argv(prompt, &opts));
             if let Some(m) = opts.mcp {
@@ -757,13 +751,8 @@ mod tests {
     }
 
     #[test]
-    fn only_the_whole_user_setup_runs() {
-        assert_eq!(check_setup(Setup::UserAndProject), Ok(()));
-        for s in [Setup::Project, Setup::Isolated] {
-            let e = check_setup(s).unwrap_err();
-            assert!(e.contains("instructions and skills"), "{e}");
-        }
-        // A run asking for less fails before codex starts, rather than reading more.
+    fn a_narrowed_setup_fails_before_codex_starts() {
+        // Rather than reading more than asked.
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
