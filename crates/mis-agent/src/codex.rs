@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use crate::{Agent, BoxFut, RunOpts, MCP_SERVER, MCP_TOKEN_ENV, OWN_TOOLS};
+use crate::{Agent, BoxFut, RunOpts, Setup, MCP_SERVER, MCP_TOKEN_ENV, OWN_TOOLS};
 
 #[derive(Default)]
 pub struct CodexAgent {
@@ -250,6 +250,18 @@ pub fn permission_args(p: &Permissions) -> Vec<String> {
         .collect()
 }
 
+/// Whether codex can run reading only `s` of the user's setup. It can't narrow it:
+/// `--ignore-user-config` skips `config.toml`, but nothing skips the user's
+/// `AGENTS.md` or skills, so anything less than all of it is refused.
+pub fn check_setup(s: Setup) -> Result<(), String> {
+    match s {
+        Setup::UserAndProject => Ok(()),
+        _ => Err(format!(
+            "codex can't run without the user's own instructions and skills ({s:?} setup)"
+        )),
+    }
+}
+
 /// Map one `--json` line to zero or more events.
 pub fn parse_line(line: &str) -> Vec<AgentEvent> {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -443,6 +455,7 @@ impl Agent for CodexAgent {
         tx: mpsc::Sender<AgentEvent>,
     ) -> BoxFut<'a> {
         Box::pin(async move {
+            check_setup(opts.setup).map_err(anyhow::Error::msg)?;
             let mut cmd = Command::new("codex");
             cmd.args(self.argv(prompt, &opts));
             if let Some(m) = opts.mcp {
@@ -741,6 +754,30 @@ mod tests {
         assert!(!plan_tool_verdict(None), "didn't run or timed out");
         // The override after the subcommand, so codex parses it as config.
         assert_eq!(PLAN_PROBE, ["features", "list", "-c", PLAN_TOOL]);
+    }
+
+    #[test]
+    fn only_the_whole_user_setup_runs() {
+        assert_eq!(check_setup(Setup::UserAndProject), Ok(()));
+        for s in [Setup::Project, Setup::Isolated] {
+            let e = check_setup(s).unwrap_err();
+            assert!(e.contains("instructions and skills"), "{e}");
+        }
+        // A run asking for less fails before codex starts, rather than reading more.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(4);
+        let opts = RunOpts {
+            setup: Setup::Project,
+            ..Default::default()
+        };
+        let agent = CodexAgent::default();
+        rt.block_on(crate::run_guarded(&agent, TaskId::nil(), "hi", opts, tx));
+        let Ok(AgentEvent::Finished { ok: false, summary }) = rx.try_recv() else {
+            panic!()
+        };
+        assert!(summary.unwrap().contains("Project setup"));
     }
 
     #[test]

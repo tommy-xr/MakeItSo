@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use std::collections::HashSet;
 
-use crate::{Agent, BoxFut, RunOpts, MCP_SERVER, MCP_TOKEN_ENV, OWN_TOOLS};
+use crate::{Agent, BoxFut, RunOpts, Setup, MCP_SERVER, MCP_TOKEN_ENV, OWN_TOOLS};
 
 #[derive(Default)]
 pub struct ClaudeAgent {
@@ -413,7 +413,10 @@ impl ClaudeAgent {
         }
         if let Some(p) = o.permissions.filter(|_| o.read_only) {
             a.extend(read_only_args(p, &mut allowed));
-        } else if let Some(p) = o.permissions {
+        } else {
+            a.extend(setup_args(o.setup));
+        }
+        if let Some(p) = o.permissions.filter(|_| !o.read_only) {
             a.extend(permission_args(p, &mut allowed));
             // Ask: what the rules don't allow goes to the worker's `approve` tool.
             if p.mode == PermissionMode::Ask && o.mcp.is_some() {
@@ -445,6 +448,25 @@ impl ClaudeAgent {
         a.extend(["--".into(), with_images(prompt, o.images)]); // prompt may start with '-'
         a
     }
+}
+
+/// Flags narrowing what claude reads of the user's setup. Its setting sources also
+/// decide which CLAUDE.md files, skills and plugins load; MCP servers come from
+/// their own files, so only the run's `--mcp-config` stays. A read-only run
+/// already reads none of it.
+fn setup_args(s: Setup) -> Vec<String> {
+    let sources = match s {
+        Setup::UserAndProject => return vec![],
+        Setup::Project => "--setting-sources=project,local",
+        Setup::Isolated => "--setting-sources=",
+    };
+    vec![sources.into(), "--strict-mcp-config".into()]
+}
+
+/// Env turning off claude's auto memory, kept under the user's home, for any
+/// narrowed `Setup` (the setting sources don't cover it).
+fn setup_env(s: Setup) -> Option<(&'static str, &'static str)> {
+    (s != Setup::UserAndProject).then_some(("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"))
 }
 
 /// Claude has no image flag: name the files in the prompt for its Read tool.
@@ -495,6 +517,7 @@ impl Agent for ClaudeAgent {
             // `TodoWrite` (one call, whole list) over the TaskCreate/TaskUpdate set.
             cmd.env("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1")
                 .env("CLAUDE_CODE_ENABLE_TASKS", "0");
+            cmd.envs(setup_env(opts.setup));
             // stderr inherits so it can't fill a pipe and block; kill_on_drop so a
             // dropped task can't leave claude running headless.
             cmd.stdin(std::process::Stdio::null())
@@ -1098,6 +1121,49 @@ mod tests {
             ..ask
         };
         assert_eq!(allowed(&argv(&none)), ["mcp__mis"]);
+    }
+
+    #[test]
+    fn setup_narrows_what_is_read_and_keeps_permissions_and_our_server() {
+        let mcp = crate::Mcp {
+            url: "http://127.0.0.1:9/mcp".into(),
+            token: "t".into(),
+        };
+        let p = Permissions {
+            mode: PermissionMode::Folders,
+            folders: vec!["/u/game".into()],
+            ..Default::default()
+        };
+        let argv = |setup, read_only| {
+            let o = RunOpts {
+                mcp: Some(&mcp),
+                permissions: Some(&p),
+                read_only,
+                setup,
+                ..Default::default()
+            };
+            ClaudeAgent::default().argv("hi", &o)
+        };
+        let user = argv(Setup::UserAndProject, false);
+        assert!(!user.iter().any(|a| a.starts_with("--setting-sources")));
+        assert!(!user.contains(&"--strict-mcp-config".into()));
+        assert_eq!(setup_env(Setup::UserAndProject), None);
+        for (setup, sources) in [
+            (Setup::Project, "--setting-sources=project,local"),
+            (Setup::Isolated, "--setting-sources="),
+        ] {
+            let a = argv(setup, false);
+            assert_eq!(a[7..9], [sources, "--strict-mcp-config"], "{setup:?}");
+            // The rest is as the caller set it: our server, the folders' rules.
+            assert_eq!(a[..7], user[..7]);
+            assert_eq!(a[9..], user[7..]);
+            assert_eq!(
+                setup_env(setup),
+                Some(("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"))
+            );
+            // Read-only already reads no setup: no second set of flags.
+            assert_eq!(argv(setup, true), argv(Setup::UserAndProject, true));
+        }
     }
 
     #[test]

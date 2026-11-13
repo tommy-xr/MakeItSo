@@ -72,6 +72,23 @@ pub struct RunOpts<'a> {
     pub no_merge: bool,
     /// Extra environment for the agent process, e.g. an app task's `MIS_TOKEN`.
     pub env: &'a [(&'a str, &'a str)],
+    /// Which of the user's own setup the run reads. It narrows what is read only:
+    /// `permissions` and `mcp` apply as given.
+    pub setup: Setup,
+}
+
+/// How much of the user's own setup a run reads: instructions (CLAUDE.md,
+/// AGENTS.md), settings, skills, plugins, memory and MCP servers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Setup {
+    /// The user's global setup and the project's: the harness's own default.
+    #[default]
+    UserAndProject,
+    /// The project's only, nothing from the user's home. Claude: no MCP servers
+    /// but the run's own (`mcp`), not even the project's. Codex can't: the run fails.
+    Project,
+    /// Neither: only what the caller passes. Codex can't: the run fails.
+    Isolated,
 }
 
 pub trait Agent: Send + Sync {

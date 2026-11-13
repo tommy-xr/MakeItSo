@@ -1096,6 +1096,7 @@ async fn run(
             // A routine run that may act: other ways to merge are denied.
             no_merge: task.merge != MergeRule::Any && !task.read_only,
             env: &env,
+            setup: mis_agent::Setup::UserAndProject,
         },
         atx,
     );
