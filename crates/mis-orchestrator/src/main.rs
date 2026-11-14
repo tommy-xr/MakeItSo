@@ -362,12 +362,22 @@ fn install(
         state: state.ok_or_else(no_home)?,
         routines: (args.routines_dir.clone().or_else(default_routines_dir)).ok_or_else(no_home)?,
         env: env_file.or_else(default_env_file).ok_or_else(no_home)?,
-        tunnel: tunnel.then(tunnel_dir).flatten(),
+        tunnel: (tunnel.then(|| tunnel_dir().ok_or_else(no_home))).transpose()?,
     })
 }
 
+/// `~/.cloudflared` (home is `%USERPROFILE%` on Windows).
 fn tunnel_dir() -> Option<PathBuf> {
-    Some(var("HOME")?.join(".cloudflared"))
+    let home = var("HOME").or_else(|| var("USERPROFILE"))?;
+    Some(home.join(".cloudflared"))
+}
+
+/// `  tunnel:    a, b`, if any.
+fn print_tunnel(files: &[PathBuf]) {
+    if !files.is_empty() {
+        let shown: Vec<_> = files.iter().map(|p| p.display().to_string()).collect();
+        println!("  tunnel:    {}", shown.join(", "));
+    }
 }
 
 fn export(file: &Path, from: &transfer::Paths) -> anyhow::Result<()> {
@@ -376,31 +386,26 @@ fn export(file: &Path, from: &transfer::Paths) -> anyhow::Result<()> {
     println!("  state dir: {}", from.state.display());
     println!("  routines:  {}", or_none(e.routines, &from.routines));
     println!("  env file:  {}", or_none(e.env, &from.env));
-    if !e.tunnel.is_empty() {
-        let shown: Vec<_> = e.tunnel.iter().map(|p| p.display().to_string()).collect();
-        println!("  tunnel:    {}", shown.join(", "));
-        println!(
-            "Never run the tunnel on both machines at once: stop it here before starting it there."
-        );
-        return Ok(());
-    }
+    print_tunnel(&e.tunnel);
     // Without `--tunnel` its files stay put: the new machine may not run it.
-    let dir = tunnel_dir();
-    let mut files: Vec<_> = (dir.iter().flat_map(std::fs::read_dir).flatten().flatten())
-        .map(|e| e.path())
-        .filter(|p| p.is_file())
-        .collect();
-    files.sort();
-    println!(
-        "\nNot in the archive: the Cloudflare tunnel's files. To run it on the new machine, copy:"
-    );
-    match (files.is_empty(), &dir) {
-        (false, _) => files.iter().for_each(|f| println!("  {}", f.display())),
-        (true, Some(d)) => println!("  (none in {})", d.display()),
-        (true, None) => println!("  ~/.cloudflared"),
-    }
-    if !files.is_empty() {
-        println!("Or export with --tunnel: its config.yml and the credentials file it names.");
+    if e.tunnel.is_empty() {
+        let dir = tunnel_dir();
+        let mut files: Vec<_> = (dir.iter().flat_map(std::fs::read_dir).flatten().flatten())
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .collect();
+        files.sort();
+        println!(
+            "\nNot in the archive: the Cloudflare tunnel's files. To run it on the new machine, copy:"
+        );
+        match (files.is_empty(), &dir) {
+            (false, _) => files.iter().for_each(|f| println!("  {}", f.display())),
+            (true, Some(d)) => println!("  (none in {})", d.display()),
+            (true, None) => println!("  ~/.cloudflared"),
+        }
+        if !files.is_empty() {
+            println!("Or export with --tunnel: its config.yml and the credentials file it names.");
+        }
     }
     println!(
         "Never run the tunnel on both machines at once: stop it here before starting it there."
@@ -428,15 +433,18 @@ fn import(file: &Path, to: &transfer::Paths) -> anyhow::Result<()> {
     println!("  state dir: {}", to.state.display());
     println!("  routines:  {}", or_none(i.routines, &to.routines));
     println!("  env file:  {}", or_none(i.env, &to.env));
-    if !i.tunnel.is_empty() {
-        let shown: Vec<_> = i.tunnel.iter().map(|p| p.display().to_string()).collect();
-        println!("  tunnel:    {}", shown.join(", "));
-    }
+    print_tunnel(&i.tunnel);
     match &i.warnings {
         Ok(w) => {
             (w.iter()).for_each(|w| println!("warning: {w}; change it in {}", to.env.display()))
         }
         Err(e) => println!("warning: can't check {}'s paths: {e}", to.env.display()),
+    }
+    if let Some(dir) = &to.tunnel {
+        let config = dir.join("config.yml");
+        for w in &i.tunnel_warnings {
+            println!("warning: {w}; change it in {}", config.display());
+        }
     }
     println!("\nNext:");
     println!("  - Run a worker on this machine: app tasks go to the orchestrator's host first.");

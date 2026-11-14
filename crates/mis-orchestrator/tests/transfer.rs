@@ -374,8 +374,9 @@ fn old_tunnel(home: &Home) -> PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     let creds = dir.join(format!("{TUNNEL_ID}.json"));
     let config = format!(
-        "tunnel: {TUNNEL_ID}\ncredentials-file: {}\n\ningress:\n  - service: http_status:404\n",
-        creds.display()
+        "tunnel: {TUNNEL_ID}\ncredentials-file: {}\norigincert: {}\n\ningress:\n  - service: http_status:404\n",
+        creds.display(),
+        dir.join("cert.pem").display()
     );
     std::fs::write(dir.join("config.yml"), &config).unwrap();
     std::fs::write(dir.join("config.yml.bak"), &config).unwrap();
@@ -404,6 +405,21 @@ fn export_tunnel_carries_the_tunnel_config_and_its_credentials_only() {
     let creds = format!("tunnel/{TUNNEL_ID}.json");
     assert_eq!(tunnel, ["tunnel/config.yml", creds.as_str()]);
 
+    // Without --tunnel the files are listed, not carried.
+    let plain = old.0.join("plain.tar.gz");
+    let out = old.orch(&["export", plain.to_str().unwrap()]);
+    assert!(
+        text(&out).contains("Or export with --tunnel"),
+        "{}",
+        text(&out)
+    );
+    // Carried to the other machine; the old one is gone.
+    let moved = new.0.join("mis.tar.gz");
+    std::fs::copy(&archive, &moved).unwrap();
+    let path = moved.to_str().unwrap();
+    let old_dir = old_dir.to_str().unwrap().to_string();
+    drop(old);
+
     // A credentials file already there: refused, nothing written.
     let new_dir = new.0.join(".cloudflared");
     std::fs::create_dir_all(&new_dir).unwrap();
@@ -425,11 +441,20 @@ fn export_tunnel_carries_the_tunnel_config_and_its_credentials_only() {
     let shown = text(&out);
     assert!(out.status.success(), "{shown}");
     assert!(shown.contains("cloudflared tunnel run"), "{shown}");
+    let stale = format!(
+        "warning: origincert: {}: not on this machine",
+        Path::new(&old_dir).join("cert.pem").display()
+    );
+    assert!(shown.contains(&stale), "{shown}");
     let config = std::fs::read_to_string(new_dir.join("config.yml")).unwrap();
-    let want = format!("credentials-file: {}\n", mine.display());
+    let want = format!("credentials-file: '{}'\n", mine.display());
     assert!(config.contains(&want), "pointed at the new home: {config}");
     assert!(config.contains("ingress:\n  - service: http_status:404"));
-    assert!(!config.contains(old_dir.to_str().unwrap()));
+    assert_eq!(
+        config.matches(old_dir.as_str()).count(),
+        1,
+        "only origincert"
+    );
     assert_eq!(
         std::fs::read_to_string(&mine).unwrap(),
         r#"{"TunnelSecret":"demo"}"#
@@ -438,13 +463,4 @@ fn export_tunnel_carries_the_tunnel_config_and_its_credentials_only() {
         assert_eq!(mode(&p), 0o600, "{}", p.display());
     }
     assert!(!new_dir.join("cert.pem").exists() && !new_dir.join("config.yml.bak").exists());
-
-    // Without --tunnel the files are listed, not carried.
-    let plain = old.0.join("plain.tar.gz");
-    let out = old.orch(&["export", plain.to_str().unwrap()]);
-    assert!(
-        text(&out).contains("Or export with --tunnel"),
-        "{}",
-        text(&out)
-    );
 }

@@ -1,7 +1,8 @@
 //! `export` / `import`: an install (state dir, routines, env file, and optionally the Cloudflare
 //! tunnel) as one `.tar.gz`, to move it to another machine. What goes in and where each entry
 //! lands are pure ([`skipped`], [`dest`], [`clash`], [`check_manifest`], [`env_warnings`],
-//! [`credentials_file`]); [`export`] and [`import`] are the filesystem shell. Both hold the state dir's lock, so neither runs beside an orchestrator.
+//! [`credentials_file`], [`tunnel_warnings`]); [`export`] and [`import`] are the filesystem
+//! shell. Both hold the state dir's lock, so neither runs beside an orchestrator.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -160,24 +161,64 @@ pub(crate) fn env_warnings(
     Ok(out)
 }
 
+/// A YAML value as written: `"/a/b.json" # note` -> `/a/b.json`; `'it''s'` -> `it's`.
+fn scalar(v: &str) -> String {
+    let v = v.split(" #").next().unwrap_or_default().trim();
+    match v.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')) {
+        Some(q) => q.replace("''", "'"),
+        None => v.trim_matches('"').to_string(),
+    }
+}
+
 /// cloudflared `config.yml`'s top-level `credentials-file`: its line's index and its path.
 pub(crate) fn credentials_file(config: &str) -> Result<(usize, String), String> {
     for (i, line) in config.lines().enumerate() {
         if let Some(v) = line.strip_prefix("credentials-file:") {
-            // `credentials-file: "/a/b.json" # note` -> `/a/b.json`
-            let v = v.split(" #").next().unwrap_or_default().trim();
-            return Ok((i, v.trim_matches(['"', '\'']).to_string()));
+            let v = scalar(v);
+            return match v.is_empty() {
+                true => Err("credentials-file is empty".into()),
+                false => Ok((i, v)),
+            };
         }
     }
     Err("no credentials-file".into())
 }
 
-/// `config` with its `credentials-file` set to `path`: the old machine's may name its home.
-pub(crate) fn with_credentials_file(config: &str, path: &str) -> Result<String, String> {
-    let (at, _) = credentials_file(config)?;
+/// Where credentials-file `creds` is, for config dir `dir` (`~/.cloudflared`): cloudflared
+/// expands `~` itself.
+pub(crate) fn credentials_path(creds: &str, dir: &Path) -> PathBuf {
+    match (creds.strip_prefix("~/"), dir.parent()) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => dir.join(creds),
+    }
+}
+
+/// `config` with line `at` (its `credentials-file`) naming `path`: the old one may name the
+/// old home. Single-quoted, so no path character breaks the YAML.
+pub(crate) fn with_credentials_file(config: &str, at: usize, path: &str) -> String {
     let mut lines: Vec<String> = config.lines().map(String::from).collect();
-    lines[at] = format!("credentials-file: {path}");
-    Ok(lines.join("\n") + "\n")
+    lines[at] = format!("credentials-file: '{}'", path.replace('\'', "''"));
+    lines.join("\n") + "\n"
+}
+
+/// Absolute paths in tunnel `config` that `exists` says aren't here (the old home), but the
+/// credentials file, which import points here: `origincert: /old/cert.pem: not on this machine`.
+pub(crate) fn tunnel_warnings(config: &str, exists: impl Fn(&Path) -> bool) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in config.lines() {
+        let Some((key, v)) = line.split_once(':') else {
+            continue;
+        };
+        if key == "credentials-file" {
+            continue;
+        }
+        let v = scalar(v);
+        let p = Path::new(v.strip_prefix("unix:").unwrap_or(&v));
+        if p.is_absolute() && !exists(p) {
+            out.push(format!("{}: not on this machine", line.trim()));
+        }
+    }
+    out
 }
 
 /// What [`export`] wrote.
@@ -301,7 +342,7 @@ fn tunnel_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
         .with_context(|| format!("reading {}", config.display()))?;
     let (_, creds) =
         credentials_file(&text).map_err(|e| anyhow::anyhow!("{}: {e}", config.display()))?;
-    let creds = dir.join(creds);
+    let creds = credentials_path(&creds, dir);
     ensure!(
         creds.file_name() != Some(TUNNEL_CONFIG.as_ref()),
         "{}: credentials-file is config.yml",
@@ -399,6 +440,8 @@ pub struct Imported {
     pub tunnel: Vec<PathBuf>,
     /// The env file's [`env_warnings`], or why it couldn't be read.
     pub warnings: Result<Vec<String>, String>,
+    /// The placed tunnel config's [`tunnel_warnings`].
+    pub tunnel_warnings: Vec<String>,
 }
 
 /// Archive `from` (an [`export`]) into `to`: checked whole first (entries, manifest, task
@@ -421,8 +464,11 @@ pub fn import(from: &Path, to: &Paths) -> anyhow::Result<Imported> {
             Dest::Manifest => return ensure_once(&mut manifest, read()?, || twice(MANIFEST)),
             Dest::Env => return ensure_once(&mut env, read()?, || twice(ENV)),
             Dest::Tunnel(n) => {
-                let slot = tunnel.entry(n.clone()).or_default();
-                return ensure_once(slot, read()?, || twice(&format!("{TUNNEL}/{n}")));
+                let was = tunnel.insert(n.clone(), read()?);
+                return match was {
+                    None => Ok(()),
+                    Some(_) => Err(twice(&format!("{TUNNEL}/{n}"))),
+                };
             }
             Dest::In(root, p) => (root, p),
         };
@@ -462,8 +508,8 @@ pub fn import(from: &Path, to: &Paths) -> anyhow::Result<Imported> {
     if routines {
         refuse_nonempty(&to.routines, "routines dir", None)?;
     }
-    let tunnel = match (tunnel.is_empty(), &to.tunnel) {
-        (true, _) => vec![],
+    let (tunnel, tunnel_warnings) = match (tunnel.is_empty(), &to.tunnel) {
+        (true, _) => (vec![], vec![]),
         (false, None) => bail!("no home dir to put the archive's tunnel in"),
         (false, Some(dir)) => placed_tunnel(tunnel, dir)?,
     };
@@ -540,29 +586,33 @@ pub fn import(from: &Path, to: &Paths) -> anyhow::Result<Imported> {
         routines,
         tunnel: tunnel.into_iter().map(|(p, _)| p).collect(),
         warnings,
+        tunnel_warnings,
     })
 }
 
+/// Files to write: path -> bytes.
+type Placed = Vec<(PathBuf, Vec<u8>)>;
+
 /// The archive's tunnel `files` (name -> bytes) as they go in `dir`: exactly `config.yml` and
-/// the credentials file it names, the config pointed at it there. Err if either is in `dir`.
+/// the credentials file it names, the config pointed at it there; and its
+/// [`tunnel_warnings`]. Err if either is in `dir`.
 fn placed_tunnel(
-    files: BTreeMap<String, Option<Vec<u8>>>,
+    files: BTreeMap<String, Vec<u8>>,
     dir: &Path,
-) -> anyhow::Result<Vec<(PathBuf, Vec<u8>)>> {
+) -> anyhow::Result<(Placed, Vec<String>)> {
     let bad = |e: &str| anyhow::anyhow!("{TUNNEL}/{TUNNEL_CONFIG}: {e}");
-    let config = files.get(TUNNEL_CONFIG).cloned().flatten();
-    let config =
-        String::from_utf8(config.ok_or_else(|| bad("missing"))?).map_err(|_| bad("not UTF-8"))?;
-    let (_, creds) = credentials_file(&config).map_err(|e| bad(&e))?;
+    let config = files.get(TUNNEL_CONFIG).ok_or_else(|| bad("missing"))?;
+    let config = std::str::from_utf8(config).map_err(|_| bad("not UTF-8"))?;
+    let (at, creds) = credentials_file(config).map_err(|e| bad(&e))?;
     let name = Path::new(&creds).file_name().and_then(|n| n.to_str());
     let name = name.ok_or_else(|| bad("credentials-file has no file name"))?;
     ensure!(
-        files.len() == 2 && files.contains_key(name),
+        name != TUNNEL_CONFIG && files.len() == 2 && files.contains_key(name),
         "{TUNNEL}/: not config.yml and the credentials file it names"
     );
     let creds = dir.join(name);
-    let config =
-        with_credentials_file(&config, &creds.display().to_string()).map_err(|e| bad(&e))?;
+    let config = with_credentials_file(config, at, &creds.display().to_string());
+    let warnings = tunnel_warnings(&config, Path::exists);
     let mut out = Vec::new();
     for (n, bytes) in files {
         let p = dir.join(&n);
@@ -574,11 +624,11 @@ fn placed_tunnel(
         let bytes = if n == TUNNEL_CONFIG {
             config.clone().into_bytes()
         } else {
-            bytes.unwrap_or_default()
+            bytes
         };
         out.push((p, bytes));
     }
-    Ok(out)
+    Ok((out, warnings))
 }
 
 /// `slot = Some(v)`, unless it already was: `twice()`.
@@ -824,11 +874,47 @@ mod tests {
         );
         let quoted = "credentials-file: \"/a b/abc.json\" # the tunnel's\n";
         assert_eq!(credentials_file(quoted), Ok((0, "/a b/abc.json".into())));
-        // Only the top-level key.
+        let single = "credentials-file: '/it''s/abc.json'\n";
+        assert_eq!(credentials_file(single), Ok((0, "/it's/abc.json".into())));
+        // Only the top-level key, and not empty.
         assert!(credentials_file("ingress:\n  credentials-file: /x.json\n").is_err());
+        assert!(credentials_file("credentials-file:  # none\n").is_err());
+        let moved = with_credentials_file(config, 1, "/new/it's/abc.json");
         assert_eq!(
-            with_credentials_file(config, "/new/.cloudflared/abc.json").unwrap(),
-            config.replace("/old/", "/new/")
+            moved,
+            config.replace("/old/.cloudflared/abc.json", "'/new/it''s/abc.json'")
+        );
+        assert_eq!(
+            credentials_file(&moved),
+            Ok((1, "/new/it's/abc.json".into()))
+        );
+    }
+
+    #[test]
+    fn a_credentials_path_may_start_at_home() {
+        let dir = Path::new("/home/me/.cloudflared");
+        let at = |c| credentials_path(c, dir);
+        assert_eq!(
+            at("~/.cloudflared/a.json"),
+            Path::new("/home/me/.cloudflared/a.json")
+        );
+        assert_eq!(at("/srv/a.json"), Path::new("/srv/a.json"));
+        assert_eq!(at("a.json"), Path::new("/home/me/.cloudflared/a.json"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tunnel_paths_left_on_the_old_machine_are_named() {
+        let config = "tunnel: abc\ncredentials-file: /old/abc.json\norigincert: /old/cert.pem\n\
+                      logfile: /here/log\ningress:\n  - service: unix:/old/mis.sock\n  \
+                      - service: http://localhost:7474\n";
+        let got = tunnel_warnings(config, |p| p.starts_with("/here"));
+        assert_eq!(
+            got,
+            [
+                "origincert: /old/cert.pem: not on this machine",
+                "- service: unix:/old/mis.sock: not on this machine"
+            ]
         );
     }
 }
