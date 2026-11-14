@@ -1,7 +1,7 @@
-//! `export` / `import`: an install (state dir, routines, env file) as one `.tar.gz`, to move it
-//! to another machine. What goes in and where each entry lands are pure ([`skipped`],
-//! [`dest`], [`clash`], [`check_manifest`], [`env_warnings`]); [`export`] and [`import`] are
-//! the filesystem shell. Both hold the state dir's lock, so neither runs beside an orchestrator.
+//! `export` / `import`: an install (state dir, routines, env file, and optionally the Cloudflare
+//! tunnel) as one `.tar.gz`, to move it to another machine. What goes in and where each entry
+//! lands are pure ([`skipped`], [`dest`], [`clash`], [`check_manifest`], [`env_warnings`],
+//! [`credentials_file`]); [`export`] and [`import`] are the filesystem shell. Both hold the state dir's lock, so neither runs beside an orchestrator.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -21,6 +21,8 @@ const STATE: &str = "state";
 const ROUTINES: &str = "routines";
 const CONFIG: &str = "config";
 const ENV: &str = "orchestrator.env";
+const TUNNEL: &str = "tunnel";
+const TUNNEL_CONFIG: &str = "config.yml";
 
 /// `manifest.json`: what made the archive.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -36,6 +38,9 @@ pub struct Paths {
     pub state: PathBuf,
     pub routines: PathBuf,
     pub env: PathBuf,
+    /// cloudflared's dir (`~/.cloudflared`). Export: carry its tunnel (`config.yml` and the
+    /// credentials file it names). Import: where the archive's tunnel goes.
+    pub tunnel: Option<PathBuf>,
 }
 
 /// A folder of the install the archive mirrors.
@@ -50,6 +55,8 @@ pub(crate) enum Root {
 pub(crate) enum Dest {
     Manifest,
     Env,
+    /// A tunnel file, by name.
+    Tunnel(String),
     /// `/`-separated path under the root; empty: the root itself.
     In(Root, String),
 }
@@ -83,7 +90,8 @@ pub(crate) fn dest(names: &[&str], kind: Kind) -> Result<Option<Dest>, String> {
         ok.then(|| Dest::In(r, rest.join("/")))
     };
     let d = match (names, kind) {
-        ([] | [CONFIG], Kind::Dir) => return Ok(None),
+        ([] | [CONFIG] | [TUNNEL], Kind::Dir) => return Ok(None),
+        ([TUNNEL, name], Kind::File) => Some(Dest::Tunnel(name.to_string())),
         ([MANIFEST], Kind::File) => Some(Dest::Manifest),
         ([CONFIG, ENV], Kind::File) => Some(Dest::Env),
         ([STATE, rest @ ..], _) => root(Root::State, rest),
@@ -152,6 +160,26 @@ pub(crate) fn env_warnings(
     Ok(out)
 }
 
+/// cloudflared `config.yml`'s top-level `credentials-file`: its line's index and its path.
+pub(crate) fn credentials_file(config: &str) -> Result<(usize, String), String> {
+    for (i, line) in config.lines().enumerate() {
+        if let Some(v) = line.strip_prefix("credentials-file:") {
+            // `credentials-file: "/a/b.json" # note` -> `/a/b.json`
+            let v = v.split(" #").next().unwrap_or_default().trim();
+            return Ok((i, v.trim_matches(['"', '\'']).to_string()));
+        }
+    }
+    Err("no credentials-file".into())
+}
+
+/// `config` with its `credentials-file` set to `path`: the old machine's may name its home.
+pub(crate) fn with_credentials_file(config: &str, path: &str) -> Result<String, String> {
+    let (at, _) = credentials_file(config)?;
+    let mut lines: Vec<String> = config.lines().map(String::from).collect();
+    lines[at] = format!("credentials-file: {path}");
+    Ok(lines.join("\n") + "\n")
+}
+
 /// What [`export`] wrote.
 #[derive(Debug)]
 pub struct Exported {
@@ -159,6 +187,8 @@ pub struct Exported {
     pub files: usize,
     pub env: bool,
     pub routines: bool,
+    /// The tunnel files carried, if asked.
+    pub tunnel: Vec<PathBuf>,
 }
 
 /// The install at `from` into new file `out` (`0600`), not inside the state dir. Refused while
@@ -175,6 +205,7 @@ pub fn export(out: &Path, from: &Paths) -> anyhow::Result<Exported> {
         state: from.state.canonicalize()?,
         routines: (from.routines.canonicalize()).unwrap_or_else(|_| from.routines.clone()),
         env: from.env.clone(),
+        tunnel: from.tunnel.clone(),
     };
     let parent = match out.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
@@ -235,6 +266,22 @@ fn write_archive(file: File, from: &Paths) -> anyhow::Result<Exported> {
     if routines {
         files += append_tree(&mut ar, &from.routines, Root::Routines, &mut vec![])?;
     }
+    let tunnel = match &from.tunnel {
+        Some(dir) => tunnel_files(dir)?,
+        None => vec![],
+    };
+    for p in &tunnel {
+        let name = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .context("no file name")?;
+        let name = format!("{TUNNEL}/{name}");
+        entry_names(name.as_bytes()).map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
+        let f = File::open(p).with_context(|| format!("reading {}", p.display()))?;
+        let meta = f.metadata()?;
+        append_file(&mut ar, &name, f, meta.len(), Some(&meta))?;
+        files += 1;
+    }
     let mut out = ar.into_inner()?.finish()?.into_inner()?;
     out.flush()?;
     out.sync_all()?;
@@ -242,7 +289,25 @@ fn write_archive(file: File, from: &Paths) -> anyhow::Result<Exported> {
         files,
         env,
         routines,
+        tunnel,
     })
+}
+
+/// `dir`'s `config.yml` and the credentials file it names: what runs the tunnel. The account
+/// cert (`cert.pem`) stays: it manages every tunnel, and running one doesn't need it.
+fn tunnel_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let config = dir.join(TUNNEL_CONFIG);
+    let text = std::fs::read_to_string(&config)
+        .with_context(|| format!("reading {}", config.display()))?;
+    let (_, creds) =
+        credentials_file(&text).map_err(|e| anyhow::anyhow!("{}: {e}", config.display()))?;
+    let creds = dir.join(creds);
+    ensure!(
+        creds.file_name() != Some(TUNNEL_CONFIG.as_ref()),
+        "{}: credentials-file is config.yml",
+        config.display()
+    );
+    Ok(vec![config, creds])
 }
 
 /// `dir/rel` and everything under it but what [`skipped`] leaves out, in name order; the
@@ -330,6 +395,8 @@ pub struct Imported {
     pub tasks: usize,
     pub env: bool,
     pub routines: bool,
+    /// The tunnel files placed.
+    pub tunnel: Vec<PathBuf>,
     /// The env file's [`env_warnings`], or why it couldn't be read.
     pub warnings: Result<Vec<String>, String>,
 }
@@ -342,6 +409,7 @@ pub fn import(from: &Path, to: &Paths) -> anyhow::Result<Imported> {
     // First pass: check everything, keep the few files judged before writing.
     let mut seen = BTreeMap::new();
     let (mut manifest, mut ledger, mut env) = (None, None, None);
+    let mut tunnel = BTreeMap::new();
     each_entry(from, |dest, kind, entry| {
         let mut read = || -> anyhow::Result<Vec<u8>> {
             let mut b = Vec::new();
@@ -352,6 +420,10 @@ pub fn import(from: &Path, to: &Paths) -> anyhow::Result<Imported> {
         let key = match dest {
             Dest::Manifest => return ensure_once(&mut manifest, read()?, || twice(MANIFEST)),
             Dest::Env => return ensure_once(&mut env, read()?, || twice(ENV)),
+            Dest::Tunnel(n) => {
+                let slot = tunnel.entry(n.clone()).or_default();
+                return ensure_once(slot, read()?, || twice(&format!("{TUNNEL}/{n}")));
+            }
             Dest::In(root, p) => (root, p),
         };
         if key == (Root::State, store::LEDGER_FILE.to_string()) {
@@ -390,6 +462,11 @@ pub fn import(from: &Path, to: &Paths) -> anyhow::Result<Imported> {
     if routines {
         refuse_nonempty(&to.routines, "routines dir", None)?;
     }
+    let tunnel = match (tunnel.is_empty(), &to.tunnel) {
+        (true, _) => vec![],
+        (false, None) => bail!("no home dir to put the archive's tunnel in"),
+        (false, Some(dir)) => placed_tunnel(tunnel, dir)?,
+    };
     // Locked before it's judged empty, so no orchestrator starts on it meanwhile.
     private_dir(&to.state)?;
     let _lock = store::lock(&to.state)?;
@@ -402,7 +479,7 @@ pub fn import(from: &Path, to: &Paths) -> anyhow::Result<Imported> {
     let mut files = 0;
     let wrote = each_entry(from, |dest, kind, entry| {
         let path = match dest {
-            Dest::Manifest => return Ok(()),
+            Dest::Manifest | Dest::Tunnel(_) => return Ok(()),
             Dest::Env => to.env.clone(),
             Dest::In(root, p) => {
                 let dir = if root == Root::State {
@@ -428,8 +505,22 @@ pub fn import(from: &Path, to: &Paths) -> anyhow::Result<Imported> {
         files += 1;
         Ok(())
     });
+    let wrote = wrote.and_then(|()| {
+        if let Some(dir) = tunnel.first().and_then(|(p, _)| p.parent()) {
+            private_dir(dir)?;
+        }
+        for (p, bytes) in &tunnel {
+            let mut f = create_private(p)?;
+            f.write_all(bytes)?;
+            f.sync_all()?;
+            files += 1;
+        }
+        Ok(())
+    });
     wrote.with_context(|| {
-        let placed = [&to.state, &to.routines, &to.env].map(|p| p.display().to_string());
+        let placed = [&to.state, &to.routines, &to.env].into_iter();
+        let placed = placed.chain(tunnel.iter().map(|(p, _)| p));
+        let placed: Vec<_> = placed.map(|p| p.display().to_string()).collect();
         format!(
             "import cut short: remove what it wrote ({}) before trying again",
             placed.join(", ")
@@ -447,8 +538,47 @@ pub fn import(from: &Path, to: &Paths) -> anyhow::Result<Imported> {
         tasks,
         env: env.is_some(),
         routines,
+        tunnel: tunnel.into_iter().map(|(p, _)| p).collect(),
         warnings,
     })
+}
+
+/// The archive's tunnel `files` (name -> bytes) as they go in `dir`: exactly `config.yml` and
+/// the credentials file it names, the config pointed at it there. Err if either is in `dir`.
+fn placed_tunnel(
+    files: BTreeMap<String, Option<Vec<u8>>>,
+    dir: &Path,
+) -> anyhow::Result<Vec<(PathBuf, Vec<u8>)>> {
+    let bad = |e: &str| anyhow::anyhow!("{TUNNEL}/{TUNNEL_CONFIG}: {e}");
+    let config = files.get(TUNNEL_CONFIG).cloned().flatten();
+    let config =
+        String::from_utf8(config.ok_or_else(|| bad("missing"))?).map_err(|_| bad("not UTF-8"))?;
+    let (_, creds) = credentials_file(&config).map_err(|e| bad(&e))?;
+    let name = Path::new(&creds).file_name().and_then(|n| n.to_str());
+    let name = name.ok_or_else(|| bad("credentials-file has no file name"))?;
+    ensure!(
+        files.len() == 2 && files.contains_key(name),
+        "{TUNNEL}/: not config.yml and the credentials file it names"
+    );
+    let creds = dir.join(name);
+    let config =
+        with_credentials_file(&config, &creds.display().to_string()).map_err(|e| bad(&e))?;
+    let mut out = Vec::new();
+    for (n, bytes) in files {
+        let p = dir.join(&n);
+        ensure!(
+            !p.exists(),
+            "{} exists; move it aside to import",
+            p.display()
+        );
+        let bytes = if n == TUNNEL_CONFIG {
+            config.clone().into_bytes()
+        } else {
+            bytes.unwrap_or_default()
+        };
+        out.push((p, bytes));
+    }
+    Ok(out)
 }
 
 /// `slot = Some(v)`, unless it already was: `twice()`.
@@ -581,6 +711,11 @@ mod tests {
         assert_eq!(at("manifest.json", File), Ok(Some(Dest::Manifest)));
         assert_eq!(at("config/orchestrator.env", File), Ok(Some(Dest::Env)));
         assert_eq!(at("config", Dir), Ok(None));
+        assert_eq!(at("tunnel", Dir), Ok(None));
+        assert_eq!(
+            at("tunnel/config.yml", File),
+            Ok(Some(Dest::Tunnel("config.yml".into())))
+        );
         assert_eq!(at("", Dir), Ok(None));
         assert_eq!(at("state", Dir), under(Root::State, ""));
         assert_eq!(at("state/apps/x", File), under(Root::State, "apps/x"));
@@ -595,6 +730,8 @@ mod tests {
             ("config/orchestrator.env", Dir),
             ("state/builds/x", File),
             ("state/ledger.lock", File),
+            ("tunnel/a/b.json", File),
+            ("tunnel/x", Dir),
             ("other/x", File),
             (".bashrc", File),
         ] {
@@ -649,6 +786,7 @@ mod tests {
             state: abs("/here/state").into(),
             routines: abs("/here/routines").into(),
             env: abs("/here/orchestrator.env").into(),
+            tunnel: None,
         };
         let env = [
             format!("MIS_STATE_DIR={}", abs("/old/home/.local/state/mis")),
@@ -675,5 +813,22 @@ mod tests {
             ]
         );
         assert!(env_warnings("X=$HOME", &to, |_| true).is_err());
+    }
+
+    #[test]
+    fn a_tunnel_config_names_its_credentials_file() {
+        let config = "tunnel: abc\ncredentials-file: /old/.cloudflared/abc.json\n\ningress:\n  - service: http_status:404\n";
+        assert_eq!(
+            credentials_file(config),
+            Ok((1, "/old/.cloudflared/abc.json".into()))
+        );
+        let quoted = "credentials-file: \"/a b/abc.json\" # the tunnel's\n";
+        assert_eq!(credentials_file(quoted), Ok((0, "/a b/abc.json".into())));
+        // Only the top-level key.
+        assert!(credentials_file("ingress:\n  credentials-file: /x.json\n").is_err());
+        assert_eq!(
+            with_credentials_file(config, "/new/.cloudflared/abc.json").unwrap(),
+            config.replace("/old/", "/new/")
+        );
     }
 }

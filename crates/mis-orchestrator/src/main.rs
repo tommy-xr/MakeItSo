@@ -53,6 +53,10 @@ enum Cmd {
         /// As the orchestrator's; it goes in the archive. Default: ~/.config/mis/orchestrator.env.
         #[arg(long = "env-file", env = "MIS_ENV_FILE")]
         env_file: Option<PathBuf>,
+        /// Also carry the Cloudflare tunnel: ~/.cloudflared/config.yml and the credentials file
+        /// it names. Not the account cert.
+        #[arg(long)]
+        tunnel: bool,
     },
     /// Unpack an `export` archive into this machine's new install, then run doctor (exit 1 if
     /// it finds a failure).
@@ -295,11 +299,13 @@ fn main() -> anyhow::Result<()> {
     match cmd {
         Some(Cmd::Doctor { json, .. }) => doctor(&args, state_dir.as_deref(), json),
         Some(Cmd::Service { label, cmd }) => service(&label, cmd, &args, state_dir),
-        Some(Cmd::Export { file, env_file }) => {
-            export(&file, &install(&args, state_dir, env_file)?)
-        }
+        Some(Cmd::Export {
+            file,
+            env_file,
+            tunnel,
+        }) => export(&file, &install(&args, state_dir, env_file, tunnel)?),
         Some(Cmd::Import { file, env_file }) => {
-            import(&file, &install(&args, state_dir, env_file)?)
+            import(&file, &install(&args, state_dir, env_file, true)?)
         }
         None => tokio::runtime::Runtime::new()?.block_on(serve(args, state_dir)),
     }
@@ -342,11 +348,13 @@ fn service(
     }
 }
 
-/// This install's paths, as serve would use them; `env_file` as given, else the default.
+/// This install's paths, as serve would use them; `env_file` as given, else the default;
+/// `~/.cloudflared` if `tunnel`.
 fn install(
     args: &Args,
     state: Option<PathBuf>,
     env_file: Option<PathBuf>,
+    tunnel: bool,
 ) -> anyhow::Result<transfer::Paths> {
     let no_home =
         || anyhow::anyhow!("no home dir: set MIS_STATE_DIR, MIS_ROUTINES_DIR and --env-file");
@@ -354,7 +362,12 @@ fn install(
         state: state.ok_or_else(no_home)?,
         routines: (args.routines_dir.clone().or_else(default_routines_dir)).ok_or_else(no_home)?,
         env: env_file.or_else(default_env_file).ok_or_else(no_home)?,
+        tunnel: tunnel.then(tunnel_dir).flatten(),
     })
+}
+
+fn tunnel_dir() -> Option<PathBuf> {
+    Some(var("HOME")?.join(".cloudflared"))
 }
 
 fn export(file: &Path, from: &transfer::Paths) -> anyhow::Result<()> {
@@ -363,8 +376,16 @@ fn export(file: &Path, from: &transfer::Paths) -> anyhow::Result<()> {
     println!("  state dir: {}", from.state.display());
     println!("  routines:  {}", or_none(e.routines, &from.routines));
     println!("  env file:  {}", or_none(e.env, &from.env));
-    // The tunnel's config and credentials stay put: the new machine may not run it.
-    let dir = var("HOME").map(|h| h.join(".cloudflared"));
+    if !e.tunnel.is_empty() {
+        let shown: Vec<_> = e.tunnel.iter().map(|p| p.display().to_string()).collect();
+        println!("  tunnel:    {}", shown.join(", "));
+        println!(
+            "Never run the tunnel on both machines at once: stop it here before starting it there."
+        );
+        return Ok(());
+    }
+    // Without `--tunnel` its files stay put: the new machine may not run it.
+    let dir = tunnel_dir();
     let mut files: Vec<_> = (dir.iter().flat_map(std::fs::read_dir).flatten().flatten())
         .map(|e| e.path())
         .filter(|p| p.is_file())
@@ -377,6 +398,9 @@ fn export(file: &Path, from: &transfer::Paths) -> anyhow::Result<()> {
         (false, _) => files.iter().for_each(|f| println!("  {}", f.display())),
         (true, Some(d)) => println!("  (none in {})", d.display()),
         (true, None) => println!("  ~/.cloudflared"),
+    }
+    if !files.is_empty() {
+        println!("Or export with --tunnel: its config.yml and the credentials file it names.");
     }
     println!(
         "Never run the tunnel on both machines at once: stop it here before starting it there."
@@ -404,6 +428,10 @@ fn import(file: &Path, to: &transfer::Paths) -> anyhow::Result<()> {
     println!("  state dir: {}", to.state.display());
     println!("  routines:  {}", or_none(i.routines, &to.routines));
     println!("  env file:  {}", or_none(i.env, &to.env));
+    if !i.tunnel.is_empty() {
+        let shown: Vec<_> = i.tunnel.iter().map(|p| p.display().to_string()).collect();
+        println!("  tunnel:    {}", shown.join(", "));
+    }
     match &i.warnings {
         Ok(w) => {
             (w.iter()).for_each(|w| println!("warning: {w}; change it in {}", to.env.display()))
@@ -413,6 +441,11 @@ fn import(file: &Path, to: &transfer::Paths) -> anyhow::Result<()> {
     println!("\nNext:");
     println!("  - Run a worker on this machine: app tasks go to the orchestrator's host first.");
     println!("  - On the old machine, point worker.toml's url here, or stop its worker.");
+    if !i.tunnel.is_empty() {
+        println!(
+            "  - Stop the tunnel on the old machine, then start it here: cloudflared tunnel run"
+        );
+    }
     println!("\nmis-orchestrator doctor:");
     // Of what was placed, whatever the env file says.
     let mut doctor = std::process::Command::new(std::env::current_exe()?);
