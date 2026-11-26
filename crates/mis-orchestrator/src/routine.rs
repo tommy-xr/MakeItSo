@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use chrono::TimeZone;
 use mis_types::{
     MergeApprove, MergeMethod, MergePolicy, MergeRule, NewRoutine, RoutineMode, RoutineView,
-    TaskId, TaskStatus, MERGE_TOOL,
+    TaskId, TaskStatus, MERGE_TOOL, SCRIPT_HARNESS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -93,11 +93,16 @@ impl Routine {
         s.paused.unwrap_or(self.paused)
     }
 
-    /// Unix millis of its next run, from its last one; None while paused (or a
-    /// cron that never matches). Already past means due now. Runs that would have
-    /// started before `s.since` or before the last run `ended` are skipped.
+    /// Not running: paused, or a script not live. Time spent idle is never caught up.
+    pub fn idle(&self, s: &State) -> bool {
+        self.paused(s) || (self.is_script() && self.mode(s) != RoutineMode::Live)
+    }
+
+    /// Unix millis of its next run, from its last one; None while [`Routine::idle`]
+    /// (or a cron that never matches). Already past means due now. Runs that would
+    /// have started before `s.since` or before the last run `ended` are skipped.
     pub fn next_at<Tz: TimeZone>(&self, s: &State, ended: Option<u64>, tz: &Tz) -> Option<u64> {
-        if self.paused(s) {
+        if self.idle(s) {
             return None;
         }
         let floor = s.since.max(ended.unwrap_or(0));
@@ -110,6 +115,11 @@ impl Routine {
             }
             (Trigger::Cron(c), last) => c.next_after(last.unwrap_or(0).max(floor), tz),
         }
+    }
+
+    /// `harness: script`: its prompt is a shell script, run as is once live.
+    pub fn is_script(&self) -> bool {
+        self.harness.as_deref() == Some(SCRIPT_HARNESS)
     }
 
     /// Report unless the file says `act: true`; then dry run until switched live,
@@ -149,7 +159,11 @@ impl Routine {
 
     /// The prompt a run in `mode` gets: one paragraph saying what it may do, then
     /// the file's. Runs start unattended, so they merge only through `merge_pr`.
+    /// A script's is the script.
     pub fn run_prompt(&self, mode: RoutineMode) -> String {
+        if self.is_script() {
+            return self.prompt.clone();
+        }
         let tool = self.merge.is_some();
         let rules = match mode {
             RoutineMode::Report => "(scheduled run, report only)\n\
@@ -316,6 +330,8 @@ pub fn parse_all(files: Vec<(String, Result<String, String>)>) -> Vec<Def> {
 /// the worker, as for tasks: absolute or under its root; no `~`), `paused`, `act`
 /// (may act once switched live; see [`Routine::mode`]), and `merge:` with its keys
 /// on indented lines below (see [`parse_merge`]). ` #` starts a comment.
+/// `harness: script` makes the prompt a shell script: it always acts (so runs
+/// only once live), needs a `worker`, and takes no `model` or `merge`.
 pub fn parse(file: &str, text: &str) -> Result<Routine, String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut lines = text.split_inclusive('\n');
@@ -401,7 +417,20 @@ pub fn parse(file: &str, text: &str) -> Result<Routine, String> {
         Some("true") => Ok(true),
         Some(v) => Err(format!("{k} `{v}`: want true or false")),
     };
-    let (paused, act) = (flag("paused")?, flag("act")?);
+    let (paused, mut act) = (flag("paused")?, flag("act")?);
+    if get("harness").as_deref() == Some(SCRIPT_HARNESS) {
+        if get("act").is_some() && !act {
+            return Err("scripts always act: drop `act: false`".into());
+        }
+        if get("model").is_some() || merge.is_some() {
+            return Err("scripts take no `model` or `merge`".into());
+        }
+        // A script depends on its machine: approving it approves where it runs.
+        if get("worker").is_none() {
+            return Err("scripts need a `worker`".into());
+        }
+        act = true;
+    }
     let merge = merge.map(|m| parse_merge(&m)).transpose()?;
     if merge.is_some() && !act {
         return Err("merge needs `act: true`: report-only runs never merge".into());
@@ -726,6 +755,18 @@ mod tests {
                 "want `key: value`",
             ),
             ("---\nevery: 6h\n---\n \n", "no prompt"),
+            (
+                "---\nevery: 6h\nharness: script\nworker: m\nact: false\n---\nls",
+                "always act",
+            ),
+            (
+                "---\nevery: 6h\nharness: script\nworker: m\nmodel: haiku\n---\nls",
+                "no `model`",
+            ),
+            (
+                "---\nevery: 6h\nharness: script\n---\nls",
+                "need a `worker`",
+            ),
         ] {
             let err = parse("r.md", text).unwrap_err();
             assert!(err.contains(why), "{text:?}: {err}");
@@ -883,6 +924,26 @@ mod tests {
         assert_eq!(v.last_status, Some(TaskStatus::Done));
         assert_eq!(fmt_every(90 * MINUTE_MS), "90m");
         assert_eq!(fmt_every(DAY_MS), "1d");
+    }
+
+    #[test]
+    fn scripts_act_run_only_live_and_run_as_written() {
+        let r = parse(
+            "m.md",
+            "---\nevery: 1h\nharness: script\nworker: m\n---\n#!/bin/sh\nls\n",
+        )
+        .unwrap();
+        assert!(r.is_script() && r.act);
+        let mut s = State::new(0);
+        assert_eq!(r.mode(&s), RoutineMode::DryRun);
+        assert_eq!(
+            r.next_at(&s, None, &chrono::Utc),
+            None,
+            "never due until live"
+        );
+        (s.live, s.live_pin) = (true, Some(r.pin()));
+        assert_eq!(r.next_at(&s, None, &chrono::Utc), Some(0));
+        assert_eq!(r.run_prompt(RoutineMode::Live), "#!/bin/sh\nls");
     }
 
     #[test]

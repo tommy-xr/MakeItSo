@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 
 /// Env var set on agent processes: the id of the task they are running.
 pub const TASK_ENV: &str = "MIS_TASK";
+/// Harness of a script routine's runs: the prompt is a shell script the worker
+/// runs as is, no agent. Every worker runs it; only routines start it.
+pub const SCRIPT_HARNESS: &str = "script";
 use uuid::Uuid;
 
 mod access;

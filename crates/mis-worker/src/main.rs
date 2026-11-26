@@ -958,10 +958,6 @@ async fn run(
             },
         )
     };
-    let Some(agent) = ctx.agents.iter().find(|a| a.name() == task.harness) else {
-        let _ = tx.send(fail(format!("no harness {}", task.harness))).await;
-        return;
-    };
     // A session on this disk runs in its own folder, on its own model.
     let (cwd, model) = match &task.send_to {
         Some(to) => {
@@ -984,6 +980,36 @@ async fn run(
             let _ = tx.send(fail(why)).await;
             return;
         }
+    };
+    // A script routine runs as written: no tools server, hints, attachments or diff.
+    if task.harness == SCRIPT_HARNESS {
+        // A script can't be held to reads: one that may only read doesn't run.
+        if task.read_only {
+            let _ = tx.send(fail("a script can't run read-only".into())).await;
+            return;
+        }
+        let (atx, mut arx) = mpsc::channel(64);
+        let fwd = async {
+            while let Some(ev) = arx.recv().await {
+                if tx.send((id, ev)).await.is_err() {
+                    break;
+                }
+            }
+        };
+        let opts = mis_agent::RunOpts {
+            cwd: Some(&cwd),
+            ..Default::default()
+        };
+        let script = mis_agent::script::Script;
+        tokio::join!(
+            mis_agent::run_guarded(&script, id, &task.prompt, opts, atx),
+            fwd
+        );
+        return;
+    }
+    let Some(agent) = ctx.agents.iter().find(|a| a.name() == task.harness) else {
+        let _ = tx.send(fail(format!("no harness {}", task.harness))).await;
+        return;
     };
     let image_dir = image_dir(id);
     let written = match images.is_empty() && docs.is_empty() {
