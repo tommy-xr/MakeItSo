@@ -153,6 +153,8 @@
 .mis-pop hr{border:0;border-top:1px solid var(--l);margin:4px 2px}
 .mis-veil{position:fixed;inset:0;z-index:2147483646;cursor:crosshair;background:rgba(0,0,0,.12);touch-action:none}
 .mis-ring{position:fixed;display:none;pointer-events:none;border:2px solid #fff;box-shadow:0 0 0 2px rgba(0,0,0,.55)}
+.mis-lasso{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible}
+.mis-lasso path{fill:rgba(255,255,255,.12);stroke-linecap:round;stroke-linejoin:round}
 .mis-hint{position:fixed;left:50%;top:calc(10px + env(safe-area-inset-top));transform:translateX(-50%);padding:6px 12px;border-radius:999px;white-space:nowrap;background:var(--s);color:var(--t);box-shadow:0 0 0 1px var(--l);font:13px/1.4 system-ui,sans-serif;z-index:2147483647}
 .mis-panel{position:fixed;left:8px;right:8px;top:calc(8px + env(safe-area-inset-top));z-index:2147483647;display:grid;gap:8px;padding:12px;border-radius:14px;background:var(--s);color:var(--t);box-shadow:0 0 0 1px var(--l),0 8px 24px rgba(0,0,0,.25);font:14px/1.4 system-ui,sans-serif}
 .mis-panel textarea{box-sizing:border-box;width:100%;padding:8px;border:1px solid var(--l);border-radius:8px;background:transparent;color:inherit;font:16px/1.4 system-ui,sans-serif}
@@ -286,21 +288,31 @@
       const veil = make('div', 'mis-veil mis-ui'), ring = make('div', 'mis-ring'), hint = make('div', 'mis-hint', 'Tap what to change, or draw around it');
       veil.append(ring, hint);
       document.body.append(veil);
-      const show = (r, round) => Object.assign(ring.style, { display: 'block', left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px`, borderRadius: round ? '50%' : '8px' });
-      let from = null;
-      veil.onpointerdown = (e) => { from = [e.clientX, e.clientY]; veil.setPointerCapture(e.pointerId); };
-      veil.onpointermove = (e) => { if (from) show(box(from, [e.clientX, e.clientY]), true); };
-      veil.onpointercancel = () => { from = null; ring.style.display = 'none'; };
+      const show = (r) => Object.assign(ring.style, { display: 'block', left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px`, borderRadius: '8px' });
+      // The line follows the finger: a dark edge under a white one reads on any page.
+      const ns = 'http://www.w3.org/2000/svg', lasso = document.createElementNS(ns, 'svg'), edge = document.createElementNS(ns, 'path'), line = document.createElementNS(ns, 'path');
+      lasso.setAttribute('class', 'mis-lasso');
+      edge.setAttribute('stroke', 'rgba(0,0,0,.55)'); edge.setAttribute('stroke-width', '6');
+      line.setAttribute('stroke', '#fff'); line.setAttribute('stroke-width', '3');
+      lasso.append(edge, line);
+      veil.append(lasso);
+      let pts = null;
+      const draw = () => { const d = 'M' + pts.map((q) => q.join(' ')).join('L'); edge.setAttribute('d', d); line.setAttribute('d', d); };
+      veil.onpointerdown = (e) => { pts = [[e.clientX, e.clientY]]; veil.setPointerCapture(e.pointerId); };
+      veil.onpointermove = (e) => { if (pts) { pts.push([e.clientX, e.clientY]); draw(); } };
+      veil.onpointercancel = () => { pts = null; edge.removeAttribute('d'); line.removeAttribute('d'); };
       veil.onpointerup = (e) => {
-        if (!from) return;
-        const drawn = box(from, [e.clientX, e.clientY]), tap = drawn.w < 12 && drawn.h < 12;
-        from = null;
+        if (!pts) return;
+        pts.push([e.clientX, e.clientY]);
+        const drawn = bounds(pts), tap = drawn.w < 12 && drawn.h < 12;
+        if (tap) lasso.remove(); else { pts.push(pts[0]); draw(); } // close the loop
+        pts = null;
         veil.style.pointerEvents = 'none'; // so the page, not the veil, is under the point
         const el = document.elementFromPoint(tap ? e.clientX : drawn.x + drawn.w / 2, tap ? e.clientY : drawn.y + drawn.h / 2);
         veil.style.pointerEvents = '';
         const b = tap && el && el.getBoundingClientRect();
         const rect = b ? { x: b.x, y: b.y, w: b.width, h: b.height } : drawn;
-        show(rect, !tap);
+        if (tap) show(rect);
         hint.remove();
         veil.onpointerdown = veil.onpointermove = veil.onpointerup = veil.onpointercancel = null;
         // Page coordinates, so a scrolled view is found again.
@@ -445,9 +457,11 @@
     setTimeout(() => t.remove(), 3000);
   }
 
-  // The rectangle between two points.
-  function box([x1, y1], [x2, y2]) {
-    return { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
+  // The rectangle around points.
+  function bounds(pts) {
+    const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
+    const x = Math.min(...xs), y = Math.min(...ys);
+    return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
   }
 
   // A selector a test can find again: `main > section:nth-of-type(2) > div.chart`, or from an id.

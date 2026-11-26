@@ -587,6 +587,11 @@ impl Apps {
             .is_ok_and(|p| p.created_by == Some(thread))
     }
 
+    /// `slug` has release `n` (every release is kept): guards against a number that never was.
+    pub fn has_release(&self, slug: &str, n: u32) -> bool {
+        self.releases_dir(slug).join(n.to_string()).is_dir()
+    }
+
     /// `slug` has a release.
     pub fn exists(&self, slug: &str) -> bool {
         !self.release_ns(slug).is_empty()

@@ -33,6 +33,9 @@ pub struct Member {
     pub role: AppRole,
     /// The owner is trying the app's draft, this release: its files and a copy of the records.
     pub draft: Option<u32>,
+    /// A feedback post from a page still on a draft replaced since: this release, which only
+    /// [`feedback_release`] reads. It serves nothing.
+    pub replaced: Option<u32>,
     /// Not a page: a file one of the app's files asks for, this one (its Referer, under
     /// `/a/<slug>/`). See `apps_http::draft_only`.
     pub loaded_by: Option<String>,
@@ -156,6 +159,30 @@ pub fn draft_of(asked: Option<u32>, api: bool, role: AppRole, current: Option<u3
         Some(n) if may_try(role) && current == Some(n) => Serve::Draft(n),
         Some(_) if api => Serve::Gone,
         _ => Serve::Live,
+    }
+}
+
+/// `path` takes a request whose page names a draft replaced since ([`Serve::Gone`]): only
+/// feedback, so what someone wrote about the version in front of them isn't lost.
+pub fn takes_replaced_draft(path: &str, slug: &str) -> bool {
+    path.strip_prefix("/a/").and_then(|p| p.strip_prefix(slug)) == Some("/api/v1/feedback")
+}
+
+/// The release feedback is about, and whether it was a draft: the draft served, else the
+/// release a replaced draft's page names if it exists (`kept`; it is a draft unless it is now
+/// live, i.e. was published), else `live`.
+pub fn feedback_release(
+    draft: Option<u32>,
+    replaced: Option<u32>,
+    kept: impl Fn(u32) -> bool,
+    live: Option<u32>,
+) -> (Option<u32>, bool) {
+    if let Some(n) = draft {
+        return (Some(n), true);
+    }
+    match replaced.filter(|&n| kept(n)) {
+        Some(n) => (Some(n), Some(n) != live),
+        None => (live, false),
     }
 }
 
@@ -300,8 +327,39 @@ pub fn app_of(path: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
+
+    #[test]
+    fn only_feedback_takes_a_replaced_draft_and_it_is_about_that_release_while_kept() {
+        assert!(takes_replaced_draft("/a/gifts/api/v1/feedback", "gifts"));
+        for p in [
+            "/a/gifts/api/v1/mutations",
+            "/a/gifts/api/v1/feedbackx",
+            "/a/gifts2/api/v1/feedback",
+            "/a/gift/api/v1/feedback",
+        ] {
+            assert!(!takes_replaced_draft(p, "gifts"), "{p}");
+        }
+        let kept = |n| n == 3;
+        assert_eq!(
+            feedback_release(Some(4), None, kept, Some(2)),
+            (Some(4), true)
+        );
+        assert_eq!(
+            feedback_release(None, Some(3), kept, Some(2)),
+            (Some(3), true)
+        );
+        assert_eq!(
+            feedback_release(None, Some(5), kept, Some(2)),
+            (Some(2), false)
+        );
+        assert_eq!(feedback_release(None, None, kept, None), (None, false));
+        // A draft published since is live now, not a draft.
+        assert_eq!(
+            feedback_release(None, Some(3), kept, Some(3)),
+            (Some(3), false)
+        );
+    }
 
     #[test]
     fn a_preview_is_its_url_and_the_files_its_page_loads() {

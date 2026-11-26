@@ -7692,6 +7692,22 @@ async fn feedback_on_a_draft_continues_its_thread_and_says_when_its_draft_is_rea
         201
     );
     me_until(&apps, "", r#""state":"draft_ready","release":3"#).await;
+
+    // A page still on v2 (replaced by v3): its feedback is taken, about v2; other calls aren't.
+    finish_seen(&mis, &mut worker, reply.id).await;
+    let (status, _) = app_post(&apps, "/a/demo/api/v1/mutations", in_draft, "{}").await;
+    assert_eq!(status, 409);
+    let (status, why) = app_post(&apps, path, in_draft, &feedback_body("Kept the old bars?")).await;
+    assert_eq!(status, 202, "{why}");
+    let OrchMsg::Assign { task: late, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    assert!(
+        late.prompt
+            .starts_with("Feedback on `demo` v2 (the draft) from local:"),
+        "{}",
+        late.prompt
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
