@@ -300,7 +300,7 @@
       const draw = () => { const d = 'M' + pts.map((q) => q.join(' ')).join('L'); edge.setAttribute('d', d); line.setAttribute('d', d); };
       veil.onpointerdown = (e) => { pts = [[e.clientX, e.clientY]]; veil.setPointerCapture(e.pointerId); };
       veil.onpointermove = (e) => { if (pts) { pts.push([e.clientX, e.clientY]); draw(); } };
-      veil.onpointercancel = () => { pts = null; lasso.remove(); };
+      veil.onpointercancel = () => { pts = null; edge.removeAttribute('d'); line.removeAttribute('d'); };
       veil.onpointerup = (e) => {
         if (!pts) return;
         pts.push([e.clientX, e.clientY]);
