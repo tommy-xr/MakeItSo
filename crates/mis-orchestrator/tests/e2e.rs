@@ -4342,6 +4342,7 @@ async fn refused_everywhere_else(base: &str, headers: &[(&'static str, &str)]) {
         ("GET", "/api/apps/a/backups".into()),
         ("POST", "/api/apps/a/backups".into()),
         ("POST", "/api/apps/a/restore".into()),
+        ("POST", "/api/apps/a/seed".into()),
         ("GET", "/api/boards/app/_new".into()),
         ("POST", "/api/boards/app/a/send".into()),
         ("GET", "/api/sessions".into()),
@@ -6684,6 +6685,76 @@ async fn app_backups_restore_and_the_pre_restore_one_undoes_it() {
     use BackupKind::*;
     assert_eq!(kinds, [Manual, PreRestore, PreRestore]);
     assert!(list.iter().all(|b| b.size > 0));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn seeding_adds_starter_records_once_and_only_for_the_owner() {
+    let (mis, apps, dir) = live_demo(with_read_token(), Default::default()).await;
+    // 150 notes (two batches) and a list; invented, in an export's shape (extra fields ignored).
+    let notes: Vec<_> = (0..150)
+        .map(|i| serde_json::json!({"id": format!("n{i}"), "rev": 9, "data": {"v": 1, "n": i}}))
+        .collect();
+    let seed = serde_json::json!({
+        "version": 1,
+        "shared": {"notes": notes, "lists": [{"id": "l1", "data": {"v": 1}}]},
+        "me": {"notes": [{"id": "mine", "data": {"v": 1}}]},
+    })
+    .to_string();
+    // A record already there stays as it is.
+    let op = put_op("shared", "n0", 0, 42.into());
+    assert_eq!(app_post(&apps, MUTATIONS, "", &op).await.0, 200);
+    // Every shared note (`demo_notes` is one page): (id, data), by id.
+    let all_notes = || async {
+        let (status, _, body) = app_get(&apps, "/a/demo/api/v1/export", "").await;
+        assert_eq!(status, 200, "{body}");
+        let export: Export = serde_json::from_str(&body).unwrap();
+        let mut notes: Vec<_> = (export.shared.get("notes").cloned().unwrap_or_default())
+            .into_iter()
+            .map(|e| (e.id, e.data))
+            .collect();
+        notes.sort_by(|a, b| a.0.cmp(&b.0));
+        notes
+    };
+    let seed_demo = |token: &'static str, body: String| {
+        let mis = mis.clone();
+        async move { post_json(&mis, "/api/apps/demo/seed", token, &body).await }
+    };
+    // Not the owner: refused, nothing written.
+    assert_eq!(seed_demo("r", seed.clone()).await.0, 403);
+    assert_eq!(all_notes().await.len(), 1);
+    let (status, body) = seed_demo("s", seed.clone()).await;
+    assert_eq!(status, 200, "{body}");
+    let done: Seeded = serde_json::from_str(&body).unwrap();
+    assert_eq!((done.added, done.present), (150, 1));
+    let notes = all_notes().await;
+    assert_eq!(notes.len(), 150);
+    assert!(notes.contains(&("n0".into(), 42.into())));
+    // Again: nothing added, nothing changed; the `me` space was never touched.
+    let (status, body) = seed_demo("s", seed).await;
+    assert_eq!(status, 200, "{body}");
+    let done: Seeded = serde_json::from_str(&body).unwrap();
+    assert_eq!((done.added, done.present), (0, 151));
+    assert_eq!(all_notes().await, notes);
+    // A seeded record someone removed stays removed on a rerun.
+    let gone = serde_json::json!({"op": "remove", "space": "shared", "collection": "notes",
+        "id": "n1", "rev": 1})
+    .to_string();
+    assert_eq!(app_post(&apps, MUTATIONS, "", &gone).await.0, 200);
+    let notes = all_notes().await;
+    assert_eq!(notes.len(), 149);
+    let again = serde_json::json!({"shared": {"notes": [{"id": "n1", "data": 1}]}}).to_string();
+    let (_, body) = seed_demo("s", again).await;
+    assert_eq!(serde_json::from_str::<Seeded>(&body).unwrap().added, 0);
+    assert_eq!(all_notes().await, notes);
+    // Bad keys are refused whole; no such app is a 404.
+    let bad = r#"{"shared": {"notes": [{"id": "ok", "data": 1}, {"id": "a/b", "data": 1}]}}"#;
+    assert_eq!(seed_demo("s", bad.into()).await.0, 400);
+    assert_eq!(all_notes().await, notes);
+    let twice = r#"{"shared": {"x": [{"id": "a", "data": 1}, {"id": "a", "data": 2}]}}"#;
+    assert_eq!(seed_demo("s", twice.into()).await.0, 400);
+    let (status, _) = post_json(&mis, "/api/apps/nope/seed", "s", "{\"shared\": {}}").await;
+    assert_eq!(status, 404);
     let _ = std::fs::remove_dir_all(dir);
 }
 

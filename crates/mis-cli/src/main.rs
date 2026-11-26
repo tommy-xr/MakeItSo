@@ -203,6 +203,13 @@ enum AppsCmd {
         #[arg(long)]
         with_policy: bool,
     },
+    /// Add starter records to the app's `shared` space from `file`: JSON `{"shared":
+    /// {"<collection>": [{"id", "data"}]}}`, the shape of an app export. Ids the app already
+    /// has are left alone, so it is safe to run again.
+    Seed {
+        slug: String,
+        file: std::path::PathBuf,
+    },
 }
 
 /// [`AppRole`], for clap.
@@ -384,6 +391,16 @@ async fn apps(args: &Args, cmd: &AppsCmd) -> Result<()> {
             if let Some(pre) = r.pre_restore {
                 println!("undo: mis apps restore {slug} {}", pre.name);
             }
+        }
+        AppsCmd::Seed { slug, file } => {
+            let body =
+                std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+            let req = client
+                .post(format!("{base}/api/apps/{slug}/seed"))
+                .header("content-type", "application/json")
+                .body(body);
+            let r: mis_types::Seeded = serde_json::from_str(&call(args, req).await?)?;
+            println!("{slug}: added {}, already there {}", r.added, r.present);
         }
     }
     Ok(())

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use mis_types::{Envelope, Mutation, Page, RecordQuery, Space};
+use mis_types::{Envelope, Mutation, Page, RecordQuery, Seed, Seeded, Space, MAX_BATCH};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::records::{self, Change, Compiled, Current, Refusal};
@@ -166,6 +166,60 @@ impl Records {
         }
         tx.commit()?;
         Ok(Ok(records))
+    }
+
+    /// Create each `seed` record whose id holds none, by `actor` at `now`, [`MAX_BATCH`] to a
+    /// transaction. Ids that hold one are counted, not touched, so a second run adds nothing.
+    /// Keys and sizes are checked first; the app's size cap, hit later, leaves earlier batches
+    /// written (a rerun carries on). A record created between the check and the write is a
+    /// `Conflict`, nothing overwritten.
+    pub fn seed(
+        &self,
+        slug: &str,
+        seed: &Seed,
+        actor: &str,
+        now: u64,
+    ) -> anyhow::Result<Result<Seeded, Refusal>> {
+        let (mut ops, mut present) = (vec![], 0);
+        for (collection, recs) in &seed.shared {
+            let mut ids = std::collections::HashSet::new();
+            for r in recs {
+                if let Err(e) = records::check_key(collection, &r.id) {
+                    return Ok(Err(e));
+                }
+                if !ids.insert(&r.id) {
+                    let why = format!("{collection}/{} is in the seed twice", r.id);
+                    return Ok(Err(Refusal::Invalid(why)));
+                }
+                if r.data.to_string().len() > records::MAX_DATA {
+                    let why = format!("{collection}/{} is over {} bytes", r.id, records::MAX_DATA);
+                    return Ok(Err(Refusal::TooLarge(why)));
+                }
+                let db = self.db(slug)?;
+                let current = read(&db.lock().unwrap(), Space::Shared, "", collection, &r.id)?;
+                // A removed record counts: a rerun doesn't bring back what someone deleted.
+                if !matches!(current, Current::Gone(0)) {
+                    present += 1;
+                } else {
+                    ops.push(Mutation::Put {
+                        space: Space::Shared,
+                        collection: collection.clone(),
+                        id: r.id.clone(),
+                        rev: 0,
+                        data: r.data.clone(),
+                    });
+                }
+            }
+        }
+        for batch in ops.chunks(MAX_BATCH) {
+            if let Err((_, refused)) = self.mutate_all(slug, batch, actor, now)? {
+                return Ok(Err(refused));
+            }
+        }
+        Ok(Ok(Seeded {
+            added: ops.len(),
+            present,
+        }))
     }
 
     /// One op inside `tx`, which sees the batch's earlier writes.

@@ -89,6 +89,11 @@ own page.
   collection, [{id, data}])`: create-only in batches of 100, skipping ids already there
   (`{added, present}`): imports. `mis.isConflict(e)`: a 409. `mis.errorText(e)`: what to show
   when a write fails ("You can only view this app." for a 403).
+- Starter records: to ship data with a new app, put an export-shaped file (`{"shared":
+  {"<collection>": [{"id", "data"}]}}`, deterministic ids) in the app's seed folder and have the
+  owner run `mis apps seed <slug> <file>`: create-only, so ids already there (or since removed) are left alone and
+  it can be run again (`added`, `already there`). `shared` only; `me` records can't be seeded, and
+  the app must not need a first-run import of its own.
 - The frame is the SDK's: `mis.shell({title, sections: [{id, label, tab?}], onNavigate})` draws
   the header (the section's label, View only for viewers, the `⋯` platform menu), bottom tabs
   for `tab: true` sections (two or more), and puts the others (Settings, Import) in the menu
