@@ -48,6 +48,11 @@ impl Ledger {
     /// Run `r` now, as a task. Err: why it can't (e.g. its worker is offline),
     /// also kept as the routine's error. Callers check `routine_runs` first.
     pub fn start_routine(&mut self, r: &Routine) -> Result<(TaskId, Vec<Effect>), String> {
+        // Refused, not failed: the routine keeps no error for it.
+        let s = self.routines.get(&r.name);
+        if r.is_script() && r.mode(s.unwrap_or(&State::default())) != RoutineMode::Live {
+            return Err(format!("{} is a script: it runs once live", r.name));
+        }
         let (id, mut effects) = self.begin_routine(r)?;
         effects.push(Effect::Broadcast(self.status()));
         Ok((id, effects))
@@ -75,9 +80,6 @@ impl Ledger {
     fn enqueue_routine(&mut self, r: &Routine) -> Result<(TaskId, Vec<Effect>), String> {
         let harness = r.harness.clone().unwrap_or_else(|| DEFAULT_HARNESS.into());
         let mode = r.mode(self.routines.get(&r.name).unwrap_or(&State::default()));
-        if r.is_script() && mode != RoutineMode::Live {
-            return Err(format!("{} is a script: it runs once live", r.name));
-        }
         let task = Task {
             id: Uuid::new_v4(),
             prompt: r.run_prompt(mode),
@@ -517,6 +519,7 @@ mod tests {
         let r = ds[0].clone().unwrap();
         assert!(l.routine_tick(&ds, &Utc).is_empty(), "not live: never due");
         assert!(l.start_routine(&r).unwrap_err().contains("runs once live"));
+        assert_eq!(l.routine_views(&ds, &Utc)[0].error, None);
         l.set_live(&r, true).unwrap();
         // The worker lists only claude, yet runs it.
         let eff = l.routine_tick(&ds, &Utc);
