@@ -1447,6 +1447,7 @@ mod tests {
             tokens_in: None,
             tokens_out: None,
             activity: String::new(),
+            activity_at: None,
             parent: None,
             links: vec![],
             evidence: vec![],
