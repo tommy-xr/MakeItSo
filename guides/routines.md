@@ -1,6 +1,6 @@
 ---
 name: routines
-description: Write a Make It So routine (a Markdown file whose prompt MIS runs as a task on a schedule), covering its frontmatter keys, every/cron schedules, report, dry-run and live modes, and merging PRs through merge_pr. Use when asked to add, change or debug a routine.
+description: Write a Make It So routine (a Markdown file whose prompt MIS runs as a task on a schedule), covering its frontmatter keys, every/cron schedules, report, dry-run and live modes, script routines (a shell script run with no agent), and merging PRs through merge_pr. Use when asked to add, change or debug a routine.
 ---
 
 # Make It So routines
@@ -15,7 +15,7 @@ with why a file is bad (a bad file never runs).
 ```markdown
 ---
 every: 6h                 # or cron: "0 9 * * 1-5"; exactly one of the two
-harness: claude           # optional; default claude (or codex)
+harness: claude           # optional; default claude (or codex, or script: see Scripts)
 model: sonnet             # optional, passed as is; default the harness's
 worker: build-mac         # optional: only this worker runs it (its name or hostname)
 cwd: code/make-it-so      # optional: folder on the worker (see below)
@@ -60,6 +60,18 @@ Every run's prompt starts with MIS's rules for its mode; write the file's prompt
   `cwd` drops it back to dry run. `mis routines dry-run <name>` does that by hand.
 - No run may push tags, create releases, or read or print secrets; none merges but through
   `merge_pr`.
+
+## Scripts
+
+With `harness: script` the body is a shell script, run as is on the worker in `cwd`, with no
+agent: directly if it starts with `#!`, else with `sh`. Use it when the job is a fixed set of
+commands (mirroring repos, a backup); keep prompts for judgment.
+
+- It always acts, so it never runs until the owner switches it live, and editing it (or its
+  placement) stops it again until they do. No dry run, `model` or `merge`.
+- The run's output (stdout and stderr, last 64 KiB) is the task's transcript; exit 0 is done,
+  anything else failed, with the last line printed as its summary.
+- A reply in its thread starts an agent with the run as context; it is never run as a script.
 
 ## Merging
 

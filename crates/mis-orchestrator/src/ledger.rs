@@ -735,7 +735,7 @@ impl Ledger {
             .workers
             .iter()
             .filter(|(wid, w)| t.pin.is_none_or(|p| p == **wid) && w.conn.is_some())
-            .filter(|(_, w)| w.info.harnesses.contains(&t.task.harness))
+            .filter(|(_, w)| runs_harness(&w.info, &t.task.harness))
             .map(|(wid, _)| self.exhausted_until(*wid, &t.task.harness))
             .collect();
         candidates?.into_iter().min()
@@ -792,6 +792,9 @@ impl Ledger {
         worker: Option<WorkerId>,
         unplanned: bool,
     ) -> Result<(TaskId, Vec<Effect>), String> {
+        if harness.as_deref() == Some(SCRIPT_HARNESS) {
+            return Err("scripts run only as routines".into());
+        }
         let prefer = self.default_harness.as_deref();
         let harness = match worker {
             // `known_fleet` is never empty.
@@ -927,7 +930,7 @@ impl Ledger {
     fn runs(&self, wid: WorkerId, harness: &str) -> Result<(), String> {
         let info = (self.seen.get(&wid))
             .ok_or_else(|| format!("unknown worker {}", &wid.to_string()[..8]))?;
-        match info.harnesses.iter().any(|h| h == harness) {
+        match runs_harness(info, harness) {
             true => Ok(()),
             false => Err(format!("{} doesn't run {harness}", self.host(wid))),
         }
@@ -936,7 +939,7 @@ impl Ledger {
     /// Online workers running `harness`: id and hostname.
     pub fn online_hosts(&self, harness: &str) -> Vec<(WorkerId, String)> {
         (self.workers.iter())
-            .filter(|(_, w)| w.conn.is_some() && w.info.harnesses.iter().any(|h| h == harness))
+            .filter(|(_, w)| w.conn.is_some() && runs_harness(&w.info, harness))
             .map(|(id, w)| (*id, w.info.hostname.clone()))
             .collect()
     }
@@ -1059,7 +1062,8 @@ impl Ledger {
         if !p.status.finished() {
             return Err(format!("task {short} hasn't finished; reply once it has"));
         }
-        let by_planner = p.task.harness == "planner" || p.task.harness.is_empty();
+        // The planner's answer, or a script run's (the reply isn't a script): a fresh task.
+        let fresh = matches!(p.task.harness.as_str(), "planner" | "" | SCRIPT_HARNESS);
         // An app task's thread stays one: its replies never merge either (the user approves the PR).
         let app = p.app;
         // Its own token, for the app the thread is bound to.
@@ -1078,7 +1082,7 @@ impl Ledger {
             MergeRule::Any
         };
         let (id, effects) = match (&p.session, p.worker) {
-            (Some(session), Some(wid)) if !by_planner => {
+            (Some(session), Some(wid)) if !fresh => {
                 // A reply continues this task's session, in its folder.
                 let task = Task {
                     id: Uuid::new_v4(),
@@ -1132,7 +1136,7 @@ impl Ledger {
             }
             _ => {
                 let prompt = reply_context(&p.task.prompt, p.summary.as_deref(), &text, false);
-                let (harness, model) = match by_planner {
+                let (harness, model) = match fresh {
                     true => (None, None),
                     false => (Some(p.task.harness.clone()), p.task.model.clone()),
                 };
@@ -1200,7 +1204,7 @@ impl Ledger {
         let host = &wid.to_string()[..8];
         let w = (self.workers.get(&wid).filter(|w| w.conn.is_some()))
             .ok_or_else(|| format!("worker {host} is offline"))?;
-        if !w.info.harnesses.contains(&entry.task.harness) {
+        if !runs_harness(&w.info, &entry.task.harness) {
             return Err(format!(
                 "worker {host} no longer runs {}",
                 entry.task.harness
@@ -1612,10 +1616,10 @@ impl Ledger {
                 }),
         );
         // Replies waiting for this worker can't run if it dropped their harness.
-        let harnesses = self.workers[&wid].info.harnesses.clone();
+        let info = self.workers[&wid].info.clone();
         effects.extend(
             self.fail_pinned(wid, "worker no longer runs this harness", |t| {
-                !harnesses.contains(&t.task.harness)
+                !runs_harness(&info, &t.task.harness)
             }),
         );
         effects.extend(self.schedule());
@@ -2055,7 +2059,7 @@ impl Ledger {
                 .filter(|(wid, w)| w.conn.is_some() && !self.is_busy(**wid))
                 .filter(|(_, w)| !matches!(w.update, WorkerUpdate::Pending { .. }))
                 .filter(|(wid, _)| self.exhausted_until(**wid, harness).is_none())
-                .find(|(_, w)| w.info.harnesses.contains(harness))
+                .find(|(_, w)| runs_harness(&w.info, harness))
                 .map(|(wid, w)| (*wid, w.conn.unwrap()));
             match picked {
                 Some((wid, conn)) => {
@@ -2139,6 +2143,11 @@ impl Ledger {
 }
 
 /// Every harness `workers` run, each with the models all of them that run it list.
+/// `info`'s worker runs `harness`: one it lists, or a script, which every worker runs.
+fn runs_harness(info: &WorkerInfo, harness: &str) -> bool {
+    harness == SCRIPT_HARNESS || info.harnesses.iter().any(|h| h == harness)
+}
+
 fn fleet_of<'a>(workers: impl IntoIterator<Item = &'a WorkerInfo>) -> plan::Fleet {
     let mut fleet = plan::Fleet::new();
     for info in workers {

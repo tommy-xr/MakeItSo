@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 pub mod claude;
 pub mod codex;
 pub mod deliver;
+pub mod script;
 
 pub type BoxFut<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 

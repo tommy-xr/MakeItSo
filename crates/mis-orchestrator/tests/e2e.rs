@@ -3464,6 +3464,59 @@ async fn routine_files_run_as_tagged_tasks_run_now_and_pause() {
 }
 
 #[tokio::test]
+async fn a_script_routine_runs_as_written_once_live() {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-script-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = "#!/bin/sh\ngit -C repo.git remote update --prune";
+    let text = format!("---\nevery: 1h\nharness: script\n---\n{script}\n");
+    std::fs::write(dir.join("mirror.md"), text).unwrap();
+    let every = std::time::Duration::from_millis(100);
+    let base = start_app(with_read_token().with_routines(dir.clone(), every)).await;
+    let mut req = format!("{base}/ws/worker").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("authorization", "Bearer s".parse().unwrap());
+    let (mut worker, _) = connect_async(req).await.unwrap();
+    let hello = WorkerMsg::Hello {
+        id: WorkerId::new_v4(),
+        info: info("claude"),
+        running: vec![],
+    };
+    send(&mut worker, &hello).await;
+    let OrchMsg::Welcome { .. } = recv(&mut worker).await else {
+        panic!("welcome")
+    };
+
+    // Not live: listed with nothing next, and running it now is refused.
+    let (_, body) = get_json(&base, "/api/routines", "r").await;
+    let list: Vec<RoutineView> = serde_json::from_str(&body).unwrap();
+    let r = &list[0];
+    assert_eq!(
+        (r.mode, r.next_at, r.harness.as_deref()),
+        (Some(RoutineMode::DryRun), None, Some(SCRIPT_HARNESS))
+    );
+    let run = "/api/routines/mirror/run";
+    let (status, body) = post_json(&base, run, "s", "").await;
+    assert_eq!(
+        (status, body.contains("runs once live")),
+        (503, true),
+        "{body}"
+    );
+
+    // Live: the worker gets the script itself, though it lists only claude.
+    let pin = serde_json::json!({ "pin": r.pin }).to_string();
+    let live = "/api/routines/mirror/live";
+    assert_eq!(post_json(&base, live, "s", &pin).await.0, 204);
+    let OrchMsg::Assign { task, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    assert_eq!(
+        (task.harness.as_str(), task.prompt.as_str(), task.read_only),
+        (SCRIPT_HARNESS, script, false)
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn new_routine_is_written_paused() {
     let dir = std::env::temp_dir().join(format!("mis-e2e-new-routine-{}", uuid::Uuid::new_v4()));
     let every = std::time::Duration::from_secs(60);

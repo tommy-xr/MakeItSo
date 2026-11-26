@@ -75,6 +75,9 @@ impl Ledger {
     fn enqueue_routine(&mut self, r: &Routine) -> Result<(TaskId, Vec<Effect>), String> {
         let harness = r.harness.clone().unwrap_or_else(|| DEFAULT_HARNESS.into());
         let mode = r.mode(self.routines.get(&r.name).unwrap_or(&State::default()));
+        if r.is_script() && mode != RoutineMode::Live {
+            return Err(format!("{} is a script: it runs once live", r.name));
+        }
         let task = Task {
             id: Uuid::new_v4(),
             prompt: r.run_prompt(mode),
@@ -93,7 +96,7 @@ impl Ledger {
                 (self.enqueue_pinned(wid, task, vec![])).map_err(|why| format!("{name}: {why}"))?
             }
             // Queued for a harness no worker runs, it would hold the routine busy for good.
-            None if !self.known_fleet().contains_key(&task.harness) => {
+            None if !r.is_script() && !self.known_fleet().contains_key(&task.harness) => {
                 return Err(format!("no worker runs {}", task.harness));
             }
             None => self.enqueue(super::TaskEntry::new(task, self.now_ms)),
@@ -504,6 +507,44 @@ mod tests {
         let report = defs("---\nevery: 1h\n---\nMerge green PRs.");
         assert!(l.forget_live(&report).0);
         assert!(!l.routines["r"].changed);
+    }
+
+    #[test]
+    fn a_script_runs_once_live_on_any_worker_as_written_and_replies_go_to_an_agent() {
+        let mut l = Ledger::default();
+        let wid = worker(&mut l, "mini");
+        let ds = defs("---\nevery: 1h\nharness: script\nworker: mini\n---\ngit fetch");
+        let r = ds[0].clone().unwrap();
+        assert!(l.routine_tick(&ds, &Utc).is_empty(), "not live: never due");
+        assert!(l.start_routine(&r).unwrap_err().contains("runs once live"));
+        l.set_live(&r, true).unwrap();
+        // The worker lists only claude, yet runs it.
+        let eff = l.routine_tick(&ds, &Utc);
+        let Some(Effect::Assign { task, .. }) = eff.first() else {
+            panic!("{eff:?}")
+        };
+        assert_eq!(
+            (task.harness.as_str(), task.prompt.as_str(), task.read_only),
+            (SCRIPT_HARNESS, "git fetch", false)
+        );
+        assert_eq!(task.merge, MergeRule::Never);
+        // A reply isn't run as a script: it starts an agent with the run as context.
+        let id = task.id;
+        (l.tasks[0].status, l.tasks[0].worker) = (TaskStatus::Done, Some(wid));
+        l.reply(id, "why did it fail?".into(), vec![], false)
+            .unwrap();
+        assert_eq!(l.tasks.last().unwrap().task.harness, "claude");
+        // People can't start one.
+        let err = l.submit_to(
+            "ls".into(),
+            None,
+            Some(SCRIPT_HARNESS.into()),
+            None,
+            vec![],
+            None,
+            true,
+        );
+        assert!(err.unwrap_err().contains("only as routines"));
     }
 
     #[test]
