@@ -168,16 +168,20 @@ pub fn takes_replaced_draft(path: &str, slug: &str) -> bool {
     path.strip_prefix("/a/").and_then(|p| p.strip_prefix(slug)) == Some("/api/v1/feedback")
 }
 
-/// The release feedback is about, and whether it was a draft: the draft served, else a draft
-/// replaced since while its release is `kept`, else `live`.
+/// The release feedback is about, and whether it was a draft: the draft served, else the
+/// release a replaced draft's page names if it exists (`kept`; it is a draft unless it is now
+/// live, i.e. was published), else `live`.
 pub fn feedback_release(
     draft: Option<u32>,
     replaced: Option<u32>,
     kept: impl Fn(u32) -> bool,
     live: Option<u32>,
 ) -> (Option<u32>, bool) {
-    match draft.or(replaced.filter(|&n| kept(n))) {
-        Some(n) => (Some(n), true),
+    if let Some(n) = draft {
+        return (Some(n), true);
+    }
+    match replaced.filter(|&n| kept(n)) {
+        Some(n) => (Some(n), Some(n) != live),
         None => (live, false),
     }
 }
@@ -323,6 +327,8 @@ pub fn app_of(path: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn only_feedback_takes_a_replaced_draft_and_it_is_about_that_release_while_kept() {
         assert!(takes_replaced_draft("/a/gifts/api/v1/feedback", "gifts"));
@@ -348,9 +354,12 @@ mod tests {
             (Some(2), false)
         );
         assert_eq!(feedback_release(None, None, kept, None), (None, false));
+        // A draft published since is live now, not a draft.
+        assert_eq!(
+            feedback_release(None, Some(3), kept, Some(3)),
+            (Some(3), false)
+        );
     }
-
-    use super::*;
 
     #[test]
     fn a_preview_is_its_url_and_the_files_its_page_loads() {
