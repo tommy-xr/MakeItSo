@@ -322,6 +322,7 @@ async fn admit(
         .and_then(|r| app_access::file_of(r, slug));
     // Read only when a draft is asked for.
     let current = asked.and_then(|_| apps.draft(slug)).map(|d| d.release);
+    let mut replaced = None;
     let draft = match app_access::draft_of(asked, api, role, current) {
         // A preview's own URL naming a draft that isn't (any more), or not for them: as Try it.
         Serve::Live if page && preview.flatten().is_some() => {
@@ -329,6 +330,11 @@ async fn admit(
         }
         Serve::Live => None,
         Serve::Draft(n) => Some(n),
+        // Served live; the release they saw is only noted.
+        Serve::Gone if app_access::takes_replaced_draft(req.uri().path(), slug) => {
+            replaced = asked.filter(|_| app_access::may_try(role));
+            None
+        }
         Serve::Gone => {
             let why = "this draft was published, discarded or replaced: reload the page";
             return Err((StatusCode::CONFLICT, why));
@@ -338,6 +344,7 @@ async fn admit(
         subject,
         role,
         draft,
+        replaced,
         loaded_by,
     });
     Ok(())
@@ -691,12 +698,18 @@ async fn feedback(
         return (StatusCode::SERVICE_UNAVAILABLE, "feedback is off").into_response();
     };
     let owner = m.role == AppRole::Owner;
+    let (release, draft) = app_access::feedback_release(
+        m.draft,
+        m.replaced,
+        |n| apps.has_release(&slug, n),
+        apps.active_n(&slug),
+    );
     let held = HeldFeedback {
         id: uuid::Uuid::new_v4(),
         at: crate::unix_ms(),
         by: m.subject.name().into(),
-        release: m.draft.or_else(|| apps.active_n(&slug)),
-        draft: m.draft.is_some(),
+        release,
+        draft,
         // The draft's thread, if the app has one: feedback continues it (captured now, so a
         // later draft from elsewhere doesn't get it).
         draft_task: apps.draft(&slug).map(|d| d.task),

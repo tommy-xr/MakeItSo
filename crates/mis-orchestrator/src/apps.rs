@@ -587,6 +587,11 @@ impl Apps {
             .is_ok_and(|p| p.created_by == Some(thread))
     }
 
+    /// `slug` keeps release `n`.
+    pub fn has_release(&self, slug: &str, n: u32) -> bool {
+        self.release_ns(slug).contains(&n)
+    }
+
     /// `slug` has a release.
     pub fn exists(&self, slug: &str) -> bool {
         !self.release_ns(slug).is_empty()
