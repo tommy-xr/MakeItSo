@@ -3468,7 +3468,7 @@ async fn a_script_routine_runs_as_written_once_live() {
     let dir = std::env::temp_dir().join(format!("mis-e2e-script-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let script = "#!/bin/sh\ngit -C repo.git remote update --prune";
-    let text = format!("---\nevery: 1h\nharness: script\n---\n{script}\n");
+    let text = format!("---\nevery: 1h\nharness: script\nworker: w\n---\n{script}\n");
     std::fs::write(dir.join("mirror.md"), text).unwrap();
     let every = std::time::Duration::from_millis(100);
     let base = start_app(with_read_token().with_routines(dir.clone(), every)).await;

@@ -1,16 +1,20 @@
 //! Script routines: the prompt is a shell script, run as is with no agent. The
 //! output becomes one `Text` block (fenced), its exit status the `Finished`.
 
+use std::time::Duration;
+
 use anyhow::Context;
+use mis_types::evidence::{bound_output, MAX_OUTPUT_BYTES};
 use mis_types::{AgentEvent, TaskId, SCRIPT_HARNESS, TASK_ENV};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use crate::{Agent, BoxFut, RunOpts};
 
-/// Output kept for the transcript: the last this many bytes.
-const KEEP_BYTES: usize = 64 * 1024;
+/// How long output is still read once the script exits: a process it left
+/// running may hold its pipes open for good.
+const DRAIN: Duration = Duration::from_secs(2);
 
 /// Runs scripts. Not in [`crate::available`]: every worker runs it, and only routines start it.
 pub struct Script;
@@ -24,8 +28,9 @@ impl Agent for Script {
         vec![]
     }
 
-    /// Writes the script to a temp file and runs it in `opts.cwd`: directly if it
-    /// starts with `#!` (unix), else with `sh`. Only `cwd` and `env` of `opts` apply.
+    /// Writes the script to an owner-only temp dir and runs it in `opts.cwd`:
+    /// directly if it starts with `#!` (unix), else with `sh`. Only `cwd` and `env`
+    /// of `opts` apply.
     fn run<'a>(
         &'a self,
         task: TaskId,
@@ -34,9 +39,10 @@ impl Agent for Script {
         tx: mpsc::Sender<AgentEvent>,
     ) -> BoxFut<'a> {
         Box::pin(async move {
-            let path = std::env::temp_dir().join(format!("mis-script-{task}"));
+            let dir = crate::owner_dir(&std::env::temp_dir().join(format!("mis-script-{task}")))?;
+            let _cleanup = Remove(dir.clone());
+            let path = dir.join("script");
             std::fs::write(&path, script).context("writing the script")?;
-            let _cleanup = Remove(path.clone());
             let shebang = cfg!(unix) && script.starts_with("#!");
             let mut cmd = match shebang {
                 true => {
@@ -63,7 +69,9 @@ impl Agent for Script {
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .kill_on_drop(true);
-            let mut child = cmd.spawn().context("starting the script")?;
+            // Inline, as `run_guarded` shows only the outermost context.
+            let mut child =
+                (cmd.spawn()).map_err(|e| anyhow::anyhow!("starting the script: {e}"))?;
             // Declared after `child`, so it drops first, while the tree still hangs off it.
             let mut tree = crate::Tree::new(child.id());
             let _ = tx
@@ -72,24 +80,34 @@ impl Agent for Script {
                     model: None,
                 })
                 .await;
-            // stdout and stderr interleaved by line, as a terminal shows them.
-            let mut out = BufReader::new(child.stdout.take().unwrap()).split(b'\n');
-            let mut err = BufReader::new(child.stderr.take().unwrap()).split(b'\n');
+            // stdout and stderr interleaved as they arrive, as a terminal shows them.
+            let (mut out, mut err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
+            let (mut obuf, mut ebuf) = ([0u8; 8192], [0u8; 8192]);
             let (mut out_open, mut err_open) = (true, true);
-            let mut kept = Tail::default();
-            while out_open || err_open {
-                let line = tokio::select! {
-                    l = out.next_segment(), if out_open => l?.or_else(|| { out_open = false; None }),
-                    l = err.next_segment(), if err_open => l?.or_else(|| { err_open = false; None }),
-                };
-                if let Some(l) = line {
-                    kept.push(&String::from_utf8_lossy(&l));
+            let (mut status, mut stop) = (None, None);
+            let mut kept = Output::default();
+            while out_open || err_open || status.is_none() {
+                tokio::select! {
+                    n = out.read(&mut obuf), if out_open => match n? {
+                        0 => out_open = false,
+                        n => kept.push(&obuf[..n]),
+                    },
+                    n = err.read(&mut ebuf), if err_open => match n? {
+                        0 => err_open = false,
+                        n => kept.push(&ebuf[..n]),
+                    },
+                    s = child.wait(), if status.is_none() => {
+                        status = Some(s.context("waiting for the script")?);
+                        tree.disarm();
+                        stop = Some(tokio::time::Instant::now() + DRAIN);
+                    }
+                    () = tokio::time::sleep_until(stop.unwrap_or_else(tokio::time::Instant::now)),
+                        if stop.is_some() => break,
                 }
             }
-            let status = child.wait().await;
-            tree.disarm();
-            let status = status.context("waiting for the script")?;
-            for ev in finish(&kept, status.code()) {
+            let (text, cut) = kept.text();
+            let code = status.and_then(|s| s.code());
+            for ev in finish(&text, cut, code) {
                 if tx.send(ev).await.is_err() {
                     break;
                 }
@@ -99,42 +117,45 @@ impl Agent for Script {
     }
 }
 
-/// Deletes the script file when the run ends, however it ends.
+/// Deletes the script's dir when the run ends, however it ends.
 struct Remove(std::path::PathBuf);
 
 impl Drop for Remove {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
-/// The last [`KEEP_BYTES`] of output, whole lines, and whether earlier ones were cut.
+/// Output as read, bounded: once over twice `MAX_OUTPUT_BYTES`, only the last
+/// `MAX_OUTPUT_BYTES` stay, so endless output (even one endless line) can't fill memory.
 #[derive(Default)]
-struct Tail {
-    text: String,
+struct Output {
+    bytes: Vec<u8>,
     cut: bool,
 }
 
-impl Tail {
-    fn push(&mut self, line: &str) {
-        self.text.push_str(line.trim_end_matches('\r'));
-        self.text.push('\n');
-        if self.text.len() > KEEP_BYTES {
-            let over = self.text.len() - KEEP_BYTES;
-            // Drop whole lines from the front, at least `over` bytes' worth.
-            let at = (self.text[over..].find('\n')).map_or(self.text.len(), |i| over + i + 1);
-            self.text.drain(..at);
+impl Output {
+    fn push(&mut self, chunk: &[u8]) {
+        self.bytes.extend_from_slice(chunk);
+        if self.bytes.len() > 2 * MAX_OUTPUT_BYTES {
+            self.bytes.drain(..self.bytes.len() - MAX_OUTPUT_BYTES);
             self.cut = true;
         }
+    }
+
+    /// Its tail as command output is kept (see `bound_output`), and whether any was cut.
+    fn text(&self) -> (String, bool) {
+        let (text, cut) = bound_output(&String::from_utf8_lossy(&self.bytes));
+        (text, cut || self.cut)
     }
 }
 
 /// Events ending a run: the output fenced as one `Text` (none if it printed nothing),
 /// then `Finished`, ok on exit 0, its summary the last line printed or the exit status.
 /// `code` None: killed by a signal.
-fn finish(out: &Tail, code: Option<i32>) -> Vec<AgentEvent> {
+fn finish(text: &str, cut: bool, code: Option<i32>) -> Vec<AgentEvent> {
     let mut evs = vec![];
-    let body = out.text.trim_end();
+    let body = text.trim_end();
     if !body.is_empty() {
         // A line opening a fence would close ours; a zero-width space keeps it text.
         let lines: Vec<String> = (body.lines())
@@ -143,11 +164,7 @@ fn finish(out: &Tail, code: Option<i32>) -> Vec<AgentEvent> {
                 false => l.to_string(),
             })
             .collect();
-        let cut = if out.cut {
-            "(earlier output cut)\n"
-        } else {
-            ""
-        };
+        let cut = if cut { "(earlier output cut)\n" } else { "" };
         evs.push(AgentEvent::Text {
             text: format!("{cut}```\n{}\n```", lines.join("\n")),
         });
@@ -175,17 +192,13 @@ fn finish(out: &Tail, code: Option<i32>) -> Vec<AgentEvent> {
 mod tests {
     use super::*;
 
-    fn tail(lines: &[&str]) -> Tail {
-        let mut t = Tail::default();
-        lines.iter().for_each(|l| t.push(l));
-        t
-    }
-
     #[test]
     fn output_is_fenced_and_the_last_line_sums_it_up() {
-        let evs = finish(&tail(&["cloned a", "```", "fetched b\r", ""]), Some(0));
+        let mut out = Output::default();
+        out.push(b"cloned a\n```\nfetched b\r\n");
+        let (text, cut) = out.text();
         assert_eq!(
-            evs,
+            finish(&text, cut, Some(0)),
             vec![
                 AgentEvent::Text {
                     text: "```\ncloned a\n\u{200b}```\nfetched b\n```".into()
@@ -201,34 +214,46 @@ mod tests {
     #[test]
     fn failures_say_their_exit_and_silence_adds_no_text() {
         assert_eq!(
-            finish(&tail(&["fatal: no repo"]), Some(128))[1],
+            finish("fatal: no repo\n", false, Some(128))[1],
             AgentEvent::Finished {
                 ok: false,
                 summary: Some("exit 128: fatal: no repo".into())
             }
         );
         assert_eq!(
-            finish(&tail(&[]), None),
+            finish("", false, None),
             vec![AgentEvent::Finished {
                 ok: false,
                 summary: Some("killed".into())
             }]
         );
         assert_eq!(
-            finish(&tail(&[]), Some(0))[0],
+            finish("", false, Some(0))[0],
             AgentEvent::Finished {
                 ok: true,
                 summary: Some("done".into())
             }
         );
+        let AgentEvent::Text { text } = &finish("x\n", true, Some(0))[0] else {
+            panic!()
+        };
+        assert!(text.starts_with("(earlier output cut)\n```"));
     }
 
     #[test]
-    fn long_output_keeps_whole_lines_from_the_end() {
-        let line = "x".repeat(1000);
-        let t = tail(&vec![line.as_str(); 100]);
-        assert!(t.cut && t.text.len() <= KEEP_BYTES);
-        assert!(t.text.lines().all(|l| l == line));
+    fn endless_output_stays_bounded_even_mid_character_or_line() {
+        let mut out = Output::default();
+        // 7-byte lines of 3-byte characters: cuts land mid-character.
+        (0..100_000).for_each(|_| out.push("日本\n".as_bytes()));
+        assert!(out.bytes.len() <= 2 * MAX_OUTPUT_BYTES);
+        let (text, cut) = out.text();
+        assert!(cut && text.lines().all(|l| l == "日本"), "whole lines only");
+        // One line with no end: its tail.
+        let mut out = Output::default();
+        (0..100_000).for_each(|_| out.push(b"progress "));
+        assert!(out.bytes.len() <= 2 * MAX_OUTPUT_BYTES);
+        let (text, cut) = out.text();
+        assert!(cut && text.len() <= MAX_OUTPUT_BYTES && text.ends_with("progress "));
     }
 
     #[cfg(unix)]
@@ -266,6 +291,14 @@ mod tests {
         let evs = run("#!/bin/sh\necho \"$MIS_TASK\"\n").await;
         assert!(
             matches!(&evs[2], AgentEvent::Finished { ok: true, summary: Some(s) } if s == &uuid::Uuid::nil().to_string())
+        );
+        // A process left holding its output doesn't keep the run going.
+        let t = std::time::Instant::now();
+        let evs = run("sleep 30 &\necho left\n").await;
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+        assert!(
+            matches!(&evs[2], AgentEvent::Finished { ok: true, .. }),
+            "{evs:?}"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -19,7 +19,7 @@ impl Ledger {
         let now = self.now_ms;
         for r in defs.iter().flatten() {
             let s = (self.routines.entry(r.name.clone())).or_insert_with(|| State::new(now));
-            if r.paused(s) {
+            if r.idle(s) {
                 s.since = now;
             }
         }
@@ -534,9 +534,19 @@ mod tests {
         // A reply isn't run as a script: it starts an agent with the run as context.
         let id = task.id;
         (l.tasks[0].status, l.tasks[0].worker) = (TaskStatus::Done, Some(wid));
+        let output = "```\nfatal: no remote\n```";
+        l.tasks[0].events.push(AgentEvent::Text {
+            text: output.into(),
+        });
         l.reply(id, "why did it fail?".into(), vec![], false)
             .unwrap();
-        assert_eq!(l.tasks.last().unwrap().task.harness, "claude");
+        let reply = &l.tasks.last().unwrap().task;
+        assert_eq!(reply.harness, "claude");
+        assert!(
+            reply.prompt.contains("fatal: no remote"),
+            "{}",
+            reply.prompt
+        );
         // People can't start one.
         let err = l.submit_to(
             "ls".into(),
@@ -547,6 +557,13 @@ mod tests {
             None,
             true,
         );
+        assert!(err.unwrap_err().contains("only as routines"));
+        let to = SendTo {
+            session: Uuid::nil(),
+            title: None,
+            mode: SendMode::Deliver,
+        };
+        let err = l.send_to_session(wid, SCRIPT_HARNESS.into(), "ls".into(), to, vec![]);
         assert!(err.unwrap_err().contains("only as routines"));
     }
 

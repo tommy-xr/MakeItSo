@@ -67,9 +67,11 @@ With `harness: script` the body is a shell script, run as is on the worker in `c
 agent: directly if it starts with `#!`, else with `sh`. Use it when the job is a fixed set of
 commands (mirroring repos, a backup); keep prompts for judgment.
 
+- It needs `worker:`: going live approves the script on that machine.
 - It always acts, so it never runs until the owner switches it live, and editing it (or its
   placement) stops it again until they do. No dry run, `model` or `merge`.
-- The run's output (stdout and stderr, last 64 KiB) is the task's transcript; exit 0 is done,
+- Workers older than script routines fail its runs ("no harness script").
+- The run's output (stdout and stderr, last 64 KiB and 400 lines) is the task's transcript; exit 0 is done,
   anything else failed, with the last line printed as its summary.
 - A reply in its thread starts an agent with the run as context; it is never run as a script.
 

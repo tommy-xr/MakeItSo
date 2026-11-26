@@ -983,6 +983,11 @@ async fn run(
     };
     // A script routine runs as written: no tools server, hints, attachments or diff.
     if task.harness == SCRIPT_HARNESS {
+        // A script can't be held to reads: one that may only read doesn't run.
+        if task.read_only {
+            let _ = tx.send(fail("a script can't run read-only".into())).await;
+            return;
+        }
         let (atx, mut arx) = mpsc::channel(64);
         let fwd = async {
             while let Some(ev) = arx.recv().await {

@@ -930,7 +930,7 @@ impl Ledger {
     fn runs(&self, wid: WorkerId, harness: &str) -> Result<(), String> {
         let info = (self.seen.get(&wid))
             .ok_or_else(|| format!("unknown worker {}", &wid.to_string()[..8]))?;
-        match runs_harness(info, harness) {
+        match info.harnesses.iter().any(|h| h == harness) {
             true => Ok(()),
             false => Err(format!("{} doesn't run {harness}", self.host(wid))),
         }
@@ -939,7 +939,7 @@ impl Ledger {
     /// Online workers running `harness`: id and hostname.
     pub fn online_hosts(&self, harness: &str) -> Vec<(WorkerId, String)> {
         (self.workers.iter())
-            .filter(|(_, w)| w.conn.is_some() && runs_harness(&w.info, harness))
+            .filter(|(_, w)| w.conn.is_some() && w.info.harnesses.iter().any(|h| h == harness))
             .map(|(id, w)| (*id, w.info.hostname.clone()))
             .collect()
     }
@@ -1135,7 +1135,17 @@ impl Ledger {
                 self.enqueue(e)
             }
             _ => {
-                let prompt = reply_context(&p.task.prompt, p.summary.as_deref(), &text, false);
+                // A script run's answer is its output.
+                let output = (p.task.harness == SCRIPT_HARNESS)
+                    .then(|| {
+                        p.events.iter().rev().find_map(|e| match e {
+                            AgentEvent::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                    })
+                    .flatten();
+                let answer = output.or(p.summary.as_deref());
+                let prompt = reply_context(&p.task.prompt, answer, &text, false);
                 let (harness, model) = match fresh {
                     true => (None, None),
                     false => (Some(p.task.harness.clone()), p.task.model.clone()),
@@ -1163,6 +1173,9 @@ impl Ledger {
         mut to: SendTo,
         images: Vec<Uuid>,
     ) -> Result<(TaskId, Vec<Effect>), String> {
+        if harness == SCRIPT_HARNESS {
+            return Err("scripts run only as routines".into());
+        }
         let delivers = self.workers.get(&wid).is_some_and(|w| w.info.deliver);
         if to.mode == SendMode::Deliver && !delivers {
             to.mode = SendMode::WhenClosed;
@@ -2142,12 +2155,14 @@ impl Ledger {
     }
 }
 
-/// Every harness `workers` run, each with the models all of them that run it list.
-/// `info`'s worker runs `harness`: one it lists, or a script, which every worker runs.
+/// `info`'s worker runs `harness`: one it lists, or a script, which every worker
+/// runs. A setup probe lists none: it runs nothing.
 fn runs_harness(info: &WorkerInfo, harness: &str) -> bool {
-    harness == SCRIPT_HARNESS || info.harnesses.iter().any(|h| h == harness)
+    let script = harness == SCRIPT_HARNESS && !info.harnesses.is_empty();
+    script || info.harnesses.iter().any(|h| h == harness)
 }
 
+/// Every harness `workers` run, each with the models all of them that run it list.
 fn fleet_of<'a>(workers: impl IntoIterator<Item = &'a WorkerInfo>) -> plan::Fleet {
     let mut fleet = plan::Fleet::new();
     for info in workers {

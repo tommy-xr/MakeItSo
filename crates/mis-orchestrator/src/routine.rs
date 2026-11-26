@@ -93,11 +93,16 @@ impl Routine {
         s.paused.unwrap_or(self.paused)
     }
 
-    /// Unix millis of its next run, from its last one; None while paused, a script
-    /// not live, or a cron that never matches. Already past means due now. Runs that
-    /// would have started before `s.since` or before the last run `ended` are skipped.
+    /// Not running: paused, or a script not live. Time spent idle is never caught up.
+    pub fn idle(&self, s: &State) -> bool {
+        self.paused(s) || (self.is_script() && self.mode(s) != RoutineMode::Live)
+    }
+
+    /// Unix millis of its next run, from its last one; None while [`Routine::idle`]
+    /// (or a cron that never matches). Already past means due now. Runs that would
+    /// have started before `s.since` or before the last run `ended` are skipped.
     pub fn next_at<Tz: TimeZone>(&self, s: &State, ended: Option<u64>, tz: &Tz) -> Option<u64> {
-        if self.paused(s) || (self.is_script() && self.mode(s) != RoutineMode::Live) {
+        if self.idle(s) {
             return None;
         }
         let floor = s.since.max(ended.unwrap_or(0));
@@ -326,7 +331,7 @@ pub fn parse_all(files: Vec<(String, Result<String, String>)>) -> Vec<Def> {
 /// (may act once switched live; see [`Routine::mode`]), and `merge:` with its keys
 /// on indented lines below (see [`parse_merge`]). ` #` starts a comment.
 /// `harness: script` makes the prompt a shell script: it always acts (so runs
-/// only once live), and takes no `model` or `merge`.
+/// only once live), needs a `worker`, and takes no `model` or `merge`.
 pub fn parse(file: &str, text: &str) -> Result<Routine, String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut lines = text.split_inclusive('\n');
@@ -419,6 +424,10 @@ pub fn parse(file: &str, text: &str) -> Result<Routine, String> {
         }
         if get("model").is_some() || merge.is_some() {
             return Err("scripts take no `model` or `merge`".into());
+        }
+        // A script depends on its machine: approving it approves where it runs.
+        if get("worker").is_none() {
+            return Err("scripts need a `worker`".into());
         }
         act = true;
     }
@@ -747,12 +756,16 @@ mod tests {
             ),
             ("---\nevery: 6h\n---\n \n", "no prompt"),
             (
-                "---\nevery: 6h\nharness: script\nact: false\n---\nls",
+                "---\nevery: 6h\nharness: script\nworker: m\nact: false\n---\nls",
                 "always act",
             ),
             (
-                "---\nevery: 6h\nharness: script\nmodel: haiku\n---\nls",
+                "---\nevery: 6h\nharness: script\nworker: m\nmodel: haiku\n---\nls",
                 "no `model`",
+            ),
+            (
+                "---\nevery: 6h\nharness: script\n---\nls",
+                "need a `worker`",
             ),
         ] {
             let err = parse("r.md", text).unwrap_err();
@@ -917,7 +930,7 @@ mod tests {
     fn scripts_act_run_only_live_and_run_as_written() {
         let r = parse(
             "m.md",
-            "---\nevery: 1h\nharness: script\n---\n#!/bin/sh\nls\n",
+            "---\nevery: 1h\nharness: script\nworker: m\n---\n#!/bin/sh\nls\n",
         )
         .unwrap();
         assert!(r.is_script() && r.act);
