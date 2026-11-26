@@ -4254,7 +4254,7 @@ async fn approving_a_paused_routine_makes_the_version_read_live_and_resumes_it()
     let v = view("fix").await;
     assert_eq!((v.mode, v.paused), (Some(RoutineMode::Live), false));
 
-    // A report routine has nothing to approve: it only resumes.
+    // A report routine has nothing to approve: refused, still paused.
     let look = view("look").await;
     let (status, body) = post_json(&base, "/api/routines/look/approve", "s", &pin(&look)).await;
     assert_eq!((status, body.contains("act: true")), (400, true), "{body}");

@@ -528,6 +528,7 @@ test('a cleared Needs you row comes back when its state changes', () => {
   const a = { draft: { id: 'd1' }, review: { state: { state: 'open' } } };
   assert.notEqual(cl.clearKey.draft(a), cl.clearKey.draft({ ...a, review: { state: { state: 'fix_ready', approved: 'x', fixes: 1 } } }));
   assert.equal(cl.clearKey.draft({ draft: { id: 'd1' } }), 'd|d1|{}');
+  assert.notEqual(cl.clearKey.routine({ name: 'r', pin: 'a' }), cl.clearKey.routine({ name: 'r', pin: 'b' }));
   const f = { id: 'f1', waiting: 'waiting for the owner' };
   assert.notEqual(cl.clearKey.feedback(f), cl.clearKey.feedback({ ...f, edited: 'make it bigger' }));
   assert.notEqual(cl.clearKey.feedback(f), cl.clearKey.feedback({ ...f, waiting: 'its work was busy' }));

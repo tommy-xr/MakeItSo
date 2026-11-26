@@ -1932,7 +1932,7 @@ function homeNeed() {
     href: first ? `#task/${first.id}` : waits[0] ? `#session/${liveKey(waits[0])}` : drafts[0] ? draftHref(drafts[0]) : fb[0] ? `#apps/${fb[0].a.slug}` : ok[0] ? routineHref(ok[0]) : core ? '#' : '' };
 }
 // Routines awaiting the owner's approval; Home lists them under Needs you, each opening its card.
-const toApprove = () => (readOnly ? [] : (routines?.list || []).filter(awaitsApproval));
+const toApprove = () => (readOnly ? [] : (routines?.list || []).filter((r) => awaitsApproval(r) && !isCleared(clearKey.routine(r))));
 const routineHref = (r) => `#routines/${encodeURIComponent(r.name)}`;
 // Apps with a draft; Home lists them first under Needs you, each opening the task that made it.
 const appDrafts = () => ((hosted && hosted.list) || []).filter((a) => a.draft);
@@ -1940,7 +1940,8 @@ const appDrafts = () => ((hosted && hosted.list) || []).filter((a) => a.draft);
 // new attention brings a row back. tests/md.test.mjs runs this block.
 const CLEARED_MAX = 200;
 const clearKey = { session: (s) => `s|${s.worker}/${s.harness}/${s.id}|${s.state}|${s.updated_ms}`,
-  draft: (a) => `d|${a.draft.id}|${JSON.stringify(a.review?.state || {})}`, feedback: (f) => `f|${JSON.stringify([f.id, f.edited, f.waiting])}` };
+  draft: (a) => `d|${a.draft.id}|${JSON.stringify(a.review?.state || {})}`, feedback: (f) => `f|${JSON.stringify([f.id, f.edited, f.waiting])}`,
+  routine: (r) => `r|${r.name}|${r.pin}` }; // a new version shows again
 // Approved (merging when it can), a draft no longer waits on its owner.
 const draftWaits = (a) => a.review?.state?.state !== 'approved';
 // `keys` with `add` appended (newest last), at most CLEARED_MAX.
@@ -2504,11 +2505,11 @@ function renderList() {
       el('div', { className: 'r1' }, el('span', { className: 'sd done att-approval' }), el('strong', { className: 'one' }, `Feedback on ${a.title}`)),
       el('div', { className: 'r2 one' }, ...dots([f.by, 'send it to an agent, edit or dismiss'])),
       el('div', { className: 'r3 one' }, f.edited || f.feedback.note))), false, clr([], [clearKey.feedback(f)])));
-  const approvals = sec !== 'home' ? [] : toApprove().map((r) => el('li', { className: 'draftrow' },
+  const approvals = sec !== 'home' ? [] : toApprove().map((r) => needRow(el('li', { className: 'draftrow' },
     el('a', { href: routineHref(r) },
       el('div', { className: 'r1' }, el('span', { className: 'sd done att-approval' }), el('strong', { className: 'one' }, `Approve routine ${r.name}`)),
       el('div', { className: 'r2 one' }, ...dots([r.changed && 'changed', r.trigger, r.harness || 'claude', r.worker])),
-      el('div', { className: 'r3 one' }, r.prompt))));
+      el('div', { className: 'r3 one' }, r.prompt))), false, clr([], [clearKey.routine(r)])));
   // A thread under Needs you: settled (dimmed) once none of it needs you (only held there); clearable unless a task
   // in it waits on an approval, which clearing can't answer.
   const needThread = (th) => {
@@ -3872,7 +3873,7 @@ async function loadRoutines() {
   const got = res.error ? res : { list: res.ok };
   routines = got;
   if (route().view === 'routines') renderRoutines();
-  if (['list', 'detail', 'session'].includes(route().view)) render(); // Home's Needs you lists those awaiting approval
+  if (route().view === 'list') render(); // Home's Needs you lists those awaiting approval
   relistCol('routines');
   renderNav();
 }
@@ -3906,10 +3907,11 @@ function routineRow(r, now) {
     : el('a', { href: r.last_task ? `#task/${r.last_task}` : '#' }, `last ${ago(now - r.last_at)}`);
   const busy = routineBusy.has(r.name), err = routineErr.get(r.name) || r.error, approving = !readOnly && awaitsApproval(r);
   // Awaiting approval, Approve resumes it too; a dry run (Run now) is optional.
-  const actions = readOnly || !r.trigger ? '' : el('div', { className: 'row' },
+  const btns = readOnly || !r.trigger ? [] : [
     approving && r.harness === 'script' ? '' : el('button', { disabled: busy, onclick: () => routineAct(r.name, 'run') }, approving ? 'Dry run now' : 'Run now'),
     approving && r.paused ? '' : el('button', { type: 'button', disabled: busy, onclick: () => routineAct(r.name, r.paused ? 'resume' : 'pause') }, r.paused ? 'Resume' : 'Pause'),
-    r.mode === 'live' ? el('button', { type: 'button', disabled: busy, onclick: () => routineAct(r.name, 'dry-run') }, 'Back to dry run') : '');
+    r.mode === 'live' ? el('button', { type: 'button', disabled: busy, onclick: () => routineAct(r.name, 'dry-run') }, 'Back to dry run') : ''].filter(Boolean);
+  const actions = btns.length ? el('div', { className: 'row' }, ...btns) : '';
   const merges = !r.merge ? 'They still never merge.' : r.merge.approve === 'phone'
     ? 'They merge only through merge_pr, within the rules above, each after you approve it here.'
     : 'They merge only through merge_pr, within the rules above, without asking you.';
@@ -3919,7 +3921,7 @@ function routineRow(r, now) {
     : `Its runs will do what its prompt says (push, comment, label) instead of listing it. ${merges}${codex}`;
   // What it runs, in full, above the one button that approves it; schedule and placement show above.
   const approve = !approving ? '' : el('div', { className: 'golive' },
-    el('p', {}, `Approve ${r.name}? ${does} ${r.paused ? 'It starts on its schedule. ' : ''}Editing its ${r.harness === 'script' ? 'script' : 'prompt, merge rules'} or placement stops it until you approve again.`),
+    el('p', {}, `Approve ${r.name}? ${does} ${r.paused ? 'It starts on its schedule. ' : ''}Editing its ${r.harness === 'script' ? 'script' : 'prompt, merge rules'} or placement ends approval for later runs (one under way finishes) until you approve again.`),
     r.prompt ? el('pre', {}, r.prompt) : '',
     el('div', { className: 'row' },
       // The pin is what this page read: a file changed since is refused, not approved unseen.
@@ -3929,7 +3931,7 @@ function routineRow(r, now) {
     el('div', { className: 'sub dim' }, ...dots([r.trigger || r.file, nextText(r.next_at, now), last])),
     r.trigger ? el('div', { className: 'sub dim' }, ...dots([r.harness || 'claude', r.model, r.worker, r.cwd && folder(r.cwd)])) : '',
     r.merge ? el('div', { className: 'sub dim merge' }, ...mergeSummary(r.merge)) : '',
-    r.changed && r.mode === 'dry_run' ? el('div', { className: 'changed' }, 'Changed since you approved it: review it and approve again.') : '',
+    r.changed && awaitsApproval(r) ? el('div', { className: 'changed' }, 'Changed since you approved it: review it and approve again.') : '',
     err ? el('div', { className: 'err bad' }, err) : '',
     approve, actions);
   li.dataset.name = r.name;
