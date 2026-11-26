@@ -198,6 +198,8 @@ struct TaskEntry {
     tokens: Option<(u64, u64)>,
     /// Latest tool call or text, rendered short (see `step`).
     step: Option<String>,
+    /// Unix millis when `step` last changed.
+    step_at: Option<u64>,
     /// The task this one replies to.
     parent: Option<TaskId>,
     /// Only this worker may run it: it holds the session being resumed (a
@@ -293,11 +295,29 @@ fn step(event: &AgentEvent) -> Option<String> {
     let line = match event {
         AgentEvent::ToolUse { name, input } => {
             // The argument that says what the call is about, else the first string one.
-            let arg = ["command", "file_path", "pattern", "path", "url", "query"]
-                .iter()
-                .find_map(|k| input[*k].as_str())
-                .or_else(|| input.as_object()?.values().find_map(|v| v.as_str()))
-                .unwrap_or("");
+            let (key, arg) = [
+                "command",
+                "file_path",
+                "notebook_path",
+                "pattern",
+                "path",
+                "url",
+                "query",
+            ]
+            .iter()
+            .find_map(|k| Some((*k, input[*k].as_str()?)))
+            .or_else(|| Some(("", input.as_object()?.values().find_map(|v| v.as_str())?)))
+            .unwrap_or(("", ""));
+            // A path's end tells calls apart; a one-line display would cut it off.
+            let arg = match key {
+                "file_path" | "notebook_path" | "path" => path_tail(arg),
+                // `cd <long path> && cargo test`: what runs is the part that differs.
+                "command" => match arg.strip_prefix("cd ").and_then(|r| r.split_once(" && ")) {
+                    Some((_, rest)) => rest.to_string(),
+                    None => arg.to_string(),
+                },
+                _ => arg.to_string(),
+            };
             format!("> {name} {arg}")
         }
         AgentEvent::Text { text } if !text.trim().is_empty() => text.clone(),
@@ -305,6 +325,20 @@ fn step(event: &AgentEvent) -> Option<String> {
         _ => return None,
     };
     Some(first_line(line.trim_end(), 80))
+}
+
+/// `p`'s last three parts, `…/src/ui/photo.ts` (Windows paths too); shorter paths whole.
+/// Just the file name when even that is too long to show, so it is never cut off.
+fn path_tail(p: &str) -> String {
+    let parts: Vec<&str> = p.split(['/', '\\']).collect();
+    let tail = match parts.len() > 4 {
+        true => format!("…/{}", parts[parts.len() - 3..].join("/")),
+        false => p.to_string(),
+    };
+    match tail.chars().count() > 60 {
+        true => format!("…/{}", parts[parts.len() - 1]),
+        false => tail,
+    }
 }
 
 impl TaskEntry {
@@ -324,6 +358,7 @@ impl TaskEntry {
             finished_at: None,
             tokens: None,
             step: None,
+            step_at: None,
             parent: None,
             pin: None,
             links: vec![],
@@ -425,6 +460,10 @@ impl TaskEntry {
             tokens_in: self.tokens.map(|t| t.0),
             tokens_out: self.tokens.map(|t| t.1),
             activity: self.activity(),
+            activity_at: match self.status {
+                TaskStatus::Running if !self.cancel => self.step_at,
+                _ => None,
+            },
             parent: self.parent,
             links: self.links.clone(),
             evidence: self.evidence.clone(),
@@ -452,6 +491,7 @@ impl TaskEntry {
     fn record(&mut self, event: &AgentEvent, now_ms: u64) {
         if let Some(s) = step(event) {
             self.step = Some(s);
+            self.step_at = Some(now_ms);
         }
         let text = match event {
             AgentEvent::Text { text } => Some(text),
@@ -1484,6 +1524,7 @@ impl Ledger {
                         events.iter().for_each(|e| t.record(e, now));
                         // Not the planner's reason: the worker hasn't started yet.
                         t.step = None;
+                        t.step_at = None;
                         let mut effects: Vec<_> = events.into_iter().map(broadcast).collect();
                         effects.extend(self.schedule());
                         effects
@@ -3489,6 +3530,39 @@ mod tests {
                 Some("> Custom y"),
             ),
             (tool("TodoWrite", json!({"todos": []})), Some("> TodoWrite")),
+            (
+                tool(
+                    "Write",
+                    json!({"file_path": "/Users/a/code/app/src/ui/photo.ts"}),
+                ),
+                Some("> Write …/src/ui/photo.ts"),
+            ),
+            (
+                tool(
+                    "Bash",
+                    json!({"command": "cd /Users/a/code/app/.claude/worktrees/x && cargo test"}),
+                ),
+                Some("> Bash cargo test"),
+            ),
+            (
+                tool(
+                    "Write",
+                    json!({"file_path": format!("/repo/{}/src/two.rs", "d".repeat(70))}),
+                ),
+                Some("> Write …/two.rs"),
+            ),
+            (
+                tool("Read", json!({"file_path": "/tmp/a/b.txt"})),
+                Some("> Read /tmp/a/b.txt"),
+            ),
+            (
+                tool("Edit", json!({"file_path": r"C:\Users\a\app\src\main.rs"})),
+                Some("> Edit …/app/src/main.rs"),
+            ),
+            (
+                tool("Glob", json!({"pattern": "**/*.rs", "path": "/a/b/c/d/e"})),
+                Some("> Glob **/*.rs"),
+            ),
             (text("\n  first line\nsecond"), Some("first line")),
             (text(" \n"), None),
             (
@@ -3521,14 +3595,17 @@ mod tests {
         let wid = Uuid::new_v4();
         l.connect(wid, info(), &[], 1, T0);
         assert_eq!(summary(&l, queued).activity, "started");
+        assert_eq!(summary(&l, queued).activity_at, None);
         l.event(wid, 1, queued, text("Looking around.\nMore."));
         assert_eq!(summary(&l, queued).activity, "Looking around.");
         let tool = AgentEvent::ToolUse {
             name: "Bash".into(),
             input: serde_json::json!({"command": "ls"}),
         };
+        l.now_ms = 2_000;
         l.event(wid, 1, queued, tool);
-        // Results and usage keep the last step; usage replaces, and isn't kept.
+        l.now_ms = 3_000;
+        // Results and usage keep the last step (and when it changed); usage replaces, and isn't kept.
         l.event(
             wid,
             1,
@@ -3542,7 +3619,10 @@ mod tests {
             assert_eq!(eff.len(), 1, "broadcast");
         }
         let s = summary(&l, queued);
-        assert_eq!(s.activity, "> Bash ls");
+        assert_eq!(
+            (s.activity.as_str(), s.activity_at),
+            ("> Bash ls", Some(2_000))
+        );
         assert_eq!((s.tokens_in, s.tokens_out), (Some(250), Some(9)));
         assert_eq!((s.started_at, s.finished_at), (Some(1_000), None));
         assert!(!l
@@ -3564,8 +3644,8 @@ mod tests {
         );
         let s = summary(&l, queued);
         assert_eq!(
-            (s.activity.as_str(), s.finished_at),
-            ("FAILED", Some(5_000))
+            (s.activity.as_str(), s.finished_at, s.activity_at),
+            ("FAILED", Some(5_000), None)
         );
 
         // Planner tokens show on a task it answers, not on one it dispatches.

@@ -527,6 +527,7 @@ mod tests {
             tokens_in: None,
             tokens_out: None,
             activity: activity.into(),
+            activity_at: None,
             parent: None,
             links: vec![],
             evidence: vec![],
