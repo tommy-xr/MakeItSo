@@ -3511,7 +3511,7 @@ function drawTask(t) {
   const working = isFinished(t) || writing ? '' : t.status === 'running' ? activity || 'working…' : activity || t.status;
   const reply = items.findLast((x) => x.role === 'assistant'), folds = ledDraft && isFinished(t) && !!reply, brief = folds && !fullConvo.has(t.id);
   // What's drawn; a fold or unfold isn't new content, so placing it leaves the fold out.
-  const drawn = JSON.stringify([items.length, writing ? '' : items[items.length - 1].text, working, !!pending, t.activity_at]), sig = drawn + folds + brief;
+  const drawn = JSON.stringify([items.length, writing ? '' : items[items.length - 1].text, working, !!pending]), sig = drawn + t.activity_at + folds + brief;
   if (sig === detail.sig) return;
   const bottom = atBottom();
   detail.sig = sig;
@@ -3520,7 +3520,7 @@ function drawTask(t) {
     brief ? `Show full conversation · ${plural(items.filter((x) => x.role !== 'tool').length, 'turn')}` : 'Hide full conversation');
   if (fold) fold.setAttribute('aria-expanded', String(!brief));
   // How long the step has run, ticking: a long one reads as busy, not stuck.
-  const since = working && working === activity && num(t.activity_at) !== null && el('span', {}, fmtElapsed(Date.now() + skew - t.activity_at));
+  const since = t.status === 'running' && working && num(t.activity_at) !== null && el('span', {}, fmtElapsed(Date.now() + skew - t.activity_at));
   if (since) since.dataset.start = t.activity_at;
   drawConvo($('task-convo'), brief ? [reply, ...items.filter((x) => x.key === 'pending')] : items, detail.open, false, since ? el('span', {}, working, ' · ', since) : working, $('reply-text'), fold);
   // Led by a draft (its apps read late, maybe), it is placed afresh: at the top.

@@ -295,14 +295,27 @@ fn step(event: &AgentEvent) -> Option<String> {
     let line = match event {
         AgentEvent::ToolUse { name, input } => {
             // The argument that says what the call is about, else the first string one.
-            let (key, arg) = ["command", "file_path", "pattern", "path", "url", "query"]
-                .iter()
-                .find_map(|k| Some((*k, input[*k].as_str()?)))
-                .or_else(|| Some(("", input.as_object()?.values().find_map(|v| v.as_str())?)))
-                .unwrap_or(("", ""));
+            let (key, arg) = [
+                "command",
+                "file_path",
+                "notebook_path",
+                "pattern",
+                "path",
+                "url",
+                "query",
+            ]
+            .iter()
+            .find_map(|k| Some((*k, input[*k].as_str()?)))
+            .or_else(|| Some(("", input.as_object()?.values().find_map(|v| v.as_str())?)))
+            .unwrap_or(("", ""));
             // A path's end tells calls apart; a one-line display would cut it off.
             let arg = match key {
-                "file_path" | "path" => path_tail(arg),
+                "file_path" | "notebook_path" | "path" => path_tail(arg),
+                // `cd <long path> && cargo test`: what runs is the part that differs.
+                "command" => match arg.strip_prefix("cd ").and_then(|r| r.split_once(" && ")) {
+                    Some((_, rest)) => rest.to_string(),
+                    None => arg.to_string(),
+                },
                 _ => arg.to_string(),
             };
             format!("> {name} {arg}")
@@ -315,11 +328,16 @@ fn step(event: &AgentEvent) -> Option<String> {
 }
 
 /// `p`'s last three parts, `…/src/ui/photo.ts` (Windows paths too); shorter paths whole.
+/// Just the file name when even that is too long to show, so it is never cut off.
 fn path_tail(p: &str) -> String {
     let parts: Vec<&str> = p.split(['/', '\\']).collect();
-    match parts.len() > 4 {
+    let tail = match parts.len() > 4 {
         true => format!("…/{}", parts[parts.len() - 3..].join("/")),
         false => p.to_string(),
+    };
+    match tail.chars().count() > 60 {
+        true => format!("…/{}", parts[parts.len() - 1]),
+        false => tail,
     }
 }
 
@@ -3518,6 +3536,20 @@ mod tests {
                     json!({"file_path": "/Users/a/code/app/src/ui/photo.ts"}),
                 ),
                 Some("> Write …/src/ui/photo.ts"),
+            ),
+            (
+                tool(
+                    "Bash",
+                    json!({"command": "cd /Users/a/code/app/.claude/worktrees/x && cargo test"}),
+                ),
+                Some("> Bash cargo test"),
+            ),
+            (
+                tool(
+                    "Write",
+                    json!({"file_path": format!("/repo/{}/src/two.rs", "d".repeat(70))}),
+                ),
+                Some("> Write …/two.rs"),
             ),
             (
                 tool("Read", json!({"file_path": "/tmp/a/b.txt"})),

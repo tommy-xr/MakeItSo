@@ -36,8 +36,8 @@ pub fn with_hint(prompt: &str, tools: bool, machine: &str) -> String {
     let mut notes = vec![];
     if tools {
         notes.push(
-            "(You have reporting tools. `report_status`: a one-line status at each major step, and at \
-             least every few minutes while you work. \
+            "(You have reporting tools. `report_status`: a one-line status at each major step and \
+             before any command that may take more than a minute (builds, test suites, installs). \
              `report_evidence`: once for each push, PR, test or CI run; for a visual or \
              performance change, capture before AND after (screenshots, benchmark numbers) and \
              attach them (compare, table). `report_result`: once at the end, the outcome as a \
