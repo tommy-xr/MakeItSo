@@ -4216,6 +4216,52 @@ async fn going_live_approves_the_file_as_read_and_an_edit_ends_it() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[tokio::test]
+async fn approving_a_paused_routine_makes_the_version_read_live_and_resumes_it() {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-approve-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = |prompt: &str| format!("---\nevery: 1h\npaused: true\nact: true\n---\n{prompt}\n");
+    std::fs::write(dir.join("fix.md"), file("Fix lint.")).unwrap();
+    std::fs::write(
+        dir.join("look.md"),
+        "---\nevery: 1h\npaused: true\n---\nLook.\n",
+    )
+    .unwrap();
+    let every = std::time::Duration::from_secs(3600);
+    let base = start_app(with_read_token().with_routines(dir.clone(), every)).await;
+    let view = |name: &'static str| {
+        let base = base.clone();
+        async move {
+            let (_, body) = get_json(&base, "/api/routines", "r").await;
+            let list: Vec<RoutineView> = serde_json::from_str(&body).unwrap();
+            list.into_iter().find(|r| r.name == name).unwrap()
+        }
+    };
+    let pin = |v: &RoutineView| serde_json::json!({ "pin": v.pin }).to_string();
+    let approve = "/api/routines/fix/approve";
+
+    // Edited after the page read it: refused, still paused and dry.
+    let seen = view("fix").await;
+    std::fs::write(dir.join("fix.md"), file("Fix lint and push.")).unwrap();
+    assert_eq!(post_json(&base, approve, "r", &pin(&seen)).await.0, 403);
+    assert_eq!(post_json(&base, approve, "s", &pin(&seen)).await.0, 409);
+    assert_eq!(post_json(&base, approve, "s", "").await.0, 400, "no pin");
+    let v = view("fix").await;
+    assert_eq!((v.mode, v.paused), (Some(RoutineMode::DryRun), true));
+
+    // The version read: live and running in one call.
+    assert_eq!(post_json(&base, approve, "s", &pin(&v)).await.0, 204);
+    let v = view("fix").await;
+    assert_eq!((v.mode, v.paused), (Some(RoutineMode::Live), false));
+
+    // A report routine has nothing to approve: it only resumes.
+    let look = view("look").await;
+    let (status, body) = post_json(&base, "/api/routines/look/approve", "s", &pin(&look)).await;
+    assert_eq!((status, body.contains("act: true")), (400, true), "{body}");
+    assert!(view("look").await.paused);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// The next sessions push that changes `seen`. A watcher may get its view twice: the
 /// liveness tick's diff can land after a `WatchSessions` snapshot it doesn't know of.
 async fn next_sessions(ws: &mut Ws, seen: &[SessionRow]) -> Vec<SessionRow> {

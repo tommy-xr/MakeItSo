@@ -133,6 +133,16 @@ impl Ledger {
         })
     }
 
+    /// The owner's one-tap approval: live, as `set_live`, and resumed if paused. A
+    /// routine already running keeps its schedule.
+    pub fn approve_routine(&mut self, r: &Routine) -> Result<Vec<Effect>, String> {
+        let effects = self.set_live(r, true)?;
+        if r.paused(&self.routines[&r.name]) {
+            self.pause_routine(&r.name, false);
+        }
+        Ok(effects)
+    }
+
     /// Live lasts only while a valid file says `act: true` and pins what went
     /// live: dropping `act`, a rename or a broken file sends it back to dry run
     /// once `act` returns, and an edit to what went live (marked `changed`) does
@@ -413,6 +423,28 @@ mod tests {
         assert_eq!(l.tasks.last().unwrap().status, TaskStatus::Cancelled);
         let report = defs("---\nevery: 1h\n---\ngo");
         assert!(l.set_live(report[0].as_ref().unwrap(), false).is_err());
+    }
+
+    #[test]
+    fn approving_goes_live_and_resumes_only_a_paused_routine() {
+        let mut l = Ledger::default();
+        let act = defs("---\nevery: 1h\npaused: true\nact: true\n---\ngo");
+        let r = act[0].as_ref().unwrap();
+        l.approve_routine(r).unwrap();
+        let v = &l.routine_views(&act, &Utc)[0];
+        assert_eq!((v.mode, v.paused), (Some(RoutineMode::Live), false));
+
+        // Running already: its schedule stays as it was.
+        l.routines.get_mut("r").unwrap().since = 0;
+        l.now_ms = 5;
+        l.approve_routine(r).unwrap();
+        assert_eq!(l.routines["r"].since, 0);
+
+        // A report routine has nothing to approve, and stays paused.
+        let report = defs("---\nevery: 1h\npaused: true\n---\ngo");
+        let mut l = Ledger::default();
+        assert!(l.approve_routine(report[0].as_ref().unwrap()).is_err());
+        assert!(l.routine_views(&report, &Utc)[0].paused);
     }
 
     #[test]
