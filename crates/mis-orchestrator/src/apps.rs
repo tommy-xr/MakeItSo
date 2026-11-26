@@ -556,6 +556,21 @@ impl Apps {
         backups::restore(&app, &self.records, slug, name, with_policy, at)
     }
 
+    /// See [`Records::seed`]. Err: no such app, or its records failed (`Ok(Err)`: refused).
+    pub fn seed(
+        &self,
+        slug: &str,
+        seed: &mis_types::Seed,
+        at: u64,
+    ) -> Result<anyhow::Result<Result<mis_types::Seeded, crate::records::Refusal>>, BackupError>
+    {
+        let _held = self.lock.lock().unwrap();
+        if self.release_ns(slug).is_empty() {
+            return Err(BackupError::NoSuchApp);
+        }
+        Ok(self.records.seed(slug, seed, "local", at))
+    }
+
     /// Each app's daily snapshot, if owed one at `now` (days in `tz`): the ones taken.
     pub fn daily_backups<Tz: TimeZone>(&self, now: u64, tz: &Tz) -> Vec<AppBackup> {
         let mut taken = vec![];

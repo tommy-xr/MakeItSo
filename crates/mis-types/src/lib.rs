@@ -16,9 +16,9 @@ mod builds;
 pub use apps::{
     valid_slug, AppBackup, AppDraft, AppFeedback, AppMe, AppMember, AppRelease, AppRole, AppTask,
     AppView, BackupKind, FeedbackEnd, FeedbackRect, FeedbackSize, FeedbackState, FeedbackStatus,
-    HeldFeedback, ProposeDraft, RestoreBackup, Restored, SetMember, MAX_APP_TITLE_CHARS,
-    MAX_DRAFT_IMAGE_BYTES, MAX_DRAFT_NOTE_CHARS, MAX_FEEDBACK_CHARS, MAX_FEEDBACK_TASKS,
-    MAX_HELD_FEEDBACK, SLUG_RULE,
+    HeldFeedback, ProposeDraft, RestoreBackup, Restored, Seed, SeedRecord, Seeded, SetMember,
+    MAX_APP_TITLE_CHARS, MAX_DRAFT_IMAGE_BYTES, MAX_DRAFT_NOTE_CHARS, MAX_FEEDBACK_CHARS,
+    MAX_FEEDBACK_TASKS, MAX_HELD_FEEDBACK, SLUG_RULE,
 };
 pub use builds::{Builds, Change, Commit, CoreUpdate, Started};
 pub mod diff;

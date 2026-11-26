@@ -165,7 +165,7 @@ pub fn parse_writes(body: &[u8]) -> Result<Writes, String> {
     Ok(Writes::Batch(ops))
 }
 
-fn check_key(collection: &str, id: &str) -> Result<(), Refusal> {
+pub(crate) fn check_key(collection: &str, id: &str) -> Result<(), Refusal> {
     if !valid_collection(collection) {
         return Err(Refusal::Invalid(format!(
             "collection {collection:?}: expected [a-z0-9_-]{{1,64}}"

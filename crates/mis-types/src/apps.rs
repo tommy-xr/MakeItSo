@@ -358,6 +358,26 @@ pub struct RestoreBackup {
     pub with_policy: bool,
 }
 
+/// `POST /api/apps/{slug}/seed`: starter records for `shared`, in the shape of an app's export
+/// (so one's `shared` can be sent as it is; its other fields are ignored).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Seed {
+    pub shared: std::collections::BTreeMap<String, Vec<SeedRecord>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SeedRecord {
+    pub id: String,
+    pub data: serde_json::Value,
+}
+
+/// What a seed replies: records created, and ids that already held one (left as they were).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Seeded {
+    pub added: usize,
+    pub present: usize,
+}
+
 /// What a restore replies: the snapshot taken just before it (restore it to undo). None: the
 /// app had no records yet.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -1571,6 +1571,10 @@ pub fn router(app: App) -> Router {
         )
         .route("/api/apps/{slug}/restore", post(restore_app))
         .route(
+            "/api/apps/{slug}/seed",
+            post(seed_app).layer(axum::extract::DefaultBodyLimit::max(SEED_BODY)),
+        )
+        .route(
             "/api/apps/{slug}/draft",
             post(propose_draft).layer(axum::extract::DefaultBodyLimit::max(DRAFT_BODY)),
         )
@@ -3376,6 +3380,54 @@ async fn restore_app(
     match restored.await.expect("restoring doesn't panic") {
         Ok(r) => Json(r).into_response(),
         Err(e) => backup_refused(e),
+    }
+}
+
+/// Most bytes of a seed file.
+const SEED_BODY: usize = 16 << 20;
+
+/// `Seed` into `slug`'s `shared` records; replies `Seeded`. Full scope only.
+async fn seed_app(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    body: Bytes,
+) -> Response {
+    if let Err(refused) = app.admit_full(&headers, peer, "/api/apps").await {
+        return refused.into_response();
+    }
+    let Some(apps) = app.apps.clone() else {
+        let off = "apps are off: no state dir";
+        return (StatusCode::SERVICE_UNAVAILABLE, off).into_response();
+    };
+    if !apps::valid_slug(&slug) {
+        return (StatusCode::NOT_FOUND, "no such app").into_response();
+    }
+    let seed = match serde_json::from_slice::<mis_types::Seed>(&body) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let at = unix_ms();
+    let done = tokio::task::spawn_blocking(move || apps.seed(&slug, &seed, at));
+    match done.await.expect("seeding doesn't panic") {
+        Err(e) => backup_refused(e),
+        Ok(Err(e)) => {
+            tracing::warn!("seeding an app: {e:#}");
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response()
+        }
+        Ok(Ok(Ok(seeded))) => Json(seeded).into_response(),
+        Ok(Ok(Err(records::Refusal::TooLarge(why)))) => {
+            (StatusCode::PAYLOAD_TOO_LARGE, why).into_response()
+        }
+        Ok(Ok(Err(records::Refusal::Invalid(why)))) => {
+            (StatusCode::BAD_REQUEST, why).into_response()
+        }
+        Ok(Ok(Err(records::Refusal::Conflict(_)))) => (
+            StatusCode::CONFLICT,
+            "a record was written meanwhile; run it again",
+        )
+            .into_response(),
     }
 }
 
