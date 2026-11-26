@@ -1932,7 +1932,7 @@ async fn routine_action(
                     return (StatusCode::BAD_REQUEST, why).into_response();
                 }
                 Some(p) if p != r.pin() => {
-                    let why = "its file changed since you read it: review it and go live again";
+                    let why = "its file changed since you read it: review it and approve again";
                     return (StatusCode::CONFLICT, why).into_response();
                 }
                 Some(_) => {}

@@ -20,7 +20,7 @@ model: sonnet             # optional, passed as is; default the harness's
 worker: build-mac         # optional: only this worker runs it (its name or hostname)
 cwd: code/make-it-so      # optional: folder on the worker (see below)
 paused: true              # optional; start new files paused
-act: true                 # optional: may act once switched live (see Modes)
+act: true                 # optional: may act once the owner approves it (see Modes)
 merge:                    # optional, needs act: true (see Merging)
   repos: [owner/name]
   authors: [app/dependabot]
@@ -52,12 +52,13 @@ Every run's prompt starts with MIS's rules for its mode; write the file's prompt
 
 - Report (no `act`): the run is read-only. It investigates and reports; no pushes, PR or issue
   changes, deploys or other remote state.
-- Dry run (`act: true`, not yet live): lists every action it would take, with full text, and
-  takes none.
-- Live: only the owner switches it on (Routines view "Go live"); never run `mis routines live`
-  yourself. Runs act as the prompt says, and only that far, and report each action. Live
-  approves this exact version: editing the prompt, `merge`, `harness`, `model`, `worker` or
-  `cwd` drops it back to dry run. `mis routines dry-run <name>` does that by hand.
+- Dry run (`act: true`, not yet approved): lists every action it would take, with full text, and
+  takes none. Optional: the owner may approve without one.
+- Live: only the owner switches it on, by tapping Approve after seeing the file (Home or the
+  Routines view), which also resumes it; never run `mis routines live` yourself. Runs act as the
+  prompt says, and only that far, and report each action. Approval covers this exact version:
+  editing the prompt, `merge`, `harness`, `model`, `worker` or `cwd` drops it back to dry run
+  until approved again. `mis routines dry-run <name>` does that by hand.
 - No run may push tags, create releases, or read or print secrets; none merges but through
   `merge_pr`.
 
@@ -67,8 +68,8 @@ With `harness: script` the body is a shell script, run as is on the worker in `c
 agent: directly if it starts with `#!`, else with `sh`. Use it when the job is a fixed set of
 commands (mirroring repos, a backup); keep prompts for judgment.
 
-- It needs `worker:`: going live approves the script on that machine.
-- It always acts, so it never runs until the owner switches it live, and editing it (or its
+- It needs `worker:`: approving it approves the script on that machine.
+- It always acts, so it never runs until the owner approves it, and editing it (or its
   placement) stops it again until they do. No dry run, `model` or `merge`.
 - Workers older than script routines fail its runs ("no harness script").
 - The run's output (stdout and stderr, last 64 KiB and 400 lines) is the task's transcript; exit 0 is done,
@@ -91,7 +92,11 @@ Without `merge:`, runs never merge. With it, live runs merge only by calling the
 
 ## Writing the prompt
 
+- Pick the kind: a script for a fixed set of commands, a prompt for judgment; `act: true` only
+  if it must change things. Always write `paused: true`: the owner resumes a report routine, or
+  approves an acting one, which resumes it.
 - Each run starts fresh and unattended: name the repo, what to look at, what to do, what to
   report. Keep it to what the mode allows.
 - New routines from the phone (Routines, +) start paused and report-only.
-- Try it: `mis routines run <name>` starts one run now; the task shows what it did.
+- Try it: `mis routines run <name>` starts one run now (a dry run until approved); the task shows
+  what it did.

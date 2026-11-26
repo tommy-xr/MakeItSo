@@ -451,6 +451,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .golive p { margin: 0; overflow-wrap: anywhere; }
   .golive details { margin: .5rem 0 0; font-size: .8125rem; }
   .golive pre { margin: .25rem 0 0; max-height: 12rem; overflow: auto; padding: .5rem .625rem; border-radius: .5rem; background: var(--code); white-space: pre-wrap; overflow-wrap: anywhere; font: .75rem/1.45 var(--mono); }
+  .routine .golive button.danger { background: var(--bad); color: #fff; } /* Approve: filled, as Live's chip */
   /* Merge policy and the "changed since live" notice under a routine's placement. */
   .routine .merge { margin-top: .25rem; overflow-wrap: anywhere; }
   .routine .changed { margin-top: .5rem; padding: .5rem .625rem; border-radius: .625rem; background: var(--t-warn); }
@@ -1872,6 +1873,7 @@ function tick() {
   renderStrip();
   if (++ticks % 30 === 0 && everOpen && route().view === 'workers') renderWorkers();
   if (ticks % 10 === 0 && everOpen && route().view === 'routines' && !document.hidden) loadRoutines();
+  else if (ticks % 30 === 0 && everOpen && !readOnly && route().view === 'list' && !document.hidden) loadRoutines(); // Home: those awaiting approval
   // Apps while shown; less often on Home and task pages, for their drafts.
   const appsEvery = ['apps', 'build'].includes(route().view) ? 10 : ['list', 'detail'].includes(route().view) ? 30 : 0;
   if (appsEvery && ticks % appsEvery === 0 && everOpen && !document.hidden) loadApps();
@@ -1925,9 +1927,13 @@ function homeNeed() {
   const need = everOpen ? listOf('home', false).threads.filter((th) => th.sec === 'need') : [], waits = everOpen ? feed.filter(asksYou) : [];
   const drafts = everOpen ? homeDrafts(false) : [], fb = everOpen ? fbWaiting() : [], first = need[0] && [need[0].root, ...need[0].replies].find((t) => rank(t) === need[0].rank);
   const core = everOpen && coreShown() && !coreShown()[2] ? 1 : 0; // one waiting for no task needs nothing
-  return { n: core + drafts.length + fb.length + need.length + waits.length, att: first ? first.attention : waits[0] || fb[0] ? 'approval' : 'unread',
-    href: first ? `#task/${first.id}` : waits[0] ? `#session/${liveKey(waits[0])}` : drafts[0] ? draftHref(drafts[0]) : fb[0] ? `#apps/${fb[0].a.slug}` : core ? '#' : '' };
+  const ok = everOpen ? toApprove() : [];
+  return { n: core + drafts.length + fb.length + ok.length + need.length + waits.length, att: first ? first.attention : waits[0] || fb[0] || ok[0] ? 'approval' : 'unread',
+    href: first ? `#task/${first.id}` : waits[0] ? `#session/${liveKey(waits[0])}` : drafts[0] ? draftHref(drafts[0]) : fb[0] ? `#apps/${fb[0].a.slug}` : ok[0] ? routineHref(ok[0]) : core ? '#' : '' };
 }
+// Routines awaiting the owner's approval; Home lists them under Needs you, each opening its card.
+const toApprove = () => (readOnly ? [] : (routines?.list || []).filter(awaitsApproval));
+const routineHref = (r) => `#routines/${encodeURIComponent(r.name)}`;
 // Apps with a draft; Home lists them first under Needs you, each opening the task that made it.
 const appDrafts = () => ((hosted && hosted.list) || []).filter((a) => a.draft);
 // clear:begin. Pure. Needs you rows cleared on this browser, keyed by what they showed: a new state is a new key, so
@@ -2484,6 +2490,7 @@ function renderList() {
   if (sending && !groups.has('flight')) groups.set('flight', []);
   // Home: drafts waiting on a decision need you too, first.
   if (sec === 'home' && !hosted && !hostedAsked && everOpen) loadApps();
+  if (sec === 'home' && !routines && !routinesAsked && everOpen && !readOnly) loadRoutines();
   // Each clearable Needs you row's part of Clear all: tasks to mark seen, keys to hide.
   const clrAll = { n: 0, seen: [], keys: [] }, clr = (seen, keys) => { clrAll.n++; clrAll.seen.push(...seen); clrAll.keys.push(...keys); return () => clearNeed(seen, keys); };
   const drafted = sec !== 'home' ? [] : homeDrafts(true).map((a) => needRow(el('li', { className: 'draftrow' },
@@ -2497,6 +2504,11 @@ function renderList() {
       el('div', { className: 'r1' }, el('span', { className: 'sd done att-approval' }), el('strong', { className: 'one' }, `Feedback on ${a.title}`)),
       el('div', { className: 'r2 one' }, ...dots([f.by, 'send it to an agent, edit or dismiss'])),
       el('div', { className: 'r3 one' }, f.edited || f.feedback.note))), false, clr([], [clearKey.feedback(f)])));
+  const approvals = sec !== 'home' ? [] : toApprove().map((r) => el('li', { className: 'draftrow' },
+    el('a', { href: routineHref(r) },
+      el('div', { className: 'r1' }, el('span', { className: 'sd done att-approval' }), el('strong', { className: 'one' }, `Approve routine ${r.name}`)),
+      el('div', { className: 'r2 one' }, ...dots([r.changed && 'changed', r.trigger, r.harness || 'claude', r.worker])),
+      el('div', { className: 'r3 one' }, r.prompt))));
   // A thread under Needs you: settled (dimmed) once none of it needs you (only held there); clearable unless a task
   // in it waits on an approval, which clearing can't answer.
   const needThread = (th) => {
@@ -2507,14 +2519,14 @@ function renderList() {
   };
   const needLive = (s) => needRow(liveRow(s, now), !asksYou(s), asksYou(s) && clr([], [clearKey.session(s)]));
   const core = sec === 'home' ? coreCard() : '';
-  if (sec === 'home' && (core || drafted.length || asked.length || sessions.length) && !groups.has('need')) groups.set('need', []);
-  // Sections in Home's order; on Home, drafts, feedback, then the tasks needing you, then sessions waiting on you.
+  if (sec === 'home' && (core || drafted.length || asked.length || approvals.length || sessions.length) && !groups.has('need')) groups.set('need', []);
+  // Sections in Home's order; on Home, drafts, feedback, routines to approve, then the tasks needing you, then sessions waiting on you.
   const keys = [...groups.keys()].sort((a, b) => secRank(a) - secRank(b) || b.localeCompare(a));
   // Sessions: those under way, then the rest of the last six hours.
   const body = sec === 'sessions' ? [['Live', sessions.filter(isLive)], ['Recent', sessions.filter((s) => !isLive(s))]].filter(([, g]) => g.length)
     .map(([h, g], i) => [secHead(h, ...(i ? [] : [el('a', { href: '#workers' }, 'All sessions')])), el('ul', { className: 'rows' }, ...g.map((s) => liveRow(s, now)))])
     : keys.map((k) => {
-      const ul = el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []), ...(k === 'need' ? [...drafted, ...asked] : []),
+      const ul = el('ul', { className: 'rows' }, ...(k === 'flight' && sending ? [sending] : []), ...(k === 'need' ? [...drafted, ...asked, ...approvals] : []),
         ...groups.get(k).flatMap((th) => (k === 'need' && sec === 'home' ? needThread(th) : threadRows(th, now))), ...(k === 'need' && sec === 'home' ? sessions.map(needLive) : []));
       const clearAll = k === 'need' && sec === 'home' && !readOnly && clrAll.n > 1 && el('button', { type: 'button', onclick: () => clearNeed(clrAll.seen, clrAll.keys) }, 'Clear all');
       return [secHead(label(k), ...(clearAll ? [clearAll] : [])), k === 'need' ? core : '', ul];
@@ -3852,7 +3864,6 @@ const permRows = (w) => {
 let routines = null; // { list } | { error } | null while reading
 const routineErr = new Map(), routineBusy = new Set(); // name -> why its last action failed; names with an action in flight
 let routinesAsked = null;
-let routineLiveAsk = null; // name of the routine whose go-live confirm is open
 async function loadRoutines() {
   const ask = {};
   routinesAsked = ask;
@@ -3861,6 +3872,7 @@ async function loadRoutines() {
   const got = res.error ? res : { list: res.ok };
   routines = got;
   if (route().view === 'routines') renderRoutines();
+  if (['list', 'detail', 'session'].includes(route().view)) render(); // Home's Needs you lists those awaiting approval
   relistCol('routines');
   renderNav();
 }
@@ -3886,40 +3898,40 @@ const nextText = (at, now) => (num(at) === null ? '' : at <= now ? 'due' : `next
 // The last run's status: the live task's if listed, else as the orchestrator last saw it.
 function lastStatus(r) { const t = r.last_task && tasks.find((x) => x.id === r.last_task); return (t && t.status) || r.last_status; }
 const routineState = (r) => (r.paused ? 'paused' : lastStatus(r) || ''); // its dot's class
+// It may act but the owner hasn't approved this version: new, or changed since.
+const awaitsApproval = (r) => r.mode === 'dry_run';
 function routineRow(r, now) {
   const status = lastStatus(r);
   const last = num(r.last_at) === null ? 'never run'
     : el('a', { href: r.last_task ? `#task/${r.last_task}` : '#' }, `last ${ago(now - r.last_at)}`);
-  const busy = routineBusy.has(r.name), err = routineErr.get(r.name) || r.error;
-  const asking = routineLiveAsk === r.name && r.mode === 'dry_run';
-  const ask = (name) => { routineLiveAsk = name; renderRoutines(); };
-  // Dry run: going live asks first, in the page. Live: back to dry run at once.
-  const modeBtn = { dry_run: el('button', { type: 'button', className: 'danger', disabled: busy || asking, onclick: () => ask(r.name) }, 'Go live'),
-    live: el('button', { type: 'button', disabled: busy, onclick: () => routineAct(r.name, 'dry-run') }, 'Back to dry run') }[r.mode] || '';
+  const busy = routineBusy.has(r.name), err = routineErr.get(r.name) || r.error, approving = !readOnly && awaitsApproval(r);
+  // Awaiting approval, Approve resumes it too; a dry run (Run now) is optional.
   const actions = readOnly || !r.trigger ? '' : el('div', { className: 'row' },
-    el('button', { disabled: busy, onclick: () => routineAct(r.name, 'run') }, 'Run now'),
-    el('button', { type: 'button', disabled: busy, onclick: () => routineAct(r.name, r.paused ? 'resume' : 'pause') }, r.paused ? 'Resume' : 'Pause'),
-    modeBtn);
+    approving && r.harness === 'script' ? '' : el('button', { disabled: busy, onclick: () => routineAct(r.name, 'run') }, approving ? 'Dry run now' : 'Run now'),
+    approving && r.paused ? '' : el('button', { type: 'button', disabled: busy, onclick: () => routineAct(r.name, r.paused ? 'resume' : 'pause') }, r.paused ? 'Resume' : 'Pause'),
+    r.mode === 'live' ? el('button', { type: 'button', disabled: busy, onclick: () => routineAct(r.name, 'dry-run') }, 'Back to dry run') : '');
   const merges = !r.merge ? 'They still never merge.' : r.merge.approve === 'phone'
     ? 'They merge only through merge_pr, within the rules above, each after you approve it here.'
     : 'They merge only through merge_pr, within the rules above, without asking you.';
   // Claude runs are denied the usual other ways to merge; codex has no deny rules, only its prompt.
   const codex = r.merge && r.harness === 'codex' ? ' Codex is only told not to merge otherwise; nothing blocks it.' : '';
-  const confirm = readOnly || !asking ? '' : el('div', { className: 'golive' },
-    el('p', {}, `Let ${r.name} act? Its runs will do what its file says (push, comment, label) instead of listing it. ${merges}${codex} Editing its prompt, merge rules or placement sends it back to dry run.`),
-    r.prompt ? el('details', {}, el('summary', {}, 'What it runs'), el('pre', {}, r.prompt)) : '',
+  const does = r.harness === 'script' ? `Its script will run on ${r.worker} as written.`
+    : `Its runs will do what its prompt says (push, comment, label) instead of listing it. ${merges}${codex}`;
+  // What it runs, in full, above the one button that approves it; schedule and placement show above.
+  const approve = !approving ? '' : el('div', { className: 'golive' },
+    el('p', {}, `Approve ${r.name}? ${does} ${r.paused ? 'It starts on its schedule. ' : ''}Editing its ${r.harness === 'script' ? 'script' : 'prompt, merge rules'} or placement stops it until you approve again.`),
+    r.prompt ? el('pre', {}, r.prompt) : '',
     el('div', { className: 'row' },
       // The pin is what this page read: a file changed since is refused, not approved unseen.
-      el('button', { type: 'button', className: 'danger', disabled: busy, onclick: () => { routineLiveAsk = null; routineAct(r.name, 'live', { pin: r.pin }); } }, 'Yes, go live'),
-      el('button', { type: 'button', onclick: () => ask(null) }, 'Keep dry run')));
+      el('button', { type: 'button', className: 'danger', disabled: busy, onclick: () => routineAct(r.name, 'approve', { pin: r.pin }) }, 'Approve')));
   const li = el('li', { className: `routine ${routineState(r)}` },
     el('div', { className: 'head' }, status ? chip(status) : '', r.paused ? chip('paused') : '', modeChip(r.mode), el('strong', {}, r.name)),
     el('div', { className: 'sub dim' }, ...dots([r.trigger || r.file, nextText(r.next_at, now), last])),
     r.trigger ? el('div', { className: 'sub dim' }, ...dots([r.harness || 'claude', r.model, r.worker, r.cwd && folder(r.cwd)])) : '',
     r.merge ? el('div', { className: 'sub dim merge' }, ...mergeSummary(r.merge)) : '',
-    r.changed && r.mode === 'dry_run' ? el('div', { className: 'changed' }, 'Changed since you went live: review it and go live again.') : '',
+    r.changed && r.mode === 'dry_run' ? el('div', { className: 'changed' }, 'Changed since you approved it: review it and approve again.') : '',
     err ? el('div', { className: 'err bad' }, err) : '',
-    actions, confirm);
+    approve, actions);
   li.dataset.name = r.name;
   return li;
 }
