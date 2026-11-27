@@ -228,7 +228,7 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
   .nbody { margin: 0 0 1rem; font: .9375rem/1.55 var(--sans); overflow-wrap: anywhere; }
   .nimg { position: relative; display: block; min-height: 4rem; margin: 0 0 .75rem; border-radius: .75rem; overflow: hidden; background: var(--raised); }
   .nimg img { display: block; max-width: 100%; height: auto; margin: 0 auto; }
-  /* New routine: name, schedule and prompt atop Routines. 16px fields: iOS zooms into smaller ones. */
+  /* New routine: what it should do, atop Routines. 16px fields: iOS zooms into smaller ones. */
   #routine-new, #settings-form, #project-new { display: grid; gap: .5rem; margin: 0 0 1rem; padding: .875rem; border-radius: 1rem; background: var(--card); }
   :is(#routine-new, #settings-form, #project-new) :is(input, textarea, select) { width: 100%; font-size: 1rem; }
   :is(#routine-new, #settings-form, #project-new) input { min-height: 2.75rem; padding: 0 .75rem; }
@@ -1005,12 +1005,11 @@ try { if (localStorage.getItem('mis-rail') === 'off') document.documentElement.c
 
 <main id="routines" hidden>
   <form id="routine-new" hidden>
-    <input id="rn-name" aria-label="Name" placeholder="Name, e.g. pr-grooming" autocomplete="off" autocapitalize="off" spellcheck="false" required>
-    <input id="rn-schedule" aria-label="Schedule" placeholder="Schedule: 30m, 6h, 1d or 0 9 * * 1-5" autocomplete="off" autocapitalize="off" spellcheck="false" required>
-    <textarea id="rn-prompt" aria-label="Prompt" placeholder="What each run does" required></textarea>
-    <p class="dim">It starts paused and report-only: resume it here when ready.</p>
+    <p><strong>New routine</strong></p>
+    <textarea id="rn-request" aria-label="What it does" placeholder="What should it do, and when? e.g. mirror my GitHub repos on the mini every 6h" required></textarea>
+    <p class="dim">An agent writes it, paused. Approve it here or under Needs you, or reply in its task to change it.</p>
     <p id="rn-error" class="bad" hidden></p>
-    <div class="row"><button>Create</button><button type="button" id="rn-cancel">Cancel</button></div>
+    <div class="row"><button>Start</button><button type="button" id="rn-cancel">Cancel</button></div>
   </form>
   <ul id="routine-list"></ul>
 </main>
@@ -5763,12 +5762,12 @@ wide.addEventListener('change', () => { remember(); aim(); render(); });
 remember(); // a task or session open at load
 aim();
 $('list').addEventListener('scroll', settle);
-// + opens the new-routine form atop Routines; the orchestrator writes `<name>.md`, paused.
+// + opens the new-routine form atop Routines: the owner's words start a task whose agent writes the file, paused.
 function showNewRoutine(on) {
   $('routine-new').hidden = !on;
   $('rn-error').hidden = true;
-  render(); // shown now, so the name field can take focus; beside the list, in place of Select a routine
-  if (on) $('rn-name').focus();
+  render(); // shown now, so the field can take focus; beside the list, in place of Select a routine
+  if (on) $('rn-request').focus();
 }
 $('routine-add').onclick = () => {
   $('menu').close();
@@ -5778,21 +5777,18 @@ $('routine-add').onclick = () => {
 $('rn-cancel').onclick = () => { $('routine-new').reset(); showNewRoutine(false); };
 $('routine-new').onsubmit = async (e) => {
   e.preventDefault();
-  const body = { name: $('rn-name').value.trim(), schedule: $('rn-schedule').value, prompt: $('rn-prompt').value };
   const btn = $('routine-new').querySelector('.row button');
   btn.disabled = true;
-  let why = '';
+  let why = '', task = null;
   try {
-    const r = await fetch('/api/routines', { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
-    if (!r.ok) why = (await r.text()) || `error ${r.status}`;
+    const r = await fetch('/api/routines/tasks', { method: 'POST', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ request: $('rn-request').value }) });
+    if (r.ok) task = (await r.json()).task; else why = (await r.text()) || `error ${r.status}`;
   } catch { why = 'couldn’t reach the orchestrator'; }
   btn.disabled = false;
   if (why) { $('rn-error').textContent = why; $('rn-error').hidden = false; return; }
   $('routine-new').reset();
   showNewRoutine(false);
-  if (!inSplit()) routineFocus = body.name;
-  await loadRoutines();
-  if (inSplit()) location.hash = `#routines/${encodeURIComponent(body.name)}`; // once listed, so it shows at once
+  location.hash = `#task/${task}`;
 };
 // + by Apps: the composer, building a new app.
 $('app-add').onclick = () => {
