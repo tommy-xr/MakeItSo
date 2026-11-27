@@ -1436,7 +1436,7 @@ impl Ledger {
     }
 
     /// Every known worker, online or not, for the planner to route on.
-    fn cards(&self) -> Vec<plan::Card> {
+    pub fn cards(&self) -> Vec<plan::Card> {
         plan::cards(
             self.workers
                 .iter()
@@ -2226,6 +2226,8 @@ mod tests {
             slug: None,
             create: true,
             requester: Some("me@example.com".into()),
+            routine: false,
+            wrote: None,
         }
     }
 

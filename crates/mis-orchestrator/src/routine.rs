@@ -476,6 +476,51 @@ pub fn new_file(new: &NewRoutine) -> Result<(String, String), String> {
     Ok((file, text))
 }
 
+/// A whole routine file as an agent posts it: named `name` unless it says `name:`. Its
+/// file name, and the routine. Err unless it parses and says `paused: true`, so nothing
+/// runs before the owner looks.
+pub fn written(name: &str, text: &str) -> Result<(String, Routine), String> {
+    let r = parse(&format!("{}.md", name.trim()), text)?;
+    if !r.paused {
+        return Err("write `paused: true`: the owner resumes or approves it".into());
+    }
+    Ok((format!("{}.md", r.name), r))
+}
+
+/// `views` as a routine-writing task's token sees them: only the names, but in full the
+/// routine it wrote (`own`).
+pub fn writer_views(views: Vec<RoutineView>, own: Option<&str>) -> Vec<RoutineView> {
+    let name_only = |v: RoutineView| RoutineView {
+        name: v.name,
+        file: v.file,
+        trigger: None,
+        harness: None,
+        model: None,
+        worker: None,
+        cwd: None,
+        paused: false,
+        mode: None,
+        merge: None,
+        changed: false,
+        pin: None,
+        prompt: None,
+        next_at: None,
+        last_at: None,
+        last_task: None,
+        last_status: None,
+        error: None,
+    };
+    (views.into_iter())
+        // Its own file too: another file that names itself `mine` isn't the token's.
+        .map(
+            |v| match own == Some(v.name.as_str()) && v.file == format!("{}.md", v.name) {
+                true => v,
+                false => name_only(v),
+            },
+        )
+        .collect()
+}
+
 const MERGE_KEYS: [&str; 8] = [
     "repos",
     "max_files",
@@ -652,6 +697,42 @@ fn fmt_every(ms: u64) -> String {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[test]
+    fn a_writer_sees_only_names_but_its_own_routine_in_full() {
+        let defs = parse_all(vec![
+            ("a.md".into(), Ok("---\nevery: 1h\n---\nSecret.\n".into())),
+            ("b.md".into(), Ok("---\nevery: 2h\n---\nMine.\n".into())),
+            (
+                "c.md".into(),
+                Ok("---\nname: d\nevery: 2h\n---\nNot mine.\n".into()),
+            ),
+        ]);
+        let views: Vec<_> = (defs.iter())
+            .map(|d| view(d, None, Runs::default(), None, 0, &chrono::Utc))
+            .collect();
+        let got = writer_views(views.clone(), Some("b"));
+        assert_eq!((got[0].name.as_str(), &got[0].prompt), ("a", &None));
+        assert_eq!(got[0].trigger, None);
+        assert_eq!(got[1], views[1]);
+        assert_eq!(writer_views(views.clone(), Some("d"))[2].prompt, None);
+        assert!(writer_views(views, None).iter().all(|v| v.prompt.is_none()));
+    }
+
+    #[test]
+    fn written_files_must_parse_and_start_paused() {
+        let (file, r) = written("mirror", "---\nevery: 6h\npaused: true\n---\nGo.\n").unwrap();
+        assert_eq!((file.as_str(), r.name.as_str()), ("mirror.md", "mirror"));
+        // `name:` wins over the posted name, and names the file.
+        let text = "---\nname: deps\nevery: 1d\npaused: true\n---\nGo.\n";
+        assert_eq!(written("x", text).unwrap().0, "deps.md");
+        let unpaused = written("mirror", "---\nevery: 6h\n---\nGo.\n");
+        assert!(unpaused.unwrap_err().contains("paused: true"));
+        let off = "---\nevery: 6h\npaused: false\n---\nGo.\n";
+        assert!(written("mirror", off).is_err());
+        assert!(written("../x", "---\nevery: 6h\npaused: true\n---\nGo.\n").is_err());
+        assert!(written("mirror", "no frontmatter").is_err());
+    }
 
     #[test]
     fn new_file_starts_paused_and_checks_its_fields() {

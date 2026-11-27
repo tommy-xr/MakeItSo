@@ -42,6 +42,8 @@ pub fn binding(t: &AppTask, requester: Option<String>) -> Binding {
         slug: slug(t).map(Into::into),
         create: !t.change,
         requester,
+        routine: false,
+        wrote: None,
     }
 }
 

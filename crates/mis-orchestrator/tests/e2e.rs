@@ -4262,6 +4262,141 @@ async fn approving_a_paused_routine_makes_the_version_read_live_and_resumes_it()
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[tokio::test]
+async fn a_routine_task_token_writes_only_its_own_paused_routine_and_never_approves() {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-write-routine-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let other = "---\nevery: 1h\npaused: true\n---\nLook.\n";
+    std::fs::write(dir.join("other.md"), other).unwrap();
+    let every = std::time::Duration::from_secs(3600);
+    let base = start_app(with_read_token().with_routines(dir.clone(), every)).await;
+    let (_, mut worker) = join_as(&base).await;
+
+    // The owner's words start a task carrying a token of its own.
+    let ask = r#"{"request":"Mirror my repos every 6h."}"#;
+    assert_eq!(
+        post_json(&base, "/api/routines/tasks", "r", ask).await.0,
+        403
+    );
+    let (status, body) = post_json(&base, "/api/routines/tasks", "s", ask).await;
+    assert_eq!(status, 201, "{body}");
+    let OrchMsg::Assign { task, token, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    let token = token.expect("a routine task carries a token");
+    assert!(task
+        .prompt
+        .contains("Request:\nMirror my repos every 6h.\n"));
+    assert!(
+        task.prompt.contains("- w\n"),
+        "its workers: {}",
+        task.prompt
+    );
+    assert!(task
+        .prompt
+        .ends_with(mis_types::guides::guide("routines").unwrap()));
+
+    // A file with schedule `every`, frontmatter `head`, then `prompt`.
+    let file = |name: &str, every: &str, head: &str, prompt: &str| {
+        let text = format!("---\nevery: {every}\n{head}---\n{prompt}\n");
+        serde_json::json!({ "name": name, "text": text }).to_string()
+    };
+    let write = |body: String| {
+        let (base, token) = (base.clone(), token.clone());
+        async move { post_json(&base, "/api/routines", &token, &body).await }
+    };
+    let view = |name: &'static str| {
+        let base = base.clone();
+        async move {
+            let (_, body) = get_json(&base, "/api/routines", "r").await;
+            let list: Vec<RoutineView> = serde_json::from_str(&body).unwrap();
+            list.into_iter().find(|r| r.name == name).unwrap()
+        }
+    };
+    // Only whole paused files, never over another routine.
+    let paused = "paused: true\nact: true\n";
+    let (status, why) = write(file("mirror", "6h", "act: true\n", "Mirror.")).await;
+    assert!(status == 400 && why.contains("paused"), "{status} {why}");
+    let (status, _) = write(file("other", "6h", paused, "Mine now.")).await;
+    assert_eq!(status, 409);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("other.md")).unwrap(),
+        other
+    );
+
+    // Two at once: one is written, then only it.
+    let (a, b) = tokio::join!(
+        write(file("mirror", "6h", paused, "Mirror.")),
+        write(file("nightly", "6h", paused, "Sweep."))
+    );
+    let (mine, lost) = match (a.0, b.0) {
+        (201, 403) => ("mirror", "nightly"),
+        (403, 201) => ("nightly", "mirror"),
+        got => panic!("one of two: {got:?} {a:?} {b:?}"),
+    };
+    assert!(!dir.join(format!("{lost}.md")).exists());
+    let (status, why) = write(file(lost, "6h", paused, "Again.")).await;
+    assert!(status == 403 && why.contains(mine), "{status} {why}");
+    assert_eq!(write(file(mine, "6h", paused, "Mirror all.")).await.0, 201);
+    let v = view(mine).await;
+    assert_eq!((v.mode, v.paused), (Some(RoutineMode::DryRun), true));
+
+    // It lists the names, but reads only its own routine.
+    let (_, list) = get_json(&base, "/api/routines", &token).await;
+    let list: Vec<RoutineView> = serde_json::from_str(&list).unwrap();
+    let seen = |n: &str| list.iter().find(|r| r.name == n).unwrap().prompt.clone();
+    assert_eq!(
+        (seen("other"), seen(mine)),
+        (None, Some("Mirror all.".into()))
+    );
+
+    // It never approves, runs, resumes or switches one live; the owner's token does.
+    let pin = serde_json::json!({ "pin": v.pin }).to_string();
+    for action in ["approve", "live", "run", "resume"] {
+        let path = format!("/api/routines/{mine}/{action}");
+        let status = post_json(&base, &path, &token, &pin).await.0;
+        assert!(matches!(status, 401 | 403), "{action}: {status}");
+    }
+    let approve = format!("/api/routines/{mine}/approve");
+    assert_eq!(post_json(&base, &approve, "s", &pin).await.0, 204);
+    let v = view(mine).await;
+    assert_eq!((v.mode, v.paused), (Some(RoutineMode::Live), false));
+
+    // A revision, even of the schedule alone, pauses it and ends the approval.
+    let revised = file(mine, "12h", paused, "Mirror all.");
+    assert_eq!(write(revised.clone()).await.0, 201);
+    let v = view(mine).await;
+    assert_eq!((v.mode, v.paused), (Some(RoutineMode::DryRun), true));
+    assert_eq!(v.trigger.as_deref(), Some("every 12h"));
+
+    // Ended: its token writes nothing.
+    finish_app_task(&base, &mut worker, task.id, &token).await;
+    assert_eq!(write(revised).await.0, 401);
+
+    // A reply revises it with a token of its own, still held to that routine.
+    let (mut client, _) = connect_async(client_req(&base, &[("authorization", "Bearer s")]))
+        .await
+        .unwrap();
+    reply(&mut client, task.id, "Every 1d instead.").await;
+    let OrchMsg::Assign {
+        token: Some(again), ..
+    } = recv(&mut worker).await
+    else {
+        panic!("assign with a token")
+    };
+    let rewrite = file(mine, "1d", paused, "Mirror all.");
+    assert_eq!(
+        post_json(&base, "/api/routines", &again, &rewrite).await.0,
+        201
+    );
+    let other = file(lost, "1d", paused, "Sweep.");
+    assert_eq!(
+        post_json(&base, "/api/routines", &again, &other).await.0,
+        403
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// The next sessions push that changes `seen`. A watcher may get its view twice: the
 /// liveness tick's diff can land after a `WatchSessions` snapshot it doesn't know of.
 async fn next_sessions(ws: &mut Ws, seen: &[SessionRow]) -> Vec<SessionRow> {
