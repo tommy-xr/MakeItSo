@@ -4381,6 +4381,28 @@ async fn a_routine_task_token_writes_only_its_own_paused_routine_and_never_appro
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     assert_eq!(status, 401, "the token outlived its task");
+
+    // A reply revises it with a token of its own, still held to that routine.
+    let (mut client, _) = connect_async(client_req(&base, &[("authorization", "Bearer s")]))
+        .await
+        .unwrap();
+    reply(&mut client, task.id, "Every 12h instead.").await;
+    let OrchMsg::Assign {
+        token: Some(again), ..
+    } = recv(&mut worker).await
+    else {
+        panic!("assign with a token")
+    };
+    let rewrite = file("mirror", paused, "Mirror every 12h.");
+    assert_eq!(
+        post_json(&base, "/api/routines", &again, &rewrite).await.0,
+        201
+    );
+    let other = file("nightly", paused, "Sweep.");
+    assert_eq!(
+        post_json(&base, "/api/routines", &again, &other).await.0,
+        403
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 

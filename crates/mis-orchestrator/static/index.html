@@ -2306,12 +2306,12 @@ function taskRows(ul, rows) {
   if (!rows.length) ul.append(el('li', { className: 'dim' }, 'No tasks yet'));
 }
 
-// A routine run's own prompt, past the paragraph of rules the orchestrator puts first; an app or project task's,
-// less the guide it carries (up to a reply's earlier answer).
-const GUIDED = ['This folder is a checkout of the apps repo.', 'This folder is a checkout of the mis-notes repo.'];
+// A routine run's own prompt, past the paragraph of rules the orchestrator puts first; an app, project or
+// routine-writing task's, less the guide it carries (up to a reply's earlier answer).
+const GUIDED = ['This folder is a checkout of the apps repo.', 'This folder is a checkout of the mis-notes repo.', 'Write a Make It So routine for the owner'];
 const promptOf = (t) => {
   const p = t.routine ? t.prompt.split('\n\n').slice(1).join('\n\n') || t.prompt : t.prompt;
-  return !GUIDED.some((g) => p.includes(g)) ? p : p.replace(/\n\n---\nname: (apps|projects)\n[\s\S]*?(?=\n\nEarlier answer:\n|$)/, '\n\n(+ the $1 guide: mis guide $1)');
+  return !GUIDED.some((g) => p.includes(g)) ? p : p.replace(/\n\n---\nname: (apps|projects|routines)\n[\s\S]*?(?=\n\nEarlier answer:\n|$)/, '\n\n(+ the $1 guide: mis guide $1)');
 };
 // A routine run's row: `↻ <routine> · `, the mode it ran in, then its own prompt.
 const routineHead = (t) => (t.routine ? [`↻ ${t.routine} · `, modeChip(t.routine_mode), promptOf(t)] : [t.prompt]);
