@@ -1959,8 +1959,11 @@ async fn new_routine(
             // Whole or not at all: the scheduler re-reads the folder at any time.
             return push::write_private(&path, text.as_bytes());
         }
-        let mut f = (std::fs::File::options().write(true).create_new(true)).open(path)?;
-        f.write_all(text.as_bytes())
+        let mut f = (std::fs::File::options().write(true).create_new(true)).open(&path)?;
+        // A part-written file would outlive the claim released below: gone, or whole.
+        f.write_all(text.as_bytes()).inspect_err(|_| {
+            let _ = std::fs::remove_file(&path);
+        })
     };
     let wrote = tokio::task::spawn_blocking(write).await;
     if !matches!(wrote, Ok(Ok(()))) {

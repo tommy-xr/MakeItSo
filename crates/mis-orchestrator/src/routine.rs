@@ -511,10 +511,13 @@ pub fn writer_views(views: Vec<RoutineView>, own: Option<&str>) -> Vec<RoutineVi
         error: None,
     };
     (views.into_iter())
-        .map(|v| match own == Some(v.name.as_str()) {
-            true => v,
-            false => name_only(v),
-        })
+        // Its own file too: another file that names itself `mine` isn't the token's.
+        .map(
+            |v| match own == Some(v.name.as_str()) && v.file == format!("{}.md", v.name) {
+                true => v,
+                false => name_only(v),
+            },
+        )
         .collect()
 }
 
@@ -700,6 +703,10 @@ mod tests {
         let defs = parse_all(vec![
             ("a.md".into(), Ok("---\nevery: 1h\n---\nSecret.\n".into())),
             ("b.md".into(), Ok("---\nevery: 2h\n---\nMine.\n".into())),
+            (
+                "c.md".into(),
+                Ok("---\nname: d\nevery: 2h\n---\nNot mine.\n".into()),
+            ),
         ]);
         let views: Vec<_> = (defs.iter())
             .map(|d| view(d, None, Runs::default(), None, 0, &chrono::Utc))
@@ -708,6 +715,7 @@ mod tests {
         assert_eq!((got[0].name.as_str(), &got[0].prompt), ("a", &None));
         assert_eq!(got[0].trigger, None);
         assert_eq!(got[1], views[1]);
+        assert_eq!(writer_views(views.clone(), Some("d"))[2].prompt, None);
         assert!(writer_views(views, None).iter().all(|v| v.prompt.is_none()));
     }
 
