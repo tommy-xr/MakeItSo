@@ -487,6 +487,37 @@ pub fn written(name: &str, text: &str) -> Result<(String, Routine), String> {
     Ok((format!("{}.md", r.name), r))
 }
 
+/// `views` as a routine-writing task's token sees them: only the names, but in full the
+/// routine it wrote (`own`).
+pub fn writer_views(views: Vec<RoutineView>, own: Option<&str>) -> Vec<RoutineView> {
+    let name_only = |v: RoutineView| RoutineView {
+        name: v.name,
+        file: v.file,
+        trigger: None,
+        harness: None,
+        model: None,
+        worker: None,
+        cwd: None,
+        paused: false,
+        mode: None,
+        merge: None,
+        changed: false,
+        pin: None,
+        prompt: None,
+        next_at: None,
+        last_at: None,
+        last_task: None,
+        last_status: None,
+        error: None,
+    };
+    (views.into_iter())
+        .map(|v| match own == Some(v.name.as_str()) {
+            true => v,
+            false => name_only(v),
+        })
+        .collect()
+}
+
 const MERGE_KEYS: [&str; 8] = [
     "repos",
     "max_files",
@@ -663,6 +694,22 @@ fn fmt_every(ms: u64) -> String {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[test]
+    fn a_writer_sees_only_names_but_its_own_routine_in_full() {
+        let defs = parse_all(vec![
+            ("a.md".into(), Ok("---\nevery: 1h\n---\nSecret.\n".into())),
+            ("b.md".into(), Ok("---\nevery: 2h\n---\nMine.\n".into())),
+        ]);
+        let views: Vec<_> = (defs.iter())
+            .map(|d| view(d, None, Runs::default(), None, 0, &chrono::Utc))
+            .collect();
+        let got = writer_views(views.clone(), Some("b"));
+        assert_eq!((got[0].name.as_str(), &got[0].prompt), ("a", &None));
+        assert_eq!(got[0].trigger, None);
+        assert_eq!(got[1], views[1]);
+        assert!(writer_views(views, None).iter().all(|v| v.prompt.is_none()));
+    }
 
     #[test]
     fn written_files_must_parse_and_start_paused() {

@@ -165,7 +165,8 @@ pub struct App {
     host: String,
     /// Apps' boards of references. None: boards are off.
     boards: Option<Arc<boards::Boards>>,
-    /// Held while an app task's token creates its app, so a thread creates only one.
+    /// Held while a task's token creates its app or writes its routine, so a thread makes
+    /// only one.
     creating: Arc<tokio::sync::Mutex<()>>,
     /// Held while a board is sent, so what's new on it goes to one task.
     sending: Arc<tokio::sync::Mutex<()>>,
@@ -1810,25 +1811,51 @@ fn load_routines(dir: &std::path::Path) -> Vec<routine::Def> {
     routine::parse_all(files)
 }
 
-/// Routines with their schedules and last runs. Read-only, like task status.
+/// Who is at `/api/routines`.
+enum RoutinesAuth {
+    Full,
+    Read,
+    /// A running routine-writing task's token.
+    Writer(TaskId),
+}
+
+/// Auth for `/api/routines`; None refuses (401), as for an app task's or ended task's token.
+async fn admit_routines(app: &App, headers: &HeaderMap, peer: SocketAddr) -> Option<RoutinesAuth> {
+    let route = Route::RoutineWrite;
+    match app
+        .admit_route(headers, peer, "/api/routines", route)
+        .await?
+    {
+        Scope::Full => Some(RoutinesAuth::Full),
+        Scope::Read => Some(RoutinesAuth::Read),
+        Scope::AppTask(t) => (app.ledger().app_binding(t))
+            .filter(|b| b.routine)
+            .map(|_| RoutinesAuth::Writer(t)),
+        Scope::Capture => None,
+    }
+}
+
+/// Routines with their schedules and last runs. Read-only, like task status. A
+/// routine-writing task's token sees only names, and the routine it wrote in full.
 async fn routines(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
-    let route = Route::RoutineWrite;
-    match app
-        .admit_route(&headers, peer, "/api/routines", route)
-        .await
-    {
-        Some(Scope::Full | Scope::Read) => {}
-        Some(Scope::AppTask(t)) if app.ledger().app_binding(t).is_some_and(|b| b.routine) => {}
-        Some(Scope::AppTask(_) | Scope::Capture) | None => {
-            return StatusCode::UNAUTHORIZED.into_response()
-        }
-    }
+    let Some(auth) = admit_routines(&app, &headers, peer).await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
     let defs = app.routine_defs().await;
-    Json(app.ledger().routine_views(&defs, &chrono::Local)).into_response()
+    let l = app.ledger();
+    let views = l.routine_views(&defs, &chrono::Local);
+    Json(match auth {
+        RoutinesAuth::Writer(t) => {
+            let own = l.app_binding(t).and_then(|b| b.wrote);
+            routine::writer_views(views, own.as_deref())
+        }
+        RoutinesAuth::Full | RoutinesAuth::Read => views,
+    })
+    .into_response()
 }
 
 /// `POST /api/routines`: a whole file, or the fields of a new one.
@@ -1839,38 +1866,24 @@ enum NewRoutineBody {
     Fields(mis_types::NewRoutine),
 }
 
-/// Auth for writing a routine: None for full access, the binding of a routine-writing task's
-/// token. Err: the refusal (403 read-only, or an app task's token).
-async fn admit_routine_write(
-    app: &App,
-    headers: &HeaderMap,
-    peer: SocketAddr,
-) -> Result<Option<app_grant::Binding>, (StatusCode, &'static str)> {
-    let route = Route::RoutineWrite;
-    match app.admit_route(headers, peer, "/api/routines", route).await {
-        Some(Scope::Full) => Ok(None),
-        Some(Scope::AppTask(t)) => match app.ledger().app_binding(t) {
-            Some(b) if b.routine => Ok(Some(b)),
-            _ => Err((StatusCode::FORBIDDEN, "an app task's token stages its app")),
-        },
-        Some(Scope::Read | Scope::Capture) => Err((StatusCode::FORBIDDEN, "read-only token")),
-        None => Err((StatusCode::UNAUTHORIZED, "")),
-    }
-}
-
 /// Write a routine file: a whole one ([`mis_types::RoutineFile`], which must say `paused:
 /// true`), or one from a [`mis_types::NewRoutine`]: 201, 400 with why it doesn't parse, 409 if
 /// its name is taken. A routine-writing task's token writes one new routine, then replaces
-/// only that one, pausing it (403 otherwise). Read-only tokens get 403.
+/// only that one's file, pausing it and ending any approval (403 otherwise). Read-only
+/// tokens get 403.
 async fn new_routine(
     State(app): State<App>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    let bound = match admit_routine_write(&app, &headers, peer).await {
-        Ok(b) => b,
-        Err(refused) => return refused.into_response(),
+    let writer = match admit_routines(&app, &headers, peer).await {
+        Some(RoutinesAuth::Full) => None,
+        Some(RoutinesAuth::Writer(t)) => Some(t),
+        Some(RoutinesAuth::Read) => {
+            return (StatusCode::FORBIDDEN, "read-only token").into_response()
+        }
+        None => return StatusCode::UNAUTHORIZED.into_response(),
     };
     let Some(dir) = app.routines_dir.clone() else {
         return (StatusCode::NOT_FOUND, "routines are off").into_response();
@@ -1878,10 +1891,6 @@ async fn new_routine(
     let written = match serde_json::from_slice::<NewRoutineBody>(&body) {
         Ok(NewRoutineBody::File(f)) => {
             routine::written(&f.name, &f.text).map(|(file, _)| (file, f.text))
-        }
-        Ok(NewRoutineBody::Fields(_)) if bound.is_some() => {
-            let why = "send the whole file: `mis routines write <file>`";
-            return (StatusCode::FORBIDDEN, why).into_response();
         }
         Ok(NewRoutineBody::Fields(new)) => routine::new_file(&new),
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
@@ -1891,40 +1900,78 @@ async fn new_routine(
         Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
     };
     let name = routine::stem(&file).to_string();
-    let replace = match bound.as_ref().map(|b| app_grant::write_routine(b, &name)) {
-        None => false,
-        Some(Ok(replace)) => replace,
-        Some(Err(why)) => return (StatusCode::FORBIDDEN, why).into_response(),
+    // A task's writes wait their turn, each re-reading the binding the one before may have set.
+    let _writing = match writer {
+        Some(_) => Some(app.creating.clone().lock_owned().await),
+        None => None,
+    };
+    let defs = app.routine_defs().await;
+    let mut named = defs.iter().flatten().filter(|r| r.name == name);
+    // Replaced only in its own file: a deleted one, or another file taking the name, is new.
+    let (taken, in_file) = match named.next() {
+        Some(r) => (true, r.file == file),
+        None => (false, false),
+    };
+    // Claimed in one hold of the ledger: what the token may write, and the name it now holds.
+    let claim = writer.map(|t| {
+        let mut l = app.ledger();
+        let b = l
+            .app_binding(t)
+            .ok_or((StatusCode::UNAUTHORIZED, String::new()))?;
+        let own = app_grant::write_routine(&b, &name).map_err(|w| (StatusCode::FORBIDDEN, w))?;
+        let claimed = b.wrote.is_none() && !taken;
+        if claimed {
+            l.rebind(&app_grant::wrote(b.clone(), &name));
+        }
+        Ok::<_, (StatusCode, String)>((b, own && in_file, claimed))
+    });
+    let (before, replace, claimed) = match claim.transpose() {
+        Ok(Some(c)) => (Some(c.0), c.1, c.2),
+        Ok(None) => (None, false, false),
+        Err(refused) => return refused.into_response(),
     };
     if replace {
-        // Paused before it changes: the owner looks at the new version first.
-        app.ledger().pause_routine(&name, true);
+        // Paused and out of live before it changes: the owner looks at the new version first.
+        app.transition(|l| ((), l.revise_routine(&name)));
+    } else if taken {
+        return (StatusCode::CONFLICT, "a routine has that name").into_response();
     } else {
-        // Another file may name itself this; the file itself is caught by `create_new`.
-        if (app.routine_defs().await.iter().flatten()).any(|r| r.name == name) {
-            return (StatusCode::CONFLICT, "a routine has that name").into_response();
-        }
         // Before the file exists, so the scheduler never pairs it with an old routine's state.
         app.ledger().reset_routine(&name);
     }
-    app.save_now().await;
+    // Saved before the file is written: a crash between the two leaves the token held to it.
+    let saver = app.clone();
+    if !tokio::task::spawn_blocking(move || saver.save())
+        .await
+        .unwrap_or(false)
+    {
+        if let (Some(b), true) = (&before, claimed) {
+            app.ledger().rebind(b);
+        }
+        let why = "couldn't save the task history; nothing was written";
+        return (StatusCode::INTERNAL_SERVER_ERROR, why).into_response();
+    }
     let write = move || {
         use std::io::Write;
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(file);
-        let mut f = match replace {
-            true => std::fs::File::create(path)?,
-            false => (std::fs::File::options().write(true).create_new(true)).open(path)?,
-        };
+        if replace {
+            // Whole or not at all: the scheduler re-reads the folder at any time.
+            return push::write_private(&path, text.as_bytes());
+        }
+        let mut f = (std::fs::File::options().write(true).create_new(true)).open(path)?;
         f.write_all(text.as_bytes())
     };
-    match tokio::task::spawn_blocking(write).await {
-        Ok(Ok(())) => {
-            if let (Some(b), false) = (bound, replace) {
-                app.ledger().rebind(&app_grant::wrote(b, &name));
-            }
-            StatusCode::CREATED.into_response()
+    let wrote = tokio::task::spawn_blocking(write).await;
+    if !matches!(wrote, Ok(Ok(()))) {
+        // Nothing written: the name it claimed is free again.
+        if let (Some(b), true) = (before, claimed) {
+            app.ledger().rebind(&b);
+            app.save_now().await;
         }
+    }
+    match wrote {
+        Ok(Ok(())) => StatusCode::CREATED.into_response(),
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             (StatusCode::CONFLICT, "a routine file has that name").into_response()
         }

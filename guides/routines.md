@@ -108,4 +108,5 @@ Routines + on the phone starts a task with the owner's request: you write the ro
   unless it says `name:`). It must say `paused: true`.
 - Your task's token writes one new routine, then rewrites only that one: to revise it after a
   reply, write it again under the same name, which pauses it and drops any approval. It can
-  list routines (`mis routines`) but never run, resume or approve them.
+  list routines (`mis routines`: names, and its own in full) but never run, resume or approve
+  them.

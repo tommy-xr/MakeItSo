@@ -216,6 +216,16 @@ impl Ledger {
         s.since = now;
     }
 
+    /// Routine `name` rewritten for the owner to look at again: paused and out of live
+    /// (its queued live runs cancelled), whatever changed.
+    pub fn revise_routine(&mut self, name: &str) -> Vec<Effect> {
+        self.pause_routine(name, true);
+        let s = self.routines.get_mut(name).expect("just paused");
+        s.changed |= s.live;
+        (s.live, s.live_pin) = (false, None);
+        self.cancel_queued_live(name)
+    }
+
     /// Forget what an earlier routine named `name` left (resumed, live, last
     /// run), so a new file of that name starts as the file says.
     pub fn reset_routine(&mut self, name: &str) {
