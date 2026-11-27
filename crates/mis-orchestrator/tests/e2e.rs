@@ -4262,6 +4262,128 @@ async fn approving_a_paused_routine_makes_the_version_read_live_and_resumes_it()
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[tokio::test]
+async fn a_routine_task_token_writes_only_its_own_paused_routine_and_never_approves() {
+    let dir = std::env::temp_dir().join(format!("mis-e2e-write-routine-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let other = "---\nevery: 1h\npaused: true\n---\nLook.\n";
+    std::fs::write(dir.join("other.md"), other).unwrap();
+    let every = std::time::Duration::from_secs(3600);
+    let base = start_app(with_read_token().with_routines(dir.clone(), every)).await;
+    let (_, mut worker) = join_as(&base).await;
+
+    // The owner's words start a task carrying a token of its own.
+    let ask = r#"{"request":"Mirror my repos every 6h."}"#;
+    assert_eq!(
+        post_json(&base, "/api/routines/tasks", "r", ask).await.0,
+        403
+    );
+    let (status, body) = post_json(&base, "/api/routines/tasks", "s", ask).await;
+    assert_eq!(status, 201, "{body}");
+    let OrchMsg::Assign { task, token, .. } = recv(&mut worker).await else {
+        panic!("assign")
+    };
+    let token = token.expect("a routine task carries a token");
+    assert!(task
+        .prompt
+        .contains("Request:\nMirror my repos every 6h.\n"));
+    assert!(
+        task.prompt.contains("- w\n"),
+        "its workers: {}",
+        task.prompt
+    );
+    assert!(task
+        .prompt
+        .ends_with(mis_types::guides::guide("routines").unwrap()));
+
+    let file = |name: &str, head: &str, prompt: &str| {
+        let text = format!("---\nevery: 6h\n{head}---\n{prompt}\n");
+        serde_json::json!({ "name": name, "text": text }).to_string()
+    };
+    let write = |body: String| {
+        let (base, token) = (base.clone(), token.clone());
+        async move { post_json(&base, "/api/routines", &token, &body).await }
+    };
+    let view = |name: &'static str| {
+        let base = base.clone();
+        async move {
+            let (_, body) = get_json(&base, "/api/routines", "r").await;
+            let list: Vec<RoutineView> = serde_json::from_str(&body).unwrap();
+            list.into_iter().find(|r| r.name == name).unwrap()
+        }
+    };
+    // It reads the list; writes only whole paused files, never over another routine.
+    assert_eq!(get_json(&base, "/api/routines", &token).await.0, 200);
+    let (status, why) = write(file("mirror", "act: true\n", "Mirror.")).await;
+    assert!(status == 400 && why.contains("paused"), "{status} {why}");
+    let fields = r#"{"name":"mirror","schedule":"6h","prompt":"Mirror."}"#;
+    assert_eq!(
+        post_json(&base, "/api/routines", &token, fields).await.0,
+        403
+    );
+    let (status, _) = write(file("other", "paused: true\n", "Mine now.")).await;
+    assert_eq!(status, 409);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("other.md")).unwrap(),
+        other
+    );
+
+    // Its own: written, then only it, rewritten.
+    let paused = "paused: true\nact: true\n";
+    assert_eq!(write(file("mirror", paused, "Mirror.")).await.0, 201);
+    let (status, why) = write(file("nightly", paused, "Sweep.")).await;
+    assert!(status == 403 && why.contains("mirror"), "{status} {why}");
+    assert!(!dir.join("nightly.md").exists());
+    assert_eq!(write(file("mirror", paused, "Mirror all.")).await.0, 201);
+    let v = view("mirror").await;
+    assert_eq!((v.mode, v.paused), (Some(RoutineMode::DryRun), true));
+
+    // It never approves, runs, resumes or switches one live; the owner's token does.
+    let pin = serde_json::json!({ "pin": v.pin }).to_string();
+    for action in ["approve", "live", "run", "resume"] {
+        let path = format!("/api/routines/mirror/{action}");
+        let status = post_json(&base, &path, &token, &pin).await.0;
+        assert!(matches!(status, 401 | 403), "{action}: {status}");
+    }
+    let approve = "/api/routines/mirror/approve";
+    assert_eq!(post_json(&base, approve, "s", &pin).await.0, 204);
+    let v = view("mirror").await;
+    assert_eq!((v.mode, v.paused), (Some(RoutineMode::Live), false));
+
+    // A revision pauses it and drops the approval.
+    assert_eq!(
+        write(file("mirror", paused, "Mirror, then gc.")).await.0,
+        201
+    );
+    let v = view("mirror").await;
+    assert_eq!((v.mode, v.paused), (Some(RoutineMode::DryRun), true));
+
+    // Ended: its token writes nothing.
+    for event in [
+        AgentEvent::Started {
+            session: Some("sess".into()),
+            model: None,
+        },
+        AgentEvent::Finished {
+            ok: true,
+            summary: None,
+        },
+    ] {
+        let task = task.id;
+        send(&mut worker, &WorkerMsg::Event { task, event }).await;
+    }
+    let mut status = 0;
+    for _ in 0..100 {
+        status = write(file("mirror", paused, "Again.")).await.0;
+        if status == 401 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(status, 401, "the token outlived its task");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// The next sessions push that changes `seen`. A watcher may get its view twice: the
 /// liveness tick's diff can land after a `WatchSessions` snapshot it doesn't know of.
 async fn next_sessions(ws: &mut Ws, seen: &[SessionRow]) -> Vec<SessionRow> {

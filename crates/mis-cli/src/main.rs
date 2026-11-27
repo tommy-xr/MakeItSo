@@ -123,6 +123,9 @@ enum RoutineCmd {
     Live { name: String },
     /// Back to listing what it would do, acting on nothing.
     DryRun { name: String },
+    /// Write routine file `file` (named by its stem unless it says `name:`), paused; a
+    /// routine-writing task may then only rewrite it.
+    Write { file: std::path::PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -538,7 +541,7 @@ fn guide(name: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// `mis routines` (GET /api/routines), or `run`, `live` or `dry-run <name>`.
+/// `mis routines` (GET /api/routines), `run`, `live` or `dry-run <name>`, or `write <file>`.
 async fn routines(args: &Args, cmd: Option<&RoutineCmd>) -> Result<()> {
     let base = http_url(&args.url);
     let client = reqwest::Client::new();
@@ -563,6 +566,20 @@ async fn routines(args: &Args, cmd: Option<&RoutineCmd>) -> Result<()> {
         Some(RoutineCmd::DryRun { name }) => {
             client.post(format!("{base}/api/routines/{name}/dry-run"))
         }
+        Some(RoutineCmd::Write { file }) => {
+            let text = std::fs::read_to_string(file).with_context(|| file.display().to_string())?;
+            let stem = file
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            let body = RoutineFile {
+                name: stem.into(),
+                text,
+            };
+            (client.post(format!("{base}/api/routines")))
+                .header("content-type", "application/json")
+                .body(serde_json::to_string(&body)?)
+        }
     };
     let body = call(args, req).await?;
     match cmd {
@@ -582,6 +599,9 @@ async fn routines(args: &Args, cmd: Option<&RoutineCmd>) -> Result<()> {
         }
         Some(RoutineCmd::Live { name }) => println!("{name}: live, its next runs act"),
         Some(RoutineCmd::DryRun { name }) => println!("{name}: dry run, acting on nothing"),
+        Some(RoutineCmd::Write { file }) => {
+            println!("{}: written, paused until the owner looks", file.display())
+        }
     }
     Ok(())
 }

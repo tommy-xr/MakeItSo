@@ -743,6 +743,21 @@ pub struct NewRoutine {
     pub prompt: String,
 }
 
+/// `POST /api/routines`: a whole routine file, as an agent writes it (`mis routines write`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RoutineFile {
+    /// Its name, unless `text` says `name:`.
+    pub name: String,
+    pub text: String,
+}
+
+/// `POST /api/routines/tasks`: what the owner wants a routine to do, in their words, for an
+/// agent to write it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RoutineTask {
+    pub request: String,
+}
+
 /// A routine file as `GET /api/routines` lists it, with its schedule.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RoutineView {

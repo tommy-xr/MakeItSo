@@ -476,6 +476,17 @@ pub fn new_file(new: &NewRoutine) -> Result<(String, String), String> {
     Ok((file, text))
 }
 
+/// A whole routine file as an agent posts it: named `name` unless it says `name:`. Its
+/// file name, and the routine. Err unless it parses and says `paused: true`, so nothing
+/// runs before the owner looks.
+pub fn written(name: &str, text: &str) -> Result<(String, Routine), String> {
+    let r = parse(&format!("{}.md", name.trim()), text)?;
+    if !r.paused {
+        return Err("write `paused: true`: the owner resumes or approves it".into());
+    }
+    Ok((format!("{}.md", r.name), r))
+}
+
 const MERGE_KEYS: [&str; 8] = [
     "repos",
     "max_files",
@@ -652,6 +663,21 @@ fn fmt_every(ms: u64) -> String {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[test]
+    fn written_files_must_parse_and_start_paused() {
+        let (file, r) = written("mirror", "---\nevery: 6h\npaused: true\n---\nGo.\n").unwrap();
+        assert_eq!((file.as_str(), r.name.as_str()), ("mirror.md", "mirror"));
+        // `name:` wins over the posted name, and names the file.
+        let text = "---\nname: deps\nevery: 1d\npaused: true\n---\nGo.\n";
+        assert_eq!(written("x", text).unwrap().0, "deps.md");
+        let unpaused = written("mirror", "---\nevery: 6h\n---\nGo.\n");
+        assert!(unpaused.unwrap_err().contains("paused: true"));
+        let off = "---\nevery: 6h\npaused: false\n---\nGo.\n";
+        assert!(written("mirror", off).is_err());
+        assert!(written("../x", "---\nevery: 6h\npaused: true\n---\nGo.\n").is_err());
+        assert!(written("mirror", "no frontmatter").is_err());
+    }
 
     #[test]
     fn new_file_starts_paused_and_checks_its_fields() {

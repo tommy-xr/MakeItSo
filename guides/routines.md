@@ -97,6 +97,15 @@ Without `merge:`, runs never merge. With it, live runs merge only by calling the
   approves an acting one, which resumes it.
 - Each run starts fresh and unattended: name the repo, what to look at, what to do, what to
   report. Keep it to what the mode allows.
-- New routines from the phone (Routines, +) start paused and report-only.
 - Try it: `mis routines run <name>` starts one run now (a dry run until approved); the task shows
   what it did.
+
+## Writing one for the owner
+
+Routines + on the phone starts a task with the owner's request: you write the routine.
+
+- Write the file outside the checkout, then `mis routines write <file>` (named by its stem
+  unless it says `name:`). It must say `paused: true`.
+- Your task's token writes one new routine, then rewrites only that one: to revise it after a
+  reply, write it again under the same name, which pauses it and drops any approval. It can
+  list routines (`mis routines`) but never run, resume or approve them.

@@ -1,5 +1,6 @@
 //! What an app task's token may do (pure): stage releases of the app its thread is bound
-//! to, or, for a `+ App` thread, create exactly one new app. Never make one live.
+//! to, or, for a `+ App` thread, create exactly one new app. Never make one live. A
+//! routine-writing thread's token instead writes one new routine, then only that one.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -19,6 +20,43 @@ pub struct Binding {
     /// Who asked (an email): owner of the app it creates. None: no login (the full token
     /// or loopback), so the app is shared with no one.
     pub requester: Option<String>,
+    /// A routine-writing thread (no `slug`, no `create`): it writes routines, not apps.
+    #[serde(default)]
+    pub routine: bool,
+    /// The routine it wrote, which it alone may replace.
+    #[serde(default)]
+    pub wrote: Option<String>,
+}
+
+/// A thread that writes one routine (`+` by Routines).
+pub fn routine_writer() -> Binding {
+    Binding {
+        thread: Uuid::nil(),
+        slug: None,
+        create: false,
+        requester: None,
+        routine: true,
+        wrote: None,
+    }
+}
+
+/// Whether `b`'s token may write routine `name`: Ok(true) replacing it (the one its thread
+/// wrote), Ok(false) only as a new one. Err: why not.
+pub fn write_routine(b: &Binding, name: &str) -> Result<bool, String> {
+    match (b.routine, &b.wrote) {
+        (false, _) => Err("an app task's token stages its app".into()),
+        (true, Some(w)) if w == name => Ok(true),
+        (true, Some(w)) => Err(format!("this task's routine is {w}")),
+        (true, None) => Ok(false),
+    }
+}
+
+/// `b` once it has written routine `name`: that one only, from now on.
+pub fn wrote(b: Binding, name: &str) -> Binding {
+    Binding {
+        wrote: Some(name.into()),
+        ..b
+    }
 }
 
 /// Which apps `b`'s token may publish `slug` into (`activate`: live at once): the app it is
@@ -96,7 +134,25 @@ mod tests {
             slug: slug.map(Into::into),
             create,
             requester: Some("me@example.com".into()),
+            routine: false,
+            wrote: None,
         }
+    }
+
+    #[test]
+    fn a_routine_writer_writes_one_new_routine_then_only_it_and_no_app() {
+        let b = routine_writer();
+        assert_eq!(write_routine(&b, "mirror"), Ok(false));
+        let b = wrote(b, "mirror");
+        assert_eq!(write_routine(&b, "mirror"), Ok(true));
+        assert!(write_routine(&b, "nightly").unwrap_err().contains("mirror"));
+        // Never an app, new or existing; an app task never writes routines.
+        for b in [routine_writer(), b] {
+            assert!(publish(&b, "pool", false).is_err());
+            assert!(propose(&b, "pool").is_err());
+        }
+        assert!(write_routine(&binding(None, true), "mirror").is_err());
+        assert!(write_routine(&binding(Some("pool"), false), "mirror").is_err());
     }
 
     #[test]
